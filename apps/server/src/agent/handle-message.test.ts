@@ -1927,7 +1927,9 @@ describe("createHandleMessage", () => {
       await expectDefined(loop.tools.get("echo"), "echo tool").handler({}, loop.service);
 
       expect(skillRunner.invoke).toHaveBeenCalledWith(
-        expect.objectContaining({ runAs: { userId: "user-2", service: loop.service } }),
+        expect.objectContaining({
+          runAs: { userId: "user-2", profileId: "profile-1", service: loop.service },
+        }),
       );
     });
 

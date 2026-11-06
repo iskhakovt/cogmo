@@ -8,6 +8,7 @@ import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import { profiles, users } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
 import {
   CogmoSocketProxy,
@@ -17,7 +18,7 @@ import {
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { assertStatus } from "../test/assertions.js";
+import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
@@ -29,10 +30,8 @@ function stubSecrets(): SecretsStore {
   return mock<SecretsStore>();
 }
 
-const RUN_AS: SkillRunAs = {
-  userId: "u-1",
-  service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
-};
+/** Who every run here runs as: real rows, which a run row references. */
+let runAs: SkillRunAs;
 
 /** No skill here is scheduled, so the identity never reaches a row. */
 const DEFAULT_RUN_AS = { userId: "u-1", profileId: "p-1" };
@@ -80,7 +79,18 @@ let wasmRoot: string;
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
   wasmRoot = await mkdtemp(join(tmpdir(), "runner-sysbox-wasm-"));
-  ({ tx, close } = await createTestDatabase());
+  const testDb = await createTestDatabase();
+  ({ tx, close } = testDb);
+  const [user] = await testDb.db.insert(users).values({}).returning({ id: users.id });
+  const [profile] = await testDb.db
+    .insert(profiles)
+    .values({ userId: null, name: "default", basePrompt: "", model: "m", toolSet: [] })
+    .returning({ id: profiles.id });
+  runAs = {
+    userId: expectDefined(user, "user").id,
+    profileId: expectDefined(profile, "profile").id,
+    service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
+  };
   agentStore = new DrizzleSandboxStore();
   skillStore = new DrizzleSkillStore();
   docker = new Docker();
@@ -434,7 +444,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl container (sysbox runtime, GHA onl
       });
 
       const result = (
-        await runner.invoke({ name: "container-now", inputs: { x: 7 }, runAs: RUN_AS })
+        await runner.invoke({ name: "container-now", inputs: { x: 7 }, runAs })
       )._unsafeUnwrap();
       assertStatus(result, "success");
       expect(result.output).toMatchObject({ echoed: 8 });
@@ -479,7 +489,7 @@ resources:
 
     const start = Date.now();
     const result = (
-      await runner.invoke({ name: "container-sleep", inputs: {}, runAs: RUN_AS })
+      await runner.invoke({ name: "container-sleep", inputs: {}, runAs })
     )._unsafeUnwrap();
     const elapsedMs = Date.now() - start;
     assertStatus(result, "error");
@@ -515,10 +525,10 @@ resources:
       });
 
       const r1 = (
-        await runner.invoke({ name: "container-host", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-host", inputs: {}, runAs })
       )._unsafeUnwrap();
       const r2 = (
-        await runner.invoke({ name: "container-host", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-host", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(r1, "success");
       assertStatus(r2, "success");
@@ -573,7 +583,7 @@ async def run(inputs, ctx):
       });
 
       const result = (
-        await runner.invoke({ name: "container-with-deps", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-with-deps", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(result, "success");
       // Pass `result` as the assertion-failure label so a mismatch
@@ -618,12 +628,8 @@ async def run(inputs, ctx):
       body: STATE_LEAK_BODY,
     });
 
-    const r1 = (
-      await runner.invoke({ name: "container-leak", inputs: {}, runAs: RUN_AS })
-    )._unsafeUnwrap();
-    const r2 = (
-      await runner.invoke({ name: "container-leak", inputs: {}, runAs: RUN_AS })
-    )._unsafeUnwrap();
+    const r1 = (await runner.invoke({ name: "container-leak", inputs: {}, runAs }))._unsafeUnwrap();
+    const r2 = (await runner.invoke({ name: "container-leak", inputs: {}, runAs }))._unsafeUnwrap();
     assertStatus(r1, "success");
     assertStatus(r2, "success");
     // Task 1 sets `sys.modules["_cogmo_test_marker"]`. Task 2 runs in a
@@ -660,7 +666,7 @@ async def run(inputs, ctx):
       });
 
       const left = (
-        await runner.invoke({ name: "container-leave-sleeper", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-leave-sleeper", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(left, "success");
       const { host, pid } = left.output as { host: string; pid: number };
@@ -668,7 +674,7 @@ async def run(inputs, ctx):
         await runner.invoke({
           name: "container-check-pid",
           inputs: { pid },
-          runAs: RUN_AS,
+          runAs,
         })
       )._unsafeUnwrap();
       assertStatus(checked, "success");
@@ -699,7 +705,7 @@ async def run(inputs, ctx):
       });
 
       const result = (
-        await runner.invoke({ name: "container-proc-probe", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-proc-probe", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(result, "success");
       expect(result.output).toEqual({ opened: [], control: true });
@@ -733,11 +739,11 @@ async def run(inputs, ctx):
       });
 
       const planted = (
-        await runner.invoke({ name: "container-plant-module", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-plant-module", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(planted, "success");
       const imported = (
-        await runner.invoke({ name: "container-import-csv", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-import-csv", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(imported, "success");
       const { host } = HostSchema.parse(planted.output);
@@ -780,12 +786,12 @@ async def run(inputs, ctx):
       });
 
       const planted = (
-        await runner.invoke({ name: "container-plant-uv-config", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-plant-uv-config", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(planted, "success");
       // Its venv is populated on the worker the planting task ran on.
       const populated = (
-        await runner.invoke({ name: "container-idna-host", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-idna-host", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(populated, "success");
       const { host } = HostSchema.parse(planted.output);
@@ -827,11 +833,11 @@ async def run(inputs, ctx):
       });
 
       const planted = (
-        await runner.invoke({ name: "container-plant-project", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-plant-project", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(planted, "success");
       const populated = (
-        await runner.invoke({ name: "container-idna-project", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-idna-project", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(populated, "success");
       const { host } = HostSchema.parse(planted.output);
@@ -865,7 +871,7 @@ async def run(inputs, ctx):
       });
 
       const result = (
-        await runner.invoke({ name: "container-replace-python", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-replace-python", inputs: {}, runAs })
       )._unsafeUnwrap();
       assertStatus(result, "success");
       expect(result.output).toEqual({ replaced: false });

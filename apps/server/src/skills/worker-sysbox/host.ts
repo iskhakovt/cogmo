@@ -1,6 +1,8 @@
 import { logger } from "../../logger.js";
 import type { ResourceLimits, SandboxClient } from "../../sandbox/index.js";
+import { describeError } from "../../util/describe-error.js";
 import type { CtxHandler } from "../dispatcher.js";
+import type { DispatchGate } from "../protocol.js";
 import { type InvokeResult, SysboxSkillWorker } from "./worker.js";
 
 const log = logger.child({ component: "skills.worker.sysbox" });
@@ -46,8 +48,8 @@ export interface RunOnSysboxContainerParams {
   skillName: string;
   body: string;
   inputs: unknown;
-  /** Wall-clock cap in seconds. Defaults to the worker's default (60s). */
-  wallClockS?: number;
+  /** Wall-clock cap in seconds (`wallClockSOf`), the one `deadline_at` counts from. */
+  wallClockS: number;
   resourceLimits?: Partial<ResourceLimits>;
   image: string;
   sandbox: SandboxClient;
@@ -77,6 +79,8 @@ export interface RunOnSysboxContainerParams {
    * teardown.
    */
   depsCacheVolumeName?: string;
+  /** Asked immediately before `task_invoke` is sent (`SysboxSkillWorker.invoke`). */
+  dispatch: DispatchGate;
 }
 
 /**
@@ -96,14 +100,13 @@ export interface RunOnSysboxContainerParams {
 export async function runOnSysboxContainer(
   params: RunOnSysboxContainerParams,
 ): Promise<InvokeResult> {
-  const wallClockS = params.wallClockS;
-  // expiresAt is the reaper backstop. Take the wall-clock plus margin if
-  // declared; otherwise fall back to a generous default — the worker is
-  // disposed immediately after the single task either way.
-  const ttlS = (wallClockS ?? 60) + REAPER_BACKSTOP_S;
+  const { wallClockS } = params;
+  // expiresAt is the reaper backstop: the wall clock plus a margin. The
+  // worker is disposed immediately after the single task either way.
+  const ttlS = wallClockS + REAPER_BACKSTOP_S;
   const expiresAt = new Date(Date.now() + ttlS * 1000);
 
-  let worker: SysboxSkillWorker | undefined;
+  let worker: SysboxSkillWorker;
   try {
     worker = await SysboxSkillWorker.create({
       workerId: params.taskId,
@@ -115,35 +118,45 @@ export async function runOnSysboxContainer(
         depsCacheVolumeName: params.depsCacheVolumeName,
       }),
     });
+  } catch (e) {
+    // The worker could not be created, so nothing was sent. `invoke` fails
+    // a task as a value; anything it throws (its dispatch gate's database
+    // failure, or a bug) propagates.
+    return {
+      ok: false,
+      errorKind: "runtime_unavailable",
+      error: describeError(e),
+      workerReusable: false,
+    };
+  }
+  try {
+    // A fresh worker refuses its lease only when it died since its handshake.
     const leased = worker.tryAcquire();
     if (leased.isErr()) {
-      // Brand-new worker should always be idle; this is a programmer error.
-      throw new Error(`invariant: fresh worker not acquirable: ${leased.error}`);
+      return {
+        ok: false,
+        errorKind: "runtime_unavailable",
+        error: `the one-shot worker died before its task: ${leased.error}`,
+        workerReusable: false,
+      };
     }
     return await worker.invoke({
       taskId: params.taskId,
       skillName: params.skillName,
       body: params.body,
       inputs: params.inputs,
-      ...(wallClockS !== undefined && { wallClockS }),
+      wallClockS,
       ...(params.isolation !== undefined && { isolation: params.isolation }),
       ...(params.deps !== undefined && { deps: params.deps }),
       ctxHandler: params.ctxHandler,
+      dispatch: params.dispatch,
     });
-  } catch (e) {
-    return {
-      ok: false,
-      error: e instanceof Error ? e.message : String(e),
-      workerReusable: false,
-    };
   } finally {
-    if (worker) {
-      await worker.dispose().catch((e: unknown) => {
-        log.warn(
-          { taskId: params.taskId, err: e instanceof Error ? e.message : String(e) },
-          "one-shot worker dispose failed",
-        );
-      });
-    }
+    await worker.dispose().catch((e: unknown) => {
+      log.warn(
+        { taskId: params.taskId, err: e instanceof Error ? e.message : String(e) },
+        "one-shot worker dispose failed",
+      );
+    });
   }
 }

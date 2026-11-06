@@ -6,9 +6,10 @@ import {
   type CtxHandler,
   Dispatcher,
   type DispatcherOptions,
+  unreportedTaskKind,
   type WorkerTransport,
 } from "./dispatcher.js";
-import type { HostMessage, TaskInvoke, TaskResult } from "./protocol.js";
+import type { DispatchGate, HostMessage, TaskInvoke, TaskResult } from "./protocol.js";
 import type {
   ExitOutcome,
   Handshake,
@@ -724,12 +725,24 @@ describe("Dispatcher", () => {
       const ch = channel();
       const d = await leased(ch);
       const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
-      ch.emit({ type: "task_result", id: "task-1", ok: false, error: "boom" });
+      ch.emit({
+        type: "task_result",
+        id: "task-1",
+        ok: false,
+        errorKind: "skill_raised",
+        error: "boom",
+      });
       await flush();
       d.close("supervisor unresponsive");
       expect(await outcome).toEqual(
         completed(
-          { type: "task_result", id: "task-1", ok: false, error: "boom" },
+          {
+            type: "task_result",
+            id: "task-1",
+            ok: false,
+            errorKind: "skill_raised",
+            error: "boom",
+          },
           { kind: "unconfirmed", reason: "supervisor unresponsive" },
         ),
       );
@@ -804,6 +817,33 @@ describe("Dispatcher", () => {
       ch.emit(result(2, "task-2"));
       ch.emit({ type: "task_exited", id: "task-2" });
       expect(await second).toEqual(completed(result(2, "task-2")));
+    });
+  });
+
+  describe("gate", () => {
+    it("asks the gate of a leased worker, and answers as it does", async () => {
+      const d = await leased(channel());
+      const send = vi.fn<DispatchGate>(async () => ({ kind: "send" }));
+      const withhold = vi.fn<DispatchGate>(async () => ({ kind: "withhold" }));
+
+      expect(await d.gate(send)).toEqual({ kind: "send" });
+      expect(await d.gate(withhold)).toEqual({ kind: "withhold" });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(withhold).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not ask the gate of a worker that died since its lease", async () => {
+      const d = await leased(channel());
+      d.close("gone");
+      const dispatch = vi.fn<DispatchGate>(async () => ({ kind: "send" }));
+
+      expect(await d.gate(dispatch)).toEqual({ kind: "not_admitted" });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it("names a sent task that reported nothing result_lost, and an unsent one runtime_unavailable", () => {
+      expect(unreportedTaskKind({ kind: "send" })).toBe("result_lost");
+      expect(unreportedTaskKind({ kind: "not_admitted" })).toBe("runtime_unavailable");
     });
   });
 

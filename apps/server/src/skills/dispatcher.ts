@@ -5,7 +5,10 @@ import { describeError } from "../util/describe-error.js";
 import {
   type CtxCall,
   type CtxResult,
+  type DispatchDecision,
+  type DispatchGate,
   type HostMessage,
+  type TaskErrorKind,
   type TaskInvoke,
   WorkerMessageSchema,
 } from "./protocol.js";
@@ -82,6 +85,23 @@ export interface DispatcherOptions {
   logContext?: Record<string, unknown>;
 }
 
+/** What a worker's dispatch gate decided for its next task. */
+export type GateOutcome = DispatchDecision | { kind: "not_admitted" };
+
+/**
+ * The kind of a task that delivered no result, by its gate: once sent its
+ * body may have acted (`result_lost`); a dead worker never sent it.
+ */
+export function unreportedTaskKind(
+  gate: Exclude<GateOutcome, { kind: "withhold" }>,
+): TaskErrorKind {
+  return match(gate)
+    .returnType<TaskErrorKind>()
+    .with({ kind: "send" }, () => "result_lost")
+    .with({ kind: "not_admitted" }, () => "runtime_unavailable")
+    .exhaustive();
+}
+
 interface PendingTask {
   readonly id: string;
   readonly ctxHandler: CtxHandler;
@@ -145,6 +165,21 @@ export class Dispatcher {
   /** Whether the worker takes a task now, and how; see `admits`. */
   admission(): Result<Admission, string> {
     return admits(this.#state);
+  }
+
+  /**
+   * Ask `dispatch` whether to send the next task, immediately before the
+   * send: `send` or `withhold` as it answers. A worker that died since its
+   * lease is not asked (`not_admitted`); `invoke` fails its task unsent.
+   */
+  async gate(dispatch: DispatchGate): Promise<GateOutcome> {
+    const admission = this.admission();
+    if (admission.isErr()) return { kind: "not_admitted" };
+    return match(admission.value)
+      .returnType<Promise<GateOutcome>>()
+      .with({ kind: "runs" }, () => dispatch())
+      .with({ kind: "fails" }, async () => ({ kind: "not_admitted" }))
+      .exhaustive();
   }
 
   /** Lease an idle worker for one task; errs with why any other can't be. */

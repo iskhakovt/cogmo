@@ -2,7 +2,7 @@ import { asc, count, eq, isNull, or, sql } from "drizzle-orm";
 import { err, ok, type Result } from "neverthrow";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
-import { skills } from "../../skills/store/schema.js";
+import { skillRuns, skills } from "../../skills/store/schema.js";
 import type { AutoRecallMode } from "../recall-gate.js";
 import {
   inSavepoint,
@@ -145,9 +145,10 @@ export interface ProfileStore {
 
   /**
    * Delete a profile atomically: checks `conversations`, `messages`, the schedules that run as
-   * it (`scheduled_tasks`, `skills.run_as_profile_id`) and the steering rules scoped to it inside
-   * the same transaction and deletes nothing if any exist. Historical messages pin the profile as audit data — a
-   * profile that has ever been used in a turn stays undeletable.
+   * it (`scheduled_tasks`, `skills.run_as_profile_id`), the skill runs that ran as it and the
+   * steering rules scoped to it inside the same transaction and deletes nothing if any exist.
+   * Historical messages and skill runs pin the profile as audit data — a profile that has ever
+   * been used in a turn or run a skill stays undeletable.
    */
   deleteProfile(tx: Transaction, profileId: string): Promise<Result<void, ProfileInUse>>;
 
@@ -304,7 +305,7 @@ export class DrizzleProfileStore implements ProfileStore {
   async deleteProfile(tx: Transaction, profileId: string): Promise<Result<void, ProfileInUse>> {
     // Refs are counted in the caller's transaction, so the count and the delete
     // read one snapshot.
-    const [convRows, msgRows, taskRows, skillRows, ruleRows] = await Promise.all([
+    const [convRows, msgRows, taskRows, skillRows, runRows, ruleRows] = await Promise.all([
       tx
         .select({ value: count() })
         .from(conversations)
@@ -315,12 +316,13 @@ export class DrizzleProfileStore implements ProfileStore {
         .from(scheduledTasks)
         .where(eq(scheduledTasks.profileId, profileId)),
       tx.select({ value: count() }).from(skills).where(eq(skills.runAsProfileId, profileId)),
+      tx.select({ value: count() }).from(skillRuns).where(eq(skillRuns.runAsProfileId, profileId)),
       tx
         .select({ value: count() })
         .from(steeringRules)
         .where(eq(steeringRules.profileId, profileId)),
     ]);
-    const refRows = [convRows, msgRows, taskRows, skillRows, ruleRows];
+    const refRows = [convRows, msgRows, taskRows, skillRows, runRows, ruleRows];
     if (refRows.some((rows) => (rows[0]?.value ?? 0) > 0)) return err({ kind: "profile_in_use" });
     await tx.delete(profiles).where(eq(profiles.id, profileId));
     return ok(undefined);

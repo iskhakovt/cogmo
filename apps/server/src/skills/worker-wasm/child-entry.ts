@@ -87,8 +87,9 @@ function startWorker(init: unknown): Worker {
 
 /**
  * Send a worker frame to the host. A frame IPC's JSON cannot carry (a Python
- * int past 2^53 arrives as a BigInt) fails the task or the ctx call that sent
- * it as a value, rather than throw out of the listener and end the child.
+ * int past 2^53 among a ctx call's arguments arrives as a BigInt; a task's
+ * output is JSON already, `py/output.py`) fails the ctx call or the task that
+ * sent it as a value, rather than throw out of the listener and end the child.
  */
 function relay(worker: Worker, message: unknown): void {
   let reason: string;
@@ -105,6 +106,7 @@ function relay(worker: Worker, message: unknown): void {
         type: "task_result",
         id,
         ok: false,
+        errorKind: "output_invalid",
         error: `task output is not JSON-serializable: ${reason}`,
       }),
     )

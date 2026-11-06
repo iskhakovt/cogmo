@@ -1,5 +1,17 @@
-import { and, asc, eq, getTableColumns, inArray, isNotNull, lte, sql } from "drizzle-orm";
-import { match } from "ts-pattern";
+import {
+  and,
+  asc,
+  eq,
+  getTableColumns,
+  inArray,
+  isNotNull,
+  lt,
+  lte,
+  or,
+  type SQL,
+  sql,
+} from "drizzle-orm";
+import { isMatching, match, P } from "ts-pattern";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type {
@@ -10,10 +22,12 @@ import type {
   SkillRunResourceUsage,
 } from "../types.js";
 import {
+  RUNNING_RUN,
   skillContextCalls,
   type skillDeployStatus,
   skillDeploys,
   type skillRiskTier,
+  type skillRunErrorKind,
   type skillRunRecoveryPoint,
   type skillRunStatus,
   skillRuns,
@@ -68,6 +82,8 @@ export type SkillRunTrigger = (typeof skillRunTrigger.enumValues)[number];
 export type SkillDeployStatus = (typeof skillDeployStatus.enumValues)[number];
 /** See {@link skillRunRecoveryPoint} in schema.ts for the per-state contract. */
 export type SkillRunRecoveryPoint = (typeof skillRunRecoveryPoint.enumValues)[number];
+/** See {@link skillRunErrorKind} in schema.ts. */
+export type SkillRunErrorKind = (typeof skillRunErrorKind.enumValues)[number];
 
 export interface SkillRow {
   id: string;
@@ -122,10 +138,12 @@ export interface SkillRunRow {
   status: SkillRunStatus;
   output: unknown | null;
   error: string | null;
+  /** Set iff `error` is. */
+  errorKind: SkillRunErrorKind | null;
   /**
-   * Per-run wall-clock + peak-memory metrics. Null while the run is in
-   * `recovery_point='started'`; populated by `transitionToExecuted` when
-   * the worker returns. Shape: {@link SkillRunResourceUsage}.
+   * Per-run wall-clock + peak-memory metrics. Null before
+   * `recovery_point='executed'`; written with the executed payload or by
+   * the sweeper. Shape: {@link SkillRunResourceUsage}.
    */
   resourceUsage: SkillRunResourceUsage | null;
   /**
@@ -138,12 +156,19 @@ export interface SkillRunRow {
    */
   idempotencyKey: string | null;
   /**
-   * Stripe-pattern phase marker. `started` → row inserted, execute may
-   * not have completed; `executed` → execute completed and its result
-   * committed; `finished` → row terminal. Drives `runner.invoke`'s
-   * replay branches.
+   * Stripe-pattern phase marker: `started` → row inserted, task not sent;
+   * `dispatched` → task sent, or about to be; `executed` → execute
+   * completed and its result committed; `finished` → row terminal. Drives
+   * `runner.invoke`'s replay branches.
    */
   recoveryPoint: SkillRunRecoveryPoint;
+  /** Written at dispatch; null on a row never dispatched. */
+  deadlineAt: Date | null;
+  /** The skill's sha the run executed, and who it ran as; null only on rows from before the columns. */
+  gitSha: string | null;
+  runAsUserId: string | null;
+  runAsProfileId: string | null;
+  shadow: boolean;
   createdAt: Date;
   finishedAt: Date | null;
 }
@@ -191,10 +216,18 @@ export interface InsertDeployParams {
   resolvedAt: Date | null;
 }
 
-export interface InsertRunParams {
+/** What every new run row records. */
+export interface NewRunParams {
   skillId: string;
   trigger: SkillRunTrigger;
   inputs: unknown;
+  /** The skill's sha the run executes. */
+  gitSha: string;
+  /** Who the run acts for. */
+  runAs: SkillRunIdentity;
+}
+
+export interface InsertRunParams extends NewRunParams {
   /**
    * Plain insert: a taken key throws on `uniq_skill_runs_idempotency_key`.
    * Keyed callers use {@link SkillStore.startOrRecoverRun}.
@@ -327,13 +360,28 @@ export interface ExecuteRollbackParams {
 }
 
 /**
+ * Why a run failed: the `error_kind` and `error` columns. An
+ * `output_invalid` error keeps what the skill returned, since its effects
+ * happened — null when it returned nothing JSON could carry; no other kind
+ * has an output (`chk_skill_runs_outcome`).
+ */
+export type SkillRunError =
+  | { kind: Exclude<SkillRunErrorKind, "output_invalid">; message: string }
+  | { kind: "output_invalid"; message: string; output: unknown | null };
+
+/** The kinds a run that failed before its dispatch records: no skill code ran. */
+export type PreDispatchErrorKind = Extract<
+  SkillRunErrorKind,
+  "runtime_unavailable" | "dependency_unavailable"
+>;
+
+/**
  * What an executed run produced, as `transitionToExecuted` writes it and the
- * `executed` row records it: an output or an error, never both
- * (`chk_skill_runs_outcome`).
+ * `executed` row records it: an output or an error.
  */
 export type ExecutedOutcome =
   | { kind: "output"; output: unknown | null }
-  | { kind: "error"; error: string };
+  | { kind: "error"; error: SkillRunError };
 
 /**
  * A finished run's verdict, one shape per terminal status: the columns
@@ -342,12 +390,48 @@ export type ExecutedOutcome =
  */
 export type SkillRunVerdict =
   | { status: "success"; output: unknown | null }
-  | { status: "error"; error: string };
+  | { status: "error"; error: SkillRunError };
+
+/** Outcome of {@link SkillStore.transitionToDispatched}. */
+export type DispatchRunTransition =
+  | { kind: "dispatched" }
+  /** The sweeper finished the run first: the task must not be sent. */
+  | { kind: "swept"; row: SkillRunRow };
+
+/** Outcome of {@link SkillStore.transitionToExecuted} and {@link SkillStore.failBeforeDispatch}. */
+export type ExecuteRunTransition =
+  | { kind: "transitioned" }
+  /** The sweeper finished the run first; the payload was not written. */
+  | { kind: "swept"; row: SkillRunRow };
 
 /** Outcome of {@link SkillStore.transitionToFinished}. */
 export type FinishRunTransition =
   | { kind: "transitioned" }
   | { kind: "already_finished"; row: SkillRunRow };
+
+/**
+ * A run in flight past its bound: `started` and never dispatched, or
+ * `dispatched` past its `deadline_at` (design/skills.md → Stuck runs).
+ */
+export interface StuckRun {
+  id: string;
+  stuckAt: "started" | "dispatched";
+  createdAt: Date;
+}
+
+/** The bounds past which a run in flight is stuck. */
+export interface StuckRunCutoffs {
+  /** A `started` row created before it was never dispatched. */
+  createdBefore: Date;
+  /** A `dispatched` row whose `deadline_at` is before it had no result. */
+  deadlineBefore: Date;
+}
+
+/** Outcome of {@link SkillStore.sweepRun}. */
+export type SweepRunTransition =
+  | { kind: "swept" }
+  /** The row left the stuck state first: its own transition won. */
+  | { kind: "moved_on" };
 
 /** Outcome of {@link SkillStore.denyPendingDeploy}. */
 export type DenyDeployTransition =
@@ -469,15 +553,24 @@ export interface SkillStore {
    */
   startOrRecoverRun(
     tx: Transaction,
-    params: { skillId: string; trigger: SkillRunTrigger; inputs: unknown; idempotencyKey: string },
+    params: NewRunParams & { idempotencyKey: string },
   ): Promise<{ kind: "new" | "recovered"; row: SkillRunRow }>;
 
   /**
-   * Atomic transition `started → executed`. Writes the executed payload —
+   * Atomic transition `started → dispatched`, writing `deadline_at`; a
+   * runtime takes it immediately before sending the task. `swept` when the
+   * sweeper finished the row first; any other state is a bug and throws.
+   */
+  transitionToDispatched(
+    tx: Transaction,
+    params: { id: string; deadlineAt: Date },
+  ): Promise<DispatchRunTransition>;
+
+  /**
+   * Atomic transition `dispatched → executed`. Writes the executed payload —
    * the worker's outcome, `resource_usage` and `finished_at` — in the same
-   * UPDATE that advances `recovery_point`. Caller wraps in `runInTx`. A
-   * retry whose cached `executed` row already exists short-circuits this
-   * write via the row-state check inside `runner.invoke`.
+   * UPDATE that advances `recovery_point`. `swept` when the sweeper finished
+   * the row first; any other state is a bug and throws.
    */
   transitionToExecuted(
     tx: Transaction,
@@ -487,7 +580,44 @@ export interface SkillStore {
       resourceUsage: SkillRunResourceUsage;
       finishedAt: Date;
     },
-  ): Promise<void>;
+  ): Promise<ExecuteRunTransition>;
+
+  /**
+   * Atomic transition `started → executed` for a run that failed before
+   * its dispatch, so no skill code ran: an error in a pausing kind. `swept`
+   * as for {@link transitionToExecuted}.
+   */
+  failBeforeDispatch(
+    tx: Transaction,
+    params: {
+      id: string;
+      error: { kind: PreDispatchErrorKind; message: string };
+      resourceUsage: SkillRunResourceUsage;
+      finishedAt: Date;
+    },
+  ): Promise<ExecuteRunTransition>;
+
+  /** Runs in flight past their bound, oldest first. */
+  listStuckRuns(
+    tx: Transaction,
+    params: { cutoffs: StuckRunCutoffs; limit: number },
+  ): Promise<readonly StuckRun[]>;
+
+  /**
+   * Finish a stuck run as an error: `host_lost` from `started`,
+   * `result_lost` from `dispatched`, guarded on that recovery point and the
+   * cutoff it passed. `moved_on` when the row left it first.
+   */
+  sweepRun(
+    tx: Transaction,
+    params: {
+      run: StuckRun;
+      cutoffs: StuckRunCutoffs;
+      message: string;
+      resourceUsage: SkillRunResourceUsage;
+      finishedAt: Date;
+    },
+  ): Promise<SweepRunTransition>;
 
   /**
    * Atomic transition `executed → finished`. Writes the verdict — the
@@ -497,7 +627,7 @@ export interface SkillStore {
    *
    * Two keyed retries that both recovered the row at `executed` race here;
    * the loser gets `already_finished` with the row the winner settled. A row
-   * that is missing or still `started` is a bug and throws.
+   * that is missing or not yet `executed` is a bug and throws.
    */
   transitionToFinished(
     tx: Transaction,
@@ -507,6 +637,62 @@ export interface SkillStore {
   // --- skill_context_calls ---
   recordContextCall(tx: Transaction, params: RecordContextCallParams): Promise<void>;
   listContextCallsForRun(tx: Transaction, runId: string): Promise<readonly SkillContextCallRow[]>;
+}
+
+/** The columns a run's outcome occupies. */
+interface OutcomeColumns {
+  output: unknown | null;
+  error: string | null;
+  errorKind: SkillRunErrorKind | null;
+}
+
+/**
+ * A run stuck at `point` past its cutoff: `started` and created before
+ * `createdBefore`, or `dispatched` with a `deadline_at` before
+ * `deadlineBefore`. The listing and the sweep's guard share it.
+ */
+function stuckAt(point: StuckRun["stuckAt"], cutoffs: StuckRunCutoffs): SQL | undefined {
+  return match(point)
+    .with("started", () =>
+      and(eq(skillRuns.recoveryPoint, "started"), lt(skillRuns.createdAt, cutoffs.createdBefore)),
+    )
+    .with("dispatched", () =>
+      and(
+        eq(skillRuns.recoveryPoint, "dispatched"),
+        lt(skillRuns.deadlineAt, cutoffs.deadlineBefore),
+      ),
+    )
+    .exhaustive();
+}
+
+/** A run error's columns: only an `output_invalid` keeps an output. */
+function errorColumns(error: SkillRunError): OutcomeColumns {
+  return {
+    output: match(error)
+      .with({ kind: "output_invalid" }, ({ output }) => output)
+      .with({ kind: P.not("output_invalid") }, () => null)
+      .exhaustive(),
+    error: error.message,
+    errorKind: error.kind,
+  };
+}
+
+/**
+ * The columns every insert writes. `shadow` has no default, so it is written
+ * here: a run started through these inserts runs live (design/skills.md →
+ * Risk tiers without a human, for the shadow fire).
+ */
+function newRunColumns(params: NewRunParams) {
+  return {
+    skillId: params.skillId,
+    trigger: params.trigger,
+    inputs: params.inputs,
+    status: "running" as const,
+    gitSha: params.gitSha,
+    runAsUserId: params.runAs.userId,
+    runAsProfileId: params.runAs.profileId,
+    shadow: false,
+  };
 }
 
 export class DrizzleSkillStore implements SkillStore {
@@ -1050,10 +1236,7 @@ export class DrizzleSkillStore implements SkillStore {
       await tx
         .insert(skillRuns)
         .values({
-          skillId: params.skillId,
-          trigger: params.trigger,
-          inputs: params.inputs,
-          status: "running",
+          ...newRunColumns(params),
           ...(params.idempotencyKey !== undefined && {
             idempotencyKey: params.idempotencyKey,
           }),
@@ -1064,7 +1247,7 @@ export class DrizzleSkillStore implements SkillStore {
 
   async startOrRecoverRun(
     tx: Transaction,
-    params: { skillId: string; trigger: SkillRunTrigger; inputs: unknown; idempotencyKey: string },
+    params: NewRunParams & { idempotencyKey: string },
   ): Promise<{ kind: "new" | "recovered"; row: SkillRunRow }> {
     if (params.inputs === null || params.inputs === undefined) {
       throw new Error("startOrRecoverRun: inputs must not be null/undefined");
@@ -1072,13 +1255,7 @@ export class DrizzleSkillStore implements SkillStore {
     // Keyed insert: see `.agents/rules/inngest.md`.
     const rows = await tx
       .insert(skillRuns)
-      .values({
-        skillId: params.skillId,
-        trigger: params.trigger,
-        inputs: params.inputs,
-        status: "running",
-        idempotencyKey: params.idempotencyKey,
-      })
+      .values({ ...newRunColumns(params), idempotencyKey: params.idempotencyKey })
       .onConflictDoUpdate({
         target: skillRuns.idempotencyKey,
         set: { idempotencyKey: params.idempotencyKey },
@@ -1086,6 +1263,22 @@ export class DrizzleSkillStore implements SkillStore {
       .returning({ ...getTableColumns(skillRuns), inserted: sql<boolean>`(xmax = 0)` });
     const { inserted, ...row } = single(rows);
     return { kind: inserted ? "new" : "recovered", row };
+  }
+
+  async transitionToDispatched(
+    tx: Transaction,
+    params: { id: string; deadlineAt: Date },
+  ): Promise<DispatchRunTransition> {
+    const updated = await tx
+      .update(skillRuns)
+      .set({ recoveryPoint: "dispatched", deadlineAt: params.deadlineAt })
+      .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "started")))
+      .returning({ id: skillRuns.id });
+    if (updated.length > 0) return { kind: "dispatched" };
+    return {
+      kind: "swept",
+      row: await this.#sweptRow(tx, params.id, "transitionToDispatched", "host_lost"),
+    };
   }
 
   async transitionToExecuted(
@@ -1096,18 +1289,12 @@ export class DrizzleSkillStore implements SkillStore {
       resourceUsage: SkillRunResourceUsage;
       finishedAt: Date;
     },
-  ): Promise<void> {
+  ): Promise<ExecuteRunTransition> {
     const outcomeColumns = match(params.outcome)
-      .returnType<{ output: unknown | null; error: string | null }>()
-      .with({ kind: "output" }, ({ output }) => ({ output, error: null }))
-      .with({ kind: "error" }, ({ error }) => ({ output: null, error }))
+      .returnType<OutcomeColumns>()
+      .with({ kind: "output" }, ({ output }) => ({ output, error: null, errorKind: null }))
+      .with({ kind: "error" }, ({ error }) => errorColumns(error))
       .exhaustive();
-    // Guard the transition on the current recovery_point so a
-    // programmer error (calling transitionToExecuted on a row that has
-    // already moved past 'started') surfaces as an assertion failure
-    // instead of silently regressing the row. The UPDATE matches zero
-    // rows when the precondition fails; we re-select to discriminate
-    // "row vanished" from "row in wrong state" for a useful message.
     const updated = await tx
       .update(skillRuns)
       .set({
@@ -1116,13 +1303,119 @@ export class DrizzleSkillStore implements SkillStore {
         finishedAt: params.finishedAt,
         recoveryPoint: "executed",
       })
+      .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "dispatched")))
+      .returning({ id: skillRuns.id });
+    if (updated.length > 0) return { kind: "transitioned" };
+    return {
+      kind: "swept",
+      row: await this.#sweptRow(tx, params.id, "transitionToExecuted", "result_lost"),
+    };
+  }
+
+  async failBeforeDispatch(
+    tx: Transaction,
+    params: {
+      id: string;
+      error: { kind: PreDispatchErrorKind; message: string };
+      resourceUsage: SkillRunResourceUsage;
+      finishedAt: Date;
+    },
+  ): Promise<ExecuteRunTransition> {
+    const updated = await tx
+      .update(skillRuns)
+      .set({
+        ...errorColumns(params.error),
+        resourceUsage: params.resourceUsage,
+        finishedAt: params.finishedAt,
+        recoveryPoint: "executed",
+      })
       .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "started")))
       .returning({ id: skillRuns.id });
-    if (updated.length === 0) {
-      throw new Error(
-        `transitionToExecuted(${params.id}): row not found or recovery_point != 'started'`,
-      );
-    }
+    if (updated.length > 0) return { kind: "transitioned" };
+    return {
+      kind: "swept",
+      row: await this.#sweptRow(tx, params.id, "failBeforeDispatch", "host_lost"),
+    };
+  }
+
+  async listStuckRuns(
+    tx: Transaction,
+    params: { cutoffs: StuckRunCutoffs; limit: number },
+  ): Promise<readonly StuckRun[]> {
+    const { cutoffs } = params;
+    const rows = await tx
+      .select({
+        id: skillRuns.id,
+        recoveryPoint: skillRuns.recoveryPoint,
+        createdAt: skillRuns.createdAt,
+      })
+      .from(skillRuns)
+      .where(and(RUNNING_RUN, or(stuckAt("started", cutoffs), stuckAt("dispatched", cutoffs))))
+      .orderBy(asc(skillRuns.createdAt), asc(skillRuns.id))
+      .limit(params.limit);
+    return rows.map((row) => ({
+      id: row.id,
+      createdAt: row.createdAt,
+      stuckAt: match(row.recoveryPoint)
+        .returnType<StuckRun["stuckAt"]>()
+        .with("started", "dispatched", (point) => point)
+        .with("executed", "finished", (point) => {
+          throw new Error(`listStuckRuns: run ${row.id} selected at '${point}'`);
+        })
+        .exhaustive(),
+    }));
+  }
+
+  async sweepRun(
+    tx: Transaction,
+    params: {
+      run: StuckRun;
+      cutoffs: StuckRunCutoffs;
+      message: string;
+      resourceUsage: SkillRunResourceUsage;
+      finishedAt: Date;
+    },
+  ): Promise<SweepRunTransition> {
+    const { run, cutoffs } = params;
+    const errorKind = match(run.stuckAt)
+      .returnType<SkillRunErrorKind>()
+      .with("started", () => "host_lost")
+      .with("dispatched", () => "result_lost")
+      .exhaustive();
+    const updated = await tx
+      .update(skillRuns)
+      .set({
+        recoveryPoint: "finished",
+        status: "error",
+        output: null,
+        error: params.message,
+        errorKind,
+        resourceUsage: params.resourceUsage,
+        finishedAt: params.finishedAt,
+      })
+      .where(and(eq(skillRuns.id, run.id), stuckAt(run.stuckAt, cutoffs)))
+      .returning({ id: skillRuns.id });
+    return updated.length > 0 ? { kind: "swept" } : { kind: "moved_on" };
+  }
+
+  /**
+   * The row a transition matched none of, when the sweeper finished it from
+   * the state the transition leaves — `host_lost` from `started`,
+   * `result_lost` from `dispatched`. Any other row, or none, means the caller
+   * drove the row out of order, which is a bug.
+   */
+  async #sweptRow(
+    tx: Transaction,
+    id: string,
+    transition: string,
+    sweptAs: "host_lost" | "result_lost",
+  ): Promise<SkillRunRow> {
+    const row = await this.getRun(tx, id);
+    if (row === undefined) throw new Error(`${transition}(${id}): row not found`);
+    if (isMatching({ recoveryPoint: "finished", errorKind: sweptAs }, row)) return row;
+    throw new Error(
+      `${transition}(${id}): row is at '${row.recoveryPoint}' (error_kind ${row.errorKind ?? "null"}), not one the sweeper finished as ${sweptAs}`,
+    );
   }
 
   async transitionToFinished(
@@ -1130,13 +1423,17 @@ export class DrizzleSkillStore implements SkillStore {
     params: { id: string; verdict: SkillRunVerdict },
   ): Promise<FinishRunTransition> {
     const verdictColumns = match(params.verdict)
-      .returnType<{ status: SkillRunStatus; output: unknown | null; error: string | null }>()
-      .with({ status: "success" }, ({ output }) => ({ status: "success", output, error: null }))
-      .with({ status: "error" }, ({ error }) => ({ status: "error", output: null, error }))
+      .returnType<OutcomeColumns & { status: SkillRunStatus }>()
+      .with({ status: "success" }, ({ output }) => ({
+        status: "success",
+        output,
+        error: null,
+        errorKind: null,
+      }))
+      .with({ status: "error" }, ({ error }) => ({ status: "error", ...errorColumns(error) }))
       .exhaustive();
-    // Guard the transition on `recovery_point='executed'`. Same
-    // rationale as transitionToExecuted — catch out-of-order calls
-    // at the DB layer instead of silently regressing the row.
+    // Guarded on `recovery_point='executed'`, so an out-of-order call
+    // matches nothing instead of regressing the row.
     const updated = await tx
       .update(skillRuns)
       .set({ ...verdictColumns, recoveryPoint: "finished" })

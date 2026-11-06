@@ -5,6 +5,7 @@ import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
+import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -14,8 +15,9 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl, type SkillRunnerOptions } from "./runner.js";
-import { DrizzleSkillStore } from "./store/index.js";
+import { DrizzleSkillStore, type SkillRunIdentity } from "./store/index.js";
 import { SysboxWorkerPool } from "./worker-sysbox/pool.js";
+import type { InvokeParams, InvokeResult } from "./worker-sysbox/worker.js";
 
 type SkillRunnerCtxHttp = NonNullable<SkillRunnerOptions["ctxHttp"]>;
 
@@ -39,6 +41,33 @@ afterEach(async () => {
   await truncateAll(db);
 });
 
+/** Who a test invocation runs as: real rows, which a run row references. */
+let identity: SkillRunIdentity;
+
+beforeEach(async () => {
+  const [user] = await db.insert(users).values({}).returning({ id: users.id });
+  const [profile] = await db
+    .insert(profiles)
+    .values({ userId: null, name: "default", basePrompt: "", model: "m", toolSet: [] })
+    .returning({ id: profiles.id });
+  identity = {
+    userId: expectDefined(user, "user").id,
+    profileId: expectDefined(profile, "profile").id,
+  };
+});
+
+/** The audit columns a run row seeded directly records. */
+function audit() {
+  return { gitSha: "sha-test", runAs: identity };
+}
+
+/** Move a seeded `started` run to `dispatched`, as a runtime does before it sends the task. */
+async function dispatch(id: string): Promise<void> {
+  await tx((trx) =>
+    store.transitionToDispatched(trx, { id, deadlineAt: new Date(Date.now() + 90_000) }),
+  );
+}
+
 afterAll(async () => {
   await close();
   await rm(wasmRoot, { recursive: true, force: true });
@@ -57,9 +86,9 @@ const DEFAULT_RUN_AS = {
 };
 
 /** The identity a test invocation runs as, with mock services unless given. */
-function runAs(services: Partial<SkillRunServices> = {}, userId = "user-1"): SkillRunAs {
+function runAs(services: Partial<SkillRunServices> = {}): SkillRunAs {
   return {
-    userId,
+    ...identity,
     service: {
       memory: services.memory ?? makeMockMemory(),
       files: services.files ?? makeMockFiles(),
@@ -218,12 +247,12 @@ async def run(inputs, ctx):
       await runner.invoke({
         name: "whoami",
         inputs: {},
-        runAs: runAs({ memory }, "user-42"),
+        runAs: runAs({ memory }),
       })
     )._unsafeUnwrap();
 
     assertStatus(result, "success");
-    expect(result.output).toEqual({ user: "user-42", timezone: "UTC", count: 1 });
+    expect(result.output).toEqual({ user: identity.userId, timezone: "UTC", count: 1 });
     expect(memory.recall).toHaveBeenCalledWith("hello");
     expect(memory.stageRetain).toHaveBeenCalledWith("seen", {
       context: "from skill 'whoami'",
@@ -910,6 +939,7 @@ inputs:
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       const { row } = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill?.id ?? "",
           trigger: "cron",
           inputs: { x: 100 },
@@ -919,6 +949,7 @@ inputs:
       // Seed a different output than Pyodide would produce. If the
       // runner re-executed, it'd return {echo: 101}; the seeded value
       // returns {echo: 999} which proves no re-execution.
+      await dispatch(row.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
@@ -969,6 +1000,7 @@ inputs:
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       const { row } = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill?.id ?? "",
           trigger: "cron",
           inputs: { x: 1 },
@@ -991,6 +1023,111 @@ inputs:
       // Row stays as-is — operator inspects and decides.
       const reloaded = await tx((trx) => store.getRun(trx, row.id));
       expect(reloaded?.recoveryPoint).toBe("started");
+    });
+
+    it("recovered row at dispatched is rejected as inflight", async () => {
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const skill = expectDefined(await tx((trx) => store.getSkillByName(trx, "echo")), "echo");
+      const key = "skill-cron:echo:dispatched";
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: { x: 1 },
+          idempotencyKey: key,
+        }),
+      );
+      await dispatch(row.id);
+
+      const rejected = await runner.invoke({
+        name: "echo",
+        inputs: { x: 1 },
+        idempotencyKey: key,
+        runAs: runAs(),
+      });
+
+      expect(rejected._unsafeUnwrapErr()).toEqual({
+        kind: "inflight",
+        name: "echo",
+        runId: row.id,
+      });
+    });
+
+    it("a keyed retry of a run the sweeper finished replays the sweeper's error", async () => {
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const skill = expectDefined(await tx((trx) => store.getSkillByName(trx, "echo")), "echo");
+      const key = "skill-cron:echo:swept";
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: { x: 1 },
+          idempotencyKey: key,
+        }),
+      );
+      await dispatch(row.id);
+      const now = new Date(Date.now() + 120_000);
+      const cutoffs = { createdBefore: now, deadlineBefore: now };
+      await tx((trx) =>
+        store.sweepRun(trx, {
+          run: { id: row.id, stuckAt: "dispatched", createdAt: row.createdAt },
+          cutoffs,
+          message: "lost",
+          resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
+          finishedAt: now,
+        }),
+      );
+
+      const replayed = await runner.invoke({
+        name: "echo",
+        inputs: { x: 1 },
+        idempotencyKey: key,
+        runAs: runAs(),
+      });
+
+      expect(replayed._unsafeUnwrap()).toEqual({
+        runId: row.id,
+        status: "error",
+        errorKind: "result_lost",
+        error: "lost",
+      });
+    });
+
+    it("records the skill's sha, the run-as and the dispatch deadline on the run row", async () => {
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const skill = expectDefined(await tx((trx) => store.getSkillByName(trx, "echo")), "echo");
+
+      const result = (
+        await runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() })
+      )._unsafeUnwrap();
+
+      const row = expectDefined(await tx((trx) => store.getRun(trx, result.runId)), "run");
+      expect(row).toMatchObject({
+        status: "success",
+        gitSha: skill.gitSha,
+        runAsUserId: identity.userId,
+        runAsProfileId: identity.profileId,
+        shadow: false,
+        errorKind: null,
+      });
+      expect(row.deadlineAt).toBeInstanceOf(Date);
     });
   });
 });
@@ -1056,7 +1193,11 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
 
   function makeFakePool() {
     return {
-      invoke: vi.fn(async () => ({ ok: true, output: { x: 7 }, workerReusable: true })),
+      // A pool sends the task after its gate passes, as a worker does.
+      invoke: vi.fn(async (params: InvokeParams): Promise<InvokeResult> => {
+        await params.dispatch();
+        return { ok: true, output: { x: 7 }, workerReusable: true };
+      }),
       dispose: vi.fn(async () => undefined),
     } as unknown as SysboxWorkerPool;
   }
@@ -1166,12 +1307,14 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
     );
     const { row } = await tx((trx) =>
       store.startOrRecoverRun(trx, {
+        ...audit(),
         skillId: skill.id,
         trigger: "cron",
         inputs: {},
         idempotencyKey: keyed.idempotencyKey,
       }),
     );
+    await dispatch(row.id);
     await tx((trx) =>
       store.transitionToExecuted(trx, {
         id: row.id,
@@ -1196,10 +1339,14 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
 
   it("a pool result with ok:false finishes the run as an error", async () => {
     const fakePool = makeFakePool();
-    vi.mocked(fakePool.invoke).mockResolvedValueOnce({
-      ok: false,
-      error: "worker_crashed",
-      workerReusable: false,
+    vi.mocked(fakePool.invoke).mockImplementationOnce(async (params) => {
+      await params.dispatch();
+      return {
+        ok: false,
+        errorKind: "runtime_unavailable",
+        error: "worker_crashed",
+        workerReusable: false,
+      };
     });
     createSpy.mockResolvedValueOnce(fakePool);
     const runner = await makeContainerRunner();
@@ -1212,7 +1359,32 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
     const run = await db.query.skillRuns.findFirst();
     expect(run?.status).toBe("error");
     expect(run?.error).toBe("worker_crashed");
+    expect(run?.errorKind).toBe("runtime_unavailable");
     expect(run?.recoveryPoint).toBe("finished");
+  });
+
+  it("a pool that cannot take the task finishes the run before its dispatch", async () => {
+    const fakePool = makeFakePool();
+    vi.mocked(fakePool.invoke).mockResolvedValueOnce({
+      ok: false,
+      errorKind: "runtime_unavailable",
+      error: "pool disposed",
+      workerReusable: false,
+    });
+    createSpy.mockResolvedValueOnce(fakePool);
+    const runner = await makeContainerRunner();
+
+    const result = (
+      await runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() })
+    )._unsafeUnwrap();
+
+    expect(result).toMatchObject({
+      status: "error",
+      errorKind: "runtime_unavailable",
+      error: "pool disposed (no skill code ran)",
+    });
+    const run = await db.query.skillRuns.findFirst();
+    expect(run).toMatchObject({ recoveryPoint: "finished", deadlineAt: null });
   });
 
   it("invoke after shutdown throws and never calls SysboxWorkerPool.create", async () => {

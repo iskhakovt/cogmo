@@ -28,7 +28,7 @@ function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
 
 /** The turn's scoped service and user, which a skill run acts through. */
 const TURN_SERVICE = mock<Service>();
-const TURN = { userId: "user-7" };
+const TURN = { userId: "user-7", profileId: "profile-7" };
 
 const ECHO_DEF: SkillToolDef = {
   name: "echo",
@@ -67,7 +67,7 @@ describe("buildSkillToolSpec", () => {
       name: "echo",
       inputs: { x: 7 },
       trigger: "manual",
-      runAs: { userId: "user-7", service: TURN_SERVICE },
+      runAs: { userId: "user-7", profileId: "profile-7", service: TURN_SERVICE },
     });
     expect(JSON.parse(result)).toEqual({
       ok: true,
@@ -79,12 +79,43 @@ describe("buildSkillToolSpec", () => {
   it("handler rejects with the run's error on a runner error result (not a throw)", async () => {
     const invoke = vi
       .fn()
-      .mockResolvedValue(ok({ runId: "run-2", status: "error", error: "kaboom" }));
+      .mockResolvedValue(
+        ok({ runId: "run-2", status: "error", errorKind: "skill_raised", error: "kaboom" }),
+      );
     const runner = makeRunner({ invoke });
     const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
     const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
-    expect(rejection.message).toBe("skill echo failed (run run-2): kaboom");
+    expect(rejection.message).toBe("skill echo failed (run run-2, skill_raised): kaboom");
+  });
+
+  it.each([
+    [
+      { errorKind: "result_lost", error: "no result by its deadline" },
+      "skill echo lost its result (run run-3, result_lost): no result by its deadline. It may have acted; check before running it again.",
+    ],
+    [
+      { errorKind: "runtime_unavailable", error: "pool disposed" },
+      "skill echo hit a temporary failure (run run-3, runtime_unavailable): pool disposed. A later attempt may succeed.",
+    ],
+    [
+      { errorKind: "output_invalid", error: "echo must be an integer", output: { echo: "8" } },
+      'skill echo ran, but its output failed validation (run run-3): echo must be an integer. Its effects happened. It returned: {"echo":"8"}',
+    ],
+    [
+      { errorKind: "output_invalid", error: "output is not JSON" },
+      "skill echo ran, but its output failed validation (run run-3): output is not JSON. Its effects happened.",
+    ],
+    [
+      { errorKind: "output_invalid", error: "too long", output: "x".repeat(5000) },
+      `skill echo ran, but its output failed validation (run run-3): too long. Its effects happened. It returned: "${"x".repeat(1998)}…`,
+    ],
+  ])("handler tells the model what a failed run means: %o", async (failure, message) => {
+    const invoke = vi.fn().mockResolvedValue(ok({ runId: "run-3", status: "error", ...failure }));
+    const spec = buildSkillToolSpec(ECHO_DEF, makeRunner({ invoke }), TURN);
+
+    const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
+    expect(rejection.message).toBe(message);
   });
 
   it("handler rejects an in-flight refusal with a verdict naming the run", async () => {
