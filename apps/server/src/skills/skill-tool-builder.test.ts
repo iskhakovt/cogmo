@@ -92,7 +92,7 @@ describe("buildSkillToolSpec", () => {
   it.each([
     [
       { errorKind: "result_lost", error: "no result by its deadline" },
-      "skill echo lost its result (run run-3, result_lost): no result by its deadline. It may have acted; check before running it again.",
+      "skill echo lost its result (run run-3, result_lost): no result by its deadline. It may have done everything, nothing, or stopped partway. Do not run it again on your own: tell the user what was attempted and ask them to check the result before deciding.",
     ],
     [
       { errorKind: "runtime_unavailable", error: "pool disposed" },

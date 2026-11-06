@@ -1,5 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
-import { match } from "ts-pattern";
+import { isMatching, match } from "ts-pattern";
 import { logger } from "../logger.js";
 import { describeError } from "../util/describe-error.js";
 import {
@@ -170,16 +170,25 @@ export class Dispatcher {
   /**
    * Ask `dispatch` whether to send the next task, immediately before the
    * send: `send` or `withhold` as it answers. A worker that died since its
-   * lease is not asked (`not_admitted`); `invoke` fails its task unsent.
+   * lease is not asked, and one that died while the gate wrote the dispatch
+   * cannot be sent the task: both are `not_admitted`, and `invoke` fails the
+   * task unsent. Nothing interleaves between this returning `send` and the
+   * caller's `invoke`, which sends synchronously.
    */
   async gate(dispatch: DispatchGate): Promise<GateOutcome> {
-    const admission = this.admission();
-    if (admission.isErr()) return { kind: "not_admitted" };
-    return match(admission.value)
-      .returnType<Promise<GateOutcome>>()
-      .with({ kind: "runs" }, () => dispatch())
-      .with({ kind: "fails" }, async () => ({ kind: "not_admitted" }))
+    if (!this.#takesTask()) return { kind: "not_admitted" };
+    const decision = await dispatch();
+    return match(decision)
+      .returnType<GateOutcome>()
+      .with({ kind: "send" }, () => (this.#takesTask() ? decision : { kind: "not_admitted" }))
+      .with({ kind: "withhold" }, () => decision)
       .exhaustive();
+  }
+
+  /** Whether the worker would run a task sent now. */
+  #takesTask(): boolean {
+    const admission = this.admission();
+    return admission.isOk() && isMatching({ kind: "runs" }, admission.value);
   }
 
   /** Lease an idle worker for one task; errs with why any other can't be. */

@@ -315,8 +315,12 @@ _RESULT_FRAME_OVERHEAD_BYTES = 64 * 1024
 _MAX_SAFE_INTEGER = 2**53 - 1
 
 
-def _unsafe_int(value: object) -> int | None:
-    """The first integer in `value` the host would round, or None."""
+def _unsafe(value: object) -> str | None:
+    """Why JSON would not carry `value` to the host intact, or None.
+
+    An integer past 2**53 the host's `JSON.parse` would round; two keys of
+    one dict that JSON writes alike (`1` and `"1"`) it would keep only one of.
+    """
     pending = [value]
     while pending:
         item = pending.pop()
@@ -324,8 +328,11 @@ def _unsafe_int(value: object) -> int | None:
             continue
         if isinstance(item, int):
             if abs(item) > _MAX_SAFE_INTEGER:
-                return item
+                return f"integer {item} is past 2**53, which JSON rounds; return it as a string"
         elif isinstance(item, dict):
+            names = {key if isinstance(key, str) else json.dumps(key) for key in item}
+            if len(names) < len(item):
+                return "two keys of one dict are written alike as JSON strings, so one would be lost"
             pending.extend(item.values())
         elif isinstance(item, list | tuple):
             pending.extend(item)
@@ -337,15 +344,15 @@ def _encode_output(output: object) -> str:
 
     `allow_nan=False` refuses `NaN` and the infinities, which `json.dumps`
     would otherwise write as tokens JSON does not have; a `set` or another
-    unknown type raises `TypeError`, a cycle `ValueError`, and an integer past
-    2**53 `ValueError`, since the host would round it. The default
+    unknown type raises `TypeError`, a cycle `ValueError`, and what the host
+    would change (`_unsafe`) `ValueError`. The default
     `ensure_ascii` makes the length the byte count the relay's frame cap
     counts.
     """
     encoded = json.dumps(output, allow_nan=False)
-    unsafe = _unsafe_int(output)
+    unsafe = _unsafe(output)
     if unsafe is not None:
-        raise ValueError(f"integer {unsafe} is past 2**53, which JSON rounds; return it as a string")
+        raise ValueError(unsafe)
     limit = _MAX_FRAME_BYTES - _RESULT_FRAME_OVERHEAD_BYTES
     if len(encoded) > limit:
         raise ValueError(f"output is {len(encoded)} bytes as JSON; the cap is {limit}")

@@ -495,6 +495,30 @@ describe("SysboxSkillWorker", () => {
       expect(w.state).toBe("busy");
     });
 
+    it("fails the task unsent when the worker dies while its gate writes the dispatch", async () => {
+      const bundle = buildFakeSandbox();
+      const sent: TaskInvoke[] = [];
+      bundle.stdin.on("data", (chunk: Buffer) => sent.push(...taskInvokesIn(chunk)));
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-gate-dies",
+        sandbox: bundle.sandbox,
+        image: "python:3.14-slim",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      const dispatch = vi.fn<DispatchGate>(async () => {
+        w.retire();
+        return { kind: "send" };
+      });
+
+      const r = await w.invoke({ ...invokeParams("t-gate-dies"), dispatch });
+
+      assert(!r.ok);
+      // Nothing was sent, so nothing ran: not the `result_lost` a sent task gets.
+      expect(r.errorKind).toBe("runtime_unavailable");
+      expect(sent).toEqual([]);
+    });
+
     it("supervisor-emitted error keeps the worker reusable (supervisor still alive)", async () => {
       // The supervisor handles a wall-clock kill itself and emits the
       // wall_clock_exceeded task_result; the supervisor process stays alive

@@ -938,6 +938,17 @@ async def run(inputs, ctx):
     });
   });
 
+  it("fails the task as output_invalid on keys JSON would write alike", async () => {
+    const result = await boundaryRun(
+      'async def run(inputs, ctx):\n    return {1: "a", "1": "b"}\n',
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: expect.stringMatching(/two keys of one dict are written alike/),
+    });
+  });
+
   it("runs a run wrapped by a plain decorator that returns its awaitable", async () => {
     const result = await boundaryRun(`
 def wrap(f):

@@ -841,6 +841,17 @@ describe("Dispatcher", () => {
       expect(dispatch).not.toHaveBeenCalled();
     });
 
+    it("reports not_admitted when the worker died while the gate wrote the dispatch", async () => {
+      const d = await leased(channel());
+      const dispatch = vi.fn<DispatchGate>(async () => {
+        d.close("gone");
+        return { kind: "send" };
+      });
+
+      expect(await d.gate(dispatch)).toEqual({ kind: "not_admitted" });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
     it("names a sent task that reported nothing result_lost, and an unsent one runtime_unavailable", () => {
       expect(unreportedTaskKind({ kind: "send" })).toBe("result_lost");
       expect(unreportedTaskKind({ kind: "not_admitted" })).toBe("runtime_unavailable");

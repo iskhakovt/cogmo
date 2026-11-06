@@ -75,7 +75,7 @@ function runFailureMessage(
         .with(
           "lost",
           () =>
-            `skill ${name} lost its result (run ${runId}, ${errorKind}): ${error}. It may have acted; check before running it again.`,
+            `skill ${name} lost its result (run ${runId}, ${errorKind}): ${error}. It may have done everything, nothing, or stopped partway. Do not run it again on your own: tell the user what was attempted and ask them to check the result before deciding.`,
         )
         .with(
           "pausing",

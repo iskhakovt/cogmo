@@ -93,12 +93,14 @@ describe("finishedVerdictOf", () => {
 
 describe("reconstructFinishedResult", () => {
   it("carries a success output and omits the key when there is none", () => {
-    expect(reconstructFinishedResult("run-1", { status: "success", output: { n: 1 } })).toEqual({
+    expect(
+      reconstructFinishedResult("run-1", { status: "success", output: { n: 1 } }),
+    ).toStrictEqual({
       runId: "run-1",
       status: "success",
       output: { n: 1 },
     });
-    expect(reconstructFinishedResult("run-1", { status: "success", output: null })).toEqual({
+    expect(reconstructFinishedResult("run-1", { status: "success", output: null })).toStrictEqual({
       runId: "run-1",
       status: "success",
     });
@@ -110,7 +112,7 @@ describe("reconstructFinishedResult", () => {
         status: "error",
         error: { kind: "skill_raised", message: "boom" },
       }),
-    ).toEqual({ runId: "run-1", status: "error", errorKind: "skill_raised", error: "boom" });
+    ).toStrictEqual({ runId: "run-1", status: "error", errorKind: "skill_raised", error: "boom" });
   });
 
   it("carries the output an output_invalid kept, and omits the key when it kept none", () => {
@@ -119,7 +121,7 @@ describe("reconstructFinishedResult", () => {
         status: "error",
         error: { kind: "output_invalid", message: "bad", output: { n: "x" } },
       }),
-    ).toEqual({
+    ).toStrictEqual({
       runId: "run-1",
       status: "error",
       errorKind: "output_invalid",
@@ -131,6 +133,11 @@ describe("reconstructFinishedResult", () => {
         status: "error",
         error: { kind: "output_invalid", message: "not JSON", output: null },
       }),
-    ).toEqual({ runId: "run-1", status: "error", errorKind: "output_invalid", error: "not JSON" });
+    ).toStrictEqual({
+      runId: "run-1",
+      status: "error",
+      errorKind: "output_invalid",
+      error: "not JSON",
+    });
   });
 });

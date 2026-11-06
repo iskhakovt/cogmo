@@ -5,8 +5,9 @@ import type { SkillStore } from "../store/index.js";
 
 /**
  * How long past its wall clock a dispatched run has to report before the
- * sweeper takes it as lost: the runtime's kill, its grace and the result
- * frame (design/skills.md → Stuck runs).
+ * sweeper takes it as lost: the runtime's kill, its grace, the result frame
+ * and a one-shot container's teardown, which precedes the record
+ * (design/skills.md → Stuck runs).
  */
 const DISPATCH_GRACE_S = 60;
 

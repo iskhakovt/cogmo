@@ -88,7 +88,7 @@ async function run(createdAt: string, deadlineAt?: string): Promise<string> {
 }
 
 describe("sweepStuckRuns", () => {
-  it("finishes a run started 15 min ago host_lost and one past its deadline result_lost", async () => {
+  it("finishes a run started past the 15-min bound host_lost and one past its deadline result_lost", async () => {
     const neverDispatched = await run("2026-06-01T09:44:00Z");
     const lost = await run("2026-06-01T09:50:00Z", "2026-06-01T09:59:00Z");
     // Neither past its bound.

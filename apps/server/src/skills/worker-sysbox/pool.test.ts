@@ -338,7 +338,7 @@ describe("SysboxWorkerPool", () => {
         [
           {
             ok: false,
-            errorKind: "runtime_unavailable",
+            errorKind: "wall_clock_exceeded",
             error: "wall_clock_exceeded",
             workerReusable: false,
           },
@@ -1330,7 +1330,7 @@ describe("SysboxWorkerPool", () => {
             await first.promise;
             return {
               ok: false,
-              errorKind: "runtime_unavailable",
+              errorKind: "wall_clock_exceeded",
               error: "wall_clock_exceeded",
               workerReusable: false,
             };
@@ -1373,7 +1373,7 @@ describe("SysboxWorkerPool", () => {
             await first.promise;
             return {
               ok: false,
-              errorKind: "runtime_unavailable",
+              errorKind: "wall_clock_exceeded",
               error: "wall_clock_exceeded",
               workerReusable: false,
             };
@@ -1539,7 +1539,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
                 return chance(0.1)
                   ? {
                       ok: false,
-                      errorKind: "runtime_unavailable",
+                      errorKind: "wall_clock_exceeded",
                       error: "wall_clock_exceeded",
                       workerReusable: false,
                     }

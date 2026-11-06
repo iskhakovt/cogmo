@@ -301,12 +301,17 @@ function runTask(
         }
       }),
     )
-    .andThen(() => {
-      py.globals.set("__cogmo_inputs", py.toPy(invoke.inputs));
-      return stage(skillStageKind(py, "skill_raised"), () =>
+    .andThen(() =>
+      stage(
+        () => "runtime_unavailable",
+        () => py.globals.set("__cogmo_inputs", py.toPy(invoke.inputs)),
+      ),
+    )
+    .andThen(() =>
+      stage(skillStageKind(py, "skill_raised"), () =>
         py.runPythonAsync("__cogmo_result = await run(__cogmo_inputs, _ctx)"),
-      );
-    })
+      ),
+    )
     .andThen(() =>
       // Encoded in Python, as the container tier does: `NaN`, a `set`, a JS
       // proxy or an integer the host would round is refused here rather than

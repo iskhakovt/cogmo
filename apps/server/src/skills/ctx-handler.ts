@@ -12,7 +12,7 @@ import { describeError } from "../util/describe-error.js";
 import type { CtxFailure, CtxHandler } from "./dispatcher.js";
 import type { SkillRunServices } from "./run-as.js";
 import type { SkillManifest } from "./types.js";
-import { DEFAULT_WALL_CLOCK_S } from "./wall-clock.js";
+import { wallClockSOf } from "./wall-clock.js";
 
 const log = logger.child({ component: "skills.ctx" });
 
@@ -483,8 +483,7 @@ export class DefaultCtxHandler implements CtxHandler {
    * live gets the shorter of the two.
    */
   #httpTimeoutMs(requested: number | undefined): number {
-    const wallClockMs =
-      (this.#manifest.resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S[this.#manifest.tier]) * 1000;
+    const wallClockMs = wallClockSOf(this.#manifest.tier, this.#manifest.resources) * 1000;
     // Sized against the whole budget rather than what is left of it. The
     // accurate elapsed figure needs the moment the task reached a runtime,
     // and the only timestamps available here precede a container pool

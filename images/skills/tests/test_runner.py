@@ -185,6 +185,17 @@ class TestErrors:
         assert "integer 9007199254740992 is past 2**53" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_keys_json_writes_alike_are_output_invalid(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {1: 'a', '1': 'b'}\n",
+            inputs={},
+            task_id="t-keys",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert "two keys of one dict are written alike" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_memory_error_while_encoding_is_memory_exceeded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def exhausted(output: object) -> str:
             raise MemoryError()
