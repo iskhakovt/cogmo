@@ -38,7 +38,7 @@ import { expectDefined } from "../test/assertions.js";
 import {
   doneFrame,
   fakeRunInTx,
-  loopResult,
+  finishedLoop,
   MOCK_MESSAGE_CREATED_AT,
   mockAgentStore,
   mockAttachmentStore,
@@ -117,7 +117,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
     }),
     runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-      loopResult({
+      finishedLoop({
         text: "Hello from assistant",
         newMessages: [
           { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
@@ -436,7 +436,7 @@ describe("handle-message — crash recovery / step replay", () => {
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         const stepRun = expectDefined(params.stepRun, "stepRun");
         const cached = await stepRun("tool-iter1-0", handlerBody);
-        return loopResult({
+        return finishedLoop({
           text: cached,
           newMessages: [{ role: "assistant", content: [{ type: "text", text: cached }] }],
         });
@@ -691,7 +691,7 @@ describe("handle-message — crash recovery / step replay", () => {
       resolveProvider: mockResolver(provider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           streamed: { text: "dangling fragment", toolUseIds: [] },
           degraded: { reason: "model refused the request", subtype: "refusal" },
         }),
@@ -903,7 +903,7 @@ describe("handle-message — late replies", () => {
       }),
       debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "flush" },
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "late reply",
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "late reply" }] }],
           streamed: { text: "late reply", toolUseIds: [] },
@@ -1106,6 +1106,45 @@ describe("handle-message — late replies", () => {
         cursor: "inbound-1",
         afterMessageId: "asst-prev",
       });
+    });
+
+    it("stops at a later iteration, after the tool iteration before it", async () => {
+      // The first iteration ran before the younger turn's row committed.
+      const { deps, chatStream, handle } = preStreamDeps({ answered: false, rebatched: true });
+
+      const { result, ctx } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+        steps: [
+          {
+            // A tool the turn's table doesn't hold, answered with an error
+            // result, so the loop goes on to a second iteration.
+            id: "llm-iter1",
+            handler: () => ({
+              kind: "drained",
+              content: [{ type: "tool_use", id: "t1", name: "ghost", input: {} }],
+              stopReason: "tool_use",
+              model: "mock-model",
+              usage: { inputTokens: 10, outputTokens: 5 },
+              repaired: null,
+              emitted: { text: "", toolUseIds: ["t1"] },
+            }),
+          },
+        ],
+      }).execute();
+
+      expect(result).toEqual({ status: "skipped", reason: "superseded" });
+      expect(chatStream).not.toHaveBeenCalled();
+      const textPushes = vi
+        .mocked(handle.push)
+        .mock.calls.flat()
+        .filter((e) => e.type === "text_delta");
+      expect(textPushes).toEqual([]);
+      const planned = plannedSteps(ctx);
+      expect(planned).toContain("llm-iter2");
+      expect(planned).toContain("finish-stream");
+      expect(planned).not.toContain("persist-new-messages");
+      expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
     });
 
     it("streams and persists the reply while no other reply owns the inbounds", async () => {
@@ -1820,7 +1859,7 @@ describe("handle-message — core-memory scope frozen across re-invocations", ()
       }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async ({ service }) => {
         await service.coreMemory.update("identity", "Name: Thorin");
-        return loopResult({
+        return finishedLoop({
           text: "Saved.",
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "Saved." }] }],
         });

@@ -9,7 +9,7 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import type { NormalizeArrivalDeps } from "../agent/attachments/normalize-arrival.js";
 import type { HandleMessageDeps } from "../agent/handle-message.js";
-import type { AgentLoopResult } from "../agent/loop.js";
+import type { AgentLoopResult, StreamingLoopOutcome } from "../agent/loop.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
@@ -824,6 +824,17 @@ export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResul
     streamed: { text: "", toolUseIds: [] },
     ...overrides,
   };
+}
+
+/** A streaming loop that ran to {@link loopResult}'s result. */
+export function finishedLoop(overrides?: Partial<AgentLoopResult>): StreamingLoopOutcome {
+  return { kind: "finished", result: loopResult(overrides) };
+}
+
+/** The result of a streaming loop that finished; throws when it was superseded. */
+export function expectFinished(outcome: StreamingLoopOutcome): AgentLoopResult {
+  if (outcome.kind !== "finished") throw new Error(`expected a finished loop, got ${outcome.kind}`);
+  return outcome.result;
 }
 
 /** The `done` frame a scripted provider stream ends with. */

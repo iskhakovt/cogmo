@@ -1,9 +1,15 @@
 import type { Logger } from "pino";
+import { match } from "ts-pattern";
 import type { Durable } from "../../inngest/durable.js";
 import { isRetriableProviderError } from "../../llm/fallback.js";
 import type { Message, StreamEvent } from "../../llm/types.js";
 import { type DeliveryHandle, pushOrThrow } from "../../transport/delivery-router.js";
-import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
+import type {
+  AgentLoopResult,
+  StepRunner,
+  StreamingAgentLoopParams,
+  StreamingLoopOutcome,
+} from "../loop.js";
 import { synthesizeDegradedReply } from "../repair.js";
 import { computeRetraction } from "../retraction.js";
 import type { Service } from "../service.js";
@@ -48,8 +54,8 @@ export type TurnLoopOutcome =
 /**
  * Run the agent loop, streaming to the delivery handle, and close the stream.
  * A loop failure aborts the stream and rethrows, translated into Inngest's
- * retry decision. A stopped loop closes the stream as finished: what earlier
- * iterations streamed stays on the user's screen.
+ * retry decision. A superseded loop closes the stream as finished, with
+ * whatever it holds (design/crash-recovery.md → Late replies).
  *
  * Steps, in order: the loop's `llm-iter<N>` / `tool-iter<N>-<P>` / … steps,
  * `degraded-reply` (when the loop degraded), `finish-stream`.
@@ -57,7 +63,7 @@ export type TurnLoopOutcome =
 export async function runTurnLoop(
   step: Durable,
   stepRun: StepRunner,
-  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>,
+  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<StreamingLoopOutcome>,
   args: RunTurnLoopArgs,
 ): Promise<TurnLoopOutcome> {
   const { turnModel, delivery, turnLogger, firstInboundId } = args;
@@ -98,15 +104,21 @@ export async function runTurnLoop(
       superseded: args.superseded,
       turnLogger,
     });
-    if (looped.superseded) {
-      await finishStream(step, delivery, turnLogger);
-      return { kind: "superseded" };
-    }
-    const result = looped.degraded
-      ? await withDegradedReply(step, looped, looped.degraded, args)
-      : looped;
-    const unstreamed = await finishStream(step, delivery, turnLogger);
-    return { kind: "replied", result, unstreamed };
+    // Awaited inside the `try`, so a failure in either arm aborts the stream.
+    return await match(looped)
+      .returnType<Promise<TurnLoopOutcome>>()
+      .with({ kind: "superseded" }, async () => {
+        await finishStream(step, delivery, turnLogger);
+        return { kind: "superseded" };
+      })
+      .with({ kind: "finished" }, async ({ result: finished }) => {
+        const result = finished.degraded
+          ? await withDegradedReply(step, finished, finished.degraded, args)
+          : finished;
+        const unstreamed = await finishStream(step, delivery, turnLogger);
+        return { kind: "replied", result, unstreamed };
+      })
+      .exhaustive();
   } catch (err) {
     // The loop's error decides the retry, so a failed abort is only logged.
     const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");

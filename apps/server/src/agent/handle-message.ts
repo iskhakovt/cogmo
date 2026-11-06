@@ -34,7 +34,7 @@ import { reportTurnFailure } from "./handle-message/report-turn-failure.js";
 import { resolveTurnModel } from "./handle-message/resolve-turn-model.js";
 import { runTurnLoop } from "./handle-message/run-turn-loop.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
-import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
+import type { StreamingAgentLoopParams, StreamingLoopOutcome } from "./loop.js";
 import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import type { PromptSource } from "./prompt.js";
 import type { Service } from "./service.js";
@@ -76,7 +76,7 @@ export interface HandleMessageDeps {
   images: NormalizeArrivalDeps["images"];
   debounceConfig: DebounceConfig;
   deliveryRouter: DeliveryRouter;
-  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
+  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<StreamingLoopOutcome>;
   /**
    * Optional factory that constructs a coding service scoped to this turn's
    * conversation. Bootstrap supplies it when the sandbox module is

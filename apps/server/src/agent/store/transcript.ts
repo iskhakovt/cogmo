@@ -483,14 +483,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
         sameContent: eq(messages.content, params.content).mapWith(Boolean),
       })
       .from(messages)
-      .where(
-        and(
-          eq(messages.conversationId, params.conversationId),
-          afterMessageId(params.afterMessageId),
-          eq(messages.lastInboundMessageId, params.inboundId),
-          eq(messages.role, "assistant"),
-        ),
-      )
+      .where(replyOnCursor(params.conversationId, params.inboundId, params.afterMessageId))
       .orderBy(desc(messages.id))
       .limit(1);
     return rows[0];
@@ -503,14 +496,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     const rows = await tx
       .select({ id: messages.id })
       .from(messages)
-      .where(
-        and(
-          eq(messages.conversationId, params.conversationId),
-          afterMessageId(params.afterMessageId),
-          eq(messages.lastInboundMessageId, params.cursor),
-          eq(messages.role, "assistant"),
-        ),
-      )
+      .where(replyOnCursor(params.conversationId, params.cursor, params.afterMessageId))
       .limit(1);
     return rows.length > 0;
   }
@@ -755,4 +741,22 @@ export class DrizzleTranscriptStore implements TranscriptStore {
 /** Rows newer than `id`, or every row when `null`: a range scan on `idx_messages_conv_id`. */
 function afterMessageId(id: string | null): SQL | undefined {
   return id === null ? undefined : gt(messages.id, id);
+}
+
+/**
+ * The assistant rows newer than `after` that carry `cursor`: the rows a
+ * committed `persist-new-messages` wrote for that batch. The pre-stream check
+ * and the persist check read the same rows through it.
+ */
+function replyOnCursor(
+  conversationId: string,
+  cursor: string,
+  after: string | null,
+): SQL | undefined {
+  return and(
+    eq(messages.conversationId, conversationId),
+    afterMessageId(after),
+    eq(messages.lastInboundMessageId, cursor),
+    eq(messages.role, "assistant"),
+  );
 }

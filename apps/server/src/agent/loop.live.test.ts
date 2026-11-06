@@ -31,6 +31,7 @@ import { AnthropicProvider } from "../llm/anthropic.js";
 import { logger } from "../logger.js";
 import { DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "../test/assertions.js";
+import { expectFinished } from "../test/factories.js";
 import { createWireRecorder, type WireResponse } from "../test/wire-recorder.js";
 import { runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
@@ -138,7 +139,7 @@ describe.skipIf(API_KEY === undefined)("runStreamingAgentLoop prompt caching (li
         onEvent: async () => {},
         cache: { key: nonce, retention: "long" },
         turnLogger: logger,
-      });
+      }).then(expectFinished);
 
       // The SDK retries overloads, rate limits and dropped connections; each
       // attempt is its own exchange, and only those that succeeded are
