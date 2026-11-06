@@ -9,7 +9,7 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import type { NormalizeArrivalDeps } from "../agent/attachments/normalize-arrival.js";
 import type { HandleMessageDeps } from "../agent/handle-message.js";
-import type { AgentLoopResult } from "../agent/loop.js";
+import type { AgentLoopResult, StreamingLoopOutcome } from "../agent/loop.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
@@ -89,6 +89,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     insertMessages: vi.fn().mockResolvedValue({ id: "msg-1" }),
     getLastAssistantMessage: vi.fn().mockResolvedValue(null),
     findLastAssistantMessageByInbound: vi.fn().mockResolvedValue(undefined),
+    isCursorAnswered: vi.fn().mockResolvedValue(false),
     isCursorRebatched: vi.fn().mockResolvedValue(false),
     listMessages: vi.fn().mockResolvedValue([{ id: "msg-1", role: "user", content: "hello" }]),
     getLatestSummary: vi.fn().mockResolvedValue(undefined),
@@ -823,6 +824,11 @@ export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResul
     streamed: { text: "", toolUseIds: [] },
     ...overrides,
   };
+}
+
+/** A streaming loop that ran to {@link loopResult}'s result. */
+export function finishedLoop(overrides?: Partial<AgentLoopResult>): StreamingLoopOutcome {
+  return { kind: "finished", result: loopResult(overrides) };
 }
 
 /** The `done` frame a scripted provider stream ends with. */

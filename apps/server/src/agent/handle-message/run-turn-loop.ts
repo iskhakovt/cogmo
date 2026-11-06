@@ -1,9 +1,15 @@
 import type { Logger } from "pino";
+import { match } from "ts-pattern";
 import type { Durable } from "../../inngest/durable.js";
 import { isRetriableProviderError } from "../../llm/fallback.js";
 import type { Message, StreamEvent } from "../../llm/types.js";
 import { type DeliveryHandle, pushOrThrow } from "../../transport/delivery-router.js";
-import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
+import type {
+  AgentLoopResult,
+  StepRunner,
+  StreamingAgentLoopParams,
+  StreamingLoopOutcome,
+} from "../loop.js";
 import { synthesizeDegradedReply } from "../repair.js";
 import { computeRetraction } from "../retraction.js";
 import type { Service } from "../service.js";
@@ -22,20 +28,34 @@ export interface RunTurnLoopArgs {
   delivery: DeliveryHandle;
   /** The batch's low-water mark (`batchCursors`); empty only for an empty batch. */
   firstInboundId: string;
+  /**
+   * Whether another reply owns the turn's inbounds (`isTurnSuperseded`),
+   * asked inside each `llm-iter<N>` step before it streams.
+   */
+  superseded: () => Promise<boolean>;
   turnLogger: Logger;
 }
 
-export interface TurnLoopOutcome {
-  /** The loop's result, a degraded turn's apology appended. */
-  result: AgentLoopResult;
-  /** Sessions whose stream failed at finish; the reply goes to them again once persisted. */
-  unstreamed: ReadonlyArray<string>;
-}
+/**
+ * How the loop ended. `replied`: the loop produced the turn's reply.
+ * `superseded`: another reply owned the turn's inbounds before an iteration
+ * streamed, so the loop stopped and the turn has no reply to persist.
+ */
+export type TurnLoopOutcome =
+  | {
+      kind: "replied";
+      /** The loop's result, a degraded turn's apology appended. */
+      result: AgentLoopResult;
+      /** Sessions whose stream failed at finish; the reply goes to them again once persisted. */
+      unstreamed: ReadonlyArray<string>;
+    }
+  | { kind: "superseded" };
 
 /**
  * Run the agent loop, streaming to the delivery handle, and close the stream.
  * A loop failure aborts the stream and rethrows, translated into Inngest's
- * retry decision.
+ * retry decision. A superseded loop closes the stream as finished, with
+ * whatever it holds (design/crash-recovery.md → Late replies).
  *
  * Steps, in order: the loop's `llm-iter<N>` / `tool-iter<N>-<P>` / … steps,
  * `degraded-reply` (when the loop degraded), `finish-stream`.
@@ -43,7 +63,7 @@ export interface TurnLoopOutcome {
 export async function runTurnLoop(
   step: Durable,
   stepRun: StepRunner,
-  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>,
+  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<StreamingLoopOutcome>,
   args: RunTurnLoopArgs,
 ): Promise<TurnLoopOutcome> {
   const { turnModel, delivery, turnLogger, firstInboundId } = args;
@@ -81,24 +101,24 @@ export async function runTurnLoop(
       ...(firstInboundId !== "" && { turnKey: firstInboundId }),
       cache: turnCacheIntent(args.conversationId, "chat"),
       clearToolResults: turnModel.clearToolResults,
+      superseded: args.superseded,
       turnLogger,
     });
-    const result = looped.degraded
-      ? await withDegradedReply(step, looped, looped.degraded, args)
-      : looped;
-    // A step, so the sessions whose stream failed are known on every
-    // later invocation. Such a stream may have shown the user nothing:
-    // append-only mode writes only at chunk boundaries and at finish. A
-    // retry of the turn wouldn't help, since replayed iterations re-emit
-    // nothing, so the reply reaches those sessions through batch delivery
-    // once it is persisted.
-    const unstreamed = await step.run("finish-stream", async () => {
-      const finished = await delivery.finish();
-      if (finished.isOk()) return [];
-      turnLogger.warn({ failures: finished.error.failures }, "stream delivery failed at finish");
-      return finished.error.failures.map((failure) => failure.sessionId);
-    });
-    return { result, unstreamed };
+    // Awaited inside the `try`, so a failure in either arm aborts the stream.
+    return await match(looped)
+      .returnType<Promise<TurnLoopOutcome>>()
+      .with({ kind: "superseded" }, async () => {
+        await finishStream(step, delivery, turnLogger);
+        return { kind: "superseded" };
+      })
+      .with({ kind: "finished" }, async ({ result: finished }) => {
+        const result = finished.degraded
+          ? await withDegradedReply(step, finished, finished.degraded, args)
+          : finished;
+        const unstreamed = await finishStream(step, delivery, turnLogger);
+        return { kind: "replied", result, unstreamed };
+      })
+      .exhaustive();
   } catch (err) {
     // The loop's error decides the retry, so a failed abort is only logged.
     const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
@@ -122,6 +142,30 @@ export async function runTurnLoop(
     // retries that instantly replay the memoized rejection.
     throw err;
   }
+}
+
+/**
+ * Close the stream; returns the sessions whose stream failed.
+ *
+ * A step, so the sessions whose stream failed are known on every later
+ * invocation. Such a stream may have shown the user nothing: append-only mode
+ * writes only at chunk boundaries and at finish. A retry of the turn wouldn't
+ * help, since replayed iterations re-emit nothing, so the reply reaches those
+ * sessions through batch delivery once it is persisted.
+ *
+ * Step: `finish-stream`.
+ */
+function finishStream(
+  step: Durable,
+  delivery: DeliveryHandle,
+  turnLogger: Logger,
+): Promise<ReadonlyArray<string>> {
+  return step.run("finish-stream", async () => {
+    const finished = await delivery.finish();
+    if (finished.isOk()) return [];
+    turnLogger.warn({ failures: finished.error.failures }, "stream delivery failed at finish");
+    return finished.error.failures.map((failure) => failure.sessionId);
+  });
 }
 
 /**
