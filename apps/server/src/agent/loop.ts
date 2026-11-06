@@ -167,6 +167,14 @@ export interface AgentLoopResult {
    * `degraded`.
    */
   truncated?: true;
+  /**
+   * Set when the caller's `superseded` check stopped the loop at the start of
+   * an iteration, before its provider call: another reply owns the turn's
+   * input. Nothing is the reply: `text` is `""`, and `newMessages` holds the
+   * iterations before the stop, which the caller drops. Mutually exclusive
+   * with `degraded` and `truncated`.
+   */
+  superseded?: true;
 }
 
 const DEFAULT_MAX_ITERATIONS = 20;
@@ -751,6 +759,14 @@ export interface StreamingAgentLoopParams extends AgentLoopParams {
    * across turns. The transcript the loop holds and returns is never cleared.
    */
   clearToolResults?: ToolResultClearing;
+  /**
+   * Asked at the start of every iteration, inside its `llm-iter<N>` step and
+   * before the provider call: whether another reply owns the turn's input.
+   * When it answers true the iteration emits nothing and the loop returns a
+   * `superseded` result. The step stores the verdict, so a replay reaches
+   * the same one without asking again.
+   */
+  superseded?: () => Promise<boolean>;
 }
 
 /** What one live execution forwarded to `onEvent`, in order. */
@@ -786,7 +802,9 @@ type LlmIterationOutcome =
       repaired: "stream_truncation" | null;
       emitted: EmittedLedger;
     }
-  | { kind: "degrade"; reason: string; subtype: DegradeSubtype; emitted: EmittedLedger };
+  | { kind: "degrade"; reason: string; subtype: DegradeSubtype; emitted: EmittedLedger }
+  /** The `superseded` check held: no provider call, nothing emitted. */
+  | { kind: "superseded" };
 
 /**
  * One LLM iteration: drain the stream and, on a stream error, run the
@@ -907,6 +925,7 @@ export async function runStreamingAgentLoop(
     maxTokens,
     cache,
     clearToolResults,
+    superseded,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
@@ -957,10 +976,22 @@ export async function runStreamingAgentLoop(
     // body and fail the step (Inngest's per-step retries own those). The
     // step id derives from the SDK-local iteration counter, which replays
     // deterministically because every input to the control flow below comes
-    // from cached outcomes.
-    const iterate = (): Promise<LlmIterationOutcome> =>
-      runLlmIteration(provider, chatParams, onEvent, budgets, log);
+    // from cached outcomes. The `superseded` check runs first in the same
+    // body, so its verdict is memoized with the iteration it gates.
+    const iterate = async (): Promise<LlmIterationOutcome> =>
+      (await superseded?.())
+        ? { kind: "superseded" }
+        : runLlmIteration(provider, chatParams, onEvent, budgets, log);
     const iterOutcome = stepRun ? await stepRun(`llm-iter${iterations}`, iterate) : await iterate();
+
+    if (iterOutcome.kind === "superseded") {
+      return {
+        // The stopped iteration made no provider call.
+        ...buildResult(messages, initialLength, totalUsage, finalModel, iterations - 1, streamed),
+        text: "",
+        superseded: true,
+      };
+    }
 
     streamed.text += iterOutcome.emitted.text;
     streamed.toolUseIds.push(...iterOutcome.emitted.toolUseIds);

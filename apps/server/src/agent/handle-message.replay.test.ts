@@ -1032,6 +1032,114 @@ describe("handle-message — late replies", () => {
       data: { conversationId: "conv-1", messageId: "asst-committed" },
     });
   });
+
+  describe("before an iteration streams", () => {
+    /**
+     * The REAL loop over a provider that would stream a late reply, with the
+     * store's answers to the pre-stream check.
+     */
+    function preStreamDeps(store: { answered: boolean; rebatched: boolean }) {
+      const chatStream = vi.fn(() =>
+        scriptedStream(
+          [{ type: "text_delta", text: "late reply" }],
+          doneFrame("end_turn", { inputTokens: 10, outputTokens: 5 }),
+        ),
+      );
+      const handle = mockDeliveryHandle();
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getLastAssistantMessage: vi
+            .fn()
+            .mockResolvedValue({ id: "asst-prev", lastInboundMessageId: "inbound-0" }),
+          isCursorAnswered: vi.fn().mockResolvedValue(store.answered),
+          isCursorRebatched: vi.fn().mockResolvedValue(store.rebatched),
+        }),
+        resolveProvider: mockResolver(mockProvider({ chatStream })),
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop,
+      });
+      return { deps, chatStream, handle };
+    }
+
+    it("stops a turn whose inbounds a younger turn re-batched, so nothing streams", async () => {
+      const { deps, chatStream, handle } = preStreamDeps({ answered: false, rebatched: true });
+
+      const { result, ctx } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+      }).execute();
+
+      expect(result).toEqual({ status: "skipped", reason: "superseded" });
+      expect(chatStream).not.toHaveBeenCalled();
+      expect(handle.push).not.toHaveBeenCalled();
+      // The stream closes as finished: nothing went wrong for the user to see.
+      expect(handle.finish).toHaveBeenCalled();
+      expect(handle.abort).not.toHaveBeenCalled();
+      const planned = plannedSteps(ctx);
+      expect(planned).toContain("llm-iter1");
+      expect(planned).toContain("finish-stream");
+      expect(planned).not.toContain("degraded-reply");
+      expect(planned).not.toContain("persist-new-messages");
+      expect(R.intersection(planned, POST_PERSIST_STEPS)).toEqual([]);
+      expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+      // The check reads only rows newer than the reply admission found.
+      expect(deps.agentStore.isCursorRebatched).toHaveBeenCalledWith(expect.anything(), {
+        conversationId: "conv-1",
+        cursor: "inbound-1",
+        afterMessageId: "asst-prev",
+      });
+    });
+
+    it("stops a turn whose batch another run already answered", async () => {
+      const { deps, chatStream, handle } = preStreamDeps({ answered: true, rebatched: false });
+
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+      }).execute();
+
+      expect(result).toEqual({ status: "skipped", reason: "superseded" });
+      expect(chatStream).not.toHaveBeenCalled();
+      expect(handle.push).not.toHaveBeenCalled();
+      expect(deps.agentStore.isCursorAnswered).toHaveBeenCalledWith(expect.anything(), {
+        conversationId: "conv-1",
+        cursor: "inbound-1",
+        afterMessageId: "asst-prev",
+      });
+    });
+
+    it("streams and persists the reply while no other reply owns the inbounds", async () => {
+      // Non-vacuity check for the tests above: the same turn, unstopped.
+      const { deps, chatStream, handle } = preStreamDeps({ answered: false, rebatched: false });
+
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+      }).execute();
+
+      expect(result).toEqual({ status: "processed", conversationId: "conv-1" });
+      expect(chatStream).toHaveBeenCalledTimes(1);
+      expect(handle.push).toHaveBeenCalledWith({ type: "text_delta", text: "late reply" });
+      expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+    });
+
+    it("replays a stored superseded verdict without asking again", async () => {
+      // The check would now let the turn through; the stored verdict holds.
+      const { deps, chatStream } = preStreamDeps({ answered: false, rebatched: false });
+
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+        steps: [{ id: "llm-iter1", handler: () => ({ kind: "superseded" }) }],
+      }).execute();
+
+      expect(result).toEqual({ status: "skipped", reason: "superseded" });
+      expect(chatStream).not.toHaveBeenCalled();
+      expect(deps.agentStore.isCursorAnswered).not.toHaveBeenCalled();
+      expect(deps.agentStore.isCursorRebatched).not.toHaveBeenCalled();
+      expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("handle-message — replay equality", () => {

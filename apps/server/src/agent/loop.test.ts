@@ -2321,6 +2321,193 @@ describe("durable LLM iterations (stepRun)", () => {
 // cap sized for reply text alone truncates a turn that thinks — and
 // `classifyPostStream` reports a truncated turn as `ok`, so it is
 // delivered as if finished.
+describe("superseded check", () => {
+  function echoTools(): ToolRegistry {
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => ok(`pong from ${input.text}`),
+      }),
+    );
+    return tools;
+  }
+
+  /** A first iteration that streams a preamble and calls `echo`. */
+  const TOOL_TURN: MockStreamTurn = {
+    events: [
+      { type: "text_delta", text: "Let me check. " },
+      { type: "tool_start", id: "t1", name: "echo", input: { text: "ping" } },
+    ],
+    stopReason: "tool_use",
+  };
+
+  it("stops before the first iteration's provider call when the check holds", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "late reply" }], stopReason: "end_turn" },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      superseded: async () => true,
+    });
+
+    expect(provider.chatStream).not.toHaveBeenCalled();
+    expect(collected).toEqual([]);
+    expect(result).toMatchObject({
+      superseded: true,
+      text: "",
+      newMessages: [],
+      iterations: 0,
+      streamed: { text: "", toolUseIds: [] },
+    });
+    expect(result.degraded).toBeUndefined();
+  });
+
+  it("asks before every iteration and stops at the first that holds", async () => {
+    const provider = mockStreamProvider([
+      TOOL_TURN,
+      { events: [{ type: "text_delta", text: "late reply" }], stopReason: "end_turn" },
+    ]);
+    const superseded = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const collected: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo ping" }],
+      tools: echoTools(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      superseded,
+    });
+
+    expect(superseded).toHaveBeenCalledTimes(2);
+    expect(provider.chatStream).toHaveBeenCalledTimes(1);
+    // The first iteration and its tool streamed; the second never started.
+    expect(collected.map((e) => e.type)).toEqual(["text_delta", "tool_start", "tool_result"]);
+    expect(result).toMatchObject({
+      superseded: true,
+      text: "",
+      iterations: 1,
+      streamed: { text: "Let me check. ", toolUseIds: ["t1"] },
+    });
+    expect(result.newMessages.map((m) => m.role)).toEqual(["assistant", "user"]);
+  });
+
+  it("runs the turn as before while the check doesn't hold", async () => {
+    // Non-vacuity check for the tests above.
+    const provider = mockStreamProvider([
+      TOOL_TURN,
+      { events: [{ type: "text_delta", text: "Got: pong" }], stopReason: "end_turn" },
+    ]);
+    const superseded = vi.fn<() => Promise<boolean>>().mockResolvedValue(false);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo ping" }],
+      tools: echoTools(),
+      onEvent: async () => {},
+      superseded,
+    });
+
+    expect(superseded).toHaveBeenCalledTimes(2);
+    expect(result.text).toBe("Got: pong");
+    expect(result.superseded).toBeUndefined();
+  });
+
+  it("asks inside the iteration's step, so a stored verdict is not asked again", async () => {
+    const cache = new Map<string, unknown>();
+    const first = cachingStepRun(cache);
+    const superseded = vi.fn<() => Promise<boolean>>().mockResolvedValue(true);
+    const provider = mockStreamProvider([]);
+    const run = (stepRun: StepRunner) =>
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+        stepRun,
+        superseded,
+      });
+
+    await run(first.stepRun);
+    expect(first.calls).toEqual(["llm-iter1"]);
+    expect(cache.get("llm-iter1")).toEqual({ kind: "superseded" });
+
+    // A replay: the stored verdict stops the loop even though the check
+    // would now answer differently.
+    superseded.mockClear();
+    superseded.mockResolvedValue(false);
+    const replayed = await run(cachingStepRun(cache).stepRun);
+
+    expect(superseded).not.toHaveBeenCalled();
+    expect(provider.chatStream).not.toHaveBeenCalled();
+    expect(replayed.superseded).toBe(true);
+  });
+
+  it("does not ask again for an iteration whose drained outcome is stored", async () => {
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "text", text: "cached reply" }],
+          stopReason: "end_turn",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "cached reply", toolUseIds: [] },
+        },
+      ],
+    ]);
+    const superseded = vi.fn<() => Promise<boolean>>().mockResolvedValue(true);
+
+    const result = await testRunStreamingAgentLoop({
+      provider: mockStreamProvider([]),
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      stepRun: cachingStepRun(cache).stepRun,
+      superseded,
+    });
+
+    expect(superseded).not.toHaveBeenCalled();
+    expect(result.text).toBe("cached reply");
+    expect(result.superseded).toBeUndefined();
+  });
+
+  it("fails the iteration when the check throws, before any provider call", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "reply" }], stopReason: "end_turn" },
+    ]);
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+        superseded: async () => {
+          throw new Error("connection refused");
+        },
+      }),
+    ).rejects.toThrow("connection refused");
+    expect(provider.chatStream).not.toHaveBeenCalled();
+  });
+});
+
 describe("maxTokens", () => {
   it("forwards the caller's cap to the provider", async () => {
     const provider = mockProvider([textResponse("done")]);

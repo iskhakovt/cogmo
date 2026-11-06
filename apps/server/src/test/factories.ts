@@ -89,6 +89,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     insertMessages: vi.fn().mockResolvedValue({ id: "msg-1" }),
     getLastAssistantMessage: vi.fn().mockResolvedValue(null),
     findLastAssistantMessageByInbound: vi.fn().mockResolvedValue(undefined),
+    isCursorAnswered: vi.fn().mockResolvedValue(false),
     isCursorRebatched: vi.fn().mockResolvedValue(false),
     listMessages: vi.fn().mockResolvedValue([{ id: "msg-1", role: "user", content: "hello" }]),
     getLatestSummary: vi.fn().mockResolvedValue(undefined),

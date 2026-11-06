@@ -193,6 +193,15 @@ export interface TranscriptStore {
   ): Promise<{ id: string; sameContent: boolean } | undefined>;
 
   /**
+   * Whether an assistant row newer than `afterMessageId` (any row when `null`)
+   * carries `cursor`: a committed `persist-new-messages` answered that batch.
+   */
+  isCursorAnswered(
+    tx: Transaction,
+    params: { conversationId: string; cursor: string; afterMessageId: string | null },
+  ): Promise<boolean>;
+
+  /**
    * Whether a non-pipeline turn row newer than `afterMessageId` (any row when
    * `null`) re-batched the inbound `cursor`: its batch range
    * `[first_inbound_message_id, last_inbound_message_id]` holds `cursor`
@@ -485,6 +494,25 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       .orderBy(desc(messages.id))
       .limit(1);
     return rows[0];
+  }
+
+  async isCursorAnswered(
+    tx: Transaction,
+    params: { conversationId: string; cursor: string; afterMessageId: string | null },
+  ): Promise<boolean> {
+    const rows = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, params.conversationId),
+          afterMessageId(params.afterMessageId),
+          eq(messages.lastInboundMessageId, params.cursor),
+          eq(messages.role, "assistant"),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   async isCursorRebatched(

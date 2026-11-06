@@ -110,7 +110,6 @@
 
 ### Agent loop, context & conversations
 
-- [ ] `p1` Stop a late reply before it streams. At the start of each durable LLM iteration step in `handle-message` (`llm-iter<N>`), check whether a covering non-pipeline turn row exists (`TranscriptStore.isCursorRebatched` on the turn's cursor) and stop the turn if so, so a reply the persist check will refuse never reaches the user. Today `persist-new-messages` refuses it only after `runTurnLoop` has streamed it, and a covering turn that later fails for good leaves the user with that reply, a failure notice and the same words answered again by the next turn ([design/observation.md](design/observation.md#late-replies) → Late replies).
 - [ ] `p2` Fail a stream that ends without the provider's terminal event. Both adapters start the stop reason at `end_turn` and yield `done` when the body ends, so a dropped connection persists half a reply as complete. Also map an unknown OpenAI-compatible finish reason to an error rather than `end_turn`, and read its `refusal` field ([design/providers.md](design/providers.md)). (deep review 2026-10-27, M4)
 - [ ] `p2` Gate `admit-turn`'s `in-cooldown-reply` step on durable state. It is planned from a bare-body clock, so a replay after the cooldown lapses runs a full turn after the waiting reply. (deep review 2026-10-27, M5)
 - [ ] `p2` Mark what design/prompt-caching.md describes ahead of the code as pending: the head check, `transcript_head` and the epoch reason (append-only step 5), and the fork shape with `tool_choice: none` (step 7). (deep review 2026-10-27, D1, D2)
