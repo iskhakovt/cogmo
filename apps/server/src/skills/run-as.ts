@@ -15,9 +15,10 @@ export interface SkillRunServices {
   files: Service["files"];
 }
 
-/** The user a skill run acts for, and the services scoped to them. */
+/** The user and profile a skill run acts for, and the services scoped to them. */
 export interface SkillRunAs {
   userId: string;
+  profileId: string;
   service: SkillRunServices;
 }
 
@@ -48,5 +49,9 @@ export async function resolveSkillRunAs(
     scheduling: undefined,
     pipelines: undefined,
   });
-  return { userId: identity.userId, service: { memory: service.memory, files: service.files } };
+  return {
+    userId: identity.userId,
+    profileId: identity.profileId,
+    service: { memory: service.memory, files: service.files },
+  };
 }

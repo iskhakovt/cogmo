@@ -253,10 +253,16 @@ export class SysboxWorkerPool {
     }
     const acquired = await this.#acquire();
     if (acquired.isErr()) {
-      return { ok: false, error: describeRejection(acquired.error), workerReusable: false };
+      return {
+        ok: false,
+        errorKind: "runtime_unavailable",
+        error: describeRejection(acquired.error),
+        workerReusable: false,
+      };
     }
     const worker = acquired.value;
-    // `worker.invoke` returns a task's failures as `ok: false`; a throw is a bug.
+    // `worker.invoke` returns a task's failures as `ok: false`; it throws only
+    // for its dispatch gate's database failure, or a bug.
     let returned: TaskReturn = { kind: "threw" };
     try {
       const result = await worker.invoke(params);

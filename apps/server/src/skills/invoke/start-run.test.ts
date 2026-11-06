@@ -15,9 +15,15 @@ function runRow(overrides: Partial<SkillRunRow>): SkillRunRow {
     status: "running",
     output: null,
     error: null,
+    errorKind: null,
     resourceUsage: null,
     idempotencyKey: "key-1",
     recoveryPoint: "started",
+    deadlineAt: null,
+    gitSha: "sha-1",
+    runAsUserId: "user-1",
+    runAsProfileId: "profile-1",
+    shadow: false,
     createdAt: CREATED_AT,
     finishedAt: null,
     ...overrides,
@@ -30,7 +36,13 @@ function keyedStore(kind: "new" | "recovered", row: SkillRunRow): SkillStore {
   return store;
 }
 
-const ARGS = { skillId: "skill-1", trigger: "manual", inputs: {} } as const;
+const ARGS = {
+  skillId: "skill-1",
+  trigger: "manual",
+  inputs: {},
+  gitSha: "sha-1",
+  runAs: { userId: "user-1", profileId: "profile-1" },
+} as const;
 
 describe("startRun", () => {
   it("executes a fresh row when there is no idempotency key", async () => {
@@ -40,6 +52,7 @@ describe("startRun", () => {
     const start = await startRun({ store, runInTx: fakeRunInTx }, ARGS);
 
     expect(start).toEqual({ kind: "execute", runId: "run-1", createdAt: CREATED_AT });
+    expect(store.insertRun).toHaveBeenCalledWith(expect.anything(), ARGS);
     expect(store.startOrRecoverRun).not.toHaveBeenCalled();
   });
 
@@ -52,10 +65,15 @@ describe("startRun", () => {
     );
 
     expect(start).toEqual({ kind: "execute", runId: "run-1", createdAt: CREATED_AT });
+    expect(store.startOrRecoverRun).toHaveBeenCalledWith(expect.anything(), {
+      ...ARGS,
+      idempotencyKey: "key-1",
+    });
   });
 
   it.each<[SkillRunRecoveryPoint, Partial<SkillRunRow>, unknown]>([
     ["started", {}, { kind: "inflight", runId: "run-1" }],
+    ["dispatched", { deadlineAt: CREATED_AT }, { kind: "inflight", runId: "run-1" }],
     [
       "executed",
       { output: { n: 1 } },
@@ -63,8 +81,12 @@ describe("startRun", () => {
     ],
     [
       "executed",
-      { error: "boom" },
-      { kind: "finish", runId: "run-1", executed: { kind: "error", error: "boom" } },
+      { error: "boom", errorKind: "skill_raised" },
+      {
+        kind: "finish",
+        runId: "run-1",
+        executed: { kind: "error", error: { kind: "skill_raised", message: "boom" } },
+      },
     ],
     [
       "finished",
@@ -73,8 +95,25 @@ describe("startRun", () => {
     ],
     [
       "finished",
-      { status: "error", error: "boom" },
-      { kind: "replay", result: { runId: "run-1", status: "error", error: "boom" } },
+      { status: "error", error: "boom", errorKind: "host_lost" },
+      {
+        kind: "replay",
+        result: { runId: "run-1", status: "error", errorKind: "host_lost", error: "boom" },
+      },
+    ],
+    [
+      "finished",
+      { status: "error", error: "bad", errorKind: "output_invalid", output: { n: "x" } },
+      {
+        kind: "replay",
+        result: {
+          runId: "run-1",
+          status: "error",
+          errorKind: "output_invalid",
+          error: "bad",
+          output: { n: "x" },
+        },
+      },
     ],
   ])("takes up a recovered row at %s", async (recoveryPoint, fields, expected) => {
     const store = keyedStore("recovered", runRow({ recoveryPoint, ...fields }));
@@ -96,5 +135,16 @@ describe("startRun", () => {
     await expect(
       startRun({ store, runInTx: fakeRunInTx }, { ...ARGS, idempotencyKey: "key-1" }),
     ).rejects.toThrow(/run-1 finished with status 'error' and no error/);
+  });
+
+  it("rejects a recovered error row with no kind as an invariant violation", async () => {
+    const store = keyedStore(
+      "recovered",
+      runRow({ recoveryPoint: "executed", error: "boom", errorKind: null }),
+    );
+
+    await expect(
+      startRun({ store, runInTx: fakeRunInTx }, { ...ARGS, idempotencyKey: "key-1" }),
+    ).rejects.toThrow(/run-1 has an error and no error_kind/);
   });
 });

@@ -1,6 +1,7 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -8,8 +9,10 @@ import {
   type SandboxClient,
   type SandboxSession,
 } from "../../sandbox/index.js";
+import { sendingGate } from "../../test/factories.js";
 import type { CtxHandler } from "../dispatcher.js";
 import { runOnSysboxContainer } from "./host.js";
+import { SysboxSkillWorker } from "./worker.js";
 
 /**
  * `runOnSysboxContainer` is the resource-override one-shot path — used by
@@ -55,7 +58,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     exec: vi.fn(),
     execStreaming: vi.fn(async (cmd) => {
       calls.push(`exec:${cmd[0]}:${cmd[1]}`);
-      stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 3 })}\n`);
+      stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 4 })}\n`);
       return exec;
     }),
   };
@@ -98,7 +101,7 @@ const noopCtx: CtxHandler = { handle: async () => ok(null) };
 /** Auto-respond to any `task_invoke` line with a matching `task_result` and `task_exited`. */
 function autoRespond(
   bundle: FakeSandboxBundle,
-  result: { ok: boolean; output?: unknown; error?: string },
+  result: { ok: boolean; output?: unknown; errorKind?: string; error?: string },
 ): void {
   bundle.stdin.on("data", (chunk: Buffer) => {
     for (const line of chunk
@@ -137,6 +140,8 @@ describe("runOnSysboxContainer", () => {
       image: "python:3.14-slim",
       sandbox: bundle.sandbox,
       ctxHandler: noopCtx,
+      wallClockS: 60,
+      dispatch: sendingGate(),
     });
 
     expect(result).toMatchObject({ ok: true, output: { x: 7 } });
@@ -161,6 +166,8 @@ describe("runOnSysboxContainer", () => {
       image: "python:3.14-slim",
       sandbox: bundle.sandbox,
       ctxHandler: noopCtx,
+      wallClockS: 60,
+      dispatch: sendingGate(),
       resourceLimits: { memory_bytes: 2 * 1024 * 1024 * 1024 },
     });
 
@@ -195,6 +202,8 @@ describe("runOnSysboxContainer", () => {
       image: "python:3.14-slim",
       sandbox: bundle.sandbox,
       ctxHandler: noopCtx,
+      wallClockS: 60,
+      dispatch: sendingGate(),
       isolation: "recycle",
     });
 
@@ -217,6 +226,7 @@ describe("runOnSysboxContainer", () => {
       image: "python:3.14-slim",
       sandbox: bundle.sandbox,
       ctxHandler: noopCtx,
+      dispatch: sendingGate(),
       wallClockS: 10,
     });
 
@@ -231,29 +241,6 @@ describe("runOnSysboxContainer", () => {
     const ttlMs = expiresAt.getTime() - before;
     expect(ttlMs).toBeGreaterThanOrEqual(40_000);
     expect(ttlMs).toBeLessThan(45_000);
-  });
-
-  it("falls back to default 60s wall-clock for expiresAt when none declared", async () => {
-    const bundle = buildFakeSandbox();
-    autoRespond(bundle, { ok: true, output: null });
-    const before = Date.now();
-
-    await runOnSysboxContainer({
-      taskId: "task-default-ttl",
-      skillName: "any",
-      body: "async def run(inputs, ctx):\n    return None\n",
-      inputs: {},
-      image: "python:3.14-slim",
-      sandbox: bundle.sandbox,
-      ctxHandler: noopCtx,
-    });
-
-    const expiresAt = (bundle.sandbox.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]
-      .expiresAt as Date;
-    const ttlMs = expiresAt.getTime() - before;
-    // 60 (default wallClockS) + 30 (REAPER_BACKSTOP_S) = 90s.
-    expect(ttlMs).toBeGreaterThanOrEqual(90_000);
-    expect(ttlMs).toBeLessThan(95_000);
   });
 
   it("disposes worker even when invoke fails", async () => {
@@ -279,10 +266,14 @@ describe("runOnSysboxContainer", () => {
       image: "python:3.14-slim",
       sandbox: bundle.sandbox,
       ctxHandler: noopCtx,
+      wallClockS: 60,
+      dispatch: sendingGate(),
     });
 
     assert(!result.ok);
     expect(result.workerReusable).toBe(false);
+    // The worker never started, so nothing was sent.
+    expect(result.errorKind).toBe("runtime_unavailable");
     expect(result.error).toMatch(/exec blew up/);
     // Even on failure, the worker's dispose ran — sandbox.delete called.
     expect(bundle.sandbox.delete).toHaveBeenCalled();
@@ -300,12 +291,69 @@ describe("runOnSysboxContainer", () => {
       image: "python:3.14-slim",
       sandbox: bundle.sandbox,
       ctxHandler: noopCtx,
+      wallClockS: 60,
+      dispatch: sendingGate(),
     });
 
     assert(!result.ok);
+    expect(result.errorKind).toBe("runtime_unavailable");
     expect(result.error).toMatch(/daemon unreachable/);
     // sandbox.delete is never called because no session was ever created.
     expect(bundle.sandbox.delete).not.toHaveBeenCalled();
+  });
+
+  it("fails the task unsent when the fresh worker refuses its lease, and disposes it", async () => {
+    // A worker that died between its handshake and the lease: a stand-in, as
+    // the race is the worker's own state.
+    const worker = mock<SysboxSkillWorker>();
+    worker.tryAcquire.mockReturnValue(err("cannot acquire a worker that is dead"));
+    worker.dispose.mockResolvedValue(undefined);
+    vi.spyOn(SysboxSkillWorker, "create").mockResolvedValue(worker);
+    const dispatch = sendingGate();
+
+    const result = await runOnSysboxContainer({
+      taskId: "task-dead-lease",
+      skillName: "echo",
+      body: "async def run(inputs, ctx):\n    return None\n",
+      inputs: {},
+      image: "python:3.14-slim",
+      sandbox: buildFakeSandbox().sandbox,
+      ctxHandler: noopCtx,
+      wallClockS: 60,
+      dispatch,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "runtime_unavailable",
+      error: "the one-shot worker died before its task: cannot acquire a worker that is dead",
+      workerReusable: false,
+    });
+    expect(worker.invoke).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(worker.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a gate that throws propagate, and still disposes the worker", async () => {
+    const bundle = buildFakeSandbox();
+    autoRespond(bundle, { ok: true, output: { x: 7 } });
+
+    await expect(
+      runOnSysboxContainer({
+        taskId: "task-gate-throws",
+        skillName: "echo",
+        body: "async def run(inputs, ctx):\n    return {'x': 7}\n",
+        inputs: {},
+        image: "python:3.14-slim",
+        sandbox: bundle.sandbox,
+        ctxHandler: noopCtx,
+        wallClockS: 60,
+        dispatch: async () => {
+          throw new Error("db unreachable");
+        },
+      }),
+    ).rejects.toThrow(/db unreachable/);
+    expect(bundle.sandbox.delete).toHaveBeenCalled();
   });
 
   it("swallows dispose-time errors (logged, not surfaced)", async () => {
@@ -322,6 +370,8 @@ describe("runOnSysboxContainer", () => {
       image: "python:3.14-slim",
       sandbox: bundle.sandbox,
       ctxHandler: noopCtx,
+      wallClockS: 60,
+      dispatch: sendingGate(),
     });
 
     assert(result.ok);

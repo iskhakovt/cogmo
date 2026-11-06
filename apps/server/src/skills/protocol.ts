@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { SkillRunErrorKind } from "./store/index.js";
 
 /**
  * Worker JSON-RPC protocol — transport-agnostic message shapes used by the
@@ -15,7 +16,7 @@ import { z } from "zod";
  * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
  * change, and when the host comes to run something new in the image.
  */
-export const SUPERVISOR_PROTOCOL_VERSION = 3;
+export const SUPERVISOR_PROTOCOL_VERSION = 4;
 
 /** Container tier only: the supervisor's first frame, announcing its protocol version. */
 const SupervisorReadySchema = z.object({
@@ -116,10 +117,36 @@ const TaskResultOkSchema = z.object({
   output: z.unknown(),
   rusage: RuntimeRusageSchema.optional(),
 });
+/**
+ * The run error kinds a worker reports in a failed `task_result`
+ * (design/skills.md → Run failures → who decides each kind): the runner's
+ * `load_failed`, `skill_raised`, `memory_exceeded` and `output_invalid`, and
+ * the relay's and the task process's own.
+ */
+const WORKER_ERROR_KINDS = [
+  "load_failed",
+  "skill_raised",
+  "memory_exceeded",
+  "output_invalid",
+  "wall_clock_exceeded",
+  "runtime_unavailable",
+  "dependency_unavailable",
+] as const satisfies readonly SkillRunErrorKind[];
+
+/**
+ * The kinds a task's outcome can carry: a worker's, or `result_lost`, which
+ * a runtime host gives a task it sent that reported nothing.
+ */
+export type TaskErrorKind = WorkerErrorKind | "result_lost";
+
+/** A kind a worker reports on the wire. */
+export type WorkerErrorKind = (typeof WORKER_ERROR_KINDS)[number];
+
 const TaskResultErrSchema = z.object({
   type: z.literal("task_result"),
   id: z.string().min(1),
   ok: z.literal(false),
+  errorKind: z.enum(WORKER_ERROR_KINDS),
   error: z.string(),
   rusage: RuntimeRusageSchema.optional(),
 });
@@ -129,7 +156,34 @@ export type TaskResult = z.infer<typeof TaskResultSchema>;
 /** A task's result as a host hands it to the runner: the wire result without its framing. */
 export type TaskOutcome =
   | { ok: true; output?: unknown; rusage?: RuntimeRusage }
-  | { ok: false; error: string; rusage?: RuntimeRusage };
+  | { ok: false; errorKind: TaskErrorKind; error: string; rusage?: RuntimeRusage };
+
+/** The task's outcome without its framing. */
+export function fromTaskResult(result: TaskResult): TaskOutcome {
+  return {
+    ...(result.ok
+      ? { ok: true, output: result.output }
+      : { ok: false, errorKind: result.errorKind, error: result.error }),
+    ...(result.rusage !== undefined && { rusage: result.rusage }),
+  };
+}
+
+/**
+ * Asked by a runtime immediately before it sends `task_invoke`: `send` once
+ * the run row is at `dispatched`, `withhold` when the sweeper finished the
+ * run first, and the task must not be sent (design/skills.md → Stuck runs).
+ */
+export type DispatchGate = () => Promise<DispatchDecision>;
+export type DispatchDecision = { kind: "send" } | { kind: "withhold" };
+
+/** What a runtime returns for a task its gate withheld: nothing was sent. */
+export function withheldOutcome(): TaskOutcome {
+  return {
+    ok: false,
+    errorKind: "runtime_unavailable",
+    error: "task withheld: its run was finished before dispatch",
+  };
+}
 
 export const CtxCallSchema = z.object({
   type: z.literal("ctx_call"),

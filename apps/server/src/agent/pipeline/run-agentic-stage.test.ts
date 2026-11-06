@@ -649,7 +649,9 @@ describe("runAgenticStage", () => {
       await expectDefined(params.tools.get("echo"), "echo tool").handler({}, params.service);
 
       expect(skillRunner.invoke).toHaveBeenCalledWith(
-        expect.objectContaining({ runAs: { userId: "user-2", service: params.service } }),
+        expect.objectContaining({
+          runAs: { userId: "user-2", profileId: "profile-7", service: params.service },
+        }),
       );
     });
 

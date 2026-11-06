@@ -12,6 +12,7 @@ import { createSkillDepsReaper } from "../skills/deps-reaper-function.js";
 import { loadBundledPackages } from "../skills/pyodide-compat.js";
 import { resolveSkillRunAs } from "../skills/run-as.js";
 import { SkillRunnerImpl } from "../skills/runner.js";
+import { createSkillRunsSweeper } from "../skills/runs-sweeper.js";
 import {
   readBootId,
   readStartTime,
@@ -133,7 +134,13 @@ export function createSkillFunctions(
     inngest,
   );
 
-  return { skillCronTicker, skillCronFire, skillDepsReaper };
+  // Finishes runs stuck in flight every 5 min. See `src/skills/runs-sweeper.ts`.
+  const skillRunsSweeper = createSkillRunsSweeper(
+    { runInTx: core.runInTx, store: core.skillStore },
+    inngest,
+  );
+
+  return { skillCronTicker, skillCronFire, skillDepsReaper, skillRunsSweeper };
 }
 
 /**

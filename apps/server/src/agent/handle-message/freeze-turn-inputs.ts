@@ -117,6 +117,7 @@ export async function freezeTurnInputs(
 
   const liveTools = await buildLiveToolCatalog(deps, {
     userId,
+    profileId,
     coreMemoryScope,
     toolSetGlobs: profile?.toolSet ?? [],
   });

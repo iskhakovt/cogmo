@@ -12,13 +12,21 @@ import type { SkillManifest } from "./types.js";
  *
  * `supervisor.py` keeps its own `DEFAULT_WALL_CLOCK_S = 60` because it runs
  * in the container with no access to this module. That copy is only reachable
- * when `task_invoke` carries no `wallClockS`, which the host always sends for
- * a manifest that declares one; keep the two in step by hand.
+ * when `task_invoke` carries no `wallClockS`, which the host always sends
+ * (`wallClockSOf`); keep the two in step by hand.
  */
 export const DEFAULT_WALL_CLOCK_S: Readonly<Record<SkillManifest["tier"], number>> = {
   wasm: 30,
   container: 60,
 };
+
+/** The wall clock a run of `tier` gets: its manifest's, or the tier's default. */
+export function wallClockSOf(
+  tier: SkillManifest["tier"],
+  resources: SkillManifest["resources"] | undefined,
+): number {
+  return resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S[tier];
+}
 
 /**
  * A signal that aborts with a `TimeoutError` after `ms`. Same contract as

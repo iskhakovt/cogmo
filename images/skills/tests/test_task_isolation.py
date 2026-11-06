@@ -315,7 +315,7 @@ def _descendant_pids(root: int) -> list[int]:
 
 class TestSupervisorProtocol:
     def test_announces_its_protocol_version_first(self, sup: _Supervisor) -> None:
-        assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 3}
+        assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 4}
 
     def test_confirms_each_task_exited_and_serves_the_next(self, sup: _Supervisor) -> None:
         first = sup.run_task("t-1", _ECHO, {"n": 1})
@@ -384,6 +384,7 @@ class TestSupervisorProtocol:
             "type": "task_result",
             "id": "t-old",
             "ok": False,
+            "errorKind": "runtime_unavailable",
             "error": "host_protocol_mismatch: ctx_result without taskId",
         }
         assert frames[-1] == {"type": "task_exited", "id": "t-old"}
@@ -445,7 +446,13 @@ class TestSupervisorProtocol:
             "    await asyncio.sleep(30)\n"
         )
         result = sup.run_task("t-flood", body, {}, wall_clock_s=10)
-        assert result == {"type": "task_result", "id": "t-flood", "ok": False, "error": "task_frame_too_large"}
+        assert result == {
+            "type": "task_result",
+            "id": "t-flood",
+            "ok": False,
+            "errorKind": "skill_raised",
+            "error": "task_frame_too_large",
+        }
         assert sup.await_exit("t-flood") is not None
 
     def test_stamps_the_task_result_with_the_task_id(self, sup: _Supervisor) -> None:
@@ -464,27 +471,43 @@ class TestSupervisorProtocol:
     def test_wall_clock_kills_the_task(self, sup: _Supervisor) -> None:
         body = "import asyncio\nasync def run(inputs, ctx):\n    await asyncio.sleep(30)\n"
         result = sup.run_task("t-slow", body, {}, wall_clock_s=0.5)
-        assert result == {"type": "task_result", "id": "t-slow", "ok": False, "error": "wall_clock_exceeded"}
+        assert result == {
+            "type": "task_result",
+            "id": "t-slow",
+            "ok": False,
+            "errorKind": "wall_clock_exceeded",
+            "error": "wall_clock_exceeded",
+        }
         assert sup.await_exit("t-slow") is not None
 
     @pytest.mark.parametrize(
-        ("body", "error"),
+        ("body", "error_kind", "error"),
         [
-            ("import os\nasync def run(inputs, ctx):\n    os._exit(139)\n", "child_died: exit=139"),
+            ("import os\nasync def run(inputs, ctx):\n    os._exit(139)\n", "skill_raised", "child_died: exit=139"),
+            (
+                "import os, signal\nasync def run(inputs, ctx):\n    os.kill(os.getpid(), signal.SIGTERM)\n",
+                "skill_raised",
+                "child_died: signal=15",
+            ),
+            # SIGKILL is what the cgroup's OOM killer sends.
             (
                 "import os, signal\nasync def run(inputs, ctx):\n    os.kill(os.getpid(), signal.SIGKILL)\n",
+                "memory_exceeded",
                 "child_died: signal=9",
             ),
             (
                 "import os, signal\nasync def run(inputs, ctx):\n    os.killpg(0, signal.SIGKILL)\n",
+                "memory_exceeded",
                 "child_died: signal=9",
             ),
         ],
-        ids=["exit", "signal", "own-process-group"],
+        ids=["exit", "signal", "sigkill", "own-process-group"],
     )
-    def test_reports_a_task_process_that_died_without_a_result(self, sup: _Supervisor, body: str, error: str) -> None:
+    def test_reports_a_task_process_that_died_without_a_result(
+        self, sup: _Supervisor, body: str, error_kind: str, error: str
+    ) -> None:
         result = sup.run_task("t-die", body, {})
-        assert result == {"type": "task_result", "id": "t-die", "ok": False, "error": error}
+        assert result == {"type": "task_result", "id": "t-die", "ok": False, "errorKind": error_kind, "error": error}
         assert sup.await_exit("t-die") is not None
         assert sup.run_task("t-after", _ECHO, {})["ok"] is True
 

@@ -37,28 +37,54 @@ export const skillRunTrigger = pgEnum("skill_run_trigger", ["manual", "cron", "e
  * Stripe-pattern recovery point for `skill_runs`. Drives the
  * idempotency-key replay path inside `runner.invoke`:
  *
- *   - `started` — row inserted; execute hasn't completed. A retry that
+ *   - `started` — row inserted; no runtime has sent the task. A retry that
  *     sees this state refuses re-execution: the original may have
- *     crashed mid-execute OR another worker may be currently executing
- *     this same key. Either way, re-executing would risk double-firing
- *     non-idempotent side effects. See `SkillInvokeRejection` in
- *     `runner.ts` for the discrimination rationale.
+ *     crashed OR another worker may be preparing this same key.
+ *   - `dispatched` — a runtime moved the row here immediately before
+ *     sending `task_invoke`, writing `deadline_at`. The body may be
+ *     running or may have acted; a retry refuses it as for `started`.
  *   - `executed` — execute completed and its result is committed
- *     (output/error/rusage/finished_at). Output validation + final
- *     `status` write may not have happened yet. A retry replays only
+ *     (output/error/error_kind/rusage/finished_at). Output validation +
+ *     final `status` write may not have happened yet. A retry replays only
  *     the cheap finalize step against the cached execute payload.
  *   - `finished` — `status` set, audit row terminal. A retry returns the
  *     cached result without touching the runtime.
  *
- * The columns each point sets are pinned by the `chk_skill_runs_*` CHECKs
- * on the table (design/skills.md → Exactly-once invocation, per-state
- * data). Pattern derives from brandur.org/idempotency-keys (atomic phases
- * + recovery points).
+ * `skill-runs-sweeper` finishes a row stuck at `started` or `dispatched`
+ * (design/skills.md → Run failures → Stuck runs). The columns each point
+ * sets are pinned by the `chk_skill_runs_*` CHECKs on the table
+ * (design/skills.md → At-most-once invocation, per-state data). Pattern
+ * derives from brandur.org/idempotency-keys (atomic phases + recovery
+ * points).
  */
 export const skillRunRecoveryPoint = pgEnum("skill_run_recovery_point", [
   "started",
+  "dispatched",
   "executed",
   "finished",
+]);
+
+/**
+ * Why a run failed, set iff `error` is (design/skills.md → Run failures).
+ * Each kind has one class (`skillRunErrorClass`); `unknown` is written only
+ * by the migration, on error rows from before the column.
+ */
+export const skillRunErrorKind = pgEnum("skill_run_error_kind", [
+  "skill_raised",
+  "output_invalid",
+  "load_failed",
+  "wall_clock_exceeded",
+  "memory_exceeded",
+  "skill_failed",
+  "input_invalid",
+  "skill_retryable",
+  "runtime_unavailable",
+  "dependency_unavailable",
+  "egress_unavailable",
+  "credential_unavailable",
+  "host_lost",
+  "result_lost",
+  "unknown",
 ]);
 
 /**
@@ -72,6 +98,13 @@ export const skillDeployStatus = pgEnum("skill_deploy_status", [
   "live",
   "rolled_back",
 ]);
+
+/**
+ * Predicate of `idx_skill_runs_running`, spelled as a literal: the sweeper's
+ * listing repeats it, and a bound parameter could not prove it under a
+ * generic prepared plan.
+ */
+export const RUNNING_RUN = sql`status = 'running'`;
 
 // --- Tables ---
 
@@ -189,7 +222,7 @@ export const skillDeploys = pgTable(
  *
  * The lifecycle is `recovery_point` (the phase) with `status` (the verdict);
  * the `chk_skill_runs_*` CHECKs pin which columns each phase has set
- * (design/skills.md → Exactly-once invocation → Per-state data).
+ * (design/skills.md → At-most-once invocation → Per-state data).
  */
 export const skillRuns = pgTable(
   "skill_runs",
@@ -201,12 +234,17 @@ export const skillRuns = pgTable(
     trigger: skillRunTrigger("trigger").notNull(),
     inputs: jsonbZod("inputs", SkillInvocationInputsSchema).notNull(), // pass-through
     status: skillRunStatus("status").notNull(),
-    output: jsonbZod("output", SkillInvocationOutputSchema), // null on error
+    // Null on error, but for an `output_invalid` one, which keeps what the
+    // skill returned (`chk_skill_runs_outcome`).
+    output: jsonbZod("output", SkillInvocationOutputSchema),
     error: text("error"),
+    /** Set iff `error` is (`chk_skill_runs_error_kind_with_error`). */
+    errorKind: skillRunErrorKind("error_kind"),
     /**
-     * Per-run wall-clock + peak-memory metrics. Null while the run is in
-     * `recovery_point='started'`; written by `transitionToExecuted`. Shape
-     * defined by {@link SkillRunResourceUsageSchema} in `../types.ts`.
+     * Per-run wall-clock + peak-memory metrics. Null before
+     * `recovery_point='executed'`; written with the executed payload, or by
+     * the sweeper. Shape defined by {@link SkillRunResourceUsageSchema} in
+     * `../types.ts`.
      */
     resourceUsage: jsonbZod("resource_usage", SkillRunResourceUsageSchema),
     /**
@@ -219,20 +257,40 @@ export const skillRuns = pgTable(
     idempotencyKey: text("idempotency_key"),
     /**
      * Stripe-pattern phase marker. See `skillRunRecoveryPoint` enum
-     * docstring. Defaults to `started` on insert; transitions to
-     * `executed` after the worker returns; to `finished` after the row
-     * is terminal.
+     * docstring. Defaults to `started` on insert.
      */
     recoveryPoint: skillRunRecoveryPoint("recovery_point").notNull().default("started"),
+    /**
+     * When the sweeper may take a dispatched run as lost: the dispatch time
+     * plus the wall clock and a grace for the kill and the result frame.
+     * Written by the dispatch, so null at `started`; null past it only on a
+     * row never dispatched (`chk_skill_runs_deadline_at`).
+     */
+    deadlineAt: timestamp("deadline_at", { withTimezone: true }),
+    /**
+     * The audit of who ran what: the skill's sha the run executed and its
+     * run-as user and profile, set together (`chk_skill_runs_audit_together`)
+     * on every new row. Null only on rows from before the columns.
+     */
+    gitSha: text("git_sha"),
+    runAsUserId: uuid("run_as_user_id").references(() => users.id),
+    runAsProfileId: uuid("run_as_profile_id").references(() => profiles.id),
+    /** Whether the run is a shadow fire (design/skills.md → Risk tiers without a human). Written by every insert. */
+    shadow: boolean("shadow").notNull(),
     // `architecture-rules.md` mandates `created_at` on every table; for an
     // append-only run log the row's creation time IS the start-of-execution
     // time.
     createdAt: ts(),
-    /** When the worker returned; null while `recovery_point='started'`. */
+    /** When the worker returned, or the sweeper finished the run; null before `executed`. */
     finishedAt: timestamp("finished_at", { withTimezone: true }),
   },
   (t) => [
     index("idx_skill_runs_skill_id").on(t.skillId),
+    // The sweeper's scan: only runs in flight, a handful against an
+    // append-only log.
+    index("idx_skill_runs_running").on(t.createdAt).where(RUNNING_RUN),
+    // `deleteProfile` counts the runs that ran as a profile.
+    index("idx_skill_runs_run_as_profile_id").on(t.runAsProfileId),
     // Plain UNIQUE constraint — Postgres treats NULLs as not-equal under
     // default unique semantics, so multiple null-key rows (CLI / tests)
     // coexist freely while non-null keys are constrained to one row.
@@ -247,13 +305,27 @@ export const skillRuns = pgTable(
     // phase and is absent before it.
     check(
       "chk_skill_runs_executed_payload",
-      sql`(${t.recoveryPoint} = 'started') = (${t.finishedAt} IS NULL) AND (${t.recoveryPoint} = 'started') = (${t.resourceUsage} IS NULL) AND (${t.recoveryPoint} <> 'started' OR (${t.output} IS NULL AND ${t.error} IS NULL))`,
+      sql`(${t.recoveryPoint} IN ('executed', 'finished')) = (${t.finishedAt} IS NOT NULL) AND (${t.recoveryPoint} IN ('executed', 'finished')) = (${t.resourceUsage} IS NOT NULL) AND (${t.recoveryPoint} IN ('executed', 'finished') OR (${t.output} IS NULL AND ${t.error} IS NULL))`,
     ),
-    // `output` and `error` are alternatives; an `error` verdict names its
-    // reason and keeps no output, a `success` verdict has no error.
+    // `output` and `error` are alternatives, but for an `output_invalid`
+    // verdict, which keeps what the skill returned; an `error` verdict names
+    // its reason, a `success` verdict has no error.
     check(
       "chk_skill_runs_outcome",
-      sql`NOT (${t.output} IS NOT NULL AND ${t.error} IS NOT NULL) AND (${t.status} <> 'success' OR ${t.error} IS NULL) AND (${t.status} <> 'error' OR (${t.error} IS NOT NULL AND ${t.output} IS NULL))`,
+      sql`(${t.output} IS NULL OR ${t.error} IS NULL OR (${t.status} = 'error' AND ${t.errorKind} = 'output_invalid')) AND (${t.status} <> 'success' OR ${t.error} IS NULL) AND (${t.status} <> 'error' OR ${t.error} IS NOT NULL)`,
+    ),
+    check(
+      "chk_skill_runs_error_kind_with_error",
+      sql`(${t.errorKind} IS NULL) = (${t.error} IS NULL)`,
+    ),
+    // `deadline_at` arrives with the dispatch and stays.
+    check(
+      "chk_skill_runs_deadline_at",
+      sql`(${t.recoveryPoint} <> 'started' OR ${t.deadlineAt} IS NULL) AND (${t.recoveryPoint} IN ('started', 'executed', 'finished') OR ${t.deadlineAt} IS NOT NULL)`,
+    ),
+    check(
+      "chk_skill_runs_audit_together",
+      sql`(${t.gitSha} IS NULL) = (${t.runAsUserId} IS NULL) AND (${t.gitSha} IS NULL) = (${t.runAsProfileId} IS NULL)`,
     ),
   ],
 );
