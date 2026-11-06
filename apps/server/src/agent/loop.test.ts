@@ -18,8 +18,8 @@ import type {
   Usage,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
-import { expectDefined } from "../test/assertions.js";
-import { doneFrame, expectFinished, mockFilesService, scriptedStream } from "../test/factories.js";
+import { expectDefined, expectFinished } from "../test/assertions.js";
+import { doneFrame, mockFilesService, scriptedStream } from "../test/factories.js";
 import type {
   AgentLoopParams,
   AgentLoopResult,

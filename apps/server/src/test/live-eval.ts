@@ -49,8 +49,8 @@ import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
+import { expectFinished } from "./assertions.js";
 import { type EvalFailure, type EvalMetric, summariseRates } from "./eval-checks.js";
-import { expectFinished } from "./factories.js";
 
 export type { EvalFailure, EvalMetric } from "./eval-checks.js";
 export { isFailure } from "./eval-checks.js";

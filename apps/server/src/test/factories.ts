@@ -831,12 +831,6 @@ export function finishedLoop(overrides?: Partial<AgentLoopResult>): StreamingLoo
   return { kind: "finished", result: loopResult(overrides) };
 }
 
-/** The result of a streaming loop that finished; throws when it was superseded. */
-export function expectFinished(outcome: StreamingLoopOutcome): AgentLoopResult {
-  if (outcome.kind !== "finished") throw new Error(`expected a finished loop, got ${outcome.kind}`);
-  return outcome.result;
-}
-
 /** The `done` frame a scripted provider stream ends with. */
 export function doneFrame(stopReason: StopReason, usage: Usage): ChatStreamFrame {
   return { type: "done", meta: { stopReason, model: "mock-model", usage } };

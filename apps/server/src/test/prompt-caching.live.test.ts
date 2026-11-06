@@ -38,8 +38,7 @@ import {
 } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
-import { expectDefined } from "./assertions.js";
-import { expectFinished } from "./factories.js";
+import { expectDefined, expectFinished } from "./assertions.js";
 import { createWireRecorder, type WireRequestInit, type WireResponse } from "./wire-recorder.js";
 
 // An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.

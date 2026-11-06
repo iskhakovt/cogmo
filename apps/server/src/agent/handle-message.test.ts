@@ -475,6 +475,38 @@ describe("createHandleMessage", () => {
     expect(handle.finish).not.toHaveBeenCalled();
   });
 
+  it("aborts the stream when the degraded apology can't be pushed", async () => {
+    // The failure comes after the loop returned, from the step that streams
+    // the apology, and still closes the stream as aborted.
+    const handle = mockDeliveryHandle({
+      push: vi
+        .fn()
+        .mockResolvedValue(
+          err({ failures: [{ sessionId: "session-tg", reason: "telegram: chat not found" }] }),
+        ),
+    });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        finishedLoop({
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      ),
+    });
+
+    await expect(
+      invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }),
+    ).rejects.toThrow("stream delivery failed: telegram: chat not found");
+
+    expect(handle.abort).toHaveBeenCalledWith("stream delivery failed: telegram: chat not found");
+    expect(handle.finish).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+  });
+
   // Provider-error → Inngest retry policy translation. A 400 (or any 4xx
   // except 408/425/429) is deterministic — same request, same failure.
   // Wrapping in NonRetriableError stops Inngest from burning retries.

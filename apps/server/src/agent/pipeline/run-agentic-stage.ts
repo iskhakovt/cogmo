@@ -530,7 +530,8 @@ export async function runAgenticStage(
       .returnType<AgentLoopResult>()
       .with({ kind: "finished" }, (finished) => finished.result)
       .with({ kind: "superseded" }, () => {
-        throw new Error("runAgenticStage: a stage's loop has no superseded check");
+        // A stage passes no `superseded` check, so this is a bug a retry can't fix.
+        throw asNonRetriable(new Error("runAgenticStage: a stage's loop has no superseded check"));
       })
       .exhaustive();
     // A degrade drops the iteration that triggered it, so its streamed output

@@ -833,6 +833,17 @@ describe("runAgenticStage", () => {
     expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
   });
 
+  it("fails without retries when its loop ends superseded, which a stage never asks for", async () => {
+    const h = await harness();
+    h.runStreamingAgentLoop.mockResolvedValue({ kind: "superseded" });
+
+    const failure = runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+    expect(h.delivery.abort).toHaveBeenCalled();
+    expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
+  });
+
   describe("stream delivery failures", () => {
     const deliveryFailed: StreamDeliveryError = {
       failures: [{ sessionId: "session-tg", reason: "telegram: chat not found" }],
