@@ -16,6 +16,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import { skillRunsBefore0082 } from "../test/skill-runs-before-0082.js";
 import type { Database } from "./index.js";
 import { constraintNameOf, findPgErrorByCode } from "./pg-errors.js";
 
@@ -97,6 +98,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await truncateAll(db);
+  // The table as 0077 found it, before 0082's columns.
+  await skillRunsBefore0082(db);
   for (const [table, constraint] of CHECKS) {
     await db.execute(sql.raw(`ALTER TABLE ${table} DROP CONSTRAINT IF EXISTS ${constraint}`));
   }

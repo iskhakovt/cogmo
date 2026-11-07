@@ -575,6 +575,13 @@
       "when": 1793481049779,
       "tag": "0081_turn_observations",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1793933603707,
+      "tag": "0082_skill_run_schema",
+      "breakpoints": true
     }
   ]
 }

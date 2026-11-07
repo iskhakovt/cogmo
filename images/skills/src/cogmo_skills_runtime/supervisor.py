@@ -66,7 +66,7 @@ from cogmo_skills_runtime.runner import _main as _run_main
 # a supervisor announcing any other version (`SUPERVISOR_PROTOCOL_VERSION`
 # in `src/skills/protocol.ts`), so it also marks what else the host runs
 # in this image.
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 DEFAULT_WALL_CLOCK_S = 60
 SIGKILL_GRACE_S = 2.0
@@ -161,8 +161,9 @@ def _send(obj: Mapping[str, object]) -> None:
     _write_all(_HOST_OUT, (json.dumps(obj) + "\n").encode())
 
 
-def _failure(task_id: str, error: str) -> dict[str, object]:
-    return {"type": "task_result", "id": task_id, "ok": False, "error": error}
+def _failure(task_id: str, error_kind: str, error: str) -> dict[str, object]:
+    """A failed `task_result`; `error_kind` is a run error kind the host accepts."""
+    return {"type": "task_result", "id": task_id, "ok": False, "errorKind": error_kind, "error": error}
 
 
 def _wait_with_timeout(pid: int, timeout_s: float) -> int:
@@ -350,19 +351,28 @@ def _run_one_task_in_child(task: Mapping[str, object]) -> None:
     inputs = task.get("inputs")
     task_id = str(task["id"])
     lockfile_hash = task.get("lockfileHash")
-    try:
-        if isinstance(lockfile_hash, str) and lockfile_hash:
+    if isinstance(lockfile_hash, str) and lockfile_hash:
+        try:
             _activate_skill_venv(lockfile_hash)
+        except Exception as e:
+            _write_task_failure(task_id, "dependency_unavailable", f"skill_venv: {e}")
+            return
+    try:
         asyncio.run(_run_main(body, inputs, task_id))
     except BaseException as e:
         # The runner's own try/except covers normal Python exceptions;
         # this catches BaseException (KeyboardInterrupt, SystemExit) and
         # surfaces a synthetic task_result so the host doesn't hang.
-        try:
-            sys.stdout.write(json.dumps(_failure(task_id, f"supervisor_child_aborted: {type(e).__name__}: {e}")) + "\n")
-            sys.stdout.flush()
-        except Exception:
-            pass
+        _write_task_failure(task_id, "skill_raised", f"supervisor_child_aborted: {type(e).__name__}: {e}")
+
+
+def _write_task_failure(task_id: str, error_kind: str, error: str) -> None:
+    """Write a failed `task_result` to the task's stdout, the private pipe to the relay."""
+    try:
+        sys.stdout.write(json.dumps(_failure(task_id, error_kind, error)) + "\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def _task_process(to_task_r: int, from_task_w: int) -> None:
@@ -424,7 +434,7 @@ class _Relay:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 sys.stderr.write(f"supervisor: wall-clock {wall_clock_s}s exceeded for task {self.task_id}\n")
-                _send(_failure(self.task_id, "wall_clock_exceeded"))
+                _send(_failure(self.task_id, "wall_clock_exceeded", "wall_clock_exceeded"))
                 return _RELAY_DONE
             ready = {key.data for key, _ in sel.select(remaining)}
             # Task output first: a task_result written just before exit
@@ -444,7 +454,9 @@ class _Relay:
         try:
             frames = self.task_out.read()
         except FrameTooLargeError:
-            _send(_failure(self.task_id, "task_frame_too_large"))
+            # The runner refuses an output past the cap itself, so this is a
+            # ctx call's frame, or one skill code wrote.
+            _send(_failure(self.task_id, "skill_raised", "task_frame_too_large"))
             return True
         for frame in frames:
             msg = _parse(frame)
@@ -485,7 +497,9 @@ class _Relay:
             if "taskId" not in msg:
                 # The host predates task binding and will never tag a reply;
                 # waiting would stall every ctx call until the wall clock.
-                _send(_failure(self.task_id, "host_protocol_mismatch: ctx_result without taskId"))
+                _send(
+                    _failure(self.task_id, "runtime_unavailable", "host_protocol_mismatch: ctx_result without taskId")
+                )
                 return _RELAY_DONE
             if msg["taskId"] != self.task_id:
                 continue
@@ -506,7 +520,11 @@ class _Relay:
         _, status = os.waitpid(self.task_pid, 0)
         detail = _exit_detail(status)
         sys.stderr.write(f"supervisor: task {self.task_id} exited without a result: {detail}\n")
-        _send(_failure(self.task_id, f"child_died: {detail}"))
+        # A task process dead of SIGKILL is the cgroup's OOM killer's work,
+        # short of the skill killing itself: nothing here kills a task before
+        # reporting its wall clock.
+        oom = os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+        _send(_failure(self.task_id, "memory_exceeded" if oom else "skill_raised", f"child_died: {detail}"))
         return _RELAY_DONE
 
 

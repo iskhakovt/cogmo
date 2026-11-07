@@ -16,7 +16,7 @@ import type { SkillRunTrigger, SkillStore } from "../store/index.js";
 import { describeWasmPackagesError } from "../worker-wasm/wasm.js";
 import { executeRun } from "./execute-run.js";
 import { finishRun } from "./finish-run.js";
-import type { SkillRunResult } from "./run-result.js";
+import { finishedVerdictOf, reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
 import { planRuntime, type RuntimeConfig, type RuntimePlan, type SkillRuntime } from "./runtime.js";
 import { startRun } from "./start-run.js";
 import type { LazyWarmPool } from "./warm-pool.js";
@@ -101,6 +101,8 @@ export async function invokeSkill(
     skillId: skill.id,
     trigger,
     inputs: opts.inputs,
+    gitSha: skill.gitSha,
+    runAs: { userId: opts.runAs.userId, profileId: opts.runAs.profileId },
     ...(idempotencyKey !== undefined && { idempotencyKey }),
   });
   const logFields = {
@@ -141,7 +143,16 @@ export async function invokeSkill(
         runAs: opts.runAs,
         runtime,
       });
-      return ok(await finishRun(deps, { runId, skillName: name, cached, executed }));
+      // A run the sweeper finished first has the sweeper's error as its result.
+      return match(executed)
+        .returnType<Promise<Result<SkillRunResult, SkillInvokeRejection>>>()
+        .with({ kind: "executed" }, async ({ outcome }) =>
+          ok(await finishRun(deps, { runId, skillName: name, cached, executed: outcome })),
+        )
+        .with({ kind: "swept" }, async ({ row }) =>
+          ok(reconstructFinishedResult(runId, finishedVerdictOf(row))),
+        )
+        .exhaustive();
     })
     .exhaustive();
 }

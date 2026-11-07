@@ -27,6 +27,7 @@ import type {
 } from "../llm/types.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import type { DispatchGate } from "../skills/protocol.js";
 import { type AttachmentStore, mediaTypeToExt } from "../transport/attachment-store.js";
 import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
@@ -642,6 +643,11 @@ export function mockAdapter(overrides?: Partial<Adapter>): Adapter {
     stop: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
+}
+
+/** A dispatch gate that lets every task be sent, recording each time it is asked. */
+export function sendingGate() {
+  return vi.fn<DispatchGate>(async () => ({ kind: "send" }));
 }
 
 /**

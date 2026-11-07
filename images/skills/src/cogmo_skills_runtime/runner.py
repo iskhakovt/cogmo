@@ -222,6 +222,9 @@ class Ctx:
 
 # Host caps an `http.request` body at 5 MiB; the frame carrying it needs
 # room for that plus JSON escaping, which can inflate a body meaningfully.
+# The relay's `MAX_FRAME_BYTES` (supervisor.py) is the same cap on what this
+# process writes, which `_encode_output` checks an output against: keep the
+# two equal.
 _MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 
@@ -277,7 +280,90 @@ def _emit_result(bridge: _Bridge, stdout: TextIO, result: Mapping[str, object]) 
     the skill left running reaches the host after it.
     """
     bridge.close()
-    stdout.write(json.dumps(result) + "\n")
+    stdout.write(json.dumps(result, allow_nan=False) + "\n")
+    stdout.flush()
+
+
+def _emit_failure(
+    bridge: _Bridge,
+    stdout: TextIO,
+    task_id: str,
+    error_kind: str,
+    error: str,
+    extra: Mapping[str, object],
+) -> None:
+    """Emit a failed `task_result`; `error_kind` is a run error kind the host accepts."""
+    _emit_result(
+        bridge,
+        stdout,
+        {
+            "type": "task_result",
+            "id": task_id,
+            "ok": False,
+            "errorKind": error_kind,
+            "error": error,
+            **extra,
+            "rusage": _current_rusage(),
+        },
+    )
+
+
+# What a result frame carries beyond its output: type, id, ok and rusage.
+_RESULT_FRAME_OVERHEAD_BYTES = 64 * 1024
+
+# The largest integer the host's JSON.parse carries exactly.
+_MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def _unsafe(value: object) -> str | None:
+    """Why JSON would not carry `value` to the host intact, or None.
+
+    An integer past 2**53 the host's `JSON.parse` would round; two keys of
+    one dict that JSON writes alike (`1` and `"1"`) it would keep only one of.
+    """
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            if abs(item) > _MAX_SAFE_INTEGER:
+                return f"integer {item} is past 2**53, which JSON rounds; return it as a string"
+        elif isinstance(item, dict):
+            names = {key if isinstance(key, str) else json.dumps(key) for key in item}
+            if len(names) < len(item):
+                return "two keys of one dict are written alike as JSON strings, so one would be lost"
+            pending.extend(item.values())
+        elif isinstance(item, list | tuple):
+            pending.extend(item)
+    return None
+
+
+def _encode_output(output: object) -> str:
+    """The output as JSON, or raise if JSON cannot carry it or the frame could not.
+
+    `allow_nan=False` refuses `NaN` and the infinities, which `json.dumps`
+    would otherwise write as tokens JSON does not have; a `set` or another
+    unknown type raises `TypeError`, a cycle `ValueError`, and what the host
+    would change (`_unsafe`) `ValueError`. The default
+    `ensure_ascii` makes the length the byte count the relay's frame cap
+    counts.
+    """
+    encoded = json.dumps(output, allow_nan=False)
+    unsafe = _unsafe(output)
+    if unsafe is not None:
+        raise ValueError(unsafe)
+    limit = _MAX_FRAME_BYTES - _RESULT_FRAME_OVERHEAD_BYTES
+    if len(encoded) > limit:
+        raise ValueError(f"output is {len(encoded)} bytes as JSON; the cap is {limit}")
+    return encoded
+
+
+def _emit_output(bridge: _Bridge, stdout: TextIO, task_id: str, encoded: str) -> None:
+    """Emit a successful `task_result` carrying the already-encoded output."""
+    bridge.close()
+    head = json.dumps({"type": "task_result", "id": task_id, "ok": True, "rusage": _current_rusage()})
+    stdout.write(f'{head[:-1]}, "output": {encoded}}}\n')
     stdout.flush()
 
 
@@ -313,79 +399,55 @@ async def _main(
     stdin_task = asyncio.create_task(_read_stdin_lines(bridge, inp, err))
 
     # Compile and run the user's skill body, expecting an `async def run(inputs, ctx)`.
+    # Anything the body raises at import time is a load failure, as a
+    # syntax error is.
     skill_module: dict[str, object] = {}
     try:
         exec(compile(skill_body, "<skill>", "exec"), skill_module)
     except SyntaxError as e:
-        _emit_result(
-            bridge,
-            out,
-            {
-                "type": "task_result",
-                "id": task_id,
-                "ok": False,
-                "error": f"SyntaxError: {e.msg} (line {e.lineno})",
-                "rusage": _current_rusage(),
-            },
-        )
+        _emit_failure(bridge, out, task_id, "load_failed", f"SyntaxError: {e.msg} (line {e.lineno})", {})
+        stdin_task.cancel()
+        return
+    except MemoryError as e:
+        _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}", {})
+        stdin_task.cancel()
+        return
+    except Exception as e:
+        _emit_failure(bridge, out, task_id, "load_failed", f"{type(e).__name__}: {e}", {})
         stdin_task.cancel()
         return
 
     run_fn = skill_module.get("run")
     if not callable(run_fn) or not inspect.iscoroutinefunction(run_fn):
-        _emit_result(
-            bridge,
-            out,
-            {
-                "type": "task_result",
-                "id": task_id,
-                "ok": False,
-                "error": "skill must define `async def run(inputs, ctx)`",
-                "rusage": _current_rusage(),
-            },
-        )
+        _emit_failure(bridge, out, task_id, "load_failed", "skill must define `async def run(inputs, ctx)`", {})
         stdin_task.cancel()
         return
 
     ctx = Ctx(bridge)
     try:
         output = await run_fn(inputs, ctx)
-        _emit_result(
-            bridge,
-            out,
-            {
-                "type": "task_result",
-                "id": task_id,
-                "ok": True,
-                "output": output,
-                "rusage": _current_rusage(),
-            },
-        )
     except CtxError as e:
-        _emit_result(
-            bridge,
-            out,
-            {
-                "type": "task_result",
-                "id": task_id,
-                "ok": False,
-                "error": f"{e.kind}: {e.message}",
-                "rusage": _current_rusage(),
-            },
-        )
+        _emit_failure(bridge, out, task_id, "skill_raised", f"{e.kind}: {e.message}", {})
+    except MemoryError as e:
+        _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}", {})
     except Exception as e:
-        _emit_result(
+        _emit_failure(
             bridge,
             out,
-            {
-                "type": "task_result",
-                "id": task_id,
-                "ok": False,
-                "error": f"{type(e).__name__}: {e}",
-                "traceback": traceback.format_exc(),
-                "rusage": _current_rusage(),
-            },
+            task_id,
+            "skill_raised",
+            f"{type(e).__name__}: {e}",
+            {"traceback": traceback.format_exc()},
         )
+    else:
+        try:
+            encoded = _encode_output(output)
+        except MemoryError as e:
+            _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}", {})
+        except Exception as e:
+            _emit_failure(bridge, out, task_id, "output_invalid", f"output is not JSON: {e}", {})
+        else:
+            _emit_output(bridge, out, task_id, encoded)
     finally:
         stdin_task.cancel()
         try:

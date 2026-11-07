@@ -125,15 +125,31 @@ describe("TaskResultSchema (discriminated)", () => {
     ).toMatchObject({ ok: true, output: null });
   });
 
-  it("ok:false requires error string", () => {
+  it("ok:false requires error string and a run error kind", () => {
     expect(
       TaskResultSchema.parse({
         type: "task_result",
         id: "t",
         ok: false,
+        errorKind: "skill_raised",
         error: "boom",
       }),
-    ).toMatchObject({ ok: false, error: "boom" });
+    ).toMatchObject({ ok: false, errorKind: "skill_raised", error: "boom" });
+    expect(() =>
+      TaskResultSchema.parse({ type: "task_result", id: "t", ok: false, error: "boom" }),
+    ).toThrow();
+  });
+
+  it("ok:false rejects a kind no worker reports", () => {
+    expect(() =>
+      TaskResultSchema.parse({
+        type: "task_result",
+        id: "t",
+        ok: false,
+        errorKind: "result_lost",
+        error: "boom",
+      }),
+    ).toThrow();
   });
 
   it("ok:false rejects non-string error", () => {
@@ -179,6 +195,7 @@ describe("TaskResultSchema (discriminated)", () => {
       type: "task_result",
       id: "t",
       ok: false,
+      errorKind: "memory_exceeded",
       error: "boom",
       rusage: { peakMemoryBytes: 1024 },
     });
@@ -192,6 +209,7 @@ describe("TaskResultSchema (discriminated)", () => {
       type: "task_result",
       id: "t",
       ok: false,
+      errorKind: "wall_clock_exceeded",
       error: "wall_clock_exceeded",
     });
     expect(r).toMatchObject({ ok: false });
@@ -336,7 +354,7 @@ describe("WorkerMessageSchema (discriminated union)", () => {
     },
     {
       name: "task_result err",
-      msg: { type: "task_result", id: "t", ok: false, error: "x" },
+      msg: { type: "task_result", id: "t", ok: false, errorKind: "load_failed", error: "x" },
     },
     {
       name: "ctx_call",

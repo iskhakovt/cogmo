@@ -1,11 +1,16 @@
 import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
-import type { ExecutedOutcome, SkillRunRow, SkillRunTrigger, SkillStore } from "../store/index.js";
-import { finishedVerdictOf, reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
+import type { ExecutedOutcome, NewRunParams, SkillRunRow, SkillStore } from "../store/index.js";
+import {
+  finishedVerdictOf,
+  reconstructFinishedResult,
+  runErrorOf,
+  type SkillRunResult,
+} from "./run-result.js";
 
 /**
  * Where an invocation takes up its run row, from the row's
- * `recovery_point` (design/skills.md → Exactly-once invocation).
+ * `recovery_point` (design/skills.md → At-most-once invocation).
  */
 export type RunStart =
   /** A row this attempt inserted at `started`: execute, then finish. */
@@ -14,16 +19,15 @@ export type RunStart =
   | { kind: "finish"; runId: string; executed: ExecutedOutcome }
   /** A recovered row at `finished`: the result it settled on. */
   | { kind: "replay"; result: SkillRunResult }
-  /** A recovered row at `started`: another attempt's, crashed or still running. */
+  /** A recovered row at `started` or `dispatched`: another attempt's, crashed or still running. */
   | { kind: "inflight"; runId: string };
 
 /** The outcome an `executed` or `finished` row holds. */
-export function executedOutcomeOf(row: Pick<SkillRunRow, "output" | "error">): ExecutedOutcome {
-  return match(row)
-    .returnType<ExecutedOutcome>()
-    .with({ error: P.string }, ({ error }) => ({ kind: "error", error }))
-    .with({ error: null }, ({ output }) => ({ kind: "output", output }))
-    .exhaustive();
+export function executedOutcomeOf(
+  row: Pick<SkillRunRow, "id" | "output" | "error" | "errorKind">,
+): ExecutedOutcome {
+  const error = runErrorOf(row);
+  return error === null ? { kind: "output", output: row.output } : { kind: "error", error };
 }
 
 /**
@@ -33,32 +37,21 @@ export function executedOutcomeOf(row: Pick<SkillRunRow, "output" | "error">): E
  */
 export async function startRun(
   deps: { store: SkillStore; runInTx: Transactor },
-  args: { skillId: string; trigger: SkillRunTrigger; inputs: unknown; idempotencyKey?: string },
+  args: NewRunParams & { idempotencyKey?: string },
 ): Promise<RunStart> {
-  const { idempotencyKey } = args;
+  const { idempotencyKey, ...run } = args;
   if (idempotencyKey === undefined) {
-    const run = await deps.runInTx((tx) =>
-      deps.store.insertRun(tx, {
-        skillId: args.skillId,
-        trigger: args.trigger,
-        inputs: args.inputs,
-      }),
-    );
-    return { kind: "execute", runId: run.id, createdAt: run.createdAt };
+    const inserted = await deps.runInTx((tx) => deps.store.insertRun(tx, run));
+    return { kind: "execute", runId: inserted.id, createdAt: inserted.createdAt };
   }
 
   const { kind, row } = await deps.runInTx((tx) =>
-    deps.store.startOrRecoverRun(tx, {
-      skillId: args.skillId,
-      trigger: args.trigger,
-      inputs: args.inputs,
-      idempotencyKey,
-    }),
+    deps.store.startOrRecoverRun(tx, { ...run, idempotencyKey }),
   );
   if (kind === "new") return { kind: "execute", runId: row.id, createdAt: row.createdAt };
   return match(row.recoveryPoint)
     .returnType<RunStart>()
-    .with("started", () => ({ kind: "inflight", runId: row.id }))
+    .with(P.union("started", "dispatched"), () => ({ kind: "inflight", runId: row.id }))
     .with("executed", () => ({
       kind: "finish",
       runId: row.id,

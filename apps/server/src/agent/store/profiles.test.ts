@@ -1,9 +1,9 @@
 import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import { skills } from "../../skills/store/schema.js";
+import { skillRuns, skills } from "../../skills/store/schema.js";
 import { seedProfile, seedUser } from "../../test/agent-store-fixtures.js";
-import { expectOk } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleConversationStore } from "./conversations.js";
 import { DrizzleProfileStore } from "./profiles.js";
@@ -635,6 +635,36 @@ describe("DrizzleProfileStore", () => {
         runAsProfileId: profileId,
         gitSha: "sha",
         inputs: { type: "object" },
+      });
+      expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
+        err({ kind: "profile_in_use" }),
+      );
+      expect(await tx((trx) => store.getProfile(trx, profileId))).toBeDefined();
+    });
+
+    it("deleteProfile refuses when only a skill run ran as it", async () => {
+      const userId = await seedUser(tx);
+      const profileId = await seedProfile(tx);
+      const [skill] = await db
+        .insert(skills)
+        .values({
+          name: "briefing",
+          tier: "wasm",
+          riskTier: "notify",
+          effects: [],
+          gitSha: "sha",
+          inputs: { type: "object" },
+        })
+        .returning({ id: skills.id });
+      await db.insert(skillRuns).values({
+        skillId: expectDefined(skill, "skill").id,
+        trigger: "manual",
+        inputs: {},
+        status: "running",
+        gitSha: "sha",
+        runAsUserId: userId,
+        runAsProfileId: profileId,
+        shadow: false,
       });
       expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
         err({ kind: "profile_in_use" }),
