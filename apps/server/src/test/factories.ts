@@ -119,6 +119,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     }),
     getHistoryAfter: vi.fn().mockResolvedValue([]),
     listTurnMessages: vi.fn().mockResolvedValue([]),
+    listUserRowsAfter: vi.fn().mockResolvedValue([]),
     findAnsweredCursorBefore: vi.fn().mockResolvedValue(undefined),
     getProfile: vi.fn().mockResolvedValue({
       id: "profile-1",
@@ -382,6 +383,8 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     finishAttachmentDecode: vi.fn().mockResolvedValue({ kind: "finished" }),
     findFinishedAttachmentOriginal: vi.fn().mockResolvedValue(null),
     abandonAttachmentDecode: vi.fn().mockResolvedValue({ kind: "abandoned" }),
+    rejectAttachmentOriginals: vi.fn().mockResolvedValue(0),
+    listRejectedAttachmentOriginals: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }

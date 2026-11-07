@@ -812,6 +812,11 @@ type LlmIterationOutcome =
   /** The `superseded` check held: no provider call, nothing emitted. */
   | { kind: "superseded" };
 
+/** The id of the durable step that runs LLM iteration `iteration`, from 1. */
+export function llmIterStepId(iteration: number): string {
+  return `llm-iter${iteration}`;
+}
+
 /**
  * One LLM iteration: drain the stream and, on a stream error, run the
  * Class C classifier and (budget permitting) the non-streaming replay —
@@ -989,7 +994,9 @@ export async function runStreamingAgentLoop(
       (await superseded?.())
         ? { kind: "superseded" }
         : runLlmIteration(provider, chatParams, onEvent, budgets, log);
-    const iterOutcome = stepRun ? await stepRun(`llm-iter${iterations}`, iterate) : await iterate();
+    const iterOutcome = stepRun
+      ? await stepRun(llmIterStepId(iterations), iterate)
+      : await iterate();
 
     if (iterOutcome.kind === "superseded") return { kind: "superseded" };
 

@@ -165,6 +165,7 @@ export class DrizzleAgentStore implements AgentStore {
     this.#transcript.insertOrRecoverSystemPromptSnapshot.bind(this.#transcript);
   readonly insertOrRecoverSummary = this.#transcript.insertOrRecoverSummary.bind(this.#transcript);
   readonly listTurnMessages = this.#transcript.listTurnMessages.bind(this.#transcript);
+  readonly listUserRowsAfter = this.#transcript.listUserRowsAfter.bind(this.#transcript);
   readonly findAnsweredCursorBefore = this.#transcript.findAnsweredCursorBefore.bind(
     this.#transcript,
   );

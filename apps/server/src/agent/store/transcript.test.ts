@@ -876,6 +876,42 @@ describe("DrizzleTranscriptStore", () => {
       expect(await tx((trx) => store.listTurnMessages(trx, conversationId, []))).toEqual([]);
     });
 
+    it("lists the user rows after a reply with their cursors", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const cursor = (n: number) => `019d0000-0000-7000-8000-0000000000b${n}`;
+      const write = (role: "user" | "assistant", n: number, content: string) =>
+        tx((trx) =>
+          store.insertMessage(trx, {
+            conversationId,
+            role,
+            content,
+            lastInboundMessageId: cursor(n),
+            firstInboundMessageId: null,
+            ...stamp,
+          }),
+        );
+      await write("user", 1, "one");
+      const reply = await write("assistant", 1, "reply one");
+      await write("user", 2, "failed earlier");
+      await write("user", 3, "refused");
+      const latest = await write("user", 4, "written since");
+      const unanswered = (afterMessageId: string | null) =>
+        tx((trx) => store.listUserRowsAfter(trx, { conversationId, afterMessageId }));
+
+      expect((await unanswered(reply.id)).map((r) => [r.cursor, r.content])).toEqual([
+        [cursor(2), "failed earlier"],
+        [cursor(3), "refused"],
+        [cursor(4), "written since"],
+      ]);
+      expect((await unanswered(null)).map((r) => r.content)).toEqual([
+        "one",
+        "failed earlier",
+        "refused",
+        "written since",
+      ]);
+      expect(await unanswered(latest.id)).toEqual([]);
+    });
+
     it("finds the turn answered last before a turn's first row, past an unanswered one", async () => {
       const { conversationId, stamp } = await seedConversation(tx);
       const { first1, first2 } = await threeTurns(conversationId, stamp);

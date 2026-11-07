@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { fakeRunInTx, MOCK_MESSAGE_CREATED_AT, mockAgentStore } from "../../test/factories.js";
+import {
+  fakeRunInTx,
+  MOCK_MESSAGE_CREATED_AT,
+  mockAgentStore,
+  mockTransportStore,
+} from "../../test/factories.js";
 import type { CompactionSummary } from "../store/index.js";
 import { loadTurnHistory, summarizedSpan, TurnRowMissingError } from "./load-turn-history.js";
 
@@ -28,7 +33,7 @@ describe("loadTurnHistory", () => {
     });
 
     const result = await loadTurnHistory(
-      { runInTx: fakeRunInTx, agentStore },
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
       { conversationId: "conv-1", turnInboundId: null },
     );
 
@@ -51,7 +56,7 @@ describe("loadTurnHistory", () => {
     });
 
     const result = await loadTurnHistory(
-      { runInTx: fakeRunInTx, agentStore },
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
       { conversationId: "conv-1", turnInboundId: null },
     );
 
@@ -74,7 +79,7 @@ describe("loadTurnHistory", () => {
     });
 
     const result = await loadTurnHistory(
-      { runInTx: fakeRunInTx, agentStore },
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
       { conversationId: "conv-1", turnInboundId: null },
     );
 
@@ -90,7 +95,7 @@ describe("loadTurnHistory", () => {
     });
 
     const result = await loadTurnHistory(
-      { runInTx: fakeRunInTx, agentStore },
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
       { conversationId: "conv-1", turnInboundId: null },
     );
 
@@ -119,7 +124,7 @@ describe("loadTurnHistory", () => {
     });
 
     const result = await loadTurnHistory(
-      { runInTx: fakeRunInTx, agentStore },
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
       { conversationId: "conv-1", turnInboundId: null },
     );
 
@@ -145,7 +150,7 @@ describe("loadTurnHistory", () => {
     const agentStore = mockAgentStore();
 
     const result = await loadTurnHistory(
-      { runInTx: fakeRunInTx, agentStore },
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
       { conversationId: "conv-1", turnInboundId: "inbound-9" },
     );
 
@@ -165,7 +170,7 @@ describe("loadTurnHistory", () => {
 
     await expect(
       loadTurnHistory(
-        { runInTx: fakeRunInTx, agentStore },
+        { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
         { conversationId: "conv-1", turnInboundId: "inbound-9" },
       ),
     ).rejects.toThrow(TurnRowMissingError);
@@ -175,12 +180,87 @@ describe("loadTurnHistory", () => {
     const agentStore = mockAgentStore();
 
     const result = await loadTurnHistory(
-      { runInTx: fakeRunInTx, agentStore },
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
       { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.turn).toBeNull();
     expect(agentStore.findUserMessageByInbound).not.toHaveBeenCalled();
+  });
+
+  it("loads a ref whose original a provider rejected as the rejection placeholder", async () => {
+    const label = {
+      type: "text" as const,
+      text: "Image 1: normalized/a.jpg",
+      harness: "image_label" as const,
+    };
+    const image = {
+      type: "image_ref" as const,
+      path: "normalized/a.jpg",
+      mediaType: "image/jpeg" as const,
+      width: 10,
+      height: 10,
+      bytes: 100,
+      original: { path: "inbound/a.heic", mediaType: "image/heic" },
+    };
+    const pdf = {
+      type: "document_ref" as const,
+      path: "inbound/report.pdf",
+      mediaType: "application/pdf",
+      name: "report.pdf",
+      bytes: 2_000,
+    };
+    const notes = {
+      type: "document_ref" as const,
+      path: "normalized/notes.txt",
+      mediaType: "text/plain",
+      name: "notes.txt",
+      bytes: 50,
+      original: { path: "inbound/notes.txt", mediaType: "text/plain" },
+    };
+    const agentStore = mockAgentStore({
+      listMessages: vi.fn().mockResolvedValue([
+        { id: "m1", role: "user", content: [label, image] },
+        { id: "m2", role: "assistant", content: "seen" },
+        { id: "m3", role: "user", content: [{ type: "text", text: "read these" }, pdf, notes] },
+      ]),
+    });
+    const transportStore = mockTransportStore({
+      listRejectedAttachmentOriginals: vi
+        .fn()
+        .mockResolvedValue(["inbound/report.pdf", "inbound/notes.txt"]),
+    });
+
+    const result = await loadTurnHistory(
+      { runInTx: fakeRunInTx, agentStore, transportStore },
+      { conversationId: "conv-1", turnInboundId: null },
+    );
+
+    expect(transportStore.listRejectedAttachmentOriginals).toHaveBeenCalledWith(expect.anything(), [
+      "inbound/a.heic",
+      "inbound/report.pdf",
+      "inbound/notes.txt",
+    ]);
+    expect(result.messages).toEqual([
+      { role: "user", content: [label, image] },
+      { role: "assistant", content: "seen" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "read these" },
+          {
+            type: "text",
+            text: "[Document: report.pdf. The model provider refused this file; ask for it another way.]",
+            harness: "attachment_placeholder",
+          },
+          {
+            type: "text",
+            text: "[Document: notes.txt. The model provider refused this file; ask for it another way.]",
+            harness: "attachment_placeholder",
+          },
+        ],
+      },
+    ]);
   });
 });
 
