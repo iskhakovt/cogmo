@@ -20,9 +20,9 @@ import {
   doneFrame,
   FAKE_TX,
   fakeRunInTx,
+  finishedLoop,
   invokeInngestFn,
   invokeInngestOnFailure,
-  loopResult,
   MOCK_MESSAGE_CREATED_AT,
   type MockStep,
   mockAgentStore,
@@ -104,7 +104,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "debounce" as const },
     deliveryRouter: mockDeliveryRouter(),
     runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-      loopResult({
+      finishedLoop({
         text: "Hello from assistant",
         newMessages: [
           { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
@@ -423,7 +423,7 @@ describe("createHandleMessage", () => {
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         await params.onEvent({ type: "text_delta", text: "hi" });
-        return loopResult({
+        return finishedLoop({
           text: "hi",
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }],
         });
@@ -473,6 +473,38 @@ describe("createHandleMessage", () => {
 
     expect(handle.abort).toHaveBeenCalledWith("LLM failed");
     expect(handle.finish).not.toHaveBeenCalled();
+  });
+
+  it("aborts the stream when the degraded apology can't be pushed", async () => {
+    // The failure comes after the loop returned, from the step that streams
+    // the apology, and still closes the stream as aborted.
+    const handle = mockDeliveryHandle({
+      push: vi
+        .fn()
+        .mockResolvedValue(
+          err({ failures: [{ sessionId: "session-tg", reason: "telegram: chat not found" }] }),
+        ),
+    });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        finishedLoop({
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      ),
+    });
+
+    await expect(
+      invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }),
+    ).rejects.toThrow("stream delivery failed: telegram: chat not found");
+
+    expect(handle.abort).toHaveBeenCalledWith("stream delivery failed: telegram: chat not found");
+    expect(handle.finish).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
   });
 
   // Provider-error → Inngest retry policy translation. A 400 (or any 4xx
@@ -891,7 +923,7 @@ describe("createHandleMessage", () => {
         download: vi.fn().mockResolvedValue(docBytes),
       }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "here you go",
           newMessages: [
             {
@@ -956,7 +988,7 @@ describe("createHandleMessage", () => {
         download,
       }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "here",
           newMessages: [
             {
@@ -1027,7 +1059,7 @@ describe("createHandleMessage", () => {
         download,
       }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "pictures",
           newMessages: [
             {
@@ -1456,7 +1488,7 @@ describe("createHandleMessage", () => {
     // own tests (anthropic.test.ts → usage totals).
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "Hello from assistant",
           newMessages: [
             { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
@@ -3773,7 +3805,7 @@ describe("createHandleMessage", () => {
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 2,
           degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
         }),
@@ -3853,7 +3885,7 @@ describe("createHandleMessage", () => {
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         await params.onEvent({ type: "text_delta", text: "The three key points are: (1) the dep" });
-        return loopResult({
+        return finishedLoop({
           streamed: { text: "The three key points are: (1) the dep", toolUseIds: [] },
           degraded: {
             reason: "request exceeded the model's context window",
@@ -3940,7 +3972,7 @@ describe("createHandleMessage", () => {
           name: "get_weather",
           input: { city: "Tokyo" },
         });
-        return loopResult({
+        return finishedLoop({
           newMessages: persisted,
           iterations: 2,
           streamed: {
@@ -4007,7 +4039,7 @@ describe("createHandleMessage", () => {
         await params.onEvent({ type: "text_delta", text: "Still working on it." });
         await params.onEvent({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
         await params.onEvent({ type: "tool_result", name: "get_weather", output: "18C" });
-        return loopResult({
+        return finishedLoop({
           newMessages: [
             {
               role: "assistant",
@@ -4060,7 +4092,7 @@ describe("createHandleMessage", () => {
       resolveProvider: mockResolver(failingSynthesis),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 2,
           degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
         }),
@@ -4097,7 +4129,7 @@ describe("createHandleMessage", () => {
       resolveProvider: mockResolver(failingSynthesis),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           degraded: { reason: "model refused the request", subtype: "refusal" },
         }),
       ),
@@ -4122,7 +4154,7 @@ describe("createHandleMessage", () => {
   it("emits conversation/degraded with subtype, reason, runId, conversationId, triggerInboundId", async () => {
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 2,
           degraded: {
             reason: "streamed tool-call arguments could not be parsed",
@@ -4161,7 +4193,7 @@ describe("createHandleMessage", () => {
   it("emits conversation/degraded with subtype: stuck_loop for the Class D consecutive trip", async () => {
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 3,
           degraded: { reason: "stuck_loop", subtype: "stuck_loop" },
         }),
@@ -4193,7 +4225,7 @@ describe("createHandleMessage", () => {
   it("emits conversation/degraded with subtype: stuck_loop_cumulative for the Class D cumulative trip", async () => {
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 9,
           degraded: { reason: "stuck_loop", subtype: "stuck_loop_cumulative" },
         }),
@@ -4253,7 +4285,7 @@ describe("createHandleMessage", () => {
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           // The successful tool round IS persisted; the apology is appended.
           // The failing iteration's assistant content is already excluded
           // upstream by the loop.
@@ -4294,7 +4326,7 @@ describe("createHandleMessage", () => {
   it("still emits response/ready on the degraded path so downstream consumers run", async () => {
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           degraded: { reason: "model refused the request", subtype: "refusal" },
         }),
       ),
@@ -4326,7 +4358,7 @@ describe("createHandleMessage", () => {
       const deps = mockDeps({
         runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
           captured = params.stepRun;
-          return loopResult({
+          return finishedLoop({
             text: "ok",
             newMessages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
           });

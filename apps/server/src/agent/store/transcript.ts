@@ -193,6 +193,15 @@ export interface TranscriptStore {
   ): Promise<{ id: string; sameContent: boolean } | undefined>;
 
   /**
+   * Whether an assistant row newer than `afterMessageId` (any row when `null`)
+   * carries `cursor`: a committed `persist-new-messages` answered that batch.
+   */
+  isCursorAnswered(
+    tx: Transaction,
+    params: { conversationId: string; cursor: string; afterMessageId: string | null },
+  ): Promise<boolean>;
+
+  /**
    * Whether a non-pipeline turn row newer than `afterMessageId` (any row when
    * `null`) re-batched the inbound `cursor`: its batch range
    * `[first_inbound_message_id, last_inbound_message_id]` holds `cursor`
@@ -474,17 +483,22 @@ export class DrizzleTranscriptStore implements TranscriptStore {
         sameContent: eq(messages.content, params.content).mapWith(Boolean),
       })
       .from(messages)
-      .where(
-        and(
-          eq(messages.conversationId, params.conversationId),
-          afterMessageId(params.afterMessageId),
-          eq(messages.lastInboundMessageId, params.inboundId),
-          eq(messages.role, "assistant"),
-        ),
-      )
+      .where(replyOnCursor(params.conversationId, params.inboundId, params.afterMessageId))
       .orderBy(desc(messages.id))
       .limit(1);
     return rows[0];
+  }
+
+  async isCursorAnswered(
+    tx: Transaction,
+    params: { conversationId: string; cursor: string; afterMessageId: string | null },
+  ): Promise<boolean> {
+    const rows = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(replyOnCursor(params.conversationId, params.cursor, params.afterMessageId))
+      .limit(1);
+    return rows.length > 0;
   }
 
   async isCursorRebatched(
@@ -727,4 +741,22 @@ export class DrizzleTranscriptStore implements TranscriptStore {
 /** Rows newer than `id`, or every row when `null`: a range scan on `idx_messages_conv_id`. */
 function afterMessageId(id: string | null): SQL | undefined {
   return id === null ? undefined : gt(messages.id, id);
+}
+
+/**
+ * The assistant rows newer than `after` that carry `cursor`: the rows a
+ * committed `persist-new-messages` wrote for that batch. The pre-stream check
+ * and the persist check read the same rows through it.
+ */
+function replyOnCursor(
+  conversationId: string,
+  cursor: string,
+  after: string | null,
+): SQL | undefined {
+  return and(
+    eq(messages.conversationId, conversationId),
+    afterMessageId(after),
+    eq(messages.lastInboundMessageId, cursor),
+    eq(messages.role, "assistant"),
+  );
 }

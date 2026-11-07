@@ -32,7 +32,7 @@ import type { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import { createAttachmentReader } from "../attachments/attachment-reader.js";
 import { toolResultClearing } from "../context.js";
-import type { AgentLoopResult, StepRunner } from "../loop.js";
+import type { AgentLoopResult, StepRunner, StreamingLoopOutcome } from "../loop.js";
 import { defineTool, ToolRegistry } from "../tools.js";
 import {
   type AgenticStageArgs,
@@ -81,6 +81,11 @@ function planResult(overrides?: Partial<AgentLoopResult>): AgentLoopResult {
     streamed: { text: "Here is the plan.", toolUseIds: [] },
     ...overrides,
   });
+}
+
+/** A stage loop that finished with {@link planResult}'s result. */
+function planLoop(overrides?: Partial<AgentLoopResult>): StreamingLoopOutcome {
+  return { kind: "finished", result: planResult(overrides) };
 }
 
 function toolNamed(name: string) {
@@ -160,7 +165,7 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
   for (const name of ["web_search", "read_file", "start_pipeline"]) tools.register(toolNamed(name));
   const runStreamingAgentLoop = vi
     .fn<AgenticStageDeps["runStreamingAgentLoop"]>()
-    .mockResolvedValue(planResult());
+    .mockResolvedValue(planLoop());
   const provider = providerReplying();
 
   const deps: AgenticStageDeps = {
@@ -512,7 +517,7 @@ describe("runAgenticStage", () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockImplementation(async ({ service }) => {
       await service.coreMemory.update("preferences", "Dice");
-      return planResult();
+      return planLoop();
     });
     const { memo, steps } = memoizingSteps();
     memo.set("freeze-core-memory-scope", {
@@ -692,7 +697,7 @@ describe("runAgenticStage", () => {
   it("fails the stage when the loop degrades, after persisting what it produced", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      planResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
+      planLoop({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
     );
 
     const outcome = await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
@@ -711,7 +716,7 @@ describe("runAgenticStage", () => {
     // an empty insert: writing it would fail the step instead of the stage.
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      planResult({
+      planLoop({
         text: "",
         newMessages: [],
         streamed: { text: "", toolUseIds: [] },
@@ -736,7 +741,7 @@ describe("runAgenticStage", () => {
   it("retracts a degraded turn's dropped output before closing the stream", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      planResult({
+      planLoop({
         text: "",
         newMessages: [],
         streamed: { text: "Writing it now.", toolUseIds: ["t1"] },
@@ -764,7 +769,7 @@ describe("runAgenticStage", () => {
   it("pushes no retraction when a degraded turn persists everything it streamed", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      planResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
+      planLoop({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
     );
     const steps = recordingSteps();
 
@@ -781,7 +786,7 @@ describe("runAgenticStage", () => {
     // the next stage a result that looks finished.
     const h = await harness();
     const partial = "Here is the pl\n\n[Reply cut off: it reached the model's output limit.]";
-    h.runStreamingAgentLoop.mockResolvedValue(planResult({ text: partial, truncated: true }));
+    h.runStreamingAgentLoop.mockResolvedValue(planLoop({ text: partial, truncated: true }));
     const steps = recordingSteps();
 
     const outcome = await runAgenticStage(h.deps, stageArgs(), steps.steps, log);
@@ -827,6 +832,17 @@ describe("runAgenticStage", () => {
       boom,
     );
     expect(h.delivery.abort).toHaveBeenCalledWith("stream reset");
+    expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
+  });
+
+  it("fails without retries when its loop ends superseded, which a stage never asks for", async () => {
+    const h = await harness();
+    h.runStreamingAgentLoop.mockResolvedValue({ kind: "superseded" });
+
+    const failure = runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+    expect(h.delivery.abort).toHaveBeenCalled();
     expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
   });
 
