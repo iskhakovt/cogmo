@@ -22,6 +22,9 @@ dev = [
     "pytest>=9.0.0",
     "pytest-asyncio>=1.3.0",
 ]
+mutation = [
+    "mutmut>=3.8.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -51,6 +54,9 @@ select = ["F", "E", "W", "I", "B", "UP", "RUF"]
 [tool.pyrefly]
 project-includes = ["src", "tests"]
 search-path = ["src"]
+
+[tool.mutmut]
+source_paths = ["src/"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

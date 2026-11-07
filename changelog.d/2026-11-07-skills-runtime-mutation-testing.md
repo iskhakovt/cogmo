@@ -1,0 +1,1 @@
+`pnpm test:mutation:skills` runs mutmut over the skills runtime with every mutant in a container, and re-runs each mutant mutmut didn't kill against the whole suite, which includes the black-box tests that start the supervisor as a subprocess. It writes the survivors' diffs to `images/skills/mutation-report.txt`.

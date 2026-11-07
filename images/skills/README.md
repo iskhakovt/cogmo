@@ -33,6 +33,8 @@ uv run pyrefly check
 uv run pytest
 ```
 
+Mutation testing runs only in Docker, from the repo root: `pnpm test:mutation:skills` (`design/testing.md` → Mutation Testing).
+
 ## Production
 
 Built into `ghcr.io/iskhakovt/cogmo-skills:<version>` by
