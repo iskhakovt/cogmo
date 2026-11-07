@@ -113,12 +113,12 @@ interface SessionSpec {
   dockerSocket: boolean;
   /**
    * Required, so every caller states it. `"none"`: Local-Docker creates the
-   * container with `NetworkMode: none`, so its only interface is loopback,
-   * and Daytona with `networkBlockAll`. `"bridge"` is the backend's default
-   * network, and on Daytona the organisation's network policy. A
-   * Local-Docker session still mounts the proxy socket, through which it can
-   * create a child on the default bridge, until `dockerSocket: false`
-   * (Which sessions get a socket). `[proposed]` (skills S7) The create refuses an
+   * container with `NetworkMode: none`, so its only interface is loopback;
+   * it still mounts the proxy socket, through which it can create a child on
+   * the default bridge, until `dockerSocket: false` (Which sessions get a
+   * socket). Daytona refuses `"none"`: a Tier 1 or 2 organisation's network
+   * policy overrides a sandbox's `networkBlockAll`. `"bridge"` is the
+   * backend's default network. `[proposed]` (skills S7) The create refuses an
    * `egressSocket` with `"bridge"`, and the skills session schema (a Zod
    * refinement) requires an `egressSocket` on every `"none"` session whose
    * `purpose` is not `reap` (skills.md → Egress proxy → One path).

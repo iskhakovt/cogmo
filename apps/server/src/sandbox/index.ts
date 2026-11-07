@@ -125,10 +125,9 @@ export interface SessionSpec {
   /**
    * The session's network. Required, so every caller states it. `"none"`:
    * Local-Docker creates the container with `NetworkMode: none`, so its only
-   * interface is loopback, and Daytona with `networkBlockAll`. `"bridge"` is
-   * the backend's default network. A Local-Docker session still mounts the
-   * Docker API proxy socket, through which it can create a child container
-   * on the default bridge.
+   * interface is loopback; it still mounts the Docker API proxy socket,
+   * through which it can create a child container on the default bridge.
+   * Daytona refuses `"none"`. `"bridge"` is the backend's default network.
    */
   network: "bridge" | "none";
 }

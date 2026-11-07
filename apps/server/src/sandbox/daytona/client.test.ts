@@ -248,23 +248,12 @@ describe("DaytonaSandboxClient", () => {
       expect("volumes" in call).toBe(false);
     });
 
-    it("blocks all network for a none session, on the snapshot path and the image fallback", async () => {
-      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
-      daytonaCalls.snapshotCreate.mockResolvedValue(
-        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
-      );
-      daytonaCalls.create
-        .mockRejectedValueOnce(new DaytonaNotFoundError("snapshot not found"))
-        .mockResolvedValueOnce(fakeSandbox({ id: "sb-none", state: SandboxState.STARTED }));
+    it("refuses a none session before any SDK call: a Tier 1 or 2 organisation overrides networkBlockAll", async () => {
       const client = await makeClient();
-      await client.ensureImagePresent(PYTHON_IMAGE);
-
-      await client.create({ ...BASE_SPEC, image: PYTHON_IMAGE, network: "none" });
-
-      expect(daytonaCalls.create.mock.calls.map(([params]) => params)).toEqual([
-        expect.objectContaining({ snapshot: PYTHON_SNAPSHOT, networkBlockAll: true }),
-        expect.objectContaining({ image: PYTHON_IMAGE, networkBlockAll: true }),
-      ]);
+      await expect(client.create({ ...BASE_SPEC, network: "none" })).rejects.toThrow(
+        /SessionSpec.network "none" is unsupported/,
+      );
+      expect(daytonaCalls.create).not.toHaveBeenCalled();
     });
 
     it("leaves the network to the organisation's policy for a bridge session, on both paths", async () => {

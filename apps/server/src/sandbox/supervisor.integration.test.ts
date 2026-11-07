@@ -7,6 +7,7 @@ import Docker from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Transactor } from "../db/index.js";
 import { createTestDatabase } from "../test/pglite.js";
+import { sessionNetwork } from "../test/session-network.js";
 import { LocalDockerSandboxClient } from "./index.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED, LABEL_ROOT_TASK } from "./supervisor.js";
@@ -216,7 +217,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
 
   it("creates a none session with no interface but loopback, and a bridge one with a route out", async () => {
     const { sandbox } = await bootSandbox();
-    const interfaces = async (network: "none" | "bridge", taskId: string) => {
+    const networkOf = async (network: "none" | "bridge", taskId: string) => {
       const handle = await sandbox.create({
         taskId,
         image: TEST_IMAGE,
@@ -227,16 +228,19 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       try {
         const inspected = await docker.getContainer(handle.state.dockerId).inspect();
         expect(inspected.HostConfig.NetworkMode).toBe(network);
-        const listing = await handle.exec(["ls", "/sys/class/net"]);
-        expect(listing.exitCode).toBe(0);
-        return listing.stdout.split(/\s+/).filter((name) => name.length > 0);
+        return await sessionNetwork(handle);
       } finally {
         await sandbox.deleteByTaskId(taskId);
       }
     };
 
-    expect(await interfaces("none", "019d0000-0000-7000-8000-0000000000e1")).toEqual(["lo"]);
-    expect(await interfaces("bridge", "019d0000-0000-7000-8000-0000000000e2")).toContain("eth0");
+    expect(await networkOf("none", "019d0000-0000-7000-8000-0000000000e1")).toEqual({
+      interfaces: ["lo"],
+      defaultRoute: false,
+    });
+    expect(await networkOf("bridge", "019d0000-0000-7000-8000-0000000000e2")).toMatchObject({
+      defaultRoute: true,
+    });
   });
 
   it("create applies labels, runtime, binds, and resource caps", async () => {

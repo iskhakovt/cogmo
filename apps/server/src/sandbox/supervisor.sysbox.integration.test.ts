@@ -7,6 +7,7 @@ import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Transactor } from "../db/index.js";
 import { createTestDatabase } from "../test/pglite.js";
+import { sessionNetwork } from "../test/session-network.js";
 import { LocalDockerSandboxClient } from "./index.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
@@ -148,9 +149,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
     try {
       const inspected = await docker.getContainer(handle.state.dockerId).inspect();
       expect(inspected.HostConfig.NetworkMode).toBe("none");
-      const listing = await handle.exec(["ls", "/sys/class/net"]);
-      expect(listing).toMatchObject({ exitCode: 0 });
-      expect(listing.stdout.split(/\s+/).filter((name) => name.length > 0)).toEqual(["lo"]);
+      expect(await sessionNetwork(handle)).toEqual({ interfaces: ["lo"], defaultRoute: false });
     } finally {
       await sandbox.deleteByTaskId(taskId);
     }
