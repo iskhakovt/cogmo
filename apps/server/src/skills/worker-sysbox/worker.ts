@@ -270,6 +270,10 @@ export class SysboxSkillWorker {
       image: opts.image,
       resourceLimits,
       expiresAt: opts.expiresAt,
+      // The worker's populate reaches the package index, and container-tier
+      // skill code reaches its hosts directly until it runs behind the egress
+      // proxy (design/skills.md → Egress proxy).
+      network: "bridge",
       ...(opts.depsCacheVolumeName !== undefined && {
         depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
       }),

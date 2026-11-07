@@ -112,6 +112,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
 
     const inspected = await docker.getContainer(handle.state.dockerId).inspect();
@@ -119,6 +120,40 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
     expect(inspected.Config.Labels?.[LABEL_INSTANCE]).toBe(inst.id);
 
     await sandbox.deleteByTaskId(taskId);
+  });
+
+  it("creates a none session with no interface but loopback", async () => {
+    const inst = await tx((trx) =>
+      store.insertInstance(trx, { host: "test-host", pid: process.pid }),
+    );
+    testFileInstanceIds.push(inst.id);
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "sysbox",
+      instanceId: inst.id,
+    });
+    sandboxes.push(sandbox);
+    const taskId = "019d0000-0000-7000-8000-0000000000ab";
+
+    const handle = await sandbox.create({
+      taskId,
+      image: TEST_IMAGE,
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+      network: "none",
+    });
+
+    try {
+      const inspected = await docker.getContainer(handle.state.dockerId).inspect();
+      expect(inspected.HostConfig.NetworkMode).toBe("none");
+      const listing = await handle.exec(["ls", "/sys/class/net"]);
+      expect(listing).toMatchObject({ exitCode: 0 });
+      expect(listing.stdout.split(/\s+/).filter((name) => name.length > 0)).toEqual(["lo"]);
+    } finally {
+      await sandbox.deleteByTaskId(taskId);
+    }
   });
 
   it("delivers userns isolation — container root maps to a non-root host uid", async () => {
@@ -151,6 +186,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
 
     // Inside the container: `id -u` returns 0 (we run as root).

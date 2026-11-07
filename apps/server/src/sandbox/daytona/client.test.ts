@@ -192,6 +192,7 @@ const BASE_SPEC: SessionSpec = {
   image: "python:3.14-slim",
   resourceLimits: { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 },
   expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1h from now
+  network: "bridge",
 };
 
 async function makeClient(): Promise<DaytonaSandboxClient> {
@@ -245,6 +246,44 @@ describe("DaytonaSandboxClient", () => {
       await client.create(BASE_SPEC);
       const call = daytonaCalls.create.mock.calls[0]?.[0] as { volumes?: unknown };
       expect("volumes" in call).toBe(false);
+    });
+
+    it("blocks all network for a none session, on the snapshot path and the image fallback", async () => {
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      daytonaCalls.create
+        .mockRejectedValueOnce(new DaytonaNotFoundError("snapshot not found"))
+        .mockResolvedValueOnce(fakeSandbox({ id: "sb-none", state: SandboxState.STARTED }));
+      const client = await makeClient();
+      await client.ensureImagePresent(PYTHON_IMAGE);
+
+      await client.create({ ...BASE_SPEC, image: PYTHON_IMAGE, network: "none" });
+
+      expect(daytonaCalls.create.mock.calls.map(([params]) => params)).toEqual([
+        expect.objectContaining({ snapshot: PYTHON_SNAPSHOT, networkBlockAll: true }),
+        expect.objectContaining({ image: PYTHON_IMAGE, networkBlockAll: true }),
+      ]);
+    });
+
+    it("leaves the network to the organisation's policy for a bridge session, on both paths", async () => {
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      daytonaCalls.create
+        .mockRejectedValueOnce(new DaytonaNotFoundError("snapshot not found"))
+        .mockResolvedValueOnce(fakeSandbox({ id: "sb-bridge", state: SandboxState.STARTED }));
+      const client = await makeClient();
+      await client.ensureImagePresent(PYTHON_IMAGE);
+
+      await client.create({ ...BASE_SPEC, image: PYTHON_IMAGE });
+
+      expect(daytonaCalls.create).toHaveBeenCalledTimes(2);
+      for (const [params] of daytonaCalls.create.mock.calls) {
+        expect(params).not.toHaveProperty("networkBlockAll");
+      }
     });
 
     it("rounds memory_bytes up to GiB (Daytona's unit) and cpus up to integer", async () => {

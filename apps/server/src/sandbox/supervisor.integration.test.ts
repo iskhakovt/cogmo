@@ -143,6 +143,7 @@ for (const { sh, image, taskDigit } of SHELLS) {
         image,
         resourceLimits: RESOURCE_LIMITS,
         expiresAt: new Date(Date.now() + 60_000),
+        network: "bridge",
       });
       try {
         await body(session);
@@ -213,6 +214,31 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
     expect(result.runtime).toBe("runc");
   });
 
+  it("creates a none session with no interface but loopback, and a bridge one with a route out", async () => {
+    const { sandbox } = await bootSandbox();
+    const interfaces = async (network: "none" | "bridge", taskId: string) => {
+      const handle = await sandbox.create({
+        taskId,
+        image: TEST_IMAGE,
+        resourceLimits: RESOURCE_LIMITS,
+        expiresAt: new Date(Date.now() + 60_000),
+        network,
+      });
+      try {
+        const inspected = await docker.getContainer(handle.state.dockerId).inspect();
+        expect(inspected.HostConfig.NetworkMode).toBe(network);
+        const listing = await handle.exec(["ls", "/sys/class/net"]);
+        expect(listing.exitCode).toBe(0);
+        return listing.stdout.split(/\s+/).filter((name) => name.length > 0);
+      } finally {
+        await sandbox.deleteByTaskId(taskId);
+      }
+    };
+
+    expect(await interfaces("none", "019d0000-0000-7000-8000-0000000000e1")).toEqual(["lo"]);
+    expect(await interfaces("bridge", "019d0000-0000-7000-8000-0000000000e2")).toContain("eth0");
+  });
+
   it("create applies labels, runtime, binds, and resource caps", async () => {
     const { sandbox, instanceId } = await bootSandbox();
     const homeVolume = uniqueName("cogmo-task-home");
@@ -226,6 +252,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     expect(handle.state.dockerId).toBeTruthy();
     expect(handle.state.containerRowId).toBeTruthy();
@@ -263,6 +290,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
 
     // The bind mount is visible from inside.
@@ -288,6 +316,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
 
     const exec = await handle.execStreaming(["sh", "-c", "echo to-out; echo to-err >&2; exit 7"]);
@@ -313,6 +342,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     await sandbox.deleteByTaskId(taskId);
 
@@ -334,6 +364,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     await sandbox.deleteByTaskId(taskId);
     await expect(sandbox.deleteByTaskId(taskId)).resolves.toBeUndefined();
@@ -354,6 +385,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
 
     const { sandbox: current, instanceId: currentId } = await bootSandbox();
@@ -378,6 +410,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     // inspectContainer was removed from the public interface; verify
     // the underlying state by querying the Docker daemon directly.

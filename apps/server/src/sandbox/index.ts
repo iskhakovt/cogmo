@@ -122,6 +122,15 @@ export interface SessionSpec {
    * container's process env only; nothing is written to the home volume.
    */
   env?: Readonly<Record<string, string>>;
+  /**
+   * The session's network. Required, so every caller states it. `"none"`:
+   * Local-Docker creates the container with `NetworkMode: none`, so its only
+   * interface is loopback, and Daytona with `networkBlockAll`. `"bridge"` is
+   * the backend's default network. A Local-Docker session still mounts the
+   * Docker API proxy socket, through which it can create a child container
+   * on the default bridge.
+   */
+  network: "bridge" | "none";
 }
 
 /**

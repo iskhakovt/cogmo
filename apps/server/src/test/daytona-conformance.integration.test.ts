@@ -215,6 +215,7 @@ function wrapperSpec(): {
   image: string;
   resourceLimits: typeof WRAPPER_RESOURCE_LIMITS;
   expiresAt: Date;
+  network: "bridge";
 } {
   return {
     taskId: WRAPPER_TASK_ID,
@@ -224,6 +225,7 @@ function wrapperSpec(): {
     // / 60_000)`, so a fixed 5-min wall-clock delta gives the same
     // baked value (5) on every run regardless of record vs replay.
     expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    network: "bridge",
   };
 }
 

@@ -10,6 +10,7 @@ import {
   SandboxState,
   SnapshotState,
 } from "@daytona/sdk";
+import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { withRetry } from "../../util/with-retry.js";
 import {
@@ -592,6 +593,11 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       "cogmo.instance": this.#instanceId,
     };
     const envVars = spec.env && Object.keys(spec.env).length > 0 ? { ...spec.env } : undefined;
+    // `bridge` passes nothing, so the organisation's own network policy stands.
+    const networkBlockAll = match(spec.network)
+      .with("none", () => true)
+      .with("bridge", () => false)
+      .exhaustive();
     const createFromImage = (): Promise<DaytonaSdkSandbox> =>
       this.#daytona.create({
         image: spec.image,
@@ -599,6 +605,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         autoStopInterval,
         resources: resourcesFromLimits(spec.resourceLimits),
         ...(envVars && { envVars }),
+        ...(networkBlockAll && { networkBlockAll }),
       });
     let sdkSandbox: DaytonaSdkSandbox;
     if (warmedSnapshot) {
@@ -608,6 +615,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
           labels,
           autoStopInterval,
           ...(envVars && { envVars }),
+          ...(networkBlockAll && { networkBlockAll }),
         });
       } catch (err) {
         // The cache holds the snapshot name from the last successful

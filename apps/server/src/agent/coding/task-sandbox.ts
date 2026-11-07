@@ -177,6 +177,8 @@ export function taskSessionSpec(args: {
     expiresAt: new Date(Date.now() + args.taskTtlMs),
     allowPrivilegedRunc: args.task.allowPrivilegedRunc,
     env: args.env,
+    // The coding CLI reaches its provider, the git remote and package indexes.
+    network: "bridge",
   };
 }
 
