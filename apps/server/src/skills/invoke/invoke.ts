@@ -136,7 +136,8 @@ export async function invokeSkill(
         throw new Error(`invoke: run ${runId} was inserted under a key that already had a row`);
       }
       const executed = await executeRun(deps, {
-        run: { id: runId, createdAt },
+        // The invocation's logical key, which `ctx.run()` hands the skill.
+        run: { id: runId, key: idempotencyKey ?? runId, createdAt },
         skill,
         cached,
         inputs: opts.inputs,

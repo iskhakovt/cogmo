@@ -12,8 +12,11 @@ from typing import Any
 
 import pytest
 
+from cogmo_ctx import CtxError
 from cogmo_skills_runtime import runner
-from cogmo_skills_runtime.runner import CtxError, _Bridge, _main
+from cogmo_skills_runtime.runner import _Bridge, _main
+
+RUN = {"id": "run-1", "key": "key-1"}
 
 
 async def _drive(
@@ -27,7 +30,7 @@ async def _drive(
     stdin = io.BytesIO(stdin_text.encode("utf-8"))
     stdout = io.StringIO()
     stderr = io.StringIO()
-    await _main(body, inputs, task_id, stdin=stdin, stdout=stdout, stderr=stderr)
+    await _main(body, inputs, task_id, RUN, stdin=stdin, stdout=stdout, stderr=stderr)
     out = stdout.getvalue().strip().splitlines()
     # Last line is the task_result; earlier lines are ctx_calls (none in
     # these tests since we don't await ctx).
@@ -144,7 +147,7 @@ class TestErrors:
     async def test_uncaught_ctx_error_is_skill_raised(self) -> None:
         result = await _drive(
             body=(
-                "from cogmo_skills_runtime.runner import CtxError\n"
+                "from cogmo_ctx import CtxError\n"
                 "async def run(inputs, ctx):\n    raise CtxError('missing_effect', 'needs reads_memory')\n"
             ),
             inputs={},
@@ -153,6 +156,46 @@ class TestErrors:
         assert result["ok"] is False
         assert result["errorKind"] == "skill_raised"
         assert result["error"] == "missing_effect: needs reads_memory"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("retryable", "kind"), [(False, "skill_failed"), (True, "skill_retryable")])
+    async def test_skill_error_is_its_expected_kind(self, retryable: bool, kind: str) -> None:
+        result = await _drive(
+            body=(
+                "from cogmo_ctx import SkillError\n"
+                "async def run(inputs, ctx):\n"
+                f"    raise SkillError('not_found', 'no such feed', retryable={retryable})\n"
+            ),
+            inputs={},
+            task_id="t-skill-error",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == kind
+        assert result["error"] == "not_found: no such feed"
+
+    @pytest.mark.asyncio
+    async def test_a_skill_error_subclass_is_reported_as_a_skill_error(self) -> None:
+        result = await _drive(
+            body=(
+                "from cogmo_ctx import SkillError\n"
+                "class FeedGone(SkillError):\n"
+                "    pass\n"
+                "async def run(inputs, ctx):\n"
+                "    raise FeedGone('gone', 'feed removed')\n"
+            ),
+            inputs={},
+            task_id="t-skill-error-sub",
+        )
+        assert result["errorKind"] == "skill_failed"
+
+    @pytest.mark.asyncio
+    async def test_ctx_run_returns_the_task_run(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return ctx.run()\n",
+            inputs={},
+            task_id="t-run",
+        )
+        assert result["output"] == RUN
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -334,7 +377,7 @@ class TestAfterResult:
         )
         seen: list[str] = []
         stdout = io.StringIO()
-        await _main(body, {"seen": seen}, "t-after", stdin=io.BytesIO(b""), stdout=stdout, stderr=io.StringIO())
+        await _main(body, {"seen": seen}, "t-after", RUN, stdin=io.BytesIO(b""), stdout=stdout, stderr=io.StringIO())
         await asyncio.sleep(0.05)
 
         frames = [json.loads(line) for line in stdout.getvalue().splitlines()]

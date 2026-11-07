@@ -18,8 +18,10 @@ import resource
 import sys
 import traceback
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, BinaryIO, TextIO
+
+from cogmo_ctx import Ctx, CtxError, RunInfo, SkillError
 
 
 def _current_rusage() -> dict[str, int]:
@@ -36,17 +38,8 @@ def _current_rusage() -> dict[str, int]:
     return {"peakMemoryBytes": int(ru.ru_maxrss) * 1024}
 
 
-class CtxError(Exception):
-    """Typed ctx error surfaced to user code. Mirrors the wasm tier's ctx.py."""
-
-    def __init__(self, kind: str, message: str) -> None:
-        super().__init__(f"{kind}: {message}")
-        self.kind = kind
-        self.message = message
-
-
 class _Bridge:
-    """RPC plumbing between user code (`await ctx.foo()`) and the host.
+    """The container tier's `cogmo_ctx.Bridge`, over the task's private pipes.
 
     One bridge per task. Sends `ctx_call` to stdout, blocks the calling
     coroutine on a Future keyed by the call's correlation id, resolves
@@ -67,7 +60,7 @@ class _Bridge:
         """End of task: every later `ctx` call raises `CtxError("task_finished")`."""
         self._closed = True
 
-    async def call(self, method: str, args: object) -> Any:
+    async def call(self, method: str, args: Mapping[str, object]) -> Any:
         if self._closed:
             raise CtxError("task_finished", f"ctx.{method} called after the task returned")
         call_id = "ctx-" + uuid.uuid4().hex[:12]
@@ -106,118 +99,6 @@ class _Bridge:
         async with self._stdout_lock:
             self._stdout.write(line)
             self._stdout.flush()
-
-
-class _Secrets:
-    def __init__(self, bridge: _Bridge) -> None:
-        self._b = bridge
-
-    async def get(self, name: str) -> Any:
-        return await self._b.call("secrets.get", {"name": name})
-
-
-class _Memory:
-    def __init__(self, bridge: _Bridge) -> None:
-        self._b = bridge
-
-    async def recall(self, query: str, limit: int | None = None) -> Any:
-        args: dict[str, object] = {"query": query}
-        if limit is not None:
-            args["limit"] = limit
-        return await self._b.call("memory.recall", args)
-
-    async def remember(self, content: str, tags: Sequence[str] | None = None) -> Any:
-        args: dict[str, object] = {"content": content}
-        if tags is not None:
-            args["tags"] = list(tags)
-        return await self._b.call("memory.remember", args)
-
-
-class _Files:
-    def __init__(self, bridge: _Bridge) -> None:
-        self._b = bridge
-
-    async def read(self, path: str) -> Any:
-        return await self._b.call("files.read", {"path": path})
-
-    async def write(self, path: str, content: str) -> Any:
-        return await self._b.call("files.write", {"path": path, "content": content})
-
-    async def list(self, prefix: str | None = None) -> Any:
-        args: dict[str, object] = {}
-        if prefix is not None:
-            args["prefix"] = prefix
-        result = await self._b.call("files.list", args)
-        return result["entries"]
-
-
-class _Http:
-    """Outbound HTTP, performed by the host.
-
-    Present in both tiers so a skill does not break when adding a
-    dependency moves it here from the wasm tier. The container tier has
-    real sockets and can use `httpx` instead; going through the host keeps
-    the request in `skill_context_calls` and under the host's destination
-    checks.
-    """
-
-    def __init__(self, bridge: _Bridge) -> None:
-        self._b = bridge
-
-    async def request(
-        self,
-        method: str,
-        url: str,
-        headers: dict[str, str] | None = None,
-        body: str | None = None,
-        timeout_ms: int | None = None,
-    ) -> Any:
-        args: dict[str, object] = {"method": method.upper(), "url": url}
-        if headers is not None:
-            args["headers"] = dict(headers)
-        if body is not None:
-            args["body"] = body
-        if timeout_ms is not None:
-            args["timeoutMs"] = timeout_ms
-        return await self._b.call("http.request", args)
-
-    async def get(self, url: str, headers: dict[str, str] | None = None, timeout_ms: int | None = None) -> Any:
-        return await self.request("GET", url, headers=headers, timeout_ms=timeout_ms)
-
-    async def post(
-        self,
-        url: str,
-        body: str | None = None,
-        headers: dict[str, str] | None = None,
-        timeout_ms: int | None = None,
-    ) -> Any:
-        return await self.request("POST", url, headers=headers, body=body, timeout_ms=timeout_ms)
-
-
-class _Log:
-    def __init__(self, bridge: _Bridge) -> None:
-        self._b = bridge
-
-    async def info(self, message: str, **fields: object) -> Any:
-        return await self._b.call("log.info", {"message": message, "fields": fields})
-
-
-class Ctx:
-    """Host context object passed to `async def run(inputs, ctx)`."""
-
-    def __init__(self, bridge: _Bridge) -> None:
-        self._b = bridge
-        self.secrets = _Secrets(bridge)
-        self.memory = _Memory(bridge)
-        self.files = _Files(bridge)
-        self.http = _Http(bridge)
-        self.log = _Log(bridge)
-
-    async def now(self) -> Any:
-        return await self._b.call("now", {})
-
-    async def user(self) -> Any:
-        return await self._b.call("user", {})
 
 
 # Host caps an `http.request` body at 5 MiB; the frame carrying it needs
@@ -371,6 +252,7 @@ async def _main(
     skill_body: str,
     inputs: Any,
     task_id: str,
+    run: RunInfo,
     *,
     stdin: BinaryIO | None = None,
     stdout: TextIO | None = None,
@@ -423,9 +305,12 @@ async def _main(
         stdin_task.cancel()
         return
 
-    ctx = Ctx(bridge)
+    ctx = Ctx(bridge, run)
     try:
         output = await run_fn(inputs, ctx)
+    except SkillError as e:
+        kind = "skill_retryable" if e.retryable else "skill_failed"
+        _emit_failure(bridge, out, task_id, kind, f"{e.kind}: {e.message}", {})
     except CtxError as e:
         _emit_failure(bridge, out, task_id, "skill_raised", f"{e.kind}: {e.message}", {})
     except MemoryError as e:

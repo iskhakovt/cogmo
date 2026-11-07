@@ -105,6 +105,7 @@ function task(
     memoryMb: 128,
     dispatch: sendingGate(),
     wallClockS: 30,
+    run: { id: params.taskId, key: `key-${params.taskId}` },
     ...params,
   };
 }
@@ -194,6 +195,88 @@ async def run(inputs, ctx):
       message: "secret 'x' is not declared",
       str: "not_in_allowlist: secret 'x' is not declared",
     });
+  });
+
+  it("raises the cogmo_ctx CtxError, the class the skill's global names too", async () => {
+    const handler: CtxHandler = {
+      handle: vi.fn(async () => err({ kind: "not_in_allowlist", message: "no" })),
+    };
+    const result = await runOnWorker(
+      task({
+        taskId: "task-imported",
+        skillName: "imported",
+        body: `
+import cogmo_ctx
+async def run(inputs, ctx):
+    try:
+        await ctx.secrets.get("x")
+    except cogmo_ctx.CtxError as e:
+        return {"kind": e.kind, "global": CtxError is cogmo_ctx.CtxError}
+`,
+        inputs: {},
+        ctxHandler: handler,
+      }),
+    );
+    assert(result.ok);
+    expect(result.output).toEqual({ kind: "not_in_allowlist", global: true });
+  });
+
+  it.each([
+    ["False", "skill_failed"],
+    ["True", "skill_retryable"],
+  ])("reports a SkillError with retryable=%s as %s", async (retryable, errorKind) => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-skill-error",
+        skillName: "skill-error",
+        body: `
+from cogmo_ctx import SkillError
+async def run(inputs, ctx):
+    raise SkillError("not_found", "no such feed", retryable=${retryable})
+`,
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    expect(result).toMatchObject({ ok: false, errorKind, error: "not_found: no such feed" });
+  });
+
+  it("reports a skill that forges another kind through the SkillError report as skill_raised", async () => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-forged",
+        skillName: "forged",
+        body: `
+async def _cogmo_call_run(run, inputs, ctx):
+    return ("runtime_unavailable", "no skill code ran"), None
+
+async def run(inputs, ctx):
+    return {}
+`,
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      errorKind: "skill_raised",
+      error: "the skill replaced the SkillError report",
+    });
+  });
+
+  it("hands the task's run to ctx.run()", async () => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-run",
+        run: { id: "run-9", key: "skill-tool:call-9" },
+        skillName: "run",
+        body: "async def run(inputs, ctx):\n    return ctx.run()\n",
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    assert(result.ok);
+    expect(result.output).toEqual({ id: "run-9", key: "skill-tool:call-9" });
   });
 
   it("fails the task naming the CtxError a skill leaves uncaught", async () => {

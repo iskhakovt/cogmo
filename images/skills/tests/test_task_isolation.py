@@ -29,6 +29,8 @@ pytestmark = pytest.mark.skipif(
     reason="os.pidfd_open unavailable on this build of CPython",
 )
 
+RUN = {"id": "run-1", "key": "key-1"}
+
 
 class _Supervisor:
     """A supervisor subprocess plus a reader thread queueing its stdout frames.
@@ -99,6 +101,7 @@ class _Supervisor:
         self.send(
             {
                 "type": "task_invoke",
+                "run": RUN,
                 "id": task_id,
                 "skill": task_id,
                 "inputs": inputs,
@@ -315,7 +318,7 @@ def _descendant_pids(root: int) -> list[int]:
 
 class TestSupervisorProtocol:
     def test_announces_its_protocol_version_first(self, sup: _Supervisor) -> None:
-        assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 4}
+        assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 5}
 
     def test_confirms_each_task_exited_and_serves_the_next(self, sup: _Supervisor) -> None:
         first = sup.run_task("t-1", _ECHO, {"n": 1})
@@ -351,6 +354,7 @@ class TestSupervisorProtocol:
         sup.send(
             {
                 "type": "task_invoke",
+                "run": RUN,
                 "id": "t-ctx",
                 "skill": "ctx",
                 "inputs": {},
@@ -420,6 +424,7 @@ class TestSupervisorProtocol:
         sup.send(
             {
                 "type": "task_invoke",
+                "run": RUN,
                 "id": "t-big",
                 "skill": "big",
                 "inputs": {},

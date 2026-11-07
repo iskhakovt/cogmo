@@ -34,11 +34,17 @@ describe("createNdjsonTransport", () => {
     const captured: string[] = [];
     stdin.on("data", (chunk) => captured.push(chunk.toString("utf-8")));
 
-    t.send({ type: "task_invoke", id: "x", skill: "s", inputs: {} });
+    t.send({
+      type: "task_invoke",
+      id: "x",
+      run: { id: "run-1", key: "key-1" },
+      skill: "s",
+      inputs: {},
+    });
     t.send({ type: "ctx_result", taskId: "x", id: "y", ok: true, value: 42 });
 
     expect(captured.join("")).toBe(
-      `{"type":"task_invoke","id":"x","skill":"s","inputs":{}}\n{"type":"ctx_result","taskId":"x","id":"y","ok":true,"value":42}\n`,
+      `{"type":"task_invoke","id":"x","run":{"id":"run-1","key":"key-1"},"skill":"s","inputs":{}}\n{"type":"ctx_result","taskId":"x","id":"y","ok":true,"value":42}\n`,
     );
   });
 
@@ -101,7 +107,13 @@ describe("createNdjsonTransport", () => {
     stdin.on("data", (chunk) => captured.push(chunk.toString("utf-8")));
 
     t.close();
-    t.send({ type: "task_invoke", id: "x", skill: "s", inputs: {} });
+    t.send({
+      type: "task_invoke",
+      id: "x",
+      run: { id: "run-1", key: "key-1" },
+      skill: "s",
+      inputs: {},
+    });
 
     expect(captured).toEqual([]);
     expect(stdin.writableEnded).toBe(true);

@@ -16,7 +16,7 @@ import type { SkillRunErrorKind } from "./store/index.js";
  * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
  * change, and when the host comes to run something new in the image.
  */
-export const SUPERVISOR_PROTOCOL_VERSION = 4;
+export const SUPERVISOR_PROTOCOL_VERSION = 5;
 
 /** Container tier only: the supervisor's first frame, announcing its protocol version. */
 const SupervisorReadySchema = z.object({
@@ -30,9 +30,17 @@ const WorkerReadySchema = z.object({ type: z.literal("ready") });
 /** Wasm tier only: the Pyodide worker's first frame when it failed to load. */
 const WorkerFatalSchema = z.object({ type: z.literal("fatal"), error: z.string() });
 
+/**
+ * The run a task belongs to, which `ctx.run()` returns: its id, and the
+ * invocation's logical key (the caller's idempotency key, else the run id).
+ */
+const TaskRunSchema = z.object({ id: z.string().min(1), key: z.string().min(1) });
+export type TaskRun = z.infer<typeof TaskRunSchema>;
+
 export const TaskInvokeSchema = z.object({
   type: z.literal("task_invoke"),
   id: z.string().min(1),
+  run: TaskRunSchema,
   /** Skill name — informational; surfaced in worker logs. */
   skill: z.string().min(1),
   inputs: z.unknown(),
@@ -120,12 +128,15 @@ const TaskResultOkSchema = z.object({
 /**
  * The run error kinds a worker reports in a failed `task_result`
  * (design/skills.md → Run failures → who decides each kind): the runner's
- * `load_failed`, `skill_raised`, `memory_exceeded` and `output_invalid`, and
- * the relay's and the task process's own.
+ * `load_failed`, `skill_raised`, `memory_exceeded` and `output_invalid`, a
+ * `SkillError`'s `skill_failed` and `skill_retryable`, and the relay's and
+ * the task process's own.
  */
 const WORKER_ERROR_KINDS = [
   "load_failed",
   "skill_raised",
+  "skill_failed",
+  "skill_retryable",
   "memory_exceeded",
   "output_invalid",
   "wall_clock_exceeded",

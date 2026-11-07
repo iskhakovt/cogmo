@@ -93,8 +93,10 @@ describe("tsup build", () => {
     const computed = sources.flatMap(computedImports);
     expect(computed.filter((arg) => !PYODIDE_IMPORT.test(arg))).toEqual([]);
     expect(computed.filter((arg) => PYODIDE_IMPORT.test(arg))).toHaveLength(1);
-    // `py/ctx.py` and `py/install_deps.py`, inlined by the `.py` text loader.
-    expect(sources[1]).toContain("def _build_ctx(bridge):");
+    // `cogmo_ctx` from the skills image's source, `py/task.py` and
+    // `py/install_deps.py`, inlined by the `.py` text loader.
+    expect(sources[1]).toContain("class SkillError(Exception):");
+    expect(sources[1]).toContain("async def _cogmo_call_run(run, inputs, ctx):");
     expect(sources[1]).toContain("async def _install_wheels(mount, files):");
   });
 });

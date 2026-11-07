@@ -26,7 +26,13 @@ const NEXT: TaskRef = { id: "t3" };
 const SAME_ID: TaskRef = { id: "t1" };
 
 const RESULT: TaskResult = { type: "task_result", id: "t1", ok: true, output: 1 };
-const INVOKE: TaskInvoke = { type: "task_invoke", id: "t3", skill: "s", inputs: {} };
+const INVOKE: TaskInvoke = {
+  type: "task_invoke",
+  id: "t3",
+  run: { id: "run-1", key: "key-1" },
+  skill: "s",
+  inputs: {},
+};
 const REPLY: CtxResult = { type: "ctx_result", taskId: "t1", id: "c1", ok: true, value: 1 };
 
 const acceptReady: Handshake = (first) =>

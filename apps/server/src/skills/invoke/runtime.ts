@@ -2,7 +2,7 @@ import type { Result } from "neverthrow";
 import type { SandboxClient } from "../../sandbox/index.js";
 import type { DefaultCtxHandler } from "../ctx-handler.js";
 import type { LockfileSnapshot } from "../deps.js";
-import type { DispatchGate } from "../protocol.js";
+import type { DispatchGate, TaskRun } from "../protocol.js";
 import type { SkillSourceCacheEntry } from "../source-cache.js";
 import type { SkillRow, SkillTier } from "../store/index.js";
 import type { SkillManifest } from "../types.js";
@@ -108,6 +108,7 @@ export interface RuntimeTask {
   inputs: unknown;
   ctxHandler: DefaultCtxHandler;
   taskId: string;
+  run: TaskRun;
   /** Asked immediately before `task_invoke` is sent. */
   dispatch: DispatchGate;
   /** The wall clock the runtime enforces, the one `deadline_at` counts from. */
@@ -124,6 +125,7 @@ export async function dispatchToRuntime(
   const { wallClockS } = run;
   const task = {
     taskId: run.taskId,
+    run: run.run,
     skillName: skill.name,
     body: cached.body,
     inputs: run.inputs,

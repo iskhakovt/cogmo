@@ -7,11 +7,14 @@ import {
   WorkerMessageSchema,
 } from "./protocol.js";
 
+const RUN = { id: "run-1", key: "skill-tool:call-1" };
+
 describe("TaskInvokeSchema", () => {
   it("accepts a canonical task_invoke", () => {
     expect(
       TaskInvokeSchema.parse({
         type: "task_invoke",
+        run: RUN,
         id: "task-1",
         skill: "echo",
         inputs: { x: 1 },
@@ -22,6 +25,7 @@ describe("TaskInvokeSchema", () => {
   it("accepts arbitrary unknown inputs", () => {
     const r = TaskInvokeSchema.parse({
       type: "task_invoke",
+      run: RUN,
       id: "t",
       skill: "s",
       inputs: null,
@@ -48,6 +52,7 @@ describe("TaskInvokeSchema", () => {
     expect(() =>
       TaskInvokeSchema.parse({
         type: "task_invoke",
+        run: RUN,
         id: "",
         skill: "s",
         inputs: {},
@@ -59,10 +64,21 @@ describe("TaskInvokeSchema", () => {
     expect(() =>
       TaskInvokeSchema.parse({
         type: "task_invoke",
+        run: RUN,
         id: 42,
         skill: "s",
         inputs: {},
       }),
+    ).toThrow();
+  });
+
+  it.each([
+    ["no run", {}],
+    ["a run with no key", { run: { id: "run-1" } }],
+    ["a run with an empty key", { run: { id: "run-1", key: "" } }],
+  ])("rejects a task_invoke with %s", (_label, run) => {
+    expect(() =>
+      TaskInvokeSchema.parse({ type: "task_invoke", id: "t", skill: "s", inputs: {}, ...run }),
     ).toThrow();
   });
 
@@ -73,6 +89,7 @@ describe("TaskInvokeSchema", () => {
   it("accepts an absent lockfileHash (skill has no declared dependencies)", () => {
     const r = TaskInvokeSchema.parse({
       type: "task_invoke",
+      run: RUN,
       id: "t",
       skill: "s",
       inputs: {},
@@ -84,6 +101,7 @@ describe("TaskInvokeSchema", () => {
     const sha256 = "a".repeat(64);
     const r = TaskInvokeSchema.parse({
       type: "task_invoke",
+      run: RUN,
       id: "t",
       skill: "s",
       inputs: {},
@@ -97,6 +115,7 @@ describe("TaskInvokeSchema", () => {
       expect(() =>
         TaskInvokeSchema.parse({
           type: "task_invoke",
+          run: RUN,
           id: "t",
           skill: "s",
           inputs: {},

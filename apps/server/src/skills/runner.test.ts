@@ -884,6 +884,32 @@ inputs:
       expect(run?.idempotencyKey).toBe("skill-cron:echo:t1");
     });
 
+    it("hands ctx.run() the invocation's key, or the run id when it has none", async () => {
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: "async def run(inputs, ctx):\n    return ctx.run()\n",
+      });
+
+      const keyed = (
+        await runner.invoke({
+          name: "echo",
+          inputs: { x: 1 },
+          idempotencyKey: "skill-cron:echo:t-key",
+          runAs: runAs(),
+        })
+      )._unsafeUnwrap();
+      const unkeyed = (
+        await runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() })
+      )._unsafeUnwrap();
+
+      assertStatus(keyed, "success");
+      expect(keyed.output).toEqual({ id: keyed.runId, key: "skill-cron:echo:t-key" });
+      assertStatus(unkeyed, "success");
+      expect(unkeyed.output).toEqual({ id: unkeyed.runId, key: unkeyed.runId });
+    });
+
     it("second call with same key returns the cached terminal result WITHOUT re-executing the skill", async () => {
       // Sentinel: each Pyodide invocation increments x → echoes x+1. If
       // the skill ran twice for the same key, the second result would be

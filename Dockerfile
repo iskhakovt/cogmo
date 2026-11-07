@@ -31,6 +31,8 @@ COPY apps/server/vendor/ apps/server/vendor/
 COPY apps/server/data/ apps/server/data/
 # Types-only package the backend re-imports; tsc needs its source present.
 COPY packages/contracts/ packages/contracts/
+# The skills' ctx package, which the wasm child bundle embeds.
+COPY images/skills/src/cogmo_ctx/ images/skills/src/cogmo_ctx/
 # Build-time guard: the resolver's LiteLLM snapshot loader expects this
 # file at the deploy root. Failing here is louder than silently falling
 # back to the conservative default (128k/4k) for every model in prod.
