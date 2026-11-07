@@ -22,6 +22,7 @@
  */
 
 import type { Logger } from "pino";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { isRetriableProviderError } from "../../llm/fallback.js";
@@ -61,7 +62,12 @@ import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
 import { offeredBuiltIns } from "../core-memory-tools.js";
 import { freezeLimits, limitsPolicy } from "../handle-message/resolve-turn-model.js";
 import type { ImageToolsLoader } from "../image-tools-loader.js";
-import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
+import type {
+  AgentLoopResult,
+  StepRunner,
+  StreamingAgentLoopParams,
+  StreamingLoopOutcome,
+} from "../loop.js";
 import type { PromptSource } from "../prompt.js";
 import { computeRetraction } from "../retraction.js";
 import { createSchedulingService } from "../scheduling/scheduling-service.js";
@@ -102,7 +108,7 @@ export interface AgenticStageDeps {
   /** Renders stored attachment refs, through the process's memo. */
   attachmentReader: AttachmentReader;
   deliveryRouter: DeliveryRouter;
-  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
+  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<StreamingLoopOutcome>;
   codingServiceFactory?: (conversationId: string) => CodingService;
   skillRunner?: SkillRunner;
   mcpRegistry?: McpRegistry;
@@ -505,7 +511,7 @@ export async function runAgenticStage(
   // Sessions whose stream failed at finish; the reply goes to them again once persisted.
   let unstreamed: ReadonlyArray<string> = [];
   try {
-    result = await deps.runStreamingAgentLoop({
+    const looped = await deps.runStreamingAgentLoop({
       provider,
       model: ctx.model,
       systemPrompt,
@@ -520,6 +526,14 @@ export async function runAgenticStage(
       clearToolResults,
       turnLogger: log,
     });
+    result = match(looped)
+      .returnType<AgentLoopResult>()
+      .with({ kind: "finished" }, (finished) => finished.result)
+      .with({ kind: "superseded" }, () => {
+        // A stage passes no `superseded` check, so this is a bug a retry can't fix.
+        throw asNonRetriable(new Error("runAgenticStage: a stage's loop has no superseded check"));
+      })
+      .exhaustive();
     // A degrade drops the iteration that triggered it, so its streamed output
     // comes back off the sessions before the stream closes. The push gets a
     // step so a later boundary's re-invocation doesn't repeat it; the

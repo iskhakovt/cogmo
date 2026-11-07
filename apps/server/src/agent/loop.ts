@@ -751,6 +751,28 @@ export interface StreamingAgentLoopParams extends AgentLoopParams {
    * across turns. The transcript the loop holds and returns is never cleared.
    */
   clearToolResults?: ToolResultClearing;
+  /**
+   * Asked at the start of every iteration, inside its `llm-iter<N>` step and
+   * before the provider call: whether another reply owns the turn's input.
+   * When it answers true the iteration emits nothing and the loop ends
+   * `superseded`. The step stores the verdict, so a replay reaches the same
+   * one without asking again.
+   */
+  superseded?: () => Promise<boolean>;
+}
+
+/**
+ * How the streaming loop ended. `finished`: it ran to a result, a reply or a
+ * degrade. `superseded`: the caller's `superseded` check held at the start of
+ * an iteration, so the turn has no reply; only a loop given the check ends
+ * this way.
+ */
+export type StreamingLoopOutcome =
+  | { kind: "finished"; result: AgentLoopResult }
+  | { kind: "superseded" };
+
+function finished(result: AgentLoopResult): StreamingLoopOutcome {
+  return { kind: "finished", result };
 }
 
 /** What one live execution forwarded to `onEvent`, in order. */
@@ -786,7 +808,9 @@ type LlmIterationOutcome =
       repaired: "stream_truncation" | null;
       emitted: EmittedLedger;
     }
-  | { kind: "degrade"; reason: string; subtype: DegradeSubtype; emitted: EmittedLedger };
+  | { kind: "degrade"; reason: string; subtype: DegradeSubtype; emitted: EmittedLedger }
+  /** The `superseded` check held: no provider call, nothing emitted. */
+  | { kind: "superseded" };
 
 /**
  * One LLM iteration: drain the stream and, on a stream error, run the
@@ -876,7 +900,8 @@ async function runLlmIteration(
  *
  * Each LLM turn streams text_delta events. Tool calls are accumulated
  * from the stream, executed, and emitted as tool_result events.
- * Loops until end_turn/max_tokens or iteration limit.
+ * Loops until end_turn/max_tokens or iteration limit, and ends `finished`;
+ * a caller's `superseded` check can end it `superseded` instead.
  *
  * With `stepRun` provided, each iteration is a durable `llm-iter<N>`
  * boundary (see `runLlmIteration`): the drain and the stream-error Class C
@@ -894,7 +919,7 @@ async function runLlmIteration(
  */
 export async function runStreamingAgentLoop(
   params: StreamingAgentLoopParams,
-): Promise<AgentLoopResult> {
+): Promise<StreamingLoopOutcome> {
   const {
     provider,
     model,
@@ -907,6 +932,7 @@ export async function runStreamingAgentLoop(
     maxTokens,
     cache,
     clearToolResults,
+    superseded,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
@@ -957,24 +983,31 @@ export async function runStreamingAgentLoop(
     // body and fail the step (Inngest's per-step retries own those). The
     // step id derives from the SDK-local iteration counter, which replays
     // deterministically because every input to the control flow below comes
-    // from cached outcomes.
-    const iterate = (): Promise<LlmIterationOutcome> =>
-      runLlmIteration(provider, chatParams, onEvent, budgets, log);
+    // from cached outcomes. The `superseded` check runs first in the same
+    // body, so its verdict is memoized with the iteration it gates.
+    const iterate = async (): Promise<LlmIterationOutcome> =>
+      (await superseded?.())
+        ? { kind: "superseded" }
+        : runLlmIteration(provider, chatParams, onEvent, budgets, log);
     const iterOutcome = stepRun ? await stepRun(`llm-iter${iterations}`, iterate) : await iterate();
+
+    if (iterOutcome.kind === "superseded") return { kind: "superseded" };
 
     streamed.text += iterOutcome.emitted.text;
     streamed.toolUseIds.push(...iterOutcome.emitted.toolUseIds);
 
     if (iterOutcome.kind === "degrade") {
-      return buildDegradedResult(
-        messages,
-        initialLength,
-        totalUsage,
-        finalModel,
-        iterations,
-        iterOutcome.reason,
-        iterOutcome.subtype,
-        streamed,
+      return finished(
+        buildDegradedResult(
+          messages,
+          initialLength,
+          totalUsage,
+          finalModel,
+          iterations,
+          iterOutcome.reason,
+          iterOutcome.subtype,
+          streamed,
+        ),
       );
     }
 
@@ -1010,15 +1043,17 @@ export async function runStreamingAgentLoop(
         { event: "agent.degrade", reason: outcome.reason, subtype: outcome.subtype },
         "agent loop degraded (post-stream)",
       );
-      return buildDegradedResult(
-        messages,
-        initialLength,
-        totalUsage,
-        finalModel,
-        iterations,
-        outcome.reason,
-        outcome.subtype,
-        streamed,
+      return finished(
+        buildDegradedResult(
+          messages,
+          initialLength,
+          totalUsage,
+          finalModel,
+          iterations,
+          outcome.reason,
+          outcome.subtype,
+          streamed,
+        ),
       );
     }
     if (outcome.kind === "repair") {
@@ -1085,16 +1120,18 @@ export async function runStreamingAgentLoop(
           { type: "text", text: notice, harness: "truncation_notice" },
         ],
       });
-      return {
+      return finished({
         ...buildResult(messages, initialLength, totalUsage, finalModel, iterations, streamed),
         truncated: true,
-      };
+      });
     }
 
     // Drive flow on content, not `stop_reason` — see runAgentLoop above.
     const hasToolUse = iterationContent.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
-      return buildResult(messages, initialLength, totalUsage, finalModel, iterations, streamed);
+      return finished(
+        buildResult(messages, initialLength, totalUsage, finalModel, iterations, streamed),
+      );
     }
 
     // Volume-cluster intercept (Class D). For each tool_use in this
@@ -1235,15 +1272,17 @@ export async function runStreamingAgentLoop(
       // turn).
       messages.pop(); // user (tool_results)
       messages.pop(); // assistant (tool_use)
-      return buildDegradedResult(
-        messages,
-        initialLength,
-        totalUsage,
-        finalModel,
-        iterations,
-        "stuck_loop",
-        trip,
-        streamed,
+      return finished(
+        buildDegradedResult(
+          messages,
+          initialLength,
+          totalUsage,
+          finalModel,
+          iterations,
+          "stuck_loop",
+          trip,
+          streamed,
+        ),
       );
     }
   }
@@ -1253,15 +1292,17 @@ export async function runStreamingAgentLoop(
     { event: "agent.degrade", reason: "iteration_cap", subtype: null },
     "agent loop degraded (iteration cap)",
   );
-  return buildDegradedResult(
-    messages,
-    initialLength,
-    totalUsage,
-    finalModel,
-    iterations,
-    "iteration_cap",
-    null,
-    streamed,
+  return finished(
+    buildDegradedResult(
+      messages,
+      initialLength,
+      totalUsage,
+      finalModel,
+      iterations,
+      "iteration_cap",
+      null,
+      streamed,
+    ),
   );
 }
 

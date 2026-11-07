@@ -11,6 +11,7 @@
 import type { TextOptions } from "@clack/prompts";
 import type { Result } from "neverthrow";
 import { expect } from "vitest";
+import type { AgentLoopResult, StreamingLoopOutcome } from "../agent/loop.js";
 import { constraintNameOf, findPgErrorByCode } from "../db/pg-errors.js";
 
 import type { Adapter, StreamingAdapter } from "../transport/types.js";
@@ -47,6 +48,12 @@ export function expectDefined<T>(value: T | null | undefined, label = "value"): 
 export function expectOk<T, E>(result: Result<T, E>): T {
   if (result.isErr()) throw new Error(`expected Ok, got Err ${JSON.stringify(result.error)}`);
   return result.value;
+}
+
+/** The result of a streaming loop that finished; throws when it ended superseded. */
+export function expectFinished(outcome: StreamingLoopOutcome): AgentLoopResult {
+  if (outcome.kind !== "finished") throw new Error(`expected a finished loop, got ${outcome.kind}`);
+  return outcome.result;
 }
 
 /**
