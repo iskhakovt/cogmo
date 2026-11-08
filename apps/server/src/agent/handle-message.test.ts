@@ -5508,13 +5508,23 @@ describe("system prompt snapshot", () => {
   });
 
   describe("compaction", () => {
-    /** Eight messages, the turn's row m7, and compaction reaching Strategy 2. */
-    function summarizingDeps(
-      configDigest: string,
-      stopReason: StopReason = "end_turn",
-      summary = "the earlier discussion",
-      tokens = 800_000,
-    ) {
+    /** What the provider answers compaction: a count, then the summary call's reply. */
+    interface Compaction {
+      tokens: number;
+      summary: string;
+      stopReason: StopReason;
+    }
+
+    /** A count that reaches Strategy 2, and a summary the turn stores. */
+    const SUMMARIZED: Compaction = {
+      tokens: 800_000,
+      summary: "the earlier discussion",
+      stopReason: "end_turn",
+    };
+
+    /** Eight messages, the turn's row m7, and compaction answered by `compaction`. */
+    function summarizingDeps(configDigest: string, compaction: Compaction) {
+      const { tokens, summary, stopReason } = compaction;
       const rows: (Message & { id: string })[] = Array.from({ length: 8 }, (_, i) =>
         i % 2 === 0
           ? { id: `m${i + 1}`, role: "user", content: `turn ${i + 1}` }
@@ -5548,7 +5558,7 @@ describe("system prompt snapshot", () => {
     }
 
     it("opens an epoch at a turn whose compaction stored a summary, starting after its cutoff", async () => {
-      const deps = summarizingDeps(await defaultDigest());
+      const deps = summarizingDeps(await defaultDigest(), SUMMARIZED);
 
       await run(deps);
 
@@ -5564,11 +5574,11 @@ describe("system prompt snapshot", () => {
       expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
     });
 
-    it("shows a change in the epoch it opens when its unstored summary took the announcement out of view", async () => {
+    it("opens an epoch rather than announce again a change its unstored summary took out of view", async () => {
       // m1's context announced `identity`; this turn's summary, cut at its
       // output cap and not stored, replaces m1, so the request no longer shows it.
       const configDigest = await defaultDigest();
-      const deps = summarizingDeps(configDigest, "max_tokens");
+      const deps = summarizingDeps(configDigest, { ...SUMMARIZED, stopReason: "max_tokens" });
       Object.assign(deps.agentStore, identityChanged(configDigest, true));
 
       await run(deps);
@@ -5597,7 +5607,7 @@ describe("system prompt snapshot", () => {
     ])(
       "opens a compaction epoch at a turn whose $name rewrote its view",
       async ({ stopReason, text, tokens }) => {
-        const deps = summarizingDeps(await defaultDigest(), stopReason, text, tokens);
+        const deps = summarizingDeps(await defaultDigest(), { tokens, summary: text, stopReason });
 
         await run(deps);
 
@@ -5642,7 +5652,10 @@ describe("system prompt snapshot", () => {
     }
 
     it("heads the reply compacted, from the loaded history's start, when its summary wasn't stored", async () => {
-      const deps = summarizingDeps(await defaultDigest(), "max_tokens");
+      const deps = summarizingDeps(await defaultDigest(), {
+        ...SUMMARIZED,
+        stopReason: "max_tokens",
+      });
       deps.runStreamingAgentLoop = headedLoop();
 
       await run(deps);
@@ -5651,7 +5664,7 @@ describe("system prompt snapshot", () => {
     });
 
     it("heads the reply intact, from after the summary the turn stored", async () => {
-      const deps = summarizingDeps(await defaultDigest());
+      const deps = summarizingDeps(await defaultDigest(), SUMMARIZED);
       deps.runStreamingAgentLoop = headedLoop();
 
       await run(deps);
