@@ -8,37 +8,56 @@
         "hasToolResult": true
       },
       "response": {
-        "content": "Done. I've added a JSDoc comment to the `greet` function describing that it returns a personalized greeting message. The verify command executed successfully."
+        "content": "Now I'll run the verify command.",
+        "toolCalls": [
+          {
+            "name": "Bash",
+            "arguments": "{\"command\": \"echo verify\", \"description\": \"Run verify command\"}",
+            "id": "toolu_01S6acu7NuCcXtD5ZGySKE9h"
+          }
+        ],
+        "usage": {
+          "input_tokens": 5,
+          "cache_creation_input_tokens": 214,
+          "cache_read_input_tokens": 22792,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 214,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 81
+        }
       },
       "recordedTimings": {
-        "ttftMs": 545,
+        "ttftMs": 527,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          127,
-          12,
-          0,
-          0,
-          0,
-          21,
-          25,
-          25,
-          27,
           24,
-          26,
-          25,
-          24,
-          30,
-          14,
-          2,
+          169,
+          0,
+          72,
+          0,
+          0,
+          229,
+          0,
+          0,
+          0,
+          148,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          3,
           0
         ],
-        "totalDurationMs": 927
+        "totalDurationMs": 1172
       },
       "metadata": {
-        "systemHash": "3ff6a07d",
-        "toolsHash": "7ffc6334"
+        "systemHash": "f6af25fd",
+        "toolsHash": "f1f2015b"
       }
     }
   ]
