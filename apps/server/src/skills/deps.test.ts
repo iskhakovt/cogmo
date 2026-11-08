@@ -242,7 +242,9 @@ describe("makeSandboxLockfileCompiler", () => {
 
     // Session lifecycle — created with the requested image, deleted in finally.
     expect(h.ensureCalls[0]?.[0]).toBe("cogmo-skills:test");
-    expect(h.createCalls[0]).toMatchObject({ image: "cogmo-skills:test" });
+    expect(h.createCalls[0]).toMatchObject({ image: "cogmo-skills:test", network: "bridge" });
+    // Resolving can run a build backend, so the compile mounts no venv volume.
+    expect(h.createCalls[0]).not.toHaveProperty("depsCacheVolume");
     expect(h.deleteCalls).toBe(1);
   });
 

@@ -90,6 +90,7 @@ const CAPABILITIES: SandboxCapabilities = {
   volumes: "docker",
   workingTreeTransport: "bind-mount",
   depsCacheSharing: "shared-volume",
+  noNetworkSessions: true,
 };
 
 const HOME_VOLUME_TARGET = "/home/vscode";

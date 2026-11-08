@@ -97,6 +97,7 @@ describe("bootstrap with sandboxClientOverride (FakeDaytonaSandboxClient)", () =
       volumes: "managed",
       workingTreeTransport: "git-remote",
       depsCacheSharing: "per-sandbox",
+      noNetworkSessions: false,
     });
   });
 

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { err, ok, okAsync, type Result, ResultAsync } from "neverthrow";
 import * as R from "remeda";
 import { match, P } from "ts-pattern";
-import { z } from "zod";
+import type { z } from "zod";
 import { logger } from "../../logger.js";
 import {
   type CtxHandler,
@@ -21,25 +21,19 @@ import {
 import {
   type DispatchGate,
   fromTaskResult,
+  SchemaImportReplySchema,
   type TaskOutcome,
   type TaskRun,
   withheldOutcome,
 } from "../protocol.js";
-import { SkillInputsSchema, SkillIoSchema } from "../types.js";
+import { type SchemaImportError, schemaImportResult } from "../schema-import.js";
 import { timeoutSignal } from "../wall-clock.js";
 import type { StartFailure, WorkerFrame } from "../worker-state.js";
-import { type ChildInit, ProbeReplySchema, SchemaReplySchema } from "./child-protocol.js";
+import { type ChildInit, ProbeReplySchema } from "./child-protocol.js";
 import { INTERRUPT_MESSAGE } from "./interrupt-message.js";
 import { killChildGroup, recordChildGroup, removeChildGroupRecord } from "./process-groups.js";
 import { createIpcTransport, type IpcChannel } from "./transport.js";
-import type {
-  ImportedSchemas,
-  SchemaImportError,
-  WasmPackages,
-  WasmProbe,
-  WasmProbeError,
-  WasmSchemaImporter,
-} from "./wasm.js";
+import type { WasmPackages, WasmProbe, WasmProbeError, WasmSchemaImporter } from "./wasm.js";
 
 /**
  * The wasm host (design/skills.md → Wasm-tier boundary). Each task runs in a
@@ -444,45 +438,13 @@ export function createWasmSchemaImporter(opts: WasmProbeOptions): WasmSchemaImpo
         execArgv: launch.value.execArgv,
         timeoutMs: params.timeoutMs,
         signal: params.signal,
-        schema: SchemaReplySchema,
+        schema: SchemaImportReplySchema,
       });
       return reply
         .mapErr((reason) => unavailable(`schema import failed: ${reason}`))
-        .andThen((r) =>
-          match(r)
-            .returnType<Result<ImportedSchemas, SchemaImportError>>()
-            .with({ type: "schemas" }, ({ inputs, outputs }) => importedSchemas(inputs, outputs))
-            .with({ type: "schema_failed" }, ({ error }) =>
-              err({ kind: "refused", message: error }),
-            )
-            .with({ type: "fatal" }, ({ error }) =>
-              err(unavailable(`worker init failed: ${error}`)),
-            )
-            .exhaustive(),
-        );
+        .andThen((r) => schemaImportResult(r, (error) => `worker init failed: ${error}`));
     },
   };
-}
-
-/**
- * The child's schemas, parsed: `inputs` must be an object schema. `outputs`
- * crossed JSON IPC as an object, so it is one, and a failed parse is a bug.
- */
-function importedSchemas(
-  inputs: Record<string, unknown> | null,
-  outputs: Record<string, unknown> | null,
-): Result<ImportedSchemas, SchemaImportError> {
-  const parsedInputs = inputs === null ? null : SkillInputsSchema.safeParse(inputs);
-  if (parsedInputs !== null && !parsedInputs.success) {
-    return err({
-      kind: "refused",
-      message: `Input's JSON Schema does not describe an object: ${z.prettifyError(parsedInputs.error)}`,
-    });
-  }
-  return ok({
-    inputs: parsedInputs?.data ?? null,
-    outputs: outputs === null ? null : SkillIoSchema.parse(outputs),
-  });
 }
 
 /**

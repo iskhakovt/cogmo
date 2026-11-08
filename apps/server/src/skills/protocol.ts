@@ -276,6 +276,25 @@ export const TaskExitedSchema = z.object({
 });
 export type TaskExited = z.infer<typeof TaskExitedSchema>;
 
+/**
+ * The one reply of register's schema import, on either tier: the skill's
+ * `Input` and `Output` JSON Schemas, null for a model it does not define;
+ * `schema_failed` when the skill did not load or a model could not be
+ * described; `fatal` when the import's runtime did not start (a wasm child's
+ * boot, a container's skill venv). The host parses each schema further
+ * (design/skills.md → Contracts).
+ */
+export const SchemaImportReplySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("schemas"),
+    inputs: z.record(z.string(), z.unknown()).nullable(),
+    outputs: z.record(z.string(), z.unknown()).nullable(),
+  }),
+  z.object({ type: z.literal("schema_failed"), error: z.string() }),
+  z.object({ type: z.literal("fatal"), error: z.string() }),
+]);
+export type SchemaImportReply = z.infer<typeof SchemaImportReplySchema>;
+
 /** Every frame a worker sends the host. A worker's first frame is its handshake. */
 export const WorkerMessageSchema = z.union([
   SupervisorReadySchema,

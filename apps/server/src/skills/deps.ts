@@ -145,7 +145,8 @@ export const DEPENDENCY_EXEC_OPTIONS = {
   env: { UV_NO_CONFIG: "1" },
 } as const satisfies ExecOptions;
 
-const DEFAULT_COMPILE_RESOURCE_LIMITS: Required<ResourceLimits> = {
+/** What a dependency session (the compile, register's install and schema import) runs under by default. */
+export const DEFAULT_DEPENDENCY_SESSION_LIMITS: Required<ResourceLimits> = {
   cpus: 1,
   memory_bytes: 512 * 1024 * 1024,
   pids: 256,
@@ -165,26 +166,23 @@ export interface SandboxLockfileCompilerOptions {
   resourceLimits?: Partial<ResourceLimits>;
   /** Override the wall-clock cap. Defaults to `DEFAULT_COMPILE_TIMEOUT_MS`. */
   timeoutMs?: number;
-  /**
-   * Optional shared deps-cache volume. When set, the compile sandbox
-   * mounts it at `/skill-venvs` and points `UV_CACHE_DIR` at the
-   * `.uv-cache` subdir so wheel metadata fetched during compile lives
-   * on the same volume the populator later uses. Without this, every
-   * register re-fetches PyPI metadata from scratch (~5-30s per register
-   * for non-trivial dep sets).
-   */
-  depsCacheVolumeName?: string;
 }
 
-/** Sandbox-backed LockfileCompiler. Fresh session per compile; ~1-2s spawn-dominated. */
+/**
+ * Sandbox-backed LockfileCompiler. Fresh session per compile; ~1-2s
+ * spawn-dominated. The session mounts no venv volume: resolving can run a
+ * dependency's build backend, so the compile never reaches the venvs tasks
+ * activate, and each one fetches the index's metadata afresh.
+ */
 export function makeSandboxLockfileCompiler(
   opts: SandboxLockfileCompilerOptions,
 ): LockfileCompiler {
   const limits: ResourceLimits = {
-    cpus: opts.resourceLimits?.cpus ?? DEFAULT_COMPILE_RESOURCE_LIMITS.cpus,
-    memory_bytes: opts.resourceLimits?.memory_bytes ?? DEFAULT_COMPILE_RESOURCE_LIMITS.memory_bytes,
-    pids: opts.resourceLimits?.pids ?? DEFAULT_COMPILE_RESOURCE_LIMITS.pids,
-    disk_bytes: opts.resourceLimits?.disk_bytes ?? DEFAULT_COMPILE_RESOURCE_LIMITS.disk_bytes,
+    cpus: opts.resourceLimits?.cpus ?? DEFAULT_DEPENDENCY_SESSION_LIMITS.cpus,
+    memory_bytes:
+      opts.resourceLimits?.memory_bytes ?? DEFAULT_DEPENDENCY_SESSION_LIMITS.memory_bytes,
+    pids: opts.resourceLimits?.pids ?? DEFAULT_DEPENDENCY_SESSION_LIMITS.pids,
+    disk_bytes: opts.resourceLimits?.disk_bytes ?? DEFAULT_DEPENDENCY_SESSION_LIMITS.disk_bytes,
   };
   const timeoutMs = opts.timeoutMs ?? DEFAULT_COMPILE_TIMEOUT_MS;
 
@@ -215,10 +213,6 @@ export function makeSandboxLockfileCompiler(
           expiresAt,
           // The compile resolves against the package index.
           network: "bridge",
-          ...(opts.depsCacheVolumeName && {
-            depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
-            env: { UV_CACHE_DIR: `${DEPS_CACHE_VOLUME_TARGET}/.uv-cache` },
-          }),
         });
       } catch (e) {
         return err({

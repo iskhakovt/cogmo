@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mock } from "vitest-mock-extended";
 import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
+import type { SandboxClient } from "../sandbox/index.js";
 import { GitHubIdentitySchema } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectDefined } from "../test/assertions.js";
@@ -19,17 +20,16 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
+import { hashLockfileContents } from "./deps.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
+import type { SchemaImportError } from "./schema-import.js";
 import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
 import type { SkillInputs } from "./types.js";
-import type {
-  SchemaImportError,
-  WasmPackagesError,
-  WasmSchemaImporter,
-} from "./worker-wasm/wasm.js";
+import type { ContainerSchemaImporter } from "./worker-sysbox/schema-import.js";
+import type { WasmPackagesError, WasmSchemaImporter } from "./worker-wasm/wasm.js";
 
 const execFileP = promisify(execFile);
 
@@ -2334,17 +2334,167 @@ tier: wasm
       expect(await getMainSha(repo.bare)).toBe(mainBefore);
     });
 
-    it("keeps a container skill on its frontmatter, importing nothing", async () => {
-      const { runner, schemaImporter } = await runnerImporting(
-        ok({ inputs: CITY_INPUTS, outputs: null }),
+    const CONTAINER_MANIFEST = MODEL_MANIFEST.replace("tier: wasm", "tier: container");
+    const IDNA_LOCK = "idna==3.10 --hash=sha256:00\n";
+
+    /** A runner whose container importer answers `answer`, with the shared venv volume or without. */
+    async function runnerImportingContainer(
+      answer: Awaited<ReturnType<ContainerSchemaImporter["importSchemas"]>>,
+      depsCacheVolumeName: string | undefined,
+    ) {
+      const containerSchemaImporter = mock<ContainerSchemaImporter>();
+      containerSchemaImporter.importSchemas.mockResolvedValue(answer);
+      const runner = await makeRunner({
+        containerSchemaImporter,
+        ...(depsCacheVolumeName !== undefined && { depsCacheVolumeName }),
+      });
+      return { runner, containerSchemaImporter };
+    }
+
+    /** A container skill whose models carry its schemas, declaring idna and its lockfile. */
+    async function pushContainerWithDeps(branch: string): Promise<void> {
+      await writeFile(
+        join(repo.work, "SKILL.md"),
+        CONTAINER_MANIFEST.replace(
+          "tier: container\n",
+          "tier: container\ndependencies:\n  - idna==3.10\n",
+        ),
       );
-      await pushWeather("skill/weather", MODEL_MANIFEST.replace("tier: wasm", "tier: container"));
+      await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
+      await writeFile(join(repo.work, "requirements.lock"), IDNA_LOCK);
+      await execFileP("git", ["-C", repo.work, "add", "."]);
+      await execFileP("git", ["-C", repo.work, "commit", "-m", branch, "--allow-empty"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "push",
+        "-f",
+        "origin",
+        `HEAD:refs/heads/${branch}`,
+      ]);
+    }
+
+    it("imports a container skill under its own resources and wall clock", async () => {
+      const { runner, containerSchemaImporter } = await runnerImportingContainer(
+        ok({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS }),
+        undefined,
+      );
+      await pushWeather(
+        "skill/weather",
+        CONTAINER_MANIFEST.replace(
+          "tier: container\n",
+          "tier: container\nresources:\n  memory_mb: 256\n  wall_clock_s: 90\n",
+        ),
+      );
+
+      const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+      assertStatus(result, "pending_approval");
+      const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+      expect(deploy?.schemas).toEqual({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS });
+      expect(containerSchemaImporter.importSchemas).toHaveBeenCalledWith({
+        body: ECHO_BODY,
+        lockfile: null,
+        resourceLimits: { memory_bytes: 256 * 1024 * 1024 },
+        timeoutMs: 90_000,
+      });
+    });
+
+    it("imports a container skill's dependencies through the shared venv volume", async () => {
+      const { runner, containerSchemaImporter } = await runnerImportingContainer(
+        ok({ inputs: CITY_INPUTS, outputs: null }),
+        "cogmo-skills-venvs",
+      );
+      await pushContainerWithDeps("skill/weather");
+
+      const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+      assertStatus(result, "pending_approval");
+      expect(containerSchemaImporter.importSchemas).toHaveBeenCalledWith(
+        expect.objectContaining({
+          lockfile: { hash: hashLockfileContents(IDNA_LOCK), contents: IDNA_LOCK },
+        }),
+      );
+    });
+
+    it("keeps a container skill with dependencies on its frontmatter without the shared venv volume", async () => {
+      const { runner, containerSchemaImporter } = await runnerImportingContainer(
+        ok({ inputs: CITY_INPUTS, outputs: null }),
+        undefined,
+      );
+      await pushContainerWithDeps("skill/weather");
 
       const result = await runner.register({ branch: "skill/weather", origin: OWNER });
 
       assertStatus(result, "rejected");
       expect(result.errors).toEqual([
-        "missing_inputs: SKILL.md declares no inputs, which a container-tier skill needs",
+        "missing_inputs: SKILL.md declares no inputs, and this deployment cannot import the skill's models",
+      ]);
+      expect(containerSchemaImporter.importSchemas).not.toHaveBeenCalled();
+    });
+
+    it("rejects a container import that is refused", async () => {
+      const { runner } = await runnerImportingContainer(
+        err({ kind: "refused", message: "skill.py did not load: ZeroDivisionError" }),
+        undefined,
+      );
+      await pushWeather("skill/weather", CONTAINER_MANIFEST);
+
+      const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "schema_import_failed: skill.py did not load: ZeroDivisionError",
+      ]);
+    });
+
+    it.each([
+      { noNetworkSessions: false, imports: false },
+      { noNetworkSessions: true, imports: true },
+    ])(
+      "a sandbox whose backend has noNetworkSessions $noNetworkSessions imports container skills: $imports",
+      async ({ noNetworkSessions, imports }) => {
+        const sandbox = mock<SandboxClient>({
+          capabilities: {
+            siblingContainers: "host-proxy",
+            hostBindMount: true,
+            customImage: true,
+            volumes: "docker",
+            workingTreeTransport: "bind-mount",
+            depsCacheSharing: "shared-volume",
+            noNetworkSessions,
+          },
+        });
+        sandbox.ensureImagePresent.mockResolvedValue();
+        sandbox.create.mockRejectedValue(new Error("no daemon in this test"));
+        const runner = await makeRunner({ sandbox });
+        await pushWeather("skill/weather", CONTAINER_MANIFEST);
+
+        const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+        assertStatus(result, "rejected");
+        expect(result.errors).toEqual([
+          imports
+            ? "schema_import_unavailable: schema-import session did not start: no daemon in this test; retry the register"
+            : "missing_inputs: SKILL.md declares no inputs, and this deployment cannot import the skill's models",
+        ]);
+        expect(sandbox.create).toHaveBeenCalledTimes(imports ? 1 : 0);
+        if (imports)
+          expect(sandbox.create).toHaveBeenCalledWith(expect.objectContaining({ network: "none" }));
+      },
+    );
+
+    it("keeps a container skill on its frontmatter where the deployment cannot import it", async () => {
+      const { runner, schemaImporter } = await runnerImporting(
+        ok({ inputs: CITY_INPUTS, outputs: null }),
+      );
+      await pushWeather("skill/weather", CONTAINER_MANIFEST);
+
+      const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "missing_inputs: SKILL.md declares no inputs, and this deployment cannot import the skill's models",
       ]);
       expect(schemaImporter.importSchemas).not.toHaveBeenCalled();
     });

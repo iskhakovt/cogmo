@@ -26,6 +26,7 @@ import type { LockfileSnapshot } from "./deps.js";
 import { type LockfileCompiler, makeSandboxLockfileCompiler } from "./deps.js";
 import { type InvokeDeps, invokeSkill } from "./invoke/invoke.js";
 import type { SkillRunResult } from "./invoke/run-result.js";
+import { mapManifestResourceLimits } from "./invoke/runtime.js";
 import { LazyWarmPool, type WarmPoolSizing } from "./invoke/warm-pool.js";
 import type { SkillInvokeRejection } from "./invoke-rejection.js";
 import {
@@ -41,6 +42,10 @@ import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
 import { wallClockSOf } from "./wall-clock.js";
+import {
+  type ContainerSchemaImporter,
+  makeSandboxSchemaImporter,
+} from "./worker-sysbox/schema-import.js";
 import {
   createWasmProbe,
   createWasmSchemaImporter,
@@ -211,6 +216,12 @@ export interface SkillRunnerOptions {
     schemaImporter?: WasmSchemaImporter;
   };
   /**
+   * Tests inject a container-tier schema importer that starts no session.
+   * Otherwise register imports container skills over `sandbox` when its
+   * backend creates sessions with no network.
+   */
+  containerSchemaImporter?: ContainerSchemaImporter;
+  /**
    * Sandbox handle for running container-tier (sysbox) skills. Optional —
    * deployments without `SANDBOX_RUNTIME` set leave it undefined; container
    * skills are then rejected with `sandbox_unavailable` at invoke time.
@@ -365,6 +376,29 @@ export class SkillRunnerImpl implements SkillRunner {
         ...(signal && { signal }),
       });
     };
+    const containerImporter =
+      opts.containerSchemaImporter ??
+      (opts.sandbox?.capabilities.noNetworkSessions
+        ? makeSandboxSchemaImporter({
+            sandbox: opts.sandbox,
+            image: containerImage,
+            depsCacheVolumeName,
+          })
+        : undefined);
+    const containerSchemas: DeployDeps["containerSchemas"] =
+      containerImporter === undefined
+        ? undefined
+        : {
+            installsDependencies: depsCacheVolumeName !== undefined,
+            importSchemas: (source, signal) =>
+              containerImporter.importSchemas({
+                body: source.body,
+                lockfile: source.lockfile,
+                resourceLimits: mapManifestResourceLimits(source.resources),
+                timeoutMs: wallClockSOf("container", source.resources) * 1000,
+                ...(signal && { signal }),
+              }),
+          };
     this.#warmPool = new LazyWarmPool({
       image: containerImage,
       depsCacheVolumeName,
@@ -376,6 +410,7 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
+      containerSchemas,
       wasm: { fetchImpl, probe, fillBuiltins, packageCacheDir, importSchemas },
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
@@ -386,11 +421,7 @@ export class SkillRunnerImpl implements SkillRunner {
       lockfileCompiler:
         opts.lockfileCompiler ??
         (opts.sandbox
-          ? makeSandboxLockfileCompiler({
-              sandbox: opts.sandbox,
-              image: containerImage,
-              ...(depsCacheVolumeName !== undefined && { depsCacheVolumeName }),
-            })
+          ? makeSandboxLockfileCompiler({ sandbox: opts.sandbox, image: containerImage })
           : undefined),
       // The first occurrence of the manifest's `schedule` after the current
       // clock tick, in `userTimezone`.

@@ -1,6 +1,6 @@
 import { err, ok, type Result } from "neverthrow";
+import type { ImportedSchemas } from "../schema-import.js";
 import type { SkillManifest, SkillSchemas } from "../types.js";
-import type { ImportedSchemas } from "../worker-wasm/wasm.js";
 
 /**
  * The frontmatter's schemas, the legacy schema path; null when `SKILL.md`
@@ -27,7 +27,7 @@ export function registerSchemas(
     const declared = frontmatterSchemas(manifest);
     return declared === null
       ? err([
-          `missing_inputs: SKILL.md declares no inputs, which a ${manifest.tier}-tier skill needs`,
+          "missing_inputs: SKILL.md declares no inputs, and this deployment cannot import the skill's models",
         ])
       : ok(declared);
   }

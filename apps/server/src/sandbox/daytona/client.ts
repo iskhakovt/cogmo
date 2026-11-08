@@ -197,6 +197,7 @@ const CAPABILITIES: SandboxCapabilities = {
   // SkillRunnerImpl + createSkillDepsReaper) gates on this flag and
   // omits SessionSpec.depsCacheVolume.
   depsCacheSharing: "per-sandbox",
+  noNetworkSessions: false,
 };
 
 export interface DaytonaSandboxClientOptions {

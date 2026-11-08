@@ -164,6 +164,14 @@ export interface SandboxCapabilities {
    * by declaring the capability.
    */
   depsCacheSharing: "shared-volume" | "per-sandbox";
+  /**
+   * Whether the backend creates a session with `network: "none"`. Local-Docker
+   * does (`NetworkMode: none`); Daytona refuses one, since a Tier 1 or 2
+   * organisation's network policy overrides a sandbox's `networkBlockAll`.
+   * Register's container-tier schema import runs skill code only in such a
+   * session, and keeps the legacy schema path without one.
+   */
+  noNetworkSessions: boolean;
 }
 
 /**

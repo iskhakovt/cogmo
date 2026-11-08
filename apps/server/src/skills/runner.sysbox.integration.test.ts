@@ -22,9 +22,11 @@ import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
+import { hashLockfileContents } from "./deps.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
+import { makeSandboxSchemaImporter } from "./worker-sysbox/schema-import.js";
 
 function stubSecrets(): SecretsStore {
   return mock<SecretsStore>();
@@ -602,6 +604,51 @@ async def run(inputs, ctx):
       // doesn't accumulate one per test run. Failure is benign — the
       // volume may already be gone, or another test in the same suite
       // might be using it (volume name is unique by Date.now()).
+      await docker
+        .getVolume(depsCacheVolumeName)
+        .remove()
+        .catch(() => {});
+    }
+  }, 180_000);
+
+  it("imports a container skill's models in a session with no network, after installing its dependencies", async () => {
+    const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
+    const importer = makeSandboxSchemaImporter({
+      sandbox,
+      image: SKILLS_IMAGE,
+      depsCacheVolumeName,
+    });
+    try {
+      const imported = await importer.importSchemas({
+        body: `
+import socket
+import idna
+from pydantic import BaseModel
+
+try:
+    socket.create_connection(("1.1.1.1", 53), timeout=2).close()
+    reached = "reached"
+except OSError as e:
+    reached = type(e).__name__
+print("a module's print goes to stderr")
+
+class Input(BaseModel):
+    host: str = idna.encode("bücher.example").decode("ascii")
+    reached: str = reached
+`,
+        lockfile: { hash: hashLockfileContents(IDNA_LOCKFILE), contents: IDNA_LOCKFILE },
+        resourceLimits: {},
+        timeoutMs: 60_000,
+      });
+
+      // The install session's venv reached the import, which reached no network.
+      const properties = imported._unsafeUnwrap().inputs?.properties;
+      expect(properties).toMatchObject({
+        host: { default: "xn--bcher-kva.example" },
+        reached: { default: expect.any(String) },
+      });
+      expect(properties?.reached).not.toMatchObject({ default: "reached" });
+    } finally {
       await docker
         .getVolume(depsCacheVolumeName)
         .remove()
