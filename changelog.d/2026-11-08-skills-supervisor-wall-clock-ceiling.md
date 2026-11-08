@@ -1,0 +1,1 @@
+The skills supervisor caps a task's wall clock at a week and treats `NaN` as invalid, which falls back to the default. A task whose `wallClockS` is beyond what epoll can wait (about 24.9 days), infinite (a frame's `1e400`), an integer too large for a float, or `NaN` gets its `task_result`, and its worker stays reusable.
