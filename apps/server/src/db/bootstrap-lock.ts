@@ -21,14 +21,15 @@ export type BootstrapLock = <T>(fn: () => Promise<T>) => Promise<T>;
  */
 export function bootstrapLock(sql: Sql): BootstrapLock {
   // Typed `number`, but postgres-js keeps `?max=` and `PGMAX` as the string it
-  // read and sizes its pool by comparing against it, so a numeric string opens
-  // that many connections and any other string opens none.
+  // read, and its pool opens connections while their count is below it: a
+  // numeric `max` opens its value rounded up, anything else none.
   const max: unknown = sql.options.max;
-  const size = Number(max);
-  if (!(size >= 2)) {
+  const requested = Number(max);
+  const opens = Number.isNaN(requested) ? 0 : Math.max(0, Math.ceil(requested));
+  if (opens < 2) {
     throw new Error(
       `the bootstrap lock needs a connection pool of at least 2, but max=${String(max)} ` +
-        `opens ${Number.isNaN(size) ? "none" : size}`,
+        `opens ${opens}; set \`max\` to 2 or more, or leave it unset for the default of 10`,
     );
   }
   return async <T>(fn: () => Promise<T>): Promise<T> => {
