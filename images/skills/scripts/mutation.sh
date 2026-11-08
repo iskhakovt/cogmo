@@ -80,7 +80,8 @@ sandbox() {
 }
 export -f sandbox
 
-# mutmut can exit 0 having checked nothing, so the counts decide.
+# mutmut can exit 0 having checked nothing, or generate no mutants at all, so
+# the counts decide.
 sandbox --memory "${jobs}g" --cpus $((jobs < cores ? jobs : cores)) --pids-limit $((512 * jobs)) \
   --volume "$volume:/app/mutants" "$image" \
   sh -c 'mutmut run --max-children "$1" >&2 && mutmut export-cicd-stats >/dev/null && python -c "$2"' _ "$jobs" \
@@ -92,7 +93,7 @@ wait $! || {
   exit 1
 }
 read -r total killed checked <"$work/counts"
-if [ "$checked" -lt "$total" ]; then
+if [ "$total" -eq 0 ] || [ "$checked" -lt "$total" ]; then
   echo "mutmut checked $checked of $total mutants; its output is above." >&2
   exit 1
 fi
