@@ -45,7 +45,8 @@ function escapeIllFormed(s: string): string {
  * text), and reference cycles. Each case gets a deterministic stand-in
  * instead, so hashing a value never aborts the caller.
  *
- * The substitutions are injective, and every escape is anchored on a lone
+ * With the non-finite marker {@link canonicalJson} uses, the substitutions
+ * are injective, and every escape is anchored on a lone
  * U+FFFD that {@link escapeIllFormed} guarantees cannot occur in a translated
  * string or key. Two consequences digests rely on: a 2-key object stays a
  * 2-key object, and the pre-pass never reorders anything, so `canonicalize`

@@ -154,8 +154,8 @@ describe("checkTurnHead", () => {
     });
 
     it("heads written before the epoch's opening row, as when the opening turn failed", async () => {
-      // m5's epoch opened at m3 and wrote no reply; m2's and m4's heads
-      // predate it, whatever m3's opening rewrote.
+      // m5's epoch opened at m3 and wrote no reply; m2's head predates it,
+      // whatever m3's opening rewrote.
       const opened = epoch("m3", null);
       const heads = await headsFor(TWO_TURNS, EPOCH, ["m2"], { m2: { digest: "0".repeat(64) } });
       expect(await verdict(TWO_TURNS, heads, opened)).toEqual({ kind: "skipped" });

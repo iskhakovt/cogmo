@@ -5804,7 +5804,7 @@ describe("transcript head check", () => {
       expect.objectContaining({ openedBy: "msg-1", reason: "prefix_violation" }),
     );
     expect(add.mock.calls).toEqual([[1, { site: "turn" }]]);
-    expect(turnLogger.warn).toHaveBeenCalledWith(
+    expect(turnLogger.warn).toHaveBeenCalledExactlyOnceWith(
       { site: "turn", firstDivergingMessageId: "m2" },
       expect.stringContaining("transcript head"),
     );

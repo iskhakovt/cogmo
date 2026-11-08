@@ -299,9 +299,10 @@ describe("persistTurn", () => {
 
     it("marks the heads diverged and counts the violation once when a replay rebuilt a request", async () => {
       const add = vi.spyOn(promptPrefixViolations, "add");
+      const turnLogger = mock<typeof logger>();
       const { step, deps, agentStore } = setup({});
 
-      await persistTurn(step, deps, { ...ARGS, result: toolTurn({ violatedAt: 2 }) });
+      await persistTurn(step, deps, { ...ARGS, turnLogger, result: toolTurn({ violatedAt: 2 }) });
 
       expect(insertedRows(agentStore).map((row) => row.transcriptHead?.status)).toEqual([
         "diverged",
@@ -309,6 +310,9 @@ describe("persistTurn", () => {
         "diverged",
       ]);
       expect(add.mock.calls).toEqual([[1, { site: "iteration" }]]);
+      expect(turnLogger.warn.mock.calls).toEqual([
+        [{ site: "iteration", iteration: 2 }, expect.stringContaining("rebuilt a request")],
+      ]);
     });
 
     it("counts no in-turn violation where the turn wrote no heads", async () => {

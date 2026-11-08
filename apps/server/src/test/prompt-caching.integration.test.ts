@@ -352,8 +352,8 @@ describe("prompt caching", () => {
       .from(coreMemoryBlocks)
       .where(eq(coreMemoryBlocks.userId, userId));
     expect(blocks.map((b) => b.content).join("\n")).toMatch(/Lisbon/);
-    // One epoch: every turn's head check matched its history, image turn
-    // included, so none opened a `prefix_violation` epoch.
+    // One epoch: every turn after the first, which opened it, matched its
+    // history in the head check, image turn included.
     const snapshots = await db
       .select({ openedBy: systemPromptSnapshots.openedBy, reason: systemPromptSnapshots.reason })
       .from(systemPromptSnapshots)
