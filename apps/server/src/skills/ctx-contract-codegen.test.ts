@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { repoRoot } from "../test/repo-root.js";
 import {
   GENERATED_CONTRACT_FILES,
   renderContractSchema,
@@ -9,8 +10,6 @@ import {
   renderPythonModule,
   renderRuntimePackages,
 } from "./ctx-contract-codegen.js";
-
-const repoRoot = join(import.meta.dirname, "../../../..");
 
 describe("the generated ctx contract", () => {
   it.each([
@@ -20,7 +19,7 @@ describe("the generated ctx contract", () => {
   ])(
     "%s matches the contract; run `pnpm --filter cogmo codegen:ctx` when it does not",
     (path, render) => {
-      expect(readFileSync(join(repoRoot, path), "utf8")).toBe(render());
+      expect(readFileSync(join(repoRoot(), path), "utf8")).toBe(render());
     },
   );
 
