@@ -1,6 +1,6 @@
 import { NonRetriableError } from "inngest";
 import { err, ok } from "neverthrow";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import {
@@ -13,6 +13,7 @@ import type { LlmProvider } from "../../llm/provider.js";
 import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../../llm/request-size.js";
 import type { StopReason, ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
+import { promptPrefixViolations } from "../../metrics.js";
 import type { SkillRunner } from "../../skills/runner.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
 import {
@@ -26,6 +27,7 @@ import {
   mockFilesService,
   mockMemoryProvider,
   mockTransportStore,
+  TEST_PREFIX_VIOLATION,
 } from "../../test/factories.js";
 import { liveRegisterResult } from "../../test/skills-fixtures.js";
 import type { StreamDeliveryError } from "../../transport/delivery-router.js";
@@ -33,6 +35,8 @@ import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import { createAttachmentReader } from "../attachments/attachment-reader.js";
 import { toolResultClearing } from "../context.js";
 import type { AgentLoopResult, StepRunner, StreamingLoopOutcome } from "../loop.js";
+import type { TranscriptRow } from "../store/index.js";
+import type { StoredMessage } from "../stored-content.js";
 import { defineTool, ToolRegistry } from "../tools.js";
 import { baseDigest } from "../transcript-head.js";
 import {
@@ -87,6 +91,11 @@ function planResult(overrides?: Partial<AgentLoopResult>): AgentLoopResult {
 /** A stage loop that finished with {@link planResult}'s result. */
 function planLoop(overrides?: Partial<AgentLoopResult>): StreamingLoopOutcome {
   return { kind: "finished", result: planResult(overrides) };
+}
+
+/** History rows written before heads: none carries one. */
+function unheaded(rows: ReadonlyArray<StoredMessage & { id: string }>): TranscriptRow[] {
+  return rows.map((row) => ({ ...row, transcriptHead: null }));
 }
 
 function toolNamed(name: string) {
@@ -185,6 +194,7 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
     runStreamingAgentLoop,
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
+    prefixViolation: TEST_PREFIX_VIOLATION,
   };
   return { deps, agentStore, transportStore, delivery, deliveryRouter, runStreamingAgentLoop };
 }
@@ -275,17 +285,19 @@ describe("runAgenticStage", () => {
   it("sends the summarization fork the stage's intent", async () => {
     const h = await harness();
     vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
-    vi.mocked(h.agentStore.listMessages).mockResolvedValue([
-      { id: "m1", role: "user", content: "m1" },
-      { id: "m2", role: "assistant", content: "r1" },
-      { id: "m3", role: "user", content: "m2" },
-      { id: "m4", role: "assistant", content: "r2" },
-      { id: "m5", role: "user", content: "m3" },
-      { id: "m6", role: "assistant", content: "r3" },
-      { id: "m7", role: "user", content: "m4" },
-      { id: "m8", role: "assistant", content: "r4" },
-      { id: "msg-1", role: "user", content: "Draft a plan." },
-    ]);
+    vi.mocked(h.agentStore.listMessages).mockResolvedValue(
+      unheaded([
+        { id: "m1", role: "user", content: "m1" },
+        { id: "m2", role: "assistant", content: "r1" },
+        { id: "m3", role: "user", content: "m2" },
+        { id: "m4", role: "assistant", content: "r2" },
+        { id: "m5", role: "user", content: "m3" },
+        { id: "m6", role: "assistant", content: "r3" },
+        { id: "m7", role: "user", content: "m4" },
+        { id: "m8", role: "assistant", content: "r4" },
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]),
+    );
     const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
     // Past 80% of any budget, then under it once summarized.
     vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
@@ -306,6 +318,11 @@ describe("runAgenticStage", () => {
   });
 
   describe("transcript heads", () => {
+    // A spy left by a failing test would leak into the rest of the file.
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
     /** A stage loop whose one request carried a head. */
     function headedLoop(historyLength: number): StreamingLoopOutcome {
       return planLoop({
@@ -314,6 +331,7 @@ describe("runAgenticStage", () => {
           historyLength,
           sent: [{ length: historyLength, digest: "f".repeat(64) }],
           diverged: false,
+          violatedAt: null,
         },
       });
     }
@@ -338,6 +356,80 @@ describe("runAgenticStage", () => {
       expect(replyHead(h)).toMatchObject({ length: 2, historyStart: "msg-1", status: "intact" });
     });
 
+    it("hands the loop its policy, heads the reply diverged and counts an in-turn violation once under site stage", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const h = await harness();
+      const violated = headedLoop(1);
+      assertKind(violated, "finished");
+      h.runStreamingAgentLoop.mockResolvedValue({
+        kind: "finished",
+        result: { ...violated.result, requests: { ...violated.result.requests, violatedAt: 1 } },
+      });
+
+      await runAgenticStage(
+        { ...h.deps, prefixViolation: "reopen" },
+        stageArgs(),
+        recordingSteps().steps,
+        log,
+      );
+
+      const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+      expect(loopParams.prefixViolation).toBe("reopen");
+      expect(replyHead(h)).toMatchObject({ status: "diverged" });
+      expect(add.mock.calls).toEqual([[1, { site: "stage" }]]);
+    });
+
+    it("counts no in-turn violation for a stage that wrote no rows", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const h = await harness();
+      const violated = headedLoop(1);
+      assertKind(violated, "finished");
+      h.runStreamingAgentLoop.mockResolvedValue({
+        kind: "finished",
+        result: {
+          ...violated.result,
+          newMessages: [],
+          requests: { ...violated.result.requests, violatedAt: 1 },
+        },
+      });
+
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      expect(add).not.toHaveBeenCalled();
+    });
+
+    it("leaves the transcript heads out of its load-turn-transcript memo", async () => {
+      const h = await harness();
+      const head = {
+        length: 1,
+        base: "a".repeat(64),
+        historyStart: "m1",
+        digest: "b".repeat(64),
+        status: "intact" as const,
+      };
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+        { id: "m1", role: "user", content: "earlier", transcriptHead: null },
+        { id: "m2", role: "assistant", content: "reply", transcriptHead: head },
+        { id: "msg-1", role: "user", content: "Draft a plan.", transcriptHead: null },
+      ]);
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(3));
+      const { memo, steps } = memoizingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      expect(memo.get("load-turn-transcript")).not.toHaveProperty("heads");
+    });
+
+    it("counts nothing for a stage whose requests all matched", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const h = await harness();
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(1));
+
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      expect(add).not.toHaveBeenCalled();
+    });
+
     const STAGE_HISTORY = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"];
 
     /** A stage over eight earlier messages whose compaction summarizes, as `summary` says. */
@@ -347,14 +439,16 @@ describe("runAgenticStage", () => {
     }): Promise<Awaited<ReturnType<typeof harness>>> {
       const h = await harness();
       vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
-      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
-        ...STAGE_HISTORY.map((id, i) => ({
-          id,
-          role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
-          content: id,
-        })),
-        { id: "msg-1", role: "user", content: "Draft a plan." },
-      ]);
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue(
+        unheaded([
+          ...STAGE_HISTORY.map((id, i) => ({
+            id,
+            role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            content: id,
+          })),
+          { id: "msg-1", role: "user", content: "Draft a plan." },
+        ]),
+      );
       const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
       vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
       vi.mocked(provider.chat).mockResolvedValueOnce({
@@ -406,17 +500,19 @@ describe("runAgenticStage", () => {
     // Past 80% of the view cap, within 80% of the request cap it leaves the wire room under.
     const huge = "x".repeat(Math.floor(MAX_REQUEST_BYTES * 0.8) - 20_000);
     expect(huge.length).toBeGreaterThan(MAX_VIEW_BYTES * 0.8);
-    vi.mocked(h.agentStore.listMessages).mockResolvedValue([
-      { id: "m1", role: "user", content: huge },
-      { id: "m2", role: "assistant", content: "r1" },
-      { id: "m3", role: "user", content: "m2" },
-      { id: "m4", role: "assistant", content: "r2" },
-      { id: "m5", role: "user", content: "m3" },
-      { id: "m6", role: "assistant", content: "r3" },
-      { id: "m7", role: "user", content: "m4" },
-      { id: "m8", role: "assistant", content: "r4" },
-      { id: "msg-1", role: "user", content: "Draft a plan." },
-    ]);
+    vi.mocked(h.agentStore.listMessages).mockResolvedValue(
+      unheaded([
+        { id: "m1", role: "user", content: huge },
+        { id: "m2", role: "assistant", content: "r1" },
+        { id: "m3", role: "user", content: "m2" },
+        { id: "m4", role: "assistant", content: "r2" },
+        { id: "m5", role: "user", content: "m3" },
+        { id: "m6", role: "assistant", content: "r3" },
+        { id: "m7", role: "user", content: "m4" },
+        { id: "m8", role: "assistant", content: "r4" },
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]),
+    );
     const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
     // A 20 MB route, whose request cap `huge` is sized against.
     vi.spyOn(provider, "attachmentLimits").mockImplementation(openAICompatibleAttachmentLimits);

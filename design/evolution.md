@@ -403,7 +403,7 @@ The Observer runs on the conversation's profile's model, so it shows that model 
 
 - **This turn.** The tool result is in the transcript, so the reply that follows applies the rule. The system prompt is the epoch's [snapshot](prompt-caching.md#system-prompt-snapshot-confirmed), fixed for the turn.
 - **From the next turn.** A rule change alters the configuration digest, so the next turn of each of the user's open conversations opens an epoch and the rule keeps system authority ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed) → Rules open an epoch). A reinforcement changes no rendered text and opens none.
-- **Cost.** The epoch, recorded as `configuration` once `reason` exists ([Head check](prompt-caching.md#head-check-confirmed), Append-only step 5), rewrites the system prompt and transcript at the 1-hour write rate (2×) where they would have been read (0.1× on Sonnet 5), about two uncached requests' worth of input per change and open conversation, and strips earlier turns' thinking blocks. Rule changes are occasional, like graduations.
+- **Cost.** The epoch, recorded as `configuration` ([Head check](prompt-caching.md#head-check-confirmed)), rewrites the system prompt and transcript at the 1-hour write rate (2×) where they would have been read (0.1× on Sonnet 5), about two uncached requests' worth of input per change and open conversation, and strips earlier turns' thinking blocks. Rule changes are occasional, like graduations.
 
 ### Lifecycle `[confirmed]`
 

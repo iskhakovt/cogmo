@@ -14,6 +14,7 @@ import { synthesizeDegradedReply } from "../repair.js";
 import { computeRetraction } from "../retraction.js";
 import type { Service } from "../service.js";
 import type { ToolRegistry } from "../tools.js";
+import type { PrefixViolationPolicy } from "../transcript-head.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import { asNonRetriable } from "../turn-step-runner.js";
 import type { TurnModel } from "./resolve-turn-model.js";
@@ -33,6 +34,8 @@ export interface RunTurnLoopArgs {
    * asked inside each `llm-iter<N>` step before it streams.
    */
   superseded: () => Promise<boolean>;
+  /** What the in-turn head check does when a rebuilt request differs from its memo. */
+  prefixViolation: PrefixViolationPolicy;
   turnLogger: Logger;
 }
 
@@ -103,6 +106,7 @@ export async function runTurnLoop(
       clearToolResults: turnModel.clearToolResults,
       superseded: args.superseded,
       site: "iteration",
+      prefixViolation: args.prefixViolation,
       turnLogger,
     });
     // Awaited inside the `try`, so a failure in either arm aborts the stream.

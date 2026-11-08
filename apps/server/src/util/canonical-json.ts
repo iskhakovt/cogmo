@@ -45,7 +45,8 @@ function escapeIllFormed(s: string): string {
  * text), and reference cycles. Each case gets a deterministic stand-in
  * instead, so hashing a value never aborts the caller.
  *
- * The substitutions are injective, and every escape is anchored on a lone
+ * With the non-finite marker {@link canonicalJson} uses, the substitutions
+ * are injective, and every escape is anchored on a lone
  * U+FFFD that {@link escapeIllFormed} guarantees cannot occur in a translated
  * string or key. Two consequences digests rely on: a 2-key object stays a
  * 2-key object, and the pre-pass never reorders anything, so `canonicalize`
@@ -53,23 +54,27 @@ function escapeIllFormed(s: string): string {
  *
  * Only arrays and plain objects are walked. Anything else with a `toJSON`
  * reaches `canonicalize` untouched and takes its own path there.
+ *
+ * `nonFinite` is what a non-finite number becomes.
  */
-function toCanonicalizable(value: unknown, ancestors: Set<object>): unknown {
+function toCanonicalizable(
+  value: unknown,
+  ancestors: Set<object>,
+  nonFinite: (n: number) => unknown,
+): unknown {
   if (typeof value === "string") return escapeIllFormed(value);
-  if (typeof value === "number" && !Number.isFinite(value)) {
-    return { [NON_FINITE_KEY]: String(value) };
-  }
+  if (typeof value === "number" && !Number.isFinite(value)) return nonFinite(value);
   if (value === null || typeof value !== "object") return value;
   if (!Array.isArray(value) && !R.isPlainObject(value)) return value;
   if (ancestors.has(value)) return { [CIRCULAR_KEY]: true };
 
   ancestors.add(value);
   const encoded = Array.isArray(value)
-    ? value.map((v) => toCanonicalizable(v, ancestors))
+    ? value.map((v) => toCanonicalizable(v, ancestors, nonFinite))
     : Object.fromEntries(
         Object.entries(value).map(([k, v]) => [
           escapeIllFormed(k),
-          toCanonicalizable(v, ancestors),
+          toCanonicalizable(v, ancestors, nonFinite),
         ]),
       );
   ancestors.delete(value);
@@ -78,12 +83,12 @@ function toCanonicalizable(value: unknown, ancestors: Set<object>): unknown {
 
 /**
  * Stand-in hash input for a value no encoder could render: one holding a
- * `BigInt` or a throwing `toJSON`. Distinct unencodable inputs share it and
- * compare equal; for tool arguments that can only inflate Class D's counters
- * for repeated calls to the *same* tool, which the loop's side-effect gate and
- * iteration cap bound. A transcript head never meets one: messages are JSON
- * from a provider or a row. The alternative, propagating the throw, ends the
- * turn outright.
+ * `BigInt` or a throwing `toJSON`, or nested past the call stack. Distinct
+ * unencodable inputs share it and compare equal; for tool arguments that can
+ * only inflate Class D's counters for repeated calls to the *same* tool, which
+ * the loop's side-effect gate and iteration cap bound; for a transcript head,
+ * an edit inside such a message goes unseen. The alternative, propagating the
+ * throw, ends the turn outright.
  */
 const UNENCODABLE_ARGS = `${ESCAPE}unencodable`;
 
@@ -99,8 +104,21 @@ const UNENCODABLE_ARGS = `${ESCAPE}unencodable`;
  * on {@link UNENCODABLE_ARGS}.
  */
 export function canonicalJson(value: unknown): string {
+  return encode(value, (n) => ({ [NON_FINITE_KEY]: String(n) }));
+}
+
+/**
+ * {@link canonicalJson} of `value` as JSON sends it: a non-finite number,
+ * which `JSON.stringify` writes as `null`, is `null`, so a value held in memory
+ * and the same value reloaded from a memo or a row encode the same.
+ */
+export function canonicalJsonAsSent(value: unknown): string {
+  return encode(value, () => null);
+}
+
+function encode(value: unknown, nonFinite: (n: number) => unknown): string {
   try {
-    return canonicalize(toCanonicalizable(value, new Set())) ?? UNENCODABLE_ARGS;
+    return canonicalize(toCanonicalizable(value, new Set(), nonFinite)) ?? UNENCODABLE_ARGS;
   } catch {
     return UNENCODABLE_ARGS;
   }

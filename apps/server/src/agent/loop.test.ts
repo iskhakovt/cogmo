@@ -21,7 +21,12 @@ import type {
 import { logger } from "../logger.js";
 import { promptServerMismatches } from "../metrics.js";
 import { expectDefined, expectFinished } from "../test/assertions.js";
-import { doneFrame, mockFilesService, scriptedStream } from "../test/factories.js";
+import {
+  doneFrame,
+  mockFilesService,
+  scriptedStream,
+  TEST_PREFIX_VIOLATION,
+} from "../test/factories.js";
 import type {
   AgentLoopParams,
   AgentLoopResult,
@@ -32,7 +37,7 @@ import type {
 import { runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
 import { defineTool, reject, type ToolOutcome, ToolRegistry } from "./tools.js";
-import { baseDigest, rowHeads, TranscriptHasher } from "./transcript-head.js";
+import { baseDigest, PrefixViolationError, rowHeads, TranscriptHasher } from "./transcript-head.js";
 
 function stubService(): Service {
   return {
@@ -92,7 +97,7 @@ function toolUseResponse(toolName: string, toolId: string, input: unknown): LlmR
 type LoopDefaultable = "model" | "systemPrompt" | "service" | "turnLogger";
 type LoopOverrides = Omit<AgentLoopParams, LoopDefaultable> &
   Partial<Pick<AgentLoopParams, LoopDefaultable>>;
-type StreamingLoopDefaultable = LoopDefaultable | "site";
+type StreamingLoopDefaultable = LoopDefaultable | "site" | "prefixViolation";
 type StreamingLoopOverrides = Omit<StreamingAgentLoopParams, StreamingLoopDefaultable> &
   Partial<Pick<StreamingAgentLoopParams, StreamingLoopDefaultable>>;
 
@@ -111,6 +116,7 @@ function testStreamingLoopOutcome(
 ): Promise<StreamingLoopOutcome> {
   return runStreamingAgentLoop({
     site: "iteration",
+    prefixViolation: TEST_PREFIX_VIOLATION,
     model: "test",
     systemPrompt: "sys",
     service: stubService(),
@@ -4186,6 +4192,7 @@ describe("volume-cluster trigger", () => {
 
     const result = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4249,6 +4256,7 @@ describe("volume-cluster trigger", () => {
 
     const result = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4286,6 +4294,7 @@ describe("volume-cluster trigger", () => {
 
     const result = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4322,6 +4331,7 @@ describe("volume-cluster trigger", () => {
     ]);
     const r1 = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider: provider1,
       model: "test",
       systemPrompt: "sys",
@@ -4345,6 +4355,7 @@ describe("volume-cluster trigger", () => {
     ]);
     const r2 = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider: provider2,
       model: "test",
       systemPrompt: "sys",
@@ -4409,6 +4420,7 @@ describe("volume-cluster trigger", () => {
 
     const result = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4457,6 +4469,7 @@ describe("volume-cluster trigger", () => {
 
     const result = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4512,6 +4525,7 @@ describe("volume-cluster trigger", () => {
 
     const result = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4574,6 +4588,7 @@ describe("volume-cluster trigger", () => {
 
     const result = await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4604,6 +4619,7 @@ describe("volume-cluster trigger", () => {
 
     await runStreamingAgentLoop({
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -5080,6 +5096,7 @@ describe("transcript heads", () => {
       historyLength: 1,
       sent: [first, second],
       diverged: false,
+      violatedAt: null,
     });
   });
 
@@ -5295,5 +5312,147 @@ describe("transcript heads", () => {
         compacted: false,
       }),
     ).toEqual([null]);
+  });
+
+  describe("in-turn check", () => {
+    /** A tool turn: `echo`, then a reply. */
+    function toolTurnProvider(): LlmProvider {
+      return mockStreamProvider([
+        {
+          events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "hi" } }],
+          stopReason: "tool_use",
+        },
+        { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+      ]);
+    }
+
+    /** A non-durable read whose output changes on every invocation. */
+    function clockTools(): ToolRegistry {
+      let calls = 0;
+      const tools = new ToolRegistry();
+      tools.register(
+        defineTool({
+          name: "echo",
+          description: "echo",
+          schema: z.object({ text: z.string() }),
+          handler: async () => {
+            calls += 1;
+            return ok(`call ${calls}`);
+          },
+        }),
+      );
+      return tools;
+    }
+
+    function run(
+      cache: Map<string, unknown>,
+      overrides: Pick<StreamingLoopOverrides, "messages" | "tools" | "prefixViolation">,
+    ) {
+      return testRunStreamingAgentLoop({
+        provider: toolTurnProvider(),
+        onEvent: async () => {},
+        stepRun: cachingStepRun(cache).stepRun,
+        ...overrides,
+      });
+    }
+
+    it("passes a replay that rebuilds every request it memoized", async () => {
+      const cache = new Map<string, unknown>();
+      const tools = echoTools();
+      const history: Message[] = [{ role: "user", content: "echo hi" }];
+      const live = await run(cache, { messages: [...history], tools, prefixViolation: "throw" });
+
+      const replayed = await run(cache, {
+        messages: [...history],
+        tools,
+        prefixViolation: "throw",
+      });
+
+      expect(replayed.requests).toEqual(live.requests);
+      expect(replayed.requests.violatedAt).toBeNull();
+    });
+
+    it("throws under throw when a replay rebuilds a request other than the one sent", async () => {
+      const cache = new Map<string, unknown>();
+      const tools = clockTools();
+      const history: Message[] = [{ role: "user", content: "echo hi" }];
+      await run(cache, { messages: [...history], tools, prefixViolation: "throw" });
+
+      // The tool's output differs on the replay, so iteration 2's request does.
+      await expect(
+        run(cache, { messages: [...history], tools, prefixViolation: "throw" }),
+      ).rejects.toThrow(PrefixViolationError);
+    });
+
+    it("records the first diverging iteration under reopen and heads the rows diverged", async () => {
+      const cache = new Map<string, unknown>();
+      const tools = clockTools();
+      const history: Message[] = [{ role: "user", content: "echo hi" }];
+      const live = await run(cache, { messages: [...history], tools, prefixViolation: "reopen" });
+      expect(live.requests.violatedAt).toBeNull();
+
+      const replayed = await run(cache, {
+        messages: [...history],
+        tools,
+        prefixViolation: "reopen",
+      });
+
+      expect(replayed.requests.violatedAt).toBe(2);
+      // The heads are the requests as sent: the memoized ones.
+      expect(replayed.requests.sent).toEqual(live.requests.sent);
+      const heads = rowHeads(replayed.requests, replayed.newMessages, {
+        historyStart: "m1",
+        compacted: false,
+      });
+      expect(heads.filter((h) => h !== null).map((h) => h.status)).toEqual([
+        "diverged",
+        "diverged",
+      ]);
+    });
+
+    it("throws at the first iteration when the history it was given changed", async () => {
+      const cache = new Map<string, unknown>();
+      const tools = echoTools();
+      await run(cache, {
+        messages: [{ role: "user", content: "echo hi" }],
+        tools,
+        prefixViolation: "throw",
+      });
+
+      await expect(
+        run(cache, {
+          messages: [{ role: "user", content: "echo hello" }],
+          tools,
+          prefixViolation: "throw",
+        }),
+      ).rejects.toThrow(/iteration 1's request/);
+    });
+
+    it("skips an iteration memoized without a head", async () => {
+      const cache = new Map<string, unknown>([
+        [
+          "llm-iter1",
+          {
+            kind: "drained",
+            content: [{ type: "text", text: "Hello" }],
+            stopReason: "end_turn",
+            model: "mock-model",
+            usage: { inputTokens: 10, outputTokens: 5 },
+            repaired: null,
+            emitted: { text: "Hello", toolUseIds: [] },
+          },
+        ],
+      ]);
+
+      // Any history: there is no head to compare it with.
+      const result = await run(cache, {
+        messages: [{ role: "user", content: "a different question" }],
+        tools: new ToolRegistry(),
+        prefixViolation: "throw",
+      });
+
+      expect(result.text).toBe("Hello");
+      expect(result.requests.violatedAt).toBeNull();
+    });
   });
 });

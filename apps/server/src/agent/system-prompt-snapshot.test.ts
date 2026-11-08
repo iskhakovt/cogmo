@@ -12,6 +12,7 @@ import {
   stripThinkingBefore,
   unannounced,
 } from "./system-prompt-snapshot.js";
+import type { HeadExplanation, HeadVerdict } from "./transcript-head.js";
 
 describe("configDigest", () => {
   const base: Parameters<typeof configDigest>[0] = {
@@ -78,13 +79,30 @@ describe("historyStart", () => {
 });
 
 describe("continuesEpoch", () => {
-  const current = { configDigest: "d1", historyStart: "m1" };
+  const snapshot = { configDigest: "d1", historyStart: "m1" };
+  const current = { ...snapshot, head: { kind: "matched" } } as const;
 
   it("continues only a snapshot with the same digest and the same history start", () => {
-    expect(continuesEpoch(current, current)).toBe(true);
+    expect(continuesEpoch(snapshot, current)).toBe(true);
     expect(continuesEpoch(null, current)).toBe(false);
-    expect(continuesEpoch({ ...current, configDigest: "d0" }, current)).toBe(false);
-    expect(continuesEpoch({ ...current, historyStart: "m0" }, current)).toBe(false);
+    expect(continuesEpoch({ ...snapshot, configDigest: "d0" }, current)).toBe(false);
+    expect(continuesEpoch({ ...snapshot, historyStart: "m0" }, current)).toBe(false);
+  });
+
+  it.each<HeadVerdict>([{ kind: "skipped" }, { kind: "matched" }])(
+    "continues on a head check that found nothing: $kind",
+    (head) => {
+      expect(continuesEpoch(snapshot, { ...current, head })).toBe(true);
+    },
+  );
+
+  it.each<HeadVerdict>([
+    { kind: "explained", reason: "configuration" },
+    { kind: "explained", reason: "compaction" },
+    { kind: "explained", reason: "prefix_violation" },
+    { kind: "violated", firstDiverging: "m2" },
+  ])("opens on a head check that found a change: $kind $reason", (head) => {
+    expect(continuesEpoch(snapshot, { ...current, head })).toBe(false);
   });
 });
 
@@ -92,7 +110,16 @@ describe("epochReason", () => {
   const snapshot = { configDigest: "d1", historyStart: "m1" };
   const kept = { kind: "kept", cutoff: null } as const;
   const advanced = { kind: "advanced", cutoff: "m2" } as const;
-  const same = { configDigest: "d1", loadedStart: "m1", epochStart: "m1", cutoff: kept };
+  const matched = { kind: "matched" } as const;
+  const same = {
+    configDigest: "d1",
+    loadedStart: "m1",
+    epochStart: "m1",
+    cutoff: kept,
+    head: matched,
+  };
+  const explained = (reason: HeadExplanation) => ({ kind: "explained", reason }) as const;
+  const violated = { kind: "violated", firstDiverging: "m2" } as const;
 
   it.each([
     { name: "no snapshot", current: null, turn: same, reason: "first_turn" },
@@ -105,7 +132,13 @@ describe("epochReason", () => {
     {
       name: "another digest and a summary",
       current: snapshot,
-      turn: { configDigest: "d2", loadedStart: "m3", epochStart: "m5", cutoff: advanced },
+      turn: {
+        configDigest: "d2",
+        loadedStart: "m3",
+        epochStart: "m5",
+        cutoff: advanced,
+        head: violated,
+      },
       reason: "configuration",
     },
     {
@@ -126,13 +159,70 @@ describe("epochReason", () => {
       turn: { ...same, cutoff: advanced },
       reason: "attachments",
     },
+    {
+      name: "a head under another base",
+      current: snapshot,
+      turn: { ...same, head: explained("configuration") },
+      reason: "configuration",
+    },
+    {
+      name: "a head from another history start",
+      current: snapshot,
+      turn: { ...same, head: explained("summary") },
+      reason: "summary",
+    },
+    {
+      name: "a compacted head",
+      current: snapshot,
+      turn: { ...same, head: explained("compaction") },
+      reason: "compaction",
+    },
+    {
+      name: "a compacted head and an advanced cutoff",
+      current: snapshot,
+      turn: { ...same, head: explained("compaction"), cutoff: advanced },
+      reason: "compaction",
+    },
+    {
+      name: "a summary and a compacted head",
+      current: snapshot,
+      turn: { ...same, epochStart: "m5", head: explained("compaction") },
+      reason: "summary",
+    },
+    {
+      name: "a diverged head",
+      current: snapshot,
+      turn: { ...same, head: explained("prefix_violation") },
+      reason: "prefix_violation",
+    },
+    {
+      name: "a violated head",
+      current: snapshot,
+      turn: { ...same, head: violated },
+      reason: "prefix_violation",
+    },
+    {
+      name: "a violated head and an advanced cutoff",
+      current: snapshot,
+      turn: { ...same, head: violated, cutoff: advanced },
+      reason: "attachments",
+    },
+    {
+      name: "a violated head on the first turn",
+      current: null,
+      turn: { ...same, head: violated },
+      reason: "first_turn",
+    },
   ] as const)("records $name as $reason", ({ current, turn, reason }) => {
     expect(epochReason(current, turn)).toBe(reason);
   });
 
-  it("refuses an opening no reason explains", () => {
-    expect(() => epochReason(snapshot, same)).toThrow(/no reason/);
-  });
+  it.each([matched, { kind: "skipped" } as const])(
+    "refuses an opening no reason explains, with a $kind head",
+    (head) => {
+      expect(() => epochReason(snapshot, { ...same, head })).toThrow(/no reason/);
+    },
+  );
 });
 
 describe("stripThinkingBefore", () => {

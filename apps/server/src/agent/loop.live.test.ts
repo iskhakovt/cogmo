@@ -31,6 +31,7 @@ import { AnthropicProvider } from "../llm/anthropic.js";
 import { logger } from "../logger.js";
 import { DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined, expectFinished } from "../test/assertions.js";
+import { TEST_PREFIX_VIOLATION } from "../test/factories.js";
 import { createWireRecorder, type WireResponse } from "../test/wire-recorder.js";
 import { runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
@@ -138,6 +139,7 @@ describe.skipIf(API_KEY === undefined)("runStreamingAgentLoop prompt caching (li
         onEvent: async () => {},
         cache: { key: nonce, retention: "long" },
         site: "iteration",
+        prefixViolation: TEST_PREFIX_VIOLATION,
         turnLogger: logger,
       }).then(expectFinished);
 

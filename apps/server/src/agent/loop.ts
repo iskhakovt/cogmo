@@ -50,6 +50,8 @@ import {
   baseDigest,
   isDivergingTransformation,
   type LoopRequests,
+  PrefixViolationError,
+  type PrefixViolationPolicy,
   type RequestHead,
   type SentRequest,
   TranscriptHasher,
@@ -302,7 +304,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
 
 /** {@link AgentLoopResult.requests} for a loop that records no request heads. */
 function unrecordedRequests(base: string, historyLength: number): LoopRequests {
-  return { base, historyLength, sent: [], diverged: false };
+  return { base, historyLength, sent: [], diverged: false, violatedAt: null };
 }
 
 // Stable identifier for one `tool_use` invocation: `iteration` is the
@@ -800,6 +802,13 @@ export interface StreamingAgentLoopParams extends AgentLoopParams {
    * pipeline stage's turn.
    */
   site: "iteration" | "stage";
+  /**
+   * What the in-turn head check does when an iteration's request, as an
+   * invocation rebuilds it, differs from the head its memo recorded: `reopen`
+   * records it on {@link AgentLoopResult.requests} (`violatedAt`), `throw`
+   * fails the loop with {@link PrefixViolationError}.
+   */
+  prefixViolation: PrefixViolationPolicy;
 }
 
 /**
@@ -1000,6 +1009,7 @@ export async function runStreamingAgentLoop(
     clearToolResults,
     superseded,
     site,
+    prefixViolation,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
@@ -1024,17 +1034,20 @@ export async function runStreamingAgentLoop(
   const streamed: EmittedLedger = { text: "", toolUseIds: [] };
   // The requests the iterations sent, rebuilt every invocation from their
   // outcomes like the ledger above. Every invocation hashes h₀ once, over the
-  // system prompt and tool definitions; message heads are hashed inside the
-  // step bodies, so a replayed iteration hashes no messages.
+  // system prompt and tool definitions. The head each request sent is hashed
+  // inside its step body; every invocation hashes the request it rebuilds for
+  // a headed memo again, for the in-turn check.
   const hasher = new TranscriptHasher();
   const base = baseDigest(systemPrompt, toolDefs);
   const sent: SentRequest[] = [];
   let diverged = false;
+  let violatedAt: number | null = null;
   const requests = (): LoopRequests => ({
     base,
     historyLength: initialLength,
     sent: [...sent],
     diverged,
+    violatedAt,
   });
   let iterations = 0;
   let finalModel = model;
@@ -1081,6 +1094,14 @@ export async function runStreamingAgentLoop(
 
     if (iterOutcome.kind === "superseded") return { kind: "superseded" };
 
+    // The in-turn head check, before this iteration's content joins
+    // `messages`, so they hold the request the iteration sends.
+    if (
+      iterOutcome.head !== undefined &&
+      !rebuiltMatches(hasher, base, messages, iterOutcome.head, iterations, prefixViolation)
+    ) {
+      violatedAt ??= iterations;
+    }
     sent.push(iterOutcome.head ?? { length: messages.length, digest: null });
     if (reportedTransformations(iterOutcome).some(isDivergingTransformation)) diverged = true;
 
@@ -1583,6 +1604,35 @@ async function applyStreamReplay(
     usage: replay.usage,
     ...(replay.inputTransformations && { transformations: replay.inputTransformations }),
   };
+}
+
+/**
+ * The in-turn head check (design/prompt-caching.md → Head check): whether
+ * `messages`, the request this invocation rebuilt for `iteration`, has the
+ * head the iteration's memo recorded. On the invocation that ran the step
+ * body they are one request; on a replay a difference means the loop rebuilt
+ * input the provider never saw. Hashed in the bare body, only for a memo with
+ * a head: the check's per-invocation cost. Under `throw` a difference throws
+ * {@link PrefixViolationError}; under `reopen` it returns false.
+ */
+function rebuiltMatches(
+  hasher: TranscriptHasher,
+  base: string,
+  messages: ReadonlyArray<Message>,
+  memoized: RequestHead,
+  iteration: number,
+  policy: PrefixViolationPolicy,
+): boolean {
+  const rebuilt = hasher.head(base, messages);
+  if (rebuilt.length === memoized.length && rebuilt.digest === memoized.digest) return true;
+  return match(policy)
+    .with("reopen", () => false)
+    .with("throw", () => {
+      throw new PrefixViolationError(
+        `iteration ${iteration}'s request, rebuilt on this invocation, no longer has the head its memo recorded`,
+      );
+    })
+    .exhaustive();
 }
 
 /**

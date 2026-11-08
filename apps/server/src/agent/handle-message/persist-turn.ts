@@ -1,3 +1,4 @@
+import type { Logger } from "pino";
 import * as R from "remeda";
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -9,6 +10,7 @@ import {
   conversationDegraded,
 } from "../../inngest/events.js";
 import { agentIterations } from "../../metrics.js";
+import { reportInTurnViolation } from "../in-turn-violation.js";
 import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
@@ -40,6 +42,7 @@ export interface PersistTurnArgs {
   result: AgentLoopResult;
   /** The view the turn's requests sent, which its assistant rows' transcript heads record. */
   view: HeadView;
+  turnLogger: Logger;
 }
 
 /**
@@ -79,7 +82,8 @@ type PersistWrite =
  * written. A different one is another run of the same batch: `superseded`.
  * Otherwise it is `superseded` when a later turn row covers the cursor, and
  * inserts when none does, each assistant row with its transcript head
- * ({@link rowHeads}).
+ * ({@link rowHeads}). A loop whose in-turn head check failed counts
+ * `cogmo.prompt.prefix_violations{site: "iteration"}` once, when it inserts.
  *
  * Steps, in order: `persist-new-messages`, `emit-cooldown-cleared` (when
  * `persisted` and the turn probed an elapsed cooldown),
@@ -157,10 +161,13 @@ export async function persistTurn(
     // the result records the turn twice. For a histogram read to spot
     // runaway iteration counts, repeated copies of one value are worse than
     // a missing one, and that retry window is the only source of them.
+    // The in-turn violation is counted where the turn's rows and heads were
+    // written.
     return match(write)
       .returnType<PersistOutcome>()
       .with({ kind: "inserted" }, ({ messageId }) => {
         agentIterations.record(result.iterations, { model: result.model });
+        reportInTurnViolation(result.requests, "iteration", args.turnLogger);
         return { kind: "persisted", messageId };
       })
       .with({ kind: "own_earlier_write" }, ({ messageId }) => ({ kind: "persisted", messageId }))
