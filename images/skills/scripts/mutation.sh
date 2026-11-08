@@ -36,9 +36,11 @@ cleanup() {
       fi
       sleep 1
     done
-    docker volume rm --force "$volume" >/dev/null 2>&1
+    docker volume rm --force "$volume" >/dev/null 2>&1 || echo "Left volume $volume behind: docker volume rm $volume" >&2
   fi
-  [ -z "$image" ] || docker image rm "$image" >/dev/null 2>&1
+  if [ -n "$image" ] && docker image inspect "$image" >/dev/null 2>&1 && ! docker image rm "$image" >/dev/null 2>&1; then
+    echo "Left image $image behind: docker image rm $image" >&2
+  fi
 }
 trap cleanup EXIT
 
@@ -48,7 +50,7 @@ trap cleanup EXIT
 descendants() {
   local child
   for child in $(pgrep -P "$1"); do
-    [ "$child" != "$BASHPID" ] || continue
+    [ "$child" != "${BASHPID:-}" ] || continue
     descendants "$child"
     echo "$child"
   done
@@ -69,7 +71,7 @@ trap 'interrupted 129' HUP
 # alike; every container carries its name, so cleanup finds them by it.
 image=cogmo-skills-mutation:$(basename "$work")
 volume=cogmo-mutation-$(basename "$work")
-docker buildx bake --load --set "skills-mutation.tags=$image" skills-mutation &
+docker buildx bake --file docker-bake.hcl --load --set "skills-mutation.tags=$image" skills-mutation &
 wait $!
 docker volume create --label "cogmo.mutation=$volume" "$volume" >/dev/null
 
@@ -160,7 +162,7 @@ failed=$(outcome failed)
 
 if [ ${#survivors[@]} -gt 0 ]; then
   sandbox --memory 1g --cpus 1 --pids-limit 256 --volume "$volume:/app/mutants:ro" "$image" \
-    sh -c 'for m in "$@"; do echo "== survived: $m"; mutmut show "$m" | tail -n +2; done' _ "${survivors[@]}" \
+    bash -c 'set -o pipefail; for m in "$@"; do echo "== survived: $m"; mutmut show "$m" | tail -n +2 || { echo "mutmut show failed for $m." >&2; exit 1; }; done' _ "${survivors[@]}" \
     >"$work/survivors" &
   wait $!
 else
