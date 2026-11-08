@@ -112,8 +112,8 @@ importers:
         specifier: ^0.13.11
         version: 0.13.11(typescript@7.0.2)(zod@4.6.7)
       '@vectorize-io/hindsight-client':
-        specifier: ~1.1.0
-        version: 1.1.0
+        specifier: ~1.2.0
+        version: 1.2.0
       ai:
         specifier: ^7.0.154
         version: 7.0.154(zod@4.6.7)
@@ -4728,8 +4728,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@vectorize-io/hindsight-client@1.1.0':
-    resolution: {integrity: sha512-Tqx7SKEbKZnf9L1tnla3vIDNt83eKFCneHe8GsSQJbmAn0rY8U13fT9Jg5ZP8G/phns5Fk5tZWmagaUlVTzpCA==}
+  '@vectorize-io/hindsight-client@1.2.0':
+    resolution: {integrity: sha512-4KYsxLZhe9Hqyp6EQYMMHFmQKaP+7XBwclHD2cLjuHfR/b/KJgnieMK6YYIsWEifhRSR0llv45q5xXDObjILoQ==}
 
   '@vercel/oidc@3.2.0':
     resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
@@ -11802,7 +11802,7 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@vectorize-io/hindsight-client@1.1.0': {}
+  '@vectorize-io/hindsight-client@1.2.0': {}
 
   '@vercel/oidc@3.2.0': {}
 
