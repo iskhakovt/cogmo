@@ -57,7 +57,7 @@ jobs:
       - id: version
         run: |
           set -euo pipefail
-          version=$(pipx run dunamai==1.26.1 from any --style semver)
+          version=$(pipx run dunamai==1.26.3 from any --style semver)
           echo "Resolved version: $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 

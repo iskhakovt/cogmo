@@ -47,10 +47,10 @@ variable "UV_DIGEST" {
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
 variable "PNPM_VERSION" {
-  default = "12.16.1"
+  default = "12.17.0"
 }
 variable "PNPM_DIGEST" {
-  default = "sha256:33081d3d2c96ba582d316cfd630f0f43961d9c60ff919b50edd1835a1462976b"
+  default = "sha256:172468925f0ca368313c09867081a43e298eaeb13dee8f7e4356bfad45dd8b15"
 }
 variable "NPM_VERSION" {
   default = "12.2.1"
@@ -61,7 +61,7 @@ variable "NPM_VERSION" {
 // `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
 // so following it puts the sandbox CLI ahead of the stable rollout.
 variable "CLAUDE_CODE_VERSION" {
-  default = "2.1.309"
+  default = "2.1.311"
 }
 
 // Default group builds every image — used by publish.yml on release.
