@@ -79,7 +79,7 @@ import { toStoredMessage } from "../stored-content.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
 import { historyStart, stripThinkingBefore } from "../system-prompt-snapshot.js";
 import type { ToolRegistry } from "../tools.js";
-import { type HeadView, rowHeads, TranscriptHasher } from "../transcript-head.js";
+import { type HeadView, rowHeads } from "../transcript-head.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import {
   findTurnContext,
@@ -475,9 +475,10 @@ export async function runAgenticStage(
       log.warn({ err }, "failed to persist stage conversation summary, continuing the stage");
     }
   }
-  // What the stage's assistant rows record of the view it loaded.
+  // What the stage's assistant rows record of the view its requests sent,
+  // which starts after any summary it stored.
   const headView: HeadView = {
-    historyStart: historyStart(turnHistory.messageIds, null),
+    historyStart: historyStart(turnHistory.messageIds, storedCutoff),
     compacted: rewroteWithoutSummary(compacted.event, storedCutoff),
   };
 
@@ -587,7 +588,7 @@ export async function runAgenticStage(
     // A turn that degraded on its first iteration kept nothing to write.
     if (result.newMessages.length === 0) return { id: null };
     // Hashed in the step body, so a replay of the persisted stage hashes nothing.
-    const heads = rowHeads(new TranscriptHasher(), result.requests, result.newMessages, headView);
+    const heads = rowHeads(result.requests, result.newMessages, headView);
     const { id } = await deps.runInTx((tx) =>
       deps.agentStore.insertMessages(tx, {
         conversationId,

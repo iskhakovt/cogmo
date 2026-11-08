@@ -34,6 +34,7 @@ import { createAttachmentReader } from "../attachments/attachment-reader.js";
 import { toolResultClearing } from "../context.js";
 import type { AgentLoopResult, StepRunner, StreamingLoopOutcome } from "../loop.js";
 import { defineTool, ToolRegistry } from "../tools.js";
+import { baseDigest } from "../transcript-head.js";
 import {
   type AgenticStageArgs,
   type AgenticStageDeps,
@@ -309,8 +310,7 @@ describe("runAgenticStage", () => {
     function headedLoop(historyLength: number): StreamingLoopOutcome {
       return planLoop({
         requests: {
-          system: "SYSTEM PROMPT",
-          tools: [],
+          base: baseDigest("SYSTEM PROMPT", []),
           historyLength,
           sent: [{ length: historyLength, digest: "f".repeat(64) }],
           diverged: false,
@@ -368,6 +368,74 @@ describe("runAgenticStage", () => {
 
       expect(h.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
       expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply compacted when storing its summary failed", async () => {
+      const h = await harness();
+      vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+        { id: "m1", role: "user", content: "m1" },
+        { id: "m2", role: "assistant", content: "r1" },
+        { id: "m3", role: "user", content: "m2" },
+        { id: "m4", role: "assistant", content: "r2" },
+        { id: "m5", role: "user", content: "m3" },
+        { id: "m6", role: "assistant", content: "r3" },
+        { id: "m7", role: "user", content: "m4" },
+        { id: "m8", role: "assistant", content: "r4" },
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]);
+      const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+      vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
+      vi.mocked(provider.chat).mockResolvedValueOnce({
+        content: [{ type: "text", text: "Summary of the run" }],
+        stopReason: "end_turn",
+        model: "claude-sonnet-4-6",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+      vi.mocked(h.agentStore.insertOrRecoverSummary).mockRejectedValue(new Error("db down"));
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(7));
+      const { steps } = recordingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply intact, from after the summary it stored", async () => {
+      const h = await harness();
+      vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+        { id: "m1", role: "user", content: "m1" },
+        { id: "m2", role: "assistant", content: "r1" },
+        { id: "m3", role: "user", content: "m2" },
+        { id: "m4", role: "assistant", content: "r2" },
+        { id: "m5", role: "user", content: "m3" },
+        { id: "m6", role: "assistant", content: "r3" },
+        { id: "m7", role: "user", content: "m4" },
+        { id: "m8", role: "assistant", content: "r4" },
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]);
+      const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+      vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
+      vi.mocked(provider.chat).mockResolvedValueOnce({
+        content: [{ type: "text", text: "Summary of the run" }],
+        stopReason: "end_turn",
+        model: "claude-sonnet-4-6",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(7));
+      const { steps } = recordingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      const [, stored] = expectDefined(
+        vi.mocked(h.agentStore.insertOrRecoverSummary).mock.calls[0],
+        "stored summary",
+      );
+      const ids = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"];
+      const start = expectDefined(ids[ids.indexOf(stored.throughMessageId) + 1], "history start");
+      expect(start).not.toBe("m1");
+      expect(replyHead(h)).toMatchObject({ historyStart: start, status: "intact" });
     });
   });
 

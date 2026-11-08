@@ -2,6 +2,7 @@
  * Shared mock factories for unit tests.
  * Every store interface method is mocked — tests override what they need.
  */
+
 import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
@@ -13,6 +14,7 @@ import type { AgentLoopResult, StreamingLoopOutcome } from "../agent/loop.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
+import { baseDigest } from "../agent/transcript-head.js";
 import type { CliIo } from "../cli/run.js";
 import type { Transactor } from "../db/transactor.js";
 import type { Durable, EventPublisher } from "../inngest/durable.js";
@@ -834,7 +836,7 @@ export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResul
     model: "mock-model",
     iterations: 1,
     streamed: { text: "", toolUseIds: [] },
-    requests: { system: "", tools: [], historyLength: 0, sent: [], diverged: false },
+    requests: { base: baseDigest("", []), historyLength: 0, sent: [], diverged: false },
     ...overrides,
   };
 }

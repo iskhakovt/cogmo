@@ -122,19 +122,25 @@ export function continuesEpoch(
  * in the epoch rule's precedence. No snapshot is the conversation's first
  * turn; a different digest is `configuration`; a history start other than the
  * snapshot's, the loaded one or the one after a summary this turn stored, is
- * `summary`. A turn that matches on all three opens only because it advanced
- * the attachment cutoff.
+ * `summary`; an advanced attachment cutoff is `attachments`. A turn opening
+ * with none of these is a bug in the decision that opened it.
  */
 export function epochReason(
   snapshot: { configDigest: string; historyStart: string } | null,
-  turn: { configDigest: string; loadedStart: string; epochStart: string },
+  turn: {
+    configDigest: string;
+    loadedStart: string;
+    epochStart: string;
+    cutoffAdvanced: boolean;
+  },
 ): SystemPromptEpochReason {
   if (snapshot === null) return "first_turn";
   if (snapshot.configDigest !== turn.configDigest) return "configuration";
   if (snapshot.historyStart !== turn.loadedStart || snapshot.historyStart !== turn.epochStart) {
     return "summary";
   }
-  return "attachments";
+  if (turn.cutoffAdvanced) return "attachments";
+  throw new Error("a turn opened an epoch that no reason in the epoch rule explains");
 }
 
 /**

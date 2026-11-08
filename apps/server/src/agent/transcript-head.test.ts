@@ -235,6 +235,7 @@ describe("isDivergingTransformation", () => {
 
   it.each([
     ["thinking_mismatch_allowed", "prefix_binding_mismatch", true],
+    ["thinking_mismatch_allowed", "model_binding_mismatch", false],
     ["thinking_dropped", "prefix_binding_mismatch", true],
     ["thinking_dropped", "organization_binding_mismatch", true],
     ["thinking_dropped", "model_binding_mismatch", false],
@@ -256,8 +257,7 @@ describe("rowHeads", () => {
   ): LoopRequests {
     const hasher = new TranscriptHasher();
     return {
-      system: "system",
-      tools: TOOLS,
+      base: BASE,
       historyLength: 1,
       sent: lengths.map((length) => hasher.head(BASE, transcript.slice(0, length))),
       diverged: false,
@@ -274,7 +274,7 @@ describe("rowHeads", () => {
     const rows = [TOOL_CALL, TOOL_RESULT, REPLY];
     const transcript = [USER, ...rows];
 
-    const heads = rowHeads(new TranscriptHasher(), sentOver(transcript, [1, 3]), rows, VIEW);
+    const heads = rowHeads(sentOver(transcript, [1, 3]), rows, VIEW);
 
     expect(heads).toEqual([
       { ...nextRequestHead(transcript, 2), base: BASE, historyStart: "m1", status: "intact" },
@@ -293,7 +293,7 @@ describe("rowHeads", () => {
     const apology: Message = { role: "assistant", content: [{ type: "text", text: "Sorry." }] };
     const sent = sentOver([USER, continuation], [1, 2]);
 
-    const [head] = rowHeads(new TranscriptHasher(), sent, [apology], VIEW);
+    const [head] = rowHeads(sent, [apology], VIEW);
 
     expect(head).toMatchObject(nextRequestHead([USER, apology], 2));
   });
@@ -301,7 +301,7 @@ describe("rowHeads", () => {
   it("marks every row compacted over diverged, and diverged over intact", () => {
     const transcript = [USER, REPLY];
     const status = (compacted: boolean, diverged: boolean) =>
-      rowHeads(new TranscriptHasher(), sentOver(transcript, [1], { diverged }), [REPLY], {
+      rowHeads(sentOver(transcript, [1], { diverged }), [REPLY], {
         historyStart: "m1",
         compacted,
       })[0]?.status;
@@ -319,13 +319,11 @@ describe("rowHeads", () => {
     const first = hasher.head(BASE, transcript.slice(0, 1));
 
     const allHeadless = rowHeads(
-      hasher,
       sentOver(transcript, [], { sent: [{ length: 1, digest: null }] }),
       rows,
       VIEW,
     );
     const laterHeadless = rowHeads(
-      hasher,
       sentOver(transcript, [], { sent: [first, { length: 3, digest: null }] }),
       rows,
       VIEW,
@@ -336,6 +334,6 @@ describe("rowHeads", () => {
   });
 
   it("gives no head when the loop sent no request", () => {
-    expect(rowHeads(new TranscriptHasher(), sentOver([USER], []), [REPLY], VIEW)).toEqual([null]);
+    expect(rowHeads(sentOver([USER], []), [REPLY], VIEW)).toEqual([null]);
   });
 });

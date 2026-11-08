@@ -28,7 +28,7 @@ const RESULT: AgentLoopResult = {
   iterations: 2,
   streamed: { text: "reply", toolUseIds: [] },
   degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
-  requests: { system: "system", tools: [], historyLength: 1, sent: [], diverged: false },
+  requests: { base: baseDigest("system", []), historyLength: 1, sent: [], diverged: false },
 };
 
 const ARGS: PersistTurnArgs = {
@@ -229,8 +229,7 @@ describe("persistTurn", () => {
         ...R.omit(RESULT, ["degraded"]),
         newMessages: [CALL, OUTPUT, REPLY],
         requests: {
-          system: "system",
-          tools: [],
+          base: BASE,
           historyLength: 1,
           sent: [hasher.head(BASE, [HISTORY]), hasher.head(BASE, [HISTORY, CALL, OUTPUT])],
           diverged: false,

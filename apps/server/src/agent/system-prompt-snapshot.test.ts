@@ -90,7 +90,7 @@ describe("continuesEpoch", () => {
 
 describe("epochReason", () => {
   const snapshot = { configDigest: "d1", historyStart: "m1" };
-  const same = { configDigest: "d1", loadedStart: "m1", epochStart: "m1" };
+  const same = { configDigest: "d1", loadedStart: "m1", epochStart: "m1", cutoffAdvanced: false };
 
   it.each([
     { name: "no snapshot", current: null, turn: same, reason: "first_turn" },
@@ -103,7 +103,7 @@ describe("epochReason", () => {
     {
       name: "another digest and a summary",
       current: snapshot,
-      turn: { configDigest: "d2", loadedStart: "m3", epochStart: "m5" },
+      turn: { configDigest: "d2", loadedStart: "m3", epochStart: "m5", cutoffAdvanced: true },
       reason: "configuration",
     },
     {
@@ -121,11 +121,15 @@ describe("epochReason", () => {
     {
       name: "only an advanced attachment cutoff",
       current: snapshot,
-      turn: same,
+      turn: { ...same, cutoffAdvanced: true },
       reason: "attachments",
     },
   ] as const)("records $name as $reason", ({ current, turn, reason }) => {
     expect(epochReason(current, turn)).toBe(reason);
+  });
+
+  it("refuses an opening no reason explains", () => {
+    expect(() => epochReason(snapshot, same)).toThrow(/no reason/);
   });
 });
 

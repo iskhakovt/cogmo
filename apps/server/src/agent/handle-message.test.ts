@@ -58,6 +58,7 @@ import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
 import type { StoredContent, StoredMessage } from "./stored-content.js";
 import { ToolRegistry, type ToolSpec } from "./tools.js";
+import { baseDigest } from "./transcript-head.js";
 import { asNonRetriable, failureCause } from "./turn-step-runner.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -5587,8 +5588,7 @@ describe("system prompt snapshot", () => {
           text: "reply",
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "reply" }] }],
           requests: {
-            system: "EPOCH PROMPT",
-            tools: [],
+            base: baseDigest("EPOCH PROMPT", []),
             historyLength: 8,
             sent: [{ length: 8, digest: "f".repeat(64) }],
             diverged: false,
@@ -5615,14 +5615,16 @@ describe("system prompt snapshot", () => {
       expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m1", status: "compacted" });
     });
 
-    it("heads the reply intact, from the loaded history's start, when the turn stored its summary", async () => {
+    it("heads the reply intact, from after the summary the turn stored", async () => {
       const deps = summarizingDeps(await defaultDigest());
       deps.runStreamingAgentLoop = headedLoop();
 
       await run(deps);
 
+      // The summary covers m1 and m2: the epoch the turn opened, and the
+      // view its requests sent, start at m3.
       expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalled();
-      expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m1", status: "intact" });
+      expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m3", status: "intact" });
     });
   });
 });

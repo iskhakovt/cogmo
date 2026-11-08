@@ -15,7 +15,6 @@ import type {
   ResponseMeta,
   StopReason,
   StreamEvent,
-  ToolDefinition,
   ToolResultClearing,
   ToolUseBlock,
   Usage,
@@ -270,7 +269,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
         finalModel,
         iterations,
         { text: "", toolUseIds: [] },
-        unrecordedRequests(systemPrompt, toolDefs, initialLength),
+        unrecordedRequests(baseDigest(systemPrompt, toolDefs), initialLength),
       );
     }
 
@@ -297,17 +296,13 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     finalModel,
     iterations,
     { text: "", toolUseIds: [] },
-    unrecordedRequests(systemPrompt, toolDefs, initialLength),
+    unrecordedRequests(baseDigest(systemPrompt, toolDefs), initialLength),
   );
 }
 
 /** {@link AgentLoopResult.requests} for a loop that records no request heads. */
-function unrecordedRequests(
-  system: string,
-  tools: ReadonlyArray<ToolDefinition>,
-  historyLength: number,
-): LoopRequests {
-  return { system, tools, historyLength, sent: [], diverged: false };
+function unrecordedRequests(base: string, historyLength: number): LoopRequests {
+  return { base, historyLength, sent: [], diverged: false };
 }
 
 // Stable identifier for one `tool_use` invocation: `iteration` is the
@@ -1031,11 +1026,11 @@ export async function runStreamingAgentLoop(
   // outcomes like the ledger above. Heads are hashed inside the step bodies,
   // so a replayed iteration costs no hashing.
   const hasher = new TranscriptHasher();
+  const base = baseDigest(systemPrompt, toolDefs);
   const sent: SentRequest[] = [];
   let diverged = false;
   const requests = (): LoopRequests => ({
-    system: systemPrompt,
-    tools: toolDefs,
+    base,
     historyLength: initialLength,
     sent: [...sent],
     diverged,
@@ -1074,10 +1069,7 @@ export async function runStreamingAgentLoop(
     // changing in it, so both happen once, live.
     const iterate = async (): Promise<LlmIterationOutcome> => {
       if (await superseded?.()) return { kind: "superseded" };
-      const head = hasher.head(
-        baseDigest(chatParams.system, chatParams.tools ?? []),
-        chatParams.messages,
-      );
+      const head = hasher.head(base, chatParams.messages);
       const outcome = await runLlmIteration(provider, chatParams, onEvent, budgets, log);
       countServerMismatches(reportedTransformations(outcome), site);
       return { ...outcome, head };

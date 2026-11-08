@@ -339,8 +339,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         lastAnsweredMessageId,
         priorCooldown: conv.cooldownState,
         result,
+        // The view the turn's requests sent starts after any summary it stored.
         view: {
-          historyStart: historyStart(transcript.history.messageIds, null),
+          historyStart: historyStart(transcript.history.messageIds, compacted.storedCutoff),
           compacted: compacted.rewroteView,
         },
       });

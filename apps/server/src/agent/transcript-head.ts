@@ -99,23 +99,23 @@ export class TranscriptHasher {
   }
 }
 
-/** `thinking_dropped` reasons that mean the provider saw a history other than the one the block was bound to. */
-const DIVERGING_DROP_REASONS: ReadonlySet<string> = new Set([
+/** Binding checks whose failure means the provider saw a history other than the one the block was bound to. */
+const DIVERGING_REASONS: ReadonlySet<string> = new Set([
   "prefix_binding_mismatch",
   "organization_binding_mismatch",
 ]);
 
 /**
  * Whether a server-reported transformation means the request's history
- * diverged from the one its thinking was bound to: `thinking_mismatch_allowed`,
- * or a `thinking_dropped` for a prefix or organization binding. A model or
- * end-user binding drop follows a model switch or a routing change, and
- * changes nothing the next turn sends.
+ * diverged from the one its thinking was bound to: a thinking block dropped
+ * or let through on a prefix or organization binding. A model or end-user
+ * binding failure follows a model switch or a routing change, and changes
+ * nothing the next turn sends.
  */
 export function isDivergingTransformation(t: InputTransformation): boolean {
   return (
-    t.type === "thinking_mismatch_allowed" ||
-    (t.type === "thinking_dropped" && DIVERGING_DROP_REASONS.has(t.reason))
+    (t.type === "thinking_dropped" || t.type === "thinking_mismatch_allowed") &&
+    DIVERGING_REASONS.has(t.reason)
   );
 }
 
@@ -127,10 +127,8 @@ export interface SentRequest {
 
 /** The requests one agent loop sent, in order, which the heads of its persisted rows extend. */
 export interface LoopRequests {
-  /** The system prompt every request sent. */
-  system: string;
-  /** The tool definitions every request sent; empty when it sent none. */
-  tools: ReadonlyArray<ToolDefinition>;
+  /** h₀ of every request the loop sent: its system prompt and tool definitions. */
+  base: string;
   /** Where the loop's new messages start: the length of the history it was given, as sent. */
   historyLength: number;
   /** One per iteration that reached the provider, by increasing length. */
@@ -141,7 +139,7 @@ export interface LoopRequests {
 
 /** What a turn's row heads take from its view. */
 export interface HeadView {
-  /** The first message the loaded history holds after its summary. */
+  /** The first message after the summary the turn's requests were sent under, one it stored included. */
   historyStart: string;
   /** Whether the turn's own compaction rewrote its view without a stored summary. */
   compacted: boolean;
@@ -156,12 +154,11 @@ export interface HeadView {
  * without one.
  */
 export function rowHeads(
-  hasher: TranscriptHasher,
   loop: LoopRequests,
   rows: ReadonlyArray<Message>,
   view: HeadView,
 ): Array<TranscriptHead | null> {
-  const base = baseDigest(loop.system, loop.tools);
+  const hasher = new TranscriptHasher();
   const status = view.compacted ? "compacted" : loop.diverged ? "diverged" : "intact";
   return rows.map((row, i) => {
     if (row.role !== "assistant") return null;
@@ -174,6 +171,6 @@ export function rowHeads(
       rows.slice(0, i + 1),
       request.length - loop.historyLength,
     );
-    return { ...head, base, historyStart: view.historyStart, status };
+    return { ...head, base: loop.base, historyStart: view.historyStart, status };
   });
 }

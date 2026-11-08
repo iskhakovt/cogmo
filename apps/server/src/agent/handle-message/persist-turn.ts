@@ -13,7 +13,7 @@ import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
 import { toStoredContent, toStoredMessage } from "../stored-content.js";
-import { type HeadView, rowHeads, TranscriptHasher } from "../transcript-head.js";
+import { type HeadView, rowHeads } from "../transcript-head.js";
 
 export interface PersistTurnDeps {
   runInTx: Transactor;
@@ -96,6 +96,9 @@ export async function persistTurn(
   const memo = await step.run("persist-new-messages", async (): Promise<PersistOutcome> => {
     const finalMessage = result.newMessages.at(-1);
     if (finalMessage === undefined) throw new Error("persistTurn: the loop returned no messages");
+    // Hashed in the step body, so a replay of the persisted turn hashes
+    // nothing, and outside the transaction, so a retry of it doesn't hash again.
+    const heads = rowHeads(result.requests, result.newMessages, args.view);
     // Both checks read in the insert's transaction, so the decision and the
     // write share one snapshot. REPEATABLE READ takes no predicate lock: a
     // row committed by a transaction overlapping this one is missed
@@ -123,13 +126,6 @@ export async function persistTurn(
         afterMessageId,
       });
       if (rebatched) return { kind: "superseded" };
-      // Hashed in the step body, so a replay of the persisted turn hashes nothing.
-      const heads = rowHeads(
-        new TranscriptHasher(),
-        result.requests,
-        result.newMessages,
-        args.view,
-      );
       const inserted = await deps.agentStore.insertMessages(tx, {
         conversationId,
         messages: R.zip(result.newMessages, heads).map(([message, transcriptHead]) => ({

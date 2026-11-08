@@ -5071,8 +5071,7 @@ describe("transcript heads", () => {
     expect(cache.get("llm-iter1")).toMatchObject({ head: first });
     expect(cache.get("llm-iter2")).toMatchObject({ head: second });
     expect(result.requests).toEqual({
-      system: SYSTEM,
-      tools: tools.definitions(),
+      base,
       historyLength: 1,
       sent: [first, second],
       diverged: false,
@@ -5157,7 +5156,7 @@ describe("transcript heads", () => {
 
       expect(result.degraded !== undefined).toBe(apology);
       const rows = apology ? [...result.newMessages, APOLOGY] : result.newMessages;
-      const heads = rowHeads(new TranscriptHasher(), result.requests, rows, {
+      const heads = rowHeads(result.requests, rows, {
         historyStart: "m1",
         compacted: false,
       });
@@ -5289,7 +5288,7 @@ describe("transcript heads", () => {
     expect(result.requests.sent).toEqual([{ length: 1, digest: null }]);
     expect(result.requests.diverged).toBe(false);
     expect(
-      rowHeads(new TranscriptHasher(), result.requests, result.newMessages, {
+      rowHeads(result.requests, result.newMessages, {
         historyStart: "m1",
         compacted: false,
       }),
