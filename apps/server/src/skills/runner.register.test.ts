@@ -2183,7 +2183,7 @@ tier: wasm
       return { runner, schemaImporter };
     }
 
-    async function pushWeather(branch: string, manifest = MODEL_MANIFEST): Promise<string> {
+    async function pushWeather(branch: string, manifest: string): Promise<string> {
       return pushFeatureBranch({ work: repo.work, branch, manifest, body: ECHO_BODY });
     }
 
@@ -2191,7 +2191,7 @@ tier: wasm
       const { runner, schemaImporter } = await runnerImporting(
         ok({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS }),
       );
-      await pushWeather("skill/weather");
+      await pushWeather("skill/weather", MODEL_MANIFEST);
 
       const result = await runner.register({ branch: "skill/weather", origin: OWNER });
 
@@ -2286,7 +2286,7 @@ tier: wasm
         "inputs_declared_twice: skill.py defines an Input model; remove inputs from SKILL.md",
         "outputs_declared_twice: skill.py defines an Output model; remove outputs from SKILL.md",
       ]);
-      await pushWeather("skill/weather-none");
+      await pushWeather("skill/weather-none", MODEL_MANIFEST);
       const none = await runner.register({ branch: "skill/weather-none", origin: OWNER });
       assertStatus(none, "rejected");
       expect(none.errors).toEqual([
@@ -2308,7 +2308,7 @@ tier: wasm
       "rejects an import that is $answer.kind, and commits nothing",
       async ({ answer, error }) => {
         const { runner } = await runnerImporting(err(answer));
-        await pushWeather("skill/weather");
+        await pushWeather("skill/weather", MODEL_MANIFEST);
         const mainBefore = await getMainSha(repo.bare);
 
         const result = await runner.register({ branch: "skill/weather", origin: OWNER });
@@ -2324,7 +2324,7 @@ tier: wasm
       const { runner } = await runnerImporting(
         ok({ inputs: { type: "object", properties: { city: { type: "place" } } }, outputs: null }),
       );
-      await pushWeather("skill/weather");
+      await pushWeather("skill/weather", MODEL_MANIFEST);
       const mainBefore = await getMainSha(repo.bare);
 
       const result = await runner.register({ branch: "skill/weather", origin: OWNER });
@@ -2397,7 +2397,7 @@ tier: wasm
         ok({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS }),
         ok({ inputs: { type: "object", properties: { zip: { type: "string" } } }, outputs: null }),
       );
-      const v1 = await pushWeather("skill/weather-v1");
+      const v1 = await pushWeather("skill/weather-v1", MODEL_MANIFEST);
       assertStatus(await runner.register({ branch: "skill/weather-v1", origin: OWNER }), "live");
       await pushWeather("skill/weather-v2", MODEL_MANIFEST.replace("whose", "v2, whose"));
       assertStatus(await runner.register({ branch: "skill/weather-v2", origin: OWNER }), "live");
@@ -2424,7 +2424,7 @@ tier: wasm
       );
       assertStatus(await runner.register({ branch: "skill/weather-v1", origin: OWNER }), "live");
       await db.execute(sql`UPDATE skill_deploys SET schemas = NULL WHERE git_sha = ${v1}`);
-      await pushWeather("skill/weather-v2");
+      await pushWeather("skill/weather-v2", MODEL_MANIFEST);
       assertStatus(await runner.register({ branch: "skill/weather-v2", origin: OWNER }), "live");
 
       const rolled = await runner.rollback({ name: "weather", toGitSha: v1, origin: OWNER });
@@ -2437,7 +2437,7 @@ tier: wasm
 
     it("rejects a rollback to a sha that never went live and declares no inputs", async () => {
       const { runner } = await runnerImporting(ok({ inputs: CITY_INPUTS, outputs: null }));
-      await pushWeather("skill/weather-v1");
+      await pushWeather("skill/weather-v1", MODEL_MANIFEST);
       assertStatus(await runner.register({ branch: "skill/weather-v1", origin: OWNER }), "live");
       // Committed on main's line but never registered.
       const unregistered = await pushWeather(

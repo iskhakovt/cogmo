@@ -56,8 +56,8 @@ export async function approveDeploy(
     );
   }
 
-  // The schemas register checked; a pending row from before they were
-  // recorded had its frontmatter declare them, as register then required.
+  // The schemas register checked; a row that recorded none has its sha's
+  // frontmatter declare them.
   const schemas = deploy.schemas ?? frontmatterSchemas(manifest);
   if (schemas === null) {
     throw new Error(

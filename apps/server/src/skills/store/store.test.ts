@@ -213,7 +213,7 @@ describe("DrizzleSkillStore", () => {
         inputs: { type: "object", title },
         outputs: null,
       });
-      const insert = (status: SkillDeployStatus, schemas: SkillSchemas, gitSha = SHA) =>
+      const insert = (status: SkillDeployStatus, schemas: SkillSchemas, gitSha: string) =>
         tx((trx) =>
           store.insertDeploy(trx, {
             skillId: row.id,
@@ -226,15 +226,15 @@ describe("DrizzleSkillStore", () => {
             resolvedAt: status === "pending_approval" ? null : new Date(),
           }),
         );
-      const read = (name: string, gitSha = SHA) =>
-        tx((trx) => store.liveDeploySchemas(trx, { name, gitSha }));
+      const read = (name: string) =>
+        tx((trx) => store.liveDeploySchemas(trx, { name, gitSha: SHA }));
 
-      await insert("denied", schemasOf("denied"));
-      await insert("pending_approval", schemasOf("pending"));
+      await insert("denied", schemasOf("denied"), SHA);
+      await insert("pending_approval", schemasOf("pending"), SHA);
       expect(await read("echo")).toBeNull();
 
-      await insert("live", schemasOf("live"));
-      const rolledBack = await insert("rolled_back", schemasOf("rolled back"));
+      await insert("live", schemasOf("live"), SHA);
+      const rolledBack = await insert("rolled_back", schemasOf("rolled back"), SHA);
       await insert("live", schemasOf("other sha"), "b".repeat(40));
       expect(await read("echo")).toEqual(schemasOf("rolled back"));
       expect(await read("other-skill")).toBeNull();

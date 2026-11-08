@@ -1325,6 +1325,38 @@ class Input(BaseModel):
     expect(inputs?.properties?.reached).not.toMatchObject({ default: "reached" });
   });
 
+  it("reports a child that does not start as unavailable", async () => {
+    const unbooted = await importSchemas("x = 1\n", { builtins: ["not-a-package"] });
+    const unlaunched = await importer.importSchemas({
+      body: "x = 1\n",
+      packages: { builtins: [], wheelDir: join(tmpdir(), "cogmo-no-such-wheels") },
+      packageCacheDir: cacheDir,
+      memoryMb: 128,
+      timeoutMs: 30_000,
+    });
+
+    expect(unbooted._unsafeUnwrapErr()).toEqual({
+      kind: "unavailable",
+      message: expect.stringMatching(/^worker init failed: .*not-a-package/),
+    });
+    expect(unlaunched._unsafeUnwrapErr()).toEqual({
+      kind: "unavailable",
+      message: expect.stringMatching(/^cannot grant .*cogmo-no-such-wheels/),
+    });
+  });
+
+  it("refuses a skill that replaces the schema encoder with something that writes no schemas", async () => {
+    const imported = await importSchemas(
+      "def _cogmo_contract_schemas(namespace):\n    return '[1]'\n",
+      { builtins: [] },
+    );
+
+    expect(imported._unsafeUnwrapErr()).toEqual({
+      kind: "refused",
+      message: "the schema encoder returned no JSON object of inputs and outputs",
+    });
+  });
+
   it("kills module code that outlives its budget", async () => {
     const imported = await importSchemas("while True:\n    pass\n", {
       builtins: [],

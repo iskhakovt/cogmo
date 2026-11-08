@@ -264,13 +264,17 @@ async function resolveSchemas(
   },
 ): Promise<Result<SkillSchemas, string[]>> {
   const { manifest } = args;
-  if (manifest.tier === "container") return registerSchemas(manifest, null);
-  const imported = await deps.wasm.importSchemas(
-    { body: args.body, lockfile: args.lockfile, resources: manifest.resources },
-    args.signal,
-  );
-  if (imported.isErr()) return err([describeSchemaImportError(imported.error)]);
-  return registerSchemas(manifest, imported.value);
+  return match(manifest.tier)
+    .with("container", async () => registerSchemas(manifest, null))
+    .with("wasm", async () => {
+      const imported = await deps.wasm.importSchemas(
+        { body: args.body, lockfile: args.lockfile, resources: manifest.resources },
+        args.signal,
+      );
+      if (imported.isErr()) return err([describeSchemaImportError(imported.error)]);
+      return registerSchemas(manifest, imported.value);
+    })
+    .exhaustive();
 }
 
 /**
