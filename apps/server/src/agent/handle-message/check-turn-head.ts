@@ -48,8 +48,8 @@ interface HeadedRow {
  * sent under an earlier epoch's render state, which the opening turn rewrote.
  * An opening row missing from the history belongs to an epoch that opened
  * after the turn loaded it, so no row is compared. A turn that advanced its
- * attachment cutoff, which opens an epoch anyway, compares no digest: its head
- * is still explained, but never found violated.
+ * attachment cutoff, which opens an epoch anyway, compares no digest: the
+ * stored head is still explained, but never found violated.
  *
  * Under `throw`, a `violated` verdict throws {@link PrefixViolationError}.
  *
@@ -153,7 +153,7 @@ function chainDigests(base: string, messages: ReadonlyArray<Message>, through: n
  * The loaded history as the epoch's requests send it, before the turn's own
  * compaction: the turn's view, which renders it under the epoch's cutoff when
  * the turn kept that cutoff. Null when the turn advanced it: the turn opens an
- * `attachments` epoch whatever the comparison finds, so it compares nothing
+ * `attachments` epoch whatever the comparison finds, so it compares no digest
  * rather than render attachments it won't send.
  */
 function sentHistory(view: TurnView, openerIndex: number): Message[] | null {
