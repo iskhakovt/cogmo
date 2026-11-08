@@ -176,6 +176,46 @@ async def test_a_model_that_writes_nan_and_bytes_keys_its_own_way_is_not_refused
 
 
 @pytest.mark.asyncio
+async def test_a_non_finite_number_inside_a_list_or_set_is_output_invalid() -> None:
+    class Collections(BaseModel):
+        listed: list[float]
+        unique: set[float]
+
+    async def in_list(inputs: object, ctx: Ctx) -> object:
+        return {"listed": [1.0, float("inf")], "unique": set()}
+
+    async def in_set(inputs: object, ctx: Ctx) -> object:
+        return {"listed": [], "unique": {1.0, float("nan")}}
+
+    assert (await call_run({"Output": Collections}, in_list, {}, CTX))[0] == (
+        "output_invalid",
+        "inf is not a finite number, which JSON writes as null",
+    )
+    assert (await call_run({"Output": Collections}, in_set, {}, CTX))[0] == (
+        "output_invalid",
+        "a set holds a number that is not finite, which JSON writes as null",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_json_only_serializer_that_writes_more_keys_is_not_refused() -> None:
+    from pydantic import model_serializer
+
+    class Annotated(BaseModel):
+        n: int
+
+        @model_serializer(mode="wrap")
+        def with_kind(self, handler: Any, info: Any) -> dict[str, object]:
+            data = handler(self)
+            return {**data, "kind": "annotated"} if info.mode == "json" else data
+
+    async def run(inputs: object, ctx: Ctx) -> object:
+        return {"n": 1}
+
+    assert await call_run({"Output": Annotated}, run, {}, CTX) == (None, {"n": 1, "kind": "annotated"})
+
+
+@pytest.mark.asyncio
 async def test_a_type_error_an_output_validator_raises_propagates() -> None:
     from pydantic import field_validator
 

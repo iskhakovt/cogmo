@@ -64,9 +64,15 @@ def _lossy(python: object, dumped: object) -> str | None:
         if isinstance(before, dict) and isinstance(after, dict):
             if len(after) < len(before):
                 return "two keys of one dict are written alike as JSON strings, so one would be lost"
-            pending.extend(zip(before.values(), after.values(), strict=True))
+            # A serializer that writes other keys leaves nothing to pair.
+            if len(after) == len(before):
+                pending.extend(zip(before.values(), after.values(), strict=True))
         elif isinstance(before, list | tuple) and isinstance(after, list) and len(before) == len(after):
             pending.extend(zip(before, after, strict=True))
+        elif isinstance(before, set | frozenset) and isinstance(after, list):
+            # Unordered, so compared as a whole: a non-finite float in, a `null` out.
+            if any(isinstance(x, float) and not math.isfinite(x) for x in before) and None in after:
+                return "a set holds a number that is not finite, which JSON writes as null"
     return None
 
 
