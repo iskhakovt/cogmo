@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from cogmo_skills_runtime import runner
 from cogmo_skills_runtime.runner import CtxError, _Bridge, _main
 
 
@@ -80,6 +81,7 @@ class TestErrors:
             task_id="t-syntax",
         )
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "SyntaxError" in result["error"]
 
     @pytest.mark.asyncio
@@ -90,6 +92,7 @@ class TestErrors:
             task_id="t-raise",
         )
         assert result["ok"] is False
+        assert result["errorKind"] == "skill_raised"
         assert "RuntimeError" in result["error"]
         assert "skill failed" in result["error"]
         assert "traceback" in result
@@ -102,6 +105,7 @@ class TestErrors:
             task_id="t-no-run",
         )
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "async def run" in result["error"]
 
     @pytest.mark.asyncio
@@ -112,7 +116,129 @@ class TestErrors:
             task_id="t-sync",
         )
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "async def run" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_body_raising_at_import_fails_to_load(self) -> None:
+        result = await _drive(
+            body="import not_a_module\n\nasync def run(inputs, ctx):\n    return None\n",
+            inputs={},
+            task_id="t-import",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
+        assert "ModuleNotFoundError" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_memory_error_is_memory_exceeded(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    raise MemoryError()\n",
+            inputs={},
+            task_id="t-oom",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "memory_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_uncaught_ctx_error_is_skill_raised(self) -> None:
+        result = await _drive(
+            body=(
+                "from cogmo_skills_runtime.runner import CtxError\n"
+                "async def run(inputs, ctx):\n    raise CtxError('missing_effect', 'needs reads_memory')\n"
+            ),
+            inputs={},
+            task_id="t-ctx",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "skill_raised"
+        assert result["error"] == "missing_effect: needs reads_memory"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("float('nan')", "Out of range float values are not JSON compliant"),
+            ("float('inf')", "Out of range float values are not JSON compliant"),
+            ("{1, 2}", "Object of type set is not JSON serializable"),
+        ],
+    )
+    async def test_output_json_cannot_carry_is_output_invalid(self, value: str, message: str) -> None:
+        result = await _drive(
+            body=f"async def run(inputs, ctx):\n    return {{'v': {value}}}\n",
+            inputs={},
+            task_id="t-nonjson",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert message in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_integer_the_host_would_round_is_output_invalid(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {'id': 2**53, 'ok': 2**53 - 1}\n",
+            inputs={},
+            task_id="t-bigint",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert "integer 9007199254740992 is past 2**53" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_keys_json_writes_alike_are_output_invalid(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {1: 'a', '1': 'b'}\n",
+            inputs={},
+            task_id="t-keys",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert "two keys of one dict are written alike" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_memory_error_while_encoding_is_memory_exceeded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def exhausted(output: object) -> str:
+            raise MemoryError()
+
+        monkeypatch.setattr(runner, "_encode_output", exhausted)
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {'big': True}\n",
+            inputs={},
+            task_id="t-oom-encode",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "memory_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_memory_error_at_import_is_memory_exceeded(self) -> None:
+        result = await _drive(
+            body="raise MemoryError()\nasync def run(inputs, ctx):\n    return None\n",
+            inputs={},
+            task_id="t-oom-import",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "memory_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_output_past_the_frame_cap_is_output_invalid(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return 'x' * (17 * 1024 * 1024)\n",
+            inputs={},
+            task_id="t-huge",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert "the cap is" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_output_is_carried_as_json_carries_it(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {'t': (1, 2), 3: 'int key'}\n",
+            inputs={},
+            task_id="t-json",
+        )
+        assert result["ok"] is True
+        assert result["output"] == {"t": [1, 2], "3": "int key"}
 
 
 class TestRusage:

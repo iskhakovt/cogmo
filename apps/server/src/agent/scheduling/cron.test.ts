@@ -167,21 +167,20 @@ describe("computeNextRun", () => {
     //   - Ends   Apr 5 2026 (clocks back    03:00 AEDT → 02:00 AEST)
     // Confirms croner's tz arithmetic isn't northern-hemisphere-only.
 
-    it("shifts to next valid instant on Sydney spring-forward (Oct)", () => {
-      // "Every day at 02:30 local" — 02:30 AEST doesn't exist on
-      // 2025-10-05 (clocks jump 02:00 → 03:00 AEDT). Croner's
-      // convention: shift the missing local time forward by 1 hour
-      // (same as the northern-hemisphere `01:00 → 02:00 BST` case),
-      // NOT snap to the gap edge.
+    it("fires at the gap's end on Sydney spring-forward (Oct)", () => {
+      // "Every day at 02:30 local" — 02:30 doesn't exist on 2025-10-05
+      // (clocks jump 02:00 AEST → 03:00 AEDT). A fixed-time cron in the
+      // gap fires at the first valid instant after it, 03:00 AEDT, as
+      // Vixie cron does.
       const next = computeNextRun(
         "30 2 * * *",
         "Australia/Sydney",
         new Date("2025-10-04T12:00:00Z"),
       );
-      // 03:30 AEDT on 2025-10-05 = 16:30 UTC on 2025-10-04 (Sydney is
-      // UTC+11 post-DST, so the shifted-forward 03:30 local is the
-      // previous calendar date in UTC).
-      expect(next.toISOString()).toBe("2025-10-04T16:30:00.000Z");
+      // 03:00 AEDT on 2025-10-05 = 16:00 UTC on 2025-10-04 (Sydney is
+      // UTC+11 after the jump, so the fire lands on the previous
+      // calendar date in UTC).
+      expect(next.toISOString()).toBe("2025-10-04T16:00:00.000Z");
     });
 
     it("fires once at first occurrence on Sydney fall-back (Apr)", () => {

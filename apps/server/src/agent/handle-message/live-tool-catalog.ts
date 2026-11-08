@@ -22,6 +22,8 @@ export interface LiveToolCatalogDeps {
 
 export interface LiveToolCatalogArgs {
   userId: string;
+  /** The turn's profile, which a skill run records as its run-as. */
+  profileId: string;
   coreMemoryScope: CoreMemoryScope;
   /** The profile's `toolSet` globs; empty offers every tool. */
   toolSetGlobs: readonly string[];
@@ -48,9 +50,11 @@ export async function buildLiveToolCatalog(
   deps: LiveToolCatalogDeps,
   args: LiveToolCatalogArgs,
 ): Promise<ToolRegistry> {
-  const { userId, coreMemoryScope, toolSetGlobs } = args;
+  const { userId, profileId, coreMemoryScope, toolSetGlobs } = args;
   const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
-  const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner, { userId }) : [];
+  const skillTools = deps.skillRunner
+    ? await buildSkillTools(deps.skillRunner, { userId, profileId })
+    : [];
   // One `subagent__<name>` tool per row, loaded fresh each turn (CLI CRUD
   // takes effect without a restart). The handler closes over the same
   // per-turn `resolveProvider`, so a sub-agent can target any routable

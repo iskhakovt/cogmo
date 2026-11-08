@@ -49,6 +49,7 @@ import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
+import { expectFinished } from "./assertions.js";
 import { type EvalFailure, type EvalMetric, summariseRates } from "./eval-checks.js";
 
 export type { EvalFailure, EvalMetric } from "./eval-checks.js";
@@ -291,7 +292,7 @@ export async function runEvalTurn(params: {
     onEvent: async () => {},
     cache: { key: params.cacheKey, retention: "short" },
     turnLogger: logger,
-  });
+  }).then(expectFinished);
   return { systemPrompt, userMessage, result };
 }
 

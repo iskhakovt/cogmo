@@ -94,7 +94,7 @@ export type TaskReturn =
   /** The worker lives, and the recycle caps judge it. */
   | { kind: "alive"; taskCount: number; ageMs: number }
   | { kind: "dead" }
-  /** `invoke` threw, which is a bug: the worker is retired. */
+  /** `invoke` threw (its dispatch gate's database failure, or a bug): the worker is retired. */
   | { kind: "threw" };
 
 export type PoolEvent<W extends WorkerRef, Q> =

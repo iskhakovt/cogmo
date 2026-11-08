@@ -25,6 +25,7 @@ import { deliverReply } from "./handle-message/deliver-reply.js";
 import { finalizeTurnContext } from "./handle-message/finalize-turn-context.js";
 import { freezeTurnInputs } from "./handle-message/freeze-turn-inputs.js";
 import { batchCursors, routingKindOf } from "./handle-message/inbound-batch.js";
+import { isTurnSuperseded } from "./handle-message/is-turn-superseded.js";
 import { loadTurnTranscript } from "./handle-message/load-turn-transcript.js";
 import { persistTurn } from "./handle-message/persist-turn.js";
 import { recordUserMessage } from "./handle-message/record-user-message.js";
@@ -33,7 +34,7 @@ import { reportTurnFailure } from "./handle-message/report-turn-failure.js";
 import { resolveTurnModel } from "./handle-message/resolve-turn-model.js";
 import { runTurnLoop } from "./handle-message/run-turn-loop.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
-import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
+import type { StreamingAgentLoopParams, StreamingLoopOutcome } from "./loop.js";
 import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import type { PromptSource } from "./prompt.js";
 import type { Service } from "./service.js";
@@ -75,7 +76,7 @@ export interface HandleMessageDeps {
   images: NormalizeArrivalDeps["images"];
   debounceConfig: DebounceConfig;
   deliveryRouter: DeliveryRouter;
-  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
+  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<StreamingLoopOutcome>;
   /**
    * Optional factory that constructs a coding service scoped to this turn's
    * conversation. Bootstrap supplies it when the sandbox module is
@@ -293,22 +294,31 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         timezone: deps.userTimezone,
       });
 
-      const { result, unstreamed } = await runTurnLoop(
-        durable,
-        stepRun,
-        deps.runStreamingAgentLoop,
-        {
-          conversationId,
-          turnModel,
-          systemPrompt: finalized.systemPrompt,
-          messages: finalized.messages,
-          tools: frozen.turnTools,
-          service,
-          delivery,
-          firstInboundId,
-          turnLogger,
-        },
-      );
+      const lastAnsweredMessageId = lastAssistant?.id ?? null;
+      const looped = await runTurnLoop(durable, stepRun, deps.runStreamingAgentLoop, {
+        conversationId,
+        turnModel,
+        systemPrompt: finalized.systemPrompt,
+        messages: finalized.messages,
+        tools: frozen.turnTools,
+        service,
+        delivery,
+        firstInboundId,
+        superseded: () =>
+          isTurnSuperseded(deps, {
+            conversationId,
+            cursor: maxInboundId,
+            afterMessageId: lastAnsweredMessageId,
+          }),
+        turnLogger,
+      });
+      if (looped.kind === "superseded") {
+        // Another reply owned this batch's inbounds before an iteration
+        // streamed; the persist check would refuse this turn's reply.
+        turnLogger.warn("another reply owns this turn's inbounds; stopped before streaming");
+        return { status: "skipped" as const, reason: "superseded" as const };
+      }
+      const { result, unstreamed } = looped;
 
       turnLogger.info(
         {
@@ -325,7 +335,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         triggerInboundId,
         snapshot,
         maxInboundId,
-        lastAnsweredMessageId: lastAssistant?.id ?? null,
+        lastAnsweredMessageId,
         priorCooldown: conv.cooldownState,
         result,
       });

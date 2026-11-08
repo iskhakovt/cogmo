@@ -18,13 +18,14 @@ import type {
   Usage,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
-import { expectDefined } from "../test/assertions.js";
+import { expectDefined, expectFinished } from "../test/assertions.js";
 import { doneFrame, mockFilesService, scriptedStream } from "../test/factories.js";
 import type {
   AgentLoopParams,
   AgentLoopResult,
   StepRunner,
   StreamingAgentLoopParams,
+  StreamingLoopOutcome,
 } from "./loop.js";
 import { runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
@@ -101,7 +102,9 @@ function testRunAgentLoop(overrides: LoopOverrides): Promise<AgentLoopResult> {
   });
 }
 
-function testRunStreamingAgentLoop(overrides: StreamingLoopOverrides): Promise<AgentLoopResult> {
+function testStreamingLoopOutcome(
+  overrides: StreamingLoopOverrides,
+): Promise<StreamingLoopOutcome> {
   return runStreamingAgentLoop({
     model: "test",
     systemPrompt: "sys",
@@ -109,6 +112,11 @@ function testRunStreamingAgentLoop(overrides: StreamingLoopOverrides): Promise<A
     turnLogger: logger,
     ...overrides,
   });
+}
+
+/** A streaming loop that has to finish: the result it finished with. */
+function testRunStreamingAgentLoop(overrides: StreamingLoopOverrides): Promise<AgentLoopResult> {
+  return testStreamingLoopOutcome(overrides).then(expectFinished);
 }
 
 /**
@@ -2317,6 +2325,178 @@ describe("durable LLM iterations (stepRun)", () => {
   });
 });
 
+describe("superseded check", () => {
+  function echoTools(): ToolRegistry {
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => ok(`pong from ${input.text}`),
+      }),
+    );
+    return tools;
+  }
+
+  /** A first iteration that streams a preamble and calls `echo`. */
+  const TOOL_TURN: MockStreamTurn = {
+    events: [
+      { type: "text_delta", text: "Let me check. " },
+      { type: "tool_start", id: "t1", name: "echo", input: { text: "ping" } },
+    ],
+    stopReason: "tool_use",
+  };
+
+  it("stops before the first iteration's provider call when the check holds", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "late reply" }], stopReason: "end_turn" },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    const outcome = await testStreamingLoopOutcome({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      superseded: async () => true,
+    });
+
+    expect(outcome).toEqual({ kind: "superseded" });
+    expect(provider.chatStream).not.toHaveBeenCalled();
+    expect(collected).toEqual([]);
+  });
+
+  it("asks before every iteration and stops at the first that holds", async () => {
+    const provider = mockStreamProvider([
+      TOOL_TURN,
+      { events: [{ type: "text_delta", text: "late reply" }], stopReason: "end_turn" },
+    ]);
+    const superseded = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const collected: StreamEvent[] = [];
+
+    const outcome = await testStreamingLoopOutcome({
+      provider,
+      messages: [{ role: "user", content: "echo ping" }],
+      tools: echoTools(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      superseded,
+    });
+
+    expect(outcome).toEqual({ kind: "superseded" });
+    expect(superseded).toHaveBeenCalledTimes(2);
+    expect(provider.chatStream).toHaveBeenCalledTimes(1);
+    // The first iteration and its tool streamed; the second never started.
+    expect(collected.map((e) => e.type)).toEqual(["text_delta", "tool_start", "tool_result"]);
+  });
+
+  it("runs the turn to its reply while the check doesn't hold", async () => {
+    // Non-vacuity check for the tests above.
+    const provider = mockStreamProvider([
+      TOOL_TURN,
+      { events: [{ type: "text_delta", text: "Got: pong" }], stopReason: "end_turn" },
+    ]);
+    const superseded = vi.fn<() => Promise<boolean>>().mockResolvedValue(false);
+
+    const outcome = await testStreamingLoopOutcome({
+      provider,
+      messages: [{ role: "user", content: "echo ping" }],
+      tools: echoTools(),
+      onEvent: async () => {},
+      superseded,
+    });
+
+    expect(superseded).toHaveBeenCalledTimes(2);
+    expect(expectFinished(outcome).text).toBe("Got: pong");
+  });
+
+  it("asks inside the iteration's step, so a stored verdict is not asked again", async () => {
+    const cache = new Map<string, unknown>();
+    const first = cachingStepRun(cache);
+    const superseded = vi.fn<() => Promise<boolean>>().mockResolvedValue(true);
+    const provider = mockStreamProvider([]);
+    const run = (stepRun: StepRunner) =>
+      testStreamingLoopOutcome({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+        stepRun,
+        superseded,
+      });
+
+    await run(first.stepRun);
+    expect(first.calls).toEqual(["llm-iter1"]);
+    expect(cache.get("llm-iter1")).toEqual({ kind: "superseded" });
+
+    // A replay: the stored verdict stops the loop even though the check
+    // would now answer differently.
+    superseded.mockClear();
+    superseded.mockResolvedValue(false);
+    const replayed = await run(cachingStepRun(cache).stepRun);
+
+    expect(replayed).toEqual({ kind: "superseded" });
+    expect(superseded).not.toHaveBeenCalled();
+    expect(provider.chatStream).not.toHaveBeenCalled();
+  });
+
+  it("does not ask again for an iteration whose drained outcome is stored", async () => {
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "text", text: "cached reply" }],
+          stopReason: "end_turn",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "cached reply", toolUseIds: [] },
+        },
+      ],
+    ]);
+    const superseded = vi.fn<() => Promise<boolean>>().mockResolvedValue(true);
+
+    const outcome = await testStreamingLoopOutcome({
+      provider: mockStreamProvider([]),
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      stepRun: cachingStepRun(cache).stepRun,
+      superseded,
+    });
+
+    expect(superseded).not.toHaveBeenCalled();
+    expect(expectFinished(outcome).text).toBe("cached reply");
+  });
+
+  it("fails the iteration when the check throws, before any provider call", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "reply" }], stopReason: "end_turn" },
+    ]);
+
+    await expect(
+      testStreamingLoopOutcome({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+        superseded: async () => {
+          throw new Error("connection refused");
+        },
+      }),
+    ).rejects.toThrow("connection refused");
+    expect(provider.chatStream).not.toHaveBeenCalled();
+  });
+});
+
 // The cap is per-model and set by the caller. Reasoning shares it, so a
 // cap sized for reply text alone truncates a turn that thinks — and
 // `classifyPostStream` reports a truncated turn as `ok`, so it is
@@ -4008,7 +4188,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger,
-    });
+    }).then(expectFinished);
 
     expect(result.degraded).toBeUndefined();
     expect(result.iterations).toBe(4);
@@ -4070,7 +4250,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger: logger,
-    });
+    }).then(expectFinished);
 
     expect(result.degraded).toBeUndefined();
     const toolResults = result.newMessages
@@ -4106,7 +4286,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger: logger,
-    });
+    }).then(expectFinished);
 
     const toolResults = result.newMessages
       .filter((m) => m.role === "user")
@@ -4141,7 +4321,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger: logger,
-    });
+    }).then(expectFinished);
     expect(r1.degraded).toBeUndefined();
     const r1Errors = r1.newMessages
       .filter((m) => m.role === "user")
@@ -4166,7 +4346,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger: logger,
-    });
+    }).then(expectFinished);
     expect(r2.degraded).toBeUndefined();
     const r2Errors = r2.newMessages
       .filter((m) => m.role === "user")
@@ -4226,7 +4406,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger: logger,
-    });
+    }).then(expectFinished);
 
     // The fresh tool_use (new1) lands as the 3rd `img` call when counted
     // from the start of this turn's iteration window (initialLength =
@@ -4273,7 +4453,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger,
-    });
+    }).then(expectFinished);
 
     expect(result.degraded).toBeUndefined();
     const toolResults = result.newMessages
@@ -4327,7 +4507,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger,
-    });
+    }).then(expectFinished);
 
     expect(result.degraded).toBeUndefined();
     const toolResults = result.newMessages
@@ -4388,7 +4568,7 @@ describe("volume-cluster trigger", () => {
       service: stubService(),
       onEvent: async () => {},
       turnLogger: logger,
-    });
+    }).then(expectFinished);
 
     // Iterations 1, 2 succeed. Iter 3 intercept = no side effect, fp
     // consecutive=1. Iter 4 = consecutive=2. Iter 5 = consecutive=3

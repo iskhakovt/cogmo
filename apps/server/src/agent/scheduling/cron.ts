@@ -4,11 +4,12 @@
  * Backed by croner — zero-dep, IANA-tz-aware via `Intl.DateTimeFormat`.
  * DST behaviour (verified empirically and pinned in `cron.test.ts`):
  *
- *   - **Spring forward**: when a cron targets a local hour that doesn't
- *     exist on the DST-start day, croner shifts it to the next valid
- *     instant rather than skipping the day. "Every day at 01:00 local"
- *     fires once that day at 02:00 BST (= 01:00 UTC), then resumes
- *     normal cadence. Preserves "fires daily" semantics.
+ *   - **Spring forward**: when a cron targets a local time that doesn't
+ *     exist on the DST-start day, croner fires at the first valid
+ *     instant after the gap rather than skipping the day. "Every day at
+ *     01:00 local" fires once that day at 02:00 BST (= 01:00 UTC), and
+ *     02:30 in Sydney's 02:00 → 03:00 gap fires at 03:00, then normal
+ *     cadence resumes. Preserves "fires daily" semantics.
  *   - **Fall back**: when a cron targets a local hour that occurs twice
  *     on the DST-end day, croner fires once at the FIRST occurrence and
  *     skips the second. "Every day at 01:00 local" fires at 01:00 BST,

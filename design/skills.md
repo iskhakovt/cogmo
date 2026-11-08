@@ -162,7 +162,7 @@ A worker has one task in flight and possibly several `ctx_call`s nested inside i
 
 ```json
 // worker → host (startup)
-{"type": "supervisor_ready", "protocolVersion": 3}
+{"type": "supervisor_ready", "protocolVersion": 4}
 
 // host → worker
 {"type": "task_invoke", "id": "run-7f3", "skill": "summarize-email", "inputs": {...}}
@@ -176,6 +176,9 @@ A worker has one task in flight and possibly several `ctx_call`s nested inside i
 // worker → host (outcome, then teardown confirmed)
 {"type": "task_result", "id": "run-7f3", "ok": true, "output": {...}}
 {"type": "task_exited", "id": "run-7f3"}
+
+// worker → host (a failed task names its kind; see Run failures)
+{"type": "task_result", "id": "run-7f3", "ok": false, "errorKind": "skill_raised", "error": "KeyError: 'id'"}
 ```
 
 stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Inside the container the host channel never reaches skill code; see [State reset between tasks](#state-reset-between-tasks-confirmed).
@@ -1738,7 +1741,7 @@ created, mounted, in use ──creating process dies──▶ orphaned ──rec
 
 - The credential is `<class>.<subject fields>.<mac>`: the class, its subject fields in the order the credential-classes table lists them, and `mac`, HMAC-SHA256 of everything before it, every subject field, under a key derived from the master key (HKDF, purpose `skill-egress`, [infrastructure.md](infrastructure.md)). Fields are dot-separated and none holds a dot: UUIDs, integers and enum values. The rules parse the class to pick a rule; admission verifies the MAC for the class claimed, then checks the subject against durable state. Every subject is durable (a `skill_runs` row, a draft's attempt or round, or a draftless register's phase row), so nothing stores the credential and a restarted proxy needs no map.
 - The relay puts it in the task process's environment and proxy URL, never in the container's. The URL is mockttp's metadata form, `http://metadata:<base64url({"tags":["<credential>"]})>@<proxy>`, where `<proxy>` is the bridge's loopback port in a session and the listener's address for `ctx.http`, which httpx and requests send as `Proxy-Authorization` on each `CONNECT`, and on each plain-`http` request (Implementation, below). A pool worker's next task gets the next run's credential.
-- A `run` request is admitted only while its run is at `recovery_point = 'dispatched'`, a `populate` request only while it is at `started`, before dispatch (`dispatched` is S3's, [Run failures](#run-failures) → Stuck runs). The proxy then loads the run's skill at the run's `git_sha` for its allowlist and bindings. `transitionToExecuted` revokes the credential by moving the row, and the proxy refuses the run's next request. A request already in flight carries no further secret, since substitution is in the request line and headers, already sent; it ends when its client socket closes, which the task process's exit does and `ctx.http` does by aborting its request when the run ends, and at the tunnel's class timeout at the latest. mockttp drops the upstream connection as soon as the client's closes. Admission is cached per class, each entry bounded by a time the admission read from the database: a `run` admission until `deadline_at`, a `populate` admission until `created_at` plus 15 min, the sweeper's bound on a `started` row. The run's next transition, the sweeper's included, also drops the entry in-process when it commits in `cogmo serve`; one committed in another process (`cogmo skills run` runs the runner in the CLI) takes effect at the bound. **Residual:** a CLI run's `populate` credential stays admitted to the package index hosts until its bound, after dispatch. A verify-class admission is never cached, so every verify request re-reads its attempt's phase, or its draftless register's phase row, in one indexed read.
+- A `run` request is admitted only while its run is at `recovery_point = 'dispatched'`, a `populate` request only while it is at `started`, before dispatch ([Run failures](#run-failures) → Stuck runs). The proxy then loads the run's skill at the run's `git_sha` for its allowlist and bindings. `transitionToExecuted` revokes the credential by moving the row, and the proxy refuses the run's next request. A request already in flight carries no further secret, since substitution is in the request line and headers, already sent; it ends when its client socket closes, which the task process's exit does and `ctx.http` does by aborting its request when the run ends, and at the tunnel's class timeout at the latest. mockttp drops the upstream connection as soon as the client's closes. Admission is cached per class, each entry bounded by a time the admission read from the database: a `run` admission until `deadline_at`, a `populate` admission until `created_at` plus 15 min, the sweeper's bound on a `started` row. The run's next transition, the sweeper's included, also drops the entry in-process when it commits in `cogmo serve`; one committed in another process (`cogmo skills run` runs the runner in the CLI) takes effect at the bound. **Residual:** a CLI run's `populate` credential stays admitted to the package index hosts until its bound, after dispatch. A verify-class admission is never cached, so every verify request re-reads its attempt's phase, or its draftless register's phase row, in one indexed read.
 - A new run means a new credential. The task process can read its own credential; that is the trade for pool workers that need no per-task network setup, and it is bounded because a credential opens only its own run's allowlist, and only while the run is in flight.
 
 **Credential classes.**
@@ -1898,35 +1901,53 @@ async def run(inputs: Input, ctx: Ctx) -> Output: ...
 
 ### Run failures
 
-`skill_runs.error_kind` (`skill_run_error_kind`) is set iff `status = 'error'`, beside the `error` message. Each kind has one class, a pure function of the kind:
+`skill_runs.error_kind` (`skill_run_error_kind`) is set iff `error` is, beside it: a worker's error carries its kind from `executed`, so a recovered `executed` row finishes with the kind the worker reported, and every `error` verdict has one. Each kind has one class, a pure function of the kind (`skillRunErrorClass`):
 
 | Class | Kinds | Counts toward auto-disable | Retried |
 |-|-|-|-|
 | defect | `skill_raised` (an uncaught exception), `output_invalid`, `load_failed` (syntax, import, missing `run`), `wall_clock_exceeded`, `memory_exceeded` | yes | no |
 | expected | `skill_failed` (`SkillError(kind, message)`), `input_invalid` (pydantic refused what ajv passed) | no | no |
 | pausing | `skill_retryable` (`SkillError(..., retryable=True)`), `runtime_unavailable` (pool, sandbox, supervisor, worker init), `dependency_unavailable`, `egress_unavailable` (the proxy down, or `[proposed]` its loopback listener failing the runner's probe), `credential_unavailable` (the proxy could not produce a bound credential), `host_lost` (swept before dispatch) | no | once, for a cron fire |
-| lost | `result_lost` (swept after dispatch, so the body may have acted) | no | no |
+| lost | `result_lost` (no result after the send: swept past `deadline_at`, or the worker died or hung after it, so the body may have acted) | no | no |
 | legacy | `unknown`: only the migration writes it, on error rows from before the column | no | no |
 
 - A failure before the skill executed is a `SkillInvokeRejection`, as today. A cron fire throws on a `wasm_packages_unavailable` a retry can clear (a network, prefetch, publish, lockfile-read or built-in integrity failure) before its final attempt, so Inngest's retries apply, and records the skip on the final one (`[proposed]` `sandbox_unavailable` gets the same treatment); one terminal for the lockfile (`wheel_unavailable`, `hash_mismatch`) is skipped at once, as is every other rejection, `[proposed]` recorded as the fire's `skip_reason` ([Cron fires](#cron-fires-proposed)).
 - A run that executed is never re-run on its own key. A cron run ending in a pausing kind is re-fired once, after a backoff, under `skill-cron:<skillId>:<scheduledFor>:retry`, as the fire's attempt-1 row ([Cron fires](#cron-fires-proposed)).
 - `output_invalid` keeps what the skill returned, so the run is debuggable and the model is told its effects happened: `chk_skill_runs_outcome` admits `output` on an error verdict only with that kind.
-- A non-JSON output (`NaN`, a `set`) is `output_invalid`, decided in the worker before `transitionToExecuted`, so a host-side parse never strands the row at `started`.
+- A non-JSON output (`NaN`, a `set`, an integer past 2**53, which the host's `JSON.parse` would round, or two keys of one dict JSON writes alike, `1` and `"1"`, of which it would keep one) is `output_invalid`, decided in the worker before `transitionToExecuted`, so a host-side parse never strands the row at `dispatched` and no value reaches the host changed: both tiers encode the return value with Python's `json.dumps(..., allow_nan=False)` and refuse such integers and keys.
+- Who decides each kind. The worker reports `load_failed` (the body would not compile or import, or defines no `run`: on the container tier an `async def run`, on the wasm tier any callable, since the call is awaited), `skill_raised`, `memory_exceeded` (a `MemoryError`, at import, in `run` or while encoding the output; on the container tier also a task process killed by `SIGKILL`, the cgroup's OOM killer's signal, which a skill killing itself with it reads as too: both are defects) and `output_invalid` (an output past the frame cap included) in `task_result.errorKind`; on the container tier its relay reports `wall_clock_exceeded`, `skill_raised` for a frame past the cap and `runtime_unavailable` for a host that does not tag its ctx replies (none that reads kinds), and its task process `dependency_unavailable` for a venv that will not activate. The runtime host reports the wasm tier's `wall_clock_exceeded`, `runtime_unavailable` (the pool, the worker or its supervisor, when the task was not sent), `dependency_unavailable` (the venv populate) and `result_lost` (the worker died or hung after the send). `finishRun` decides the output schema's `output_invalid`, and the sweeper `host_lost` and `result_lost`. **Residual:** a container-tier skill shares its task process's stdout with the runner, so it can write its own `task_result` and name any kind a worker reports, a pausing one included; the kind is the worker's claim, as its message is. The wasm tier's frames are written by the host's JavaScript, which skill code cannot reach. `[proposed]` `skill_failed`, `skill_retryable` and `input_invalid` arrive with `SkillError` and pydantic (todo.md → Skills autonomy S4), `egress_unavailable` with the proxy (S6) and `credential_unavailable` with bound secrets (S8).
+- A tool run's failure reaches the model by class: a `lost` run may have acted, a `pausing` one may succeed later, and an `output_invalid` one acted and returned the kept output.
 
 **Events.** Every run that finishes with an error emits `skills/run.failed` `{ skillId, runId, trigger, errorKind }`. Cron and event runs notify their run-as user: the skill, the error, the last success, and Disable. Tool runs reach the user through the model. The same subscriber applies the auto-disable rule ([Notifications and undo](#notifications-and-undo)), and `skills.activation` records why a skill is off ([Skill activation](#skill-activation-proposed)). The emit follows the commit that finishes the run, so a crash between them loses it. **Residual:** that notification is lost, though the run shows in `cogmo skills runs` and the activity view; auto-disable reads `skill_runs` at the live sha, not a counter, so it counts the failure at the next one.
 
-**Stuck runs** `[proposed]`, S3's. Dispatch is a transition: immediately before it sends `task_invoke`, every runtime moves the row `started → dispatched` by conditional UPDATE, writing `deadline_at` (now, plus `wall_clock_s`, plus 60 s for the kill and the result frame). Zero rows means the sweeper took the run, and the task is not sent. `skill-runs-sweeper` runs every 5 min and moves a stuck row to `finished`, writing `finished_at`, `resource_usage` (`wallClockMs` from `created_at`, `peakMemoryBytes` null) and the `error` text, as `chk_skill_runs_executed_payload` and `chk_skill_runs_outcome` require:
+**Stuck runs** `[confirmed]`. Dispatch is a transition: immediately before it sends `task_invoke`, every runtime moves the row `started → dispatched` by conditional UPDATE, writing `deadline_at` (now, plus `wall_clock_s`, plus 60 s for the kill, the result frame and a one-shot container's teardown, which precedes the record). Zero rows means the sweeper took the run, and the task is not sent. The runtime calls a gate the runner hands it (`DispatchGate`), after the pool lease, the worker's handshake and the populate, so the deadline counts from the send. `skill-runs-sweeper` runs every 5 min and moves a stuck row to `finished`, writing `finished_at`, `resource_usage` (`wallClockMs` from `created_at`, `peakMemoryBytes` null) and the `error` text, as `chk_skill_runs_executed_payload` and `chk_skill_runs_outcome` require:
 
 | Row | Swept when | `error_kind` | Re-fired |
 |-|-|-|-|
 | `started`, never dispatched | 15 min after `created_at`, which covers the 60 s worker init and populate (180 s; the `populate` class allows 10 min) and bounds the pool's queue, unbounded beyond `max` | `host_lost` | once, for a cron fire: nothing ran |
 | `dispatched` | past `deadline_at` | `result_lost` | never: the body may have acted |
 
-A run that fails before dispatch (the runner's egress probe failed, the populate session failed, worker init failed) does not wait for the sweeper: it moves `started → executed` by its own conditional UPDATE on `recovery_point = 'started'`, with an error-only payload in a pausing kind that says no skill code ran, and finishes as `error` ([At-most-once invocation](#at-most-once-invocation-confirmed) → transitions). Nothing ran, so a cron fire re-fires once, as for `host_lost`.
+A run that fails before dispatch (the populate failed, the pool or the worker could not take the task, `[proposed]` the runner's egress probe failed) does not wait for the sweeper: it moves `started → executed` by its own conditional UPDATE on `recovery_point = 'started'`, with an error-only payload in a pausing kind that says no skill code ran, and finishes as `error` ([At-most-once invocation](#at-most-once-invocation-confirmed) → transitions). Nothing ran, so a cron fire re-fires once, as for `host_lost`.
 
-Each move is a conditional UPDATE on the row's recovery point, and revokes the run's egress credential with it. A late `transitionToExecuted` then matches no row and returns `swept`, logged with the output it discards, rather than throwing. A keyed retry replays the swept error instead of reading `inflight` forever. **Residual:** a row a build without `dispatched` left at `started` may have executed, and is swept as `host_lost`, so its cron fire re-fires once; this happens only across the deploy that ships S3.
+Each move is a conditional UPDATE on the row's recovery point; `[proposed]` it revokes the run's egress credential with it (S6). A late `transitionToExecuted` then matches no row and returns `swept`, logged with the output it discards, rather than throwing, and the invocation returns the swept error. A keyed retry replays the swept error instead of reading `inflight` forever. The sweeper re-fires nothing; a cron fire's re-fire is the fire's own ([Cron fires](#cron-fires-proposed)).
 
-**Audit columns.** `skill_runs` gains `git_sha`, `run_as_user_id`, `run_as_profile_id`, `shadow` and `deadline_at`. `skill_context_calls.error` becomes the `ctx_error_kind` pgEnum, and `secrets.get` fails closed when its audit row cannot be written. Backfills, in the migration of the slice that adds each column: with the run schema (todo.md → Skills autonomy S3), error runs get `error_kind = 'unknown'` and `shadow` is `false`; with the failure events (S12), context-call errors map each known `CtxErrorKind` string to its value and anything else to `unknown`, and `skills.activation` is backfilled as [Skill activation](#skill-activation-proposed) states.
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| A crash after `dispatched` commits, before `task_invoke` is sent | `dispatched` | swept `result_lost` past `deadline_at`: the row cannot tell an unsent task from a sent one, so it takes the reading that may have acted |
+| The worker dies between the dispatch and the send | `executed` with `runtime_unavailable`, recorded from `dispatched` | the gate re-checks the worker before the send, so the runtime knows it sent nothing and fails the task as a value; the row keeps its `deadline_at` |
+| The worker dies or hangs after the send | `executed` with `result_lost` | the body may have acted: the model is told so, and nothing retries it |
+| A crash after the send, before `executed` commits | `dispatched` | swept `result_lost`; the body may have acted |
+| The sweeper finishes the row before the dispatch | `finished`, `host_lost` | the dispatch matches no row, the task is not sent, and the invocation returns the swept error |
+| The sweeper finishes the row before `transitionToExecuted` | `finished`, `result_lost` | the late write matches no row and returns `swept`, logging the output it discards |
+| The sweeper and a transition race on one row | whichever commits first | both are conditional UPDATEs; under REPEATABLE READ the later one raises `40001`, the transactor retries it, and its guard then matches nothing |
+| The dispatch's own transaction fails | `started`, or `dispatched` when its commit landed unacknowledged | the throw fails the invocation with nothing sent, and the sweeper finishes the row: `host_lost` from `started`, `result_lost` from `dispatched`, the conservative reading |
+| A keyed retry meets `dispatched` | `dispatched` | refused as `inflight` until the sweeper finishes the row, then replays the swept error |
+| A sweep fails | rows unchanged | the next tick retries; each move is guarded, so a repeat is a no-op |
+| A run in flight across the deploy that adds `dispatched` | `started` | the old `serve` drains its runs before it stops (deploy.md), so only a crashed build leaves one. **Residual:** that row may have executed, and is swept `host_lost`, so its cron fire re-fires once |
+
+`0082_skill_run_schema` adds the enum value, the columns and the CHECKs in one transaction. No shipped shape fails them once the backfills ran, since `error` rows get `error_kind = 'unknown'`, every row `shadow = false`, and the audit columns and `deadline_at` stay null on rows from before them.
+
+**Audit columns.** `skill_runs` records the run's `git_sha`, its run-as user and profile, and `shadow` (false for every run until shadow fires, [Risk tiers](#risk-tiers-without-a-human)); legacy rows hold null for the first three and `false` for `shadow`. `[proposed]` `skill_context_calls.error` becomes the `ctx_error_kind` pgEnum, and `secrets.get` fails closed when its audit row cannot be written; with the failure events (S12), context-call errors map each known `CtxErrorKind` string to its value and anything else to `unknown`, and `skills.activation` is backfilled as [Skill activation](#skill-activation-proposed) states.
 
 ## Observability `[proposed]`
 
@@ -1956,7 +1977,11 @@ CREATE TYPE skill_risk_tier AS ENUM ('auto', 'notify', 'approve');
 CREATE TYPE skill_run_status AS ENUM ('running', 'success', 'error');
 CREATE TYPE skill_run_trigger AS ENUM ('manual', 'cron', 'event');
 CREATE TYPE skill_deploy_status AS ENUM ('pending_approval', 'denied', 'live', 'rolled_back');
-CREATE TYPE skill_run_recovery_point AS ENUM ('started', 'executed', 'finished');
+CREATE TYPE skill_run_recovery_point AS ENUM ('started', 'dispatched', 'executed', 'finished');
+CREATE TYPE skill_run_error_kind AS ENUM ('skill_raised', 'output_invalid', 'load_failed', 'wall_clock_exceeded',
+  'memory_exceeded', 'skill_failed', 'input_invalid', 'skill_retryable', 'runtime_unavailable',
+  'dependency_unavailable', 'egress_unavailable', 'credential_unavailable', 'host_lost', 'result_lost',
+  'unknown');   -- 'unknown': migration backfill only
 
 skills (
   id                UUID v7 PK,
@@ -2001,21 +2026,33 @@ skill_runs (
   trigger         skill_run_trigger NOT NULL,
   inputs          JSONB NOT NULL,           -- SkillInvocationInputsSchema (matches skill's declared input JSON Schema at invoke time; Zod layer is pass-through)
   status          skill_run_status NOT NULL,
-  output          JSONB,                    -- nullable: null on error. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
+  output          JSONB,                    -- nullable: null on error but output_invalid. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
   error           TEXT,                     -- nullable: null on success
+  error_kind      skill_run_error_kind,     -- nullable: set iff error is (chk_skill_runs_error_kind_with_error)
   resource_usage  JSONB,                    -- nullable: SkillRunResourceUsageSchema. { wallClockMs, peakMemoryBytes }. Null while recovery_point = 'started'.
   idempotency_key TEXT,                     -- nullable: null for one-shot CLI/test invocations. UNIQUE(idempotency_key) — Postgres NULLs-are-not-equal default allows multiple null rows; see At-most-once invocation.
-  recovery_point  skill_run_recovery_point NOT NULL DEFAULT 'started',  -- 'started' | 'executed' | 'finished' — drives the replay branches in runner.invoke.
+  recovery_point  skill_run_recovery_point NOT NULL DEFAULT 'started',  -- drives the replay branches in runner.invoke.
+  deadline_at     TIMESTAMPTZ,              -- nullable: written at dispatch, so null at 'started' and set at 'dispatched'; past them, null on a row never dispatched or from before the column
+  git_sha         TEXT,                     -- nullable: the skill's sha the run executed; null only on rows from before the column
+  run_as_user_id  UUID REFERENCES users(id),     -- nullable: who the run acted for; as git_sha
+  run_as_profile_id UUID REFERENCES profiles(id), -- nullable: as git_sha
+  shadow          BOOLEAN NOT NULL,         -- written by every insert; the migration backfilled false
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finished_at     TIMESTAMPTZ,              -- nullable: null while recovery_point = 'started'
-  -- Per-state data (see At-most-once invocation → Per-state data):
+  finished_at     TIMESTAMPTZ,              -- nullable: null before recovery_point = 'executed'
+  -- Per-state data (see At-most-once invocation → Per-state data). No CHECK names 'dispatched',
+  -- so its ADD VALUE shares their migration (architecture-rules.md → splitting one migration into two):
   CHECK ((recovery_point = 'finished') = (status <> 'running')),          -- chk_skill_runs_status_iff_finished
-  CHECK ((recovery_point = 'started') = (finished_at IS NULL)
-     AND (recovery_point = 'started') = (resource_usage IS NULL)
-     AND (recovery_point <> 'started' OR (output IS NULL AND error IS NULL))),  -- chk_skill_runs_executed_payload
-  CHECK (NOT (output IS NOT NULL AND error IS NOT NULL)
+  CHECK ((recovery_point IN ('executed', 'finished')) = (finished_at IS NOT NULL)
+     AND (recovery_point IN ('executed', 'finished')) = (resource_usage IS NOT NULL)
+     AND (recovery_point IN ('executed', 'finished') OR (output IS NULL AND error IS NULL))),  -- chk_skill_runs_executed_payload
+  CHECK ((output IS NULL OR error IS NULL OR (status = 'error' AND error_kind = 'output_invalid'))
      AND (status <> 'success' OR error IS NULL)
-     AND (status <> 'error' OR (error IS NOT NULL AND output IS NULL)))   -- chk_skill_runs_outcome
+     AND (status <> 'error' OR error IS NOT NULL)),                       -- chk_skill_runs_outcome
+  CHECK ((error_kind IS NULL) = (error IS NULL)),                          -- chk_skill_runs_error_kind_with_error
+  CHECK ((recovery_point <> 'started' OR deadline_at IS NULL)
+     AND (recovery_point IN ('started', 'executed', 'finished') OR deadline_at IS NOT NULL)),  -- chk_skill_runs_deadline_at
+  CHECK ((git_sha IS NULL) = (run_as_user_id IS NULL)
+     AND (git_sha IS NULL) = (run_as_profile_id IS NULL))                  -- chk_skill_runs_audit_together
 )
 
 skill_context_calls (
@@ -2031,7 +2068,7 @@ skill_context_calls (
 
 `skills` is derived state — authoritative source is the git repo. Row synced from `SKILL.md` on deploy. `skill_runs` is append-only audit trail. `skill_context_calls` records every `ctx.*` RPC from the worker, scoped to a run — secret names and memory-bank names only, never values.
 
-**JSONB schemas validated at the store boundary** ([architecture-rules.md](../.agents/rules/architecture-rules.md)), each defined in `types.ts`: `skills.inputs` (`SkillInputsSchema`), `skills.outputs` (`SkillIoSchema`), `skills.effects` (`SkillEffectsSchema`), `skill_deploys.classifier_log` (`ClassifierLogSchema`), `skill_runs.inputs` and `output` (`SkillInvocationInputsSchema`, `SkillInvocationOutputSchema`: any JSON value, since ajv checks the skill's own schema at invoke) and `skill_runs.resource_usage` (`SkillRunResourceUsageSchema`, null while `recovery_point = 'started'`).
+**JSONB schemas validated at the store boundary** ([architecture-rules.md](../.agents/rules/architecture-rules.md)), each defined in `types.ts`: `skills.inputs` (`SkillInputsSchema`), `skills.outputs` (`SkillIoSchema`), `skills.effects` (`SkillEffectsSchema`), `skill_deploys.classifier_log` (`ClassifierLogSchema`), `skill_runs.inputs` and `output` (`SkillInvocationInputsSchema`, `SkillInvocationOutputSchema`: any JSON value, since ajv checks the skill's own schema at invoke) and `skill_runs.resource_usage` (`SkillRunResourceUsageSchema`, null before `recovery_point = 'executed'`). `idx_skill_runs_running`, partial on `status = 'running'`, keeps the sweeper's scan to the runs in flight; `idx_skill_runs_run_as_profile_id` serves the profile delete's reference count.
 
 ### Authoring, egress and audit additions `[proposed]`
 
@@ -2044,10 +2081,6 @@ CREATE TYPE skill_draft_blocked_reason AS ENUM ('author_unavailable', 'verifier_
 CREATE TYPE skill_draft_end_reason AS ENUM ('user_abandoned', 'spec_timeout', 'blocked_timeout', 'approval_timeout',
   'denied', 'base_moved', 'step_error');
 CREATE TYPE skill_review_verdict AS ENUM ('pass', 'revise', 'block');
-CREATE TYPE skill_run_error_kind AS ENUM ('skill_raised', 'output_invalid', 'load_failed', 'wall_clock_exceeded',
-  'memory_exceeded', 'skill_failed', 'input_invalid', 'skill_retryable', 'runtime_unavailable',
-  'dependency_unavailable', 'egress_unavailable', 'credential_unavailable', 'host_lost', 'result_lost',
-  'unknown');   -- 'unknown': migration backfill only
 CREATE TYPE skill_activation AS ENUM ('awaiting_first_deploy', 'live', 'disabled_operator', 'deregistered', 'disabled_error_rate');
 CREATE TYPE skill_egress_outcome AS ENUM ('pending', 'forwarded', 'shadowed', 'denied', 'failed');
 CREATE TYPE skill_egress_class AS ENUM ('run', 'populate', 'verify_install', 'verify_code', 'review');
@@ -2063,7 +2096,6 @@ CREATE TYPE skill_egress_failure_reason AS ENUM ('host_not_allowed', 'blocked_ad
   'credential_unavailable', 'not_http', 'too_large', 'timeout', 'upstream_error', 'client_aborted', 'process_lost');
 CREATE TYPE skill_register_phase AS ENUM ('register_install', 'register_code', 'done');
 CREATE TYPE egress_listener_status AS ENUM ('starting', 'listening', 'failed', 'stopped');
-ALTER TYPE skill_run_recovery_point ADD VALUE 'dispatched';   -- started | dispatched | executed | finished; no CHECK names it, so it shares their migration
 CREATE TYPE egress_ca_status AS ENUM ('active', 'retiring', 'retired');
 CREATE TYPE calibration_run_status AS ENUM ('running', 'passed', 'stale', 'failed');
 CREATE TYPE calibration_failure_reason AS ENUM ('below_floor', 'step_error', 'lost');
@@ -2277,20 +2309,6 @@ egress_ca_generations (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
--- skill_runs gains:
-  git_sha            TEXT,        -- nullable: null only on rows from before the column; every new row sets it
-  run_as_user_id     UUID REFERENCES users(id),     -- nullable: as git_sha
-  run_as_profile_id  UUID REFERENCES profiles(id),  -- nullable: as git_sha
-  shadow             BOOLEAN NOT NULL,         -- written explicitly by every insert; the migration backfills false
-  error_kind         skill_run_error_kind,  -- nullable: set iff status = 'error' (CHECK)
-  deadline_at        TIMESTAMPTZ,  -- nullable: written at dispatch, so null at 'started' and set at 'dispatched'; past them, null only on a row never dispatched;
-                                   -- CHECK (recovery_point <> 'started' OR deadline_at IS NULL)
-                                   --   AND (recovery_point IN ('started', 'executed', 'finished') OR deadline_at IS NOT NULL)
-  -- chk_skill_runs_outcome admits output on an error verdict only when error_kind = 'output_invalid'
-  -- chk_skill_runs_executed_payload is rephrased on recovery_point IN ('executed', 'finished') in place of = 'started', so 'dispatched' carries
-  -- no finished_at, resource_usage, output or error, as 'started' does. Neither CHECK names 'dispatched', so the ADD VALUE and both CHECKs share
-  -- one migration (architecture-rules.md → splitting one migration into two)
-
 -- skill_deploys gains:
   restores_git_sha   TEXT,        -- nullable: set iff status = 'rolled_back' (CHECK); backfill: the row's own git_sha, which an update-ref rollback restored
   reviewed_git_sha   TEXT NOT NULL,  -- the tip register classified and the draft verified and reviewed; git_sha is the deployed commit, which differs only
@@ -2312,13 +2330,13 @@ egress_ca_generations (
 
 `runner.invoke` takes an optional `idempotencyKey`. With one, the run follows a database-level state machine that executes the skill body at most once per key and returns the stored result to every later attempt, under any workflow engine. A first attempt that died after writing its row is refused as `inflight`, never re-executed: the guarantee is at-most-once execution with cached-result recovery. A cron re-fire after a pausing kind runs under a new key, and `ctx.run().key` is what keeps it from acting twice at a destination that honours `Idempotency-Key` ([Contracts](#contracts-proposed)). The pattern is Brandur Leach's [idempotency keys in Postgres](https://brandur.org/idempotency-keys): atomic phases and recovery points.
 
-**State machine.** `skill_runs.recovery_point` is advanced by atomic UPDATEs inside `runInTx`; `dispatched` is `[proposed]` (S3, [Run failures](#run-failures) → Stuck runs):
+**State machine.** `skill_runs.recovery_point` is advanced by atomic UPDATEs inside `runInTx`; the sweeper finishes a run stuck at `started` or `dispatched` ([Run failures](#run-failures) → Stuck runs):
 
 ```
 INSERT recovery_point='started'  ← startOrRecoverRun, atomic
-  ↓ [proposed] UPDATE recovery_point='dispatched', deadline_at  ← immediately before task_invoke
+  ↓ UPDATE recovery_point='dispatched', deadline_at  ← dispatchRun, immediately before task_invoke
   ↓ execute skill body (non-idempotent, side-effecting)
-UPDATE recovery_point='executed', output/error/resource_usage/finished_at  ← transitionToExecuted, atomic
+UPDATE recovery_point='executed', output/error/error_kind/resource_usage/finished_at  ← transitionToExecuted, atomic
   ↓ output validation (pure, deterministic)
 UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFinished, atomic
 ```
@@ -2329,28 +2347,30 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 
 | Transition | Guard | Writes, in one statement | Outcome |
 |-|-|-|-|
-| insert → `started` | none; with a key, `ON CONFLICT (idempotency_key) DO UPDATE` with a no-op SET recovers the row the key already has | `skill_id`, `trigger`, `inputs`, `status = 'running'`, the key; `recovery_point` by default | the row, as `new` or `recovered` |
-| `started` → `dispatched` `[proposed]` | `WHERE id = $1 AND recovery_point = 'started'` | `recovery_point`, `deadline_at` | `dispatched`; zero rows means swept, and the task is not sent |
-| `started` → `executed`; from `dispatched` once that ships | `WHERE id = $1 AND recovery_point = 'started'`; `= 'dispatched'` once S3 ships | `recovery_point`, the worker's `output` or `error`, `resource_usage`, `finished_at` | a zero-row match throws today. `[proposed]`: it returns `swept`, logged with the output it discards, when the sweeper finished the row, and throws on any other state |
-| `started` → `executed`, failed before dispatch `[proposed]` | `WHERE id = $1 AND recovery_point = 'started'` | `recovery_point`, an `error` saying no skill code ran, with its pausing kind (`egress_unavailable` from the runner's egress probe, `dependency_unavailable` from the populate session, `runtime_unavailable` from worker init), `resource_usage`, `finished_at`; never an `output` | `transitioned`; zero rows means swept. The normal path keeps its `= 'dispatched'` guard, so this row is the only move out of `started` but dispatch and the sweep |
-| `started` or `dispatched` → `finished`, swept `[proposed]` | the row's recovery point, and its age or `deadline_at` | `recovery_point`, `status = 'error'`, `error_kind` `host_lost` or `result_lost`, `error`, `resource_usage`, `finished_at` | `swept` |
-| `executed` → `finished` | `WHERE id = $1 AND recovery_point = 'executed'` | `recovery_point`, `status`, and the verdict's `output` or `error` | `transitioned`; `already_finished` with the row another attempt settled; a row at `started` or missing throws |
+| insert → `started` | none; with a key, `ON CONFLICT (idempotency_key) DO UPDATE` with a no-op SET recovers the row the key already has | `skill_id`, `trigger`, `inputs`, `status = 'running'`, the key, `git_sha`, the run-as, `shadow`; `recovery_point` by default | the row, as `new` or `recovered` |
+| `started` → `dispatched` | `WHERE id = $1 AND recovery_point = 'started'` | `recovery_point`, `deadline_at` | `dispatched`; `swept` with the row when the sweeper finished it, and the task is not sent; any other state throws |
+| `dispatched` → `executed` | `WHERE id = $1 AND recovery_point = 'dispatched'` | `recovery_point`, the worker's `output` or `error` with its `error_kind`, `resource_usage`, `finished_at` | `transitioned`; `swept` with the row, logged with the output it discards, when the sweeper finished it; any other state throws |
+| `started` → `executed`, failed before dispatch | `WHERE id = $1 AND recovery_point = 'started'` | `recovery_point`, an `error` saying no skill code ran, with its pausing kind (`dependency_unavailable` from the populate, `runtime_unavailable` from the pool or the worker, `[proposed]` `egress_unavailable` from the runner's egress probe), `resource_usage`, `finished_at`; never an `output` | `transitioned`; `swept` as above. The normal path keeps its `= 'dispatched'` guard, so this row is the only move out of `started` but dispatch and the sweep |
+| `started` or `dispatched` → `finished`, swept | the row's recovery point, and its age or `deadline_at` | `recovery_point`, `status = 'error'`, `error_kind` `host_lost` or `result_lost`, `error`, `resource_usage`, `finished_at` | `swept`; `moved_on` when the row left that state first |
+| `executed` → `finished` | `WHERE id = $1 AND recovery_point = 'executed'` | `recovery_point`, `status`, and the verdict's `output`, or its `error` and `error_kind` (with the output an `output_invalid` keeps) | `transitioned`; `already_finished` with the row another attempt settled; any other state or a missing row throws |
 
 | `recovery_point` | `status` | `output` / `error` | `resource_usage` | `finished_at` |
 |-|-|-|-|-|
 | `started` | `running` | both null | null | null |
-| `dispatched` `[proposed]` | `running` | both null | null | null; `deadline_at` set |
-| `executed` | `running` | what the worker produced: `output` (null when the skill returned nothing) with `error` null, or `error` with `output` null | set | set |
+| `dispatched` | `running` | both null | null | null; `deadline_at` set |
+| `executed` | `running` | what the worker produced: `output` (null when the skill returned nothing) with `error` null, or `error` and its `error_kind` with `output` null | set | set |
 | `finished` | `success` | `output` (possibly null), `error` null | set | set |
-| `finished` | `error` | `error` set, `output` null | set | set |
+| `finished` | `error` | `error` and `error_kind` set; `output` null, or what the skill returned for `output_invalid` | set | set |
 
 - `chk_skill_runs_status_iff_finished` (Data model): a terminal `status` exists exactly in the `finished` phase.
 - `chk_skill_runs_executed_payload`: `finished_at`, `resource_usage` and the worker's `output` or `error` arrive with `executed` and are absent before it.
-- `chk_skill_runs_outcome`: `output` and `error` are alternatives; an `error` verdict names its reason and keeps no output, a `success` verdict has no error.
+- `chk_skill_runs_outcome`: `output` and `error` are alternatives but on an `output_invalid` verdict; an `error` verdict names its reason, a `success` verdict has no error.
+- `chk_skill_runs_error_kind_with_error`: an `error` has its kind, and nothing else does.
+- `chk_skill_runs_deadline_at`: `deadline_at` arrives with `dispatched` and is never present at `started`.
 
-The `executed` payload stays in its existing columns under CHECK, a deviation from [state-machines.md](../.agents/rules/state-machines.md)'s per-state JSONB blob: the columns are populated in production, the CHECK gives the same all-or-none invariant, moving them would cost a data migration with no reader to benefit, and `chk_skills_run_as_iff_live_schedule` is the same accepted shape. `error` is free text, so a worker failure and an output-schema rejection cannot be told apart by query; an `error_kind` enum is a residual, closed by [Run failures](#run-failures) (todo.md → Skills autonomy S3).
+The `executed` payload stays in its existing columns under CHECK, a deviation from [state-machines.md](../.agents/rules/state-machines.md)'s per-state JSONB blob: the columns are populated in production, the CHECK gives the same all-or-none invariant, moving them would cost a data migration with no reader to benefit, and `chk_skills_run_as_iff_live_schedule` is the same accepted shape. `error_kind` tells the failures apart by query ([Run failures](#run-failures)).
 
-In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", output } | { kind: "error", error }`) and `SkillRunVerdict` (`{ status: "success", output } | { status: "error", error }`) — which the store maps onto the columns, so no caller can write a half-payload. `finishedVerdictOf` reads a `finished` row back into its verdict and throws on a row outside the shape: an invariant the CHECKs hold, so a bug, not a value.
+In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", output } | { kind: "error", error }`) and `SkillRunVerdict` (`{ status: "success", output } | { status: "error", error }`), where `error` is a `SkillRunError` (`{ kind, message }`, with `output` on the `output_invalid` variant only) — which the store maps onto the columns, so no caller can write a half-payload. `finishedVerdictOf` reads a `finished` row back into its verdict and throws on a row outside the shape: an invariant the CHECKs hold, so a bug, not a value.
 
 `0077_skill_run_and_deploy_state_checks` adds the CHECKs of both tables and, before the one that needs it, repairs the one shape a shipped build wrote that they reject — one transaction, so a failure leaves the repair unapplied too, boot fails naming the constraint, and the next boot retries the file.
 
@@ -2370,7 +2390,7 @@ In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", ou
 | `kind='new'` (no prior row) | Standard flow: execute → executed → finished |
 | `recovered`, `recovery_point='finished'` | Return cached `SkillRunResult` reconstructed from the row. Runtime never touched. |
 | `recovered`, `recovery_point='executed'` | Skip execute, replay output validation against stored output, transition to `finished`. Persist-failure retries land here. When two attempts finish the same row, the second gets the result the first settled. |
-| `recovered`, `recovery_point` `started` or `dispatched` | In flight: the prior attempt crashed mid-execute, or another worker is executing this key, and the row cannot tell which. Refused as `inflight`, naming the run, since re-executing risks repeating non-idempotent side effects; an operator inspects. A manifest flag `idempotent_invocation: true` could later opt into re-executing. `[proposed]` (S3): the sweeper moves such a row past its bound to `host_lost` or `result_lost`, after which the key replays that error ([Run failures](#run-failures)). |
+| `recovered`, `recovery_point` `started` or `dispatched` | In flight: the prior attempt crashed mid-execute, or another worker is executing this key, and the row cannot tell which. Refused as `inflight`, naming the run, since re-executing risks repeating non-idempotent side effects. A manifest flag `idempotent_invocation: true` could later opt into re-executing. The sweeper moves such a row past its bound to `host_lost` or `result_lost`, after which the key replays that error ([Run failures](#run-failures)). |
 
 **Caller key conventions** (deterministic per logical fire):
 
@@ -2392,7 +2412,7 @@ In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", ou
 |-|-|-|
 | Public interface | `index.ts`, `runner.ts` | `SkillRunner` contract; `SkillRunnerImpl` wires the source cache, warm pool and use cases below |
 | Deploy pipeline | `deploy/` | One use case per RPC: `register.ts`, `approve.ts`, `deny.ts`, `rollback.ts`, `activation.ts` (enable + deregister); `announce-outcome.ts`, which emits `skills/deploy/outcome` for every register caller; the lockfile check, the remote mirror, the deploy facts and the run-as `origin.ts` they share |
-| Invocation | `invoke/` | `invoke.ts` (pre-flight, then the recovery-point state machine: `start-run.ts`, `execute-run.ts`, `finish-run.ts`), `runtime.ts` (planning + dispatch to the isolate, pool or one-shot container), `warm-pool.ts` (lazy pool start + shutdown) |
+| Invocation | `invoke/`, `runs-sweeper.ts` | `invoke.ts` (pre-flight, then the recovery-point state machine: `start-run.ts`, `dispatch-run.ts`, `execute-run.ts`, `finish-run.ts`), `run-result.ts` (the result, the verdict reader, `skillRunErrorClass`), `runtime.ts` (planning + dispatch to the isolate, pool or one-shot container), `warm-pool.ts` (lazy pool start + shutdown); `skill-runs-sweeper`, which finishes runs stuck in flight |
 | Source cache + listing | `source-cache.ts`, `listing.ts` | Parsed manifests with compiled validators keyed by `(name, gitSha)`; `listAll` (every skill with its pending deploy) / `listToolDefs` |
 | Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts`, `risk-reasons.ts`, `capabilities.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) with its reasons, against the deployment's enforcement flags |
 | Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, wasm-tier Pyodide compat check |

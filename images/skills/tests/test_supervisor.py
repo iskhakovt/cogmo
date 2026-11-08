@@ -166,6 +166,7 @@ class TestRunOneTaskInChild:
         assert result["type"] == "task_result"
         assert result["id"] == "t-bad"
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "SyntaxError" in result["error"]
 
     def test_writes_task_result_when_skill_raises(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -180,6 +181,7 @@ class TestRunOneTaskInChild:
         captured = capsys.readouterr()
         result = json.loads(captured.out.strip())
         assert result["ok"] is False
+        assert result["errorKind"] == "skill_raised"
         assert "ValueError" in result["error"]
         assert "boom" in result["error"]
 
@@ -195,7 +197,21 @@ class TestRunOneTaskInChild:
         captured = capsys.readouterr()
         result = json.loads(captured.out.strip())
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "async def run" in result["error"]
+
+    def test_reports_a_skill_that_exits_as_skill_raised(self, capsys: pytest.CaptureFixture[str]) -> None:
+        task = {
+            "type": "task_invoke",
+            "id": "t-exit",
+            "skill": "exit",
+            "inputs": {},
+            "body": "import sys\nasync def run(inputs, ctx):\n    sys.exit(3)\n",
+        }
+        _run_one_task_in_child(task)
+        result = json.loads(capsys.readouterr().out.strip())
+        assert result["errorKind"] == "skill_raised"
+        assert result["error"] == "supervisor_child_aborted: SystemExit: 3"
 
 
 class TestActivateSkillVenv:
@@ -341,6 +357,23 @@ class TestActivateSkillVenv:
         result = json.loads(captured.out.strip())
         assert result["ok"] is True, result
         assert result["output"] == {"answer": 42}
+
+    def test_run_one_task_in_child_reports_a_missing_venv_as_dependency_unavailable(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        task = {
+            "type": "task_invoke",
+            "id": "t-no-venv",
+            "skill": "venv-missing",
+            "inputs": {},
+            "body": "async def run(inputs, ctx):\n    return None\n",
+            "lockfileHash": self._HASH,
+        }
+        _run_one_task_in_child(task)
+        result = json.loads(capsys.readouterr().out.strip())
+        assert result["ok"] is False
+        assert result["errorKind"] == "dependency_unavailable"
+        assert "has no site-packages" in result["error"]
 
 
 class TestSupervisorImportSafety:

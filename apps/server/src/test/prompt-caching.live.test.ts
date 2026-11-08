@@ -38,7 +38,7 @@ import {
 } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
-import { expectDefined } from "./assertions.js";
+import { expectDefined, expectFinished } from "./assertions.js";
 import { createWireRecorder, type WireRequestInit, type WireResponse } from "./wire-recorder.js";
 
 // An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
@@ -230,7 +230,7 @@ async function converse(params: {
       cache: turnCacheIntent(nonce, "chat"),
       ...(params.clearToolResults && { clearToolResults: params.clearToolResults }),
       turnLogger: logger,
-    });
+    }).then(expectFinished);
     expect(result.degraded, `turn ${i + 1} degraded`).toBeUndefined();
     turnOf.push(...Array.from({ length: recorder.exchanges.length - before }, () => i + 1));
     history = [...history, message, ...result.newMessages.map(reloaded)];

@@ -8,14 +8,21 @@ import type {
   SandboxSession,
 } from "../../sandbox/index.js";
 import { ensureVenvPopulated } from "../deps.js";
-import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import {
+  type CtxHandler,
+  Dispatcher,
+  type GateOutcome,
+  unreportedTaskKind,
+} from "../dispatcher.js";
+import {
+  type DispatchGate,
+  fromTaskResult,
   SUPERVISOR_PROTOCOL_VERSION,
   type TaskInvoke,
   type TaskOutcome,
-  type TaskResult,
+  withheldOutcome,
 } from "../protocol.js";
-import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
+import { timeoutSignal } from "../wall-clock.js";
 import type { Death, StartFailure, TaskFailure, WorkerFrame } from "../worker-state.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
 import { createNdjsonTransport } from "./transport.js";
@@ -116,19 +123,22 @@ function describeStartFailure(failure: StartFailure): string {
     .exhaustive();
 }
 
-function fromTaskResult(result: TaskResult): TaskOutcome {
-  return {
-    ...(result.ok ? { ok: true, output: result.output } : { ok: false, error: result.error }),
-    ...(result.rusage !== undefined && { rusage: result.rusage }),
-  };
-}
-
-function describeTaskFailure(failure: TaskFailure): string {
-  return match(failure)
+/**
+ * A task that delivered no result: the supervisor's or the channel's
+ * failure, since the relay reports the skill's own. Once the task was sent
+ * its body may have acted, so it is `result_lost`; a task a dead worker
+ * never sent is `runtime_unavailable`.
+ */
+function taskFailureOutcome(
+  failure: TaskFailure,
+  gate: Exclude<GateOutcome, { kind: "withhold" }>,
+): TaskOutcome {
+  const error = match(failure)
     .with({ kind: "timed_out" }, () => "supervisor_unresponsive")
     .with({ kind: "failed" }, ({ reason }) => `dispatcher_error: ${reason}`)
     .with({ kind: "exited_without_result" }, () => "task_exited_without_result")
     .exhaustive();
+  return { ok: false, errorKind: unreportedTaskKind(gate), error };
 }
 
 export interface InvokeParams {
@@ -138,8 +148,8 @@ export interface InvokeParams {
   /** Source of `skill.py`. */
   body: string;
   inputs: unknown;
-  /** Wall-clock cap in seconds. Defaults to 60 s. */
-  wallClockS?: number;
+  /** Wall-clock cap in seconds (`wallClockSOf`), the one `deadline_at` counts from. */
+  wallClockS: number;
   /**
    * Manifest's isolation declaration. Threaded through to the supervisor
    * (via `task_invoke.isolation`) so the task process knows; on the host side, a
@@ -162,6 +172,8 @@ export interface InvokeParams {
     lockfileContents: string;
   };
   ctxHandler: CtxHandler;
+  /** Asked immediately before `task_invoke` is sent; a withheld task is not sent. */
+  dispatch: DispatchGate;
 }
 
 /**
@@ -362,14 +374,16 @@ export class SysboxSkillWorker {
    * Run one task on this worker's supervisor. The caller must hold the
    * worker's lease (`tryAcquire`): a task needs the channel to itself. A
    * worker can die after its lease is taken; its task then fails as a
-   * value, with nothing populated or sent.
+   * value, with nothing populated or sent. After the populate, and only on
+   * a worker that takes the task, the dispatch gate is asked; a withheld
+   * task returns without being sent or counted, the worker reusable.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
     const admission = this.#dispatcher.admission();
     if (admission.isErr()) {
       throw new Error(`SysboxSkillWorker.invoke: ${admission.error}`);
     }
-    const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.container;
+    const { wallClockS } = params;
 
     // Ensure the skill's venv is populated before sending the task. The
     // populator is idempotent — second-and-later calls with the same
@@ -393,6 +407,7 @@ export class SysboxSkillWorker {
         this.retire();
         return {
           ok: false,
+          errorKind: "dependency_unavailable",
           error: `skill_venv_${populate.error.kind}: ${populate.error.message}`,
           workerReusable: false,
         };
@@ -400,6 +415,26 @@ export class SysboxSkillWorker {
       lockfileHash = params.deps.lockfileHash;
     }
 
+    const gate = await this.#dispatcher.gate(params.dispatch);
+    return match(gate)
+      .returnType<Promise<InvokeResult>>()
+      .with({ kind: "withhold" }, async () => ({ ...withheldOutcome(), workerReusable: true }))
+      .with({ kind: P.union("send", "not_admitted") }, (taken) =>
+        this.#send(params, taken, { wallClockS, lockfileHash }),
+      )
+      .exhaustive();
+  }
+
+  /**
+   * Send the task its gate let through, or let the dispatcher fail it on a
+   * worker that died since its lease, and settle the worker's bookkeeping.
+   */
+  async #send(
+    params: InvokeParams,
+    gate: Exclude<GateOutcome, { kind: "withhold" }>,
+    task: { wallClockS: number; lockfileHash: string | undefined },
+  ): Promise<InvokeResult> {
+    const { wallClockS, lockfileHash } = task;
     const invoke: TaskInvoke = {
       type: "task_invoke",
       id: params.taskId,
@@ -428,7 +463,7 @@ export class SysboxSkillWorker {
     const workerReusable = exit.kind === "confirmed" && !recycle;
     return result.match(
       (delivered) => ({ ...fromTaskResult(delivered), workerReusable }),
-      (failure) => ({ ok: false, error: describeTaskFailure(failure), workerReusable }),
+      (failure) => ({ ...taskFailureOutcome(failure, gate), workerReusable }),
     );
   }
 

@@ -7,10 +7,12 @@ import { finishedVerdictOf, reconstructFinishedResult, type SkillRunResult } fro
 
 /**
  * The `executed → finished` transition: validate the executed output against
- * the manifest's `outputs` schema and settle the run's terminal status.
- * Validation is pure, so a recovered `executed` row reaches the verdict the
- * original attempt would have. A concurrent attempt that finished the row
- * first wins: its settled result is returned.
+ * the manifest's `outputs` schema and settle the run's terminal status. An
+ * output the schema refuses is an `output_invalid` error that keeps the
+ * output, since the skill's effects happened. Validation is pure, so a
+ * recovered `executed` row reaches the verdict the original attempt would
+ * have. A concurrent attempt that finished the row first wins: its settled
+ * result is returned.
  */
 export async function finishRun(
   deps: { store: SkillStore; runInTx: Transactor },
@@ -28,7 +30,7 @@ export async function finishRun(
     .with({ kind: "output" }, ({ output }) =>
       validateOutput(args.cached, output, args.skillName).match(
         () => ({ status: "success", output }),
-        (error) => ({ status: "error", error }),
+        (message) => ({ status: "error", error: { kind: "output_invalid", message, output } }),
       ),
     )
     .exhaustive();

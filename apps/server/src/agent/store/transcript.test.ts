@@ -702,6 +702,44 @@ describe("DrizzleTranscriptStore", () => {
       ).toBeUndefined();
     });
 
+    it("isCursorAnswered is true once a reply carries the cursor", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const answered = (cursor: string, afterMessageId: string | null) =>
+        tx((trx) => store.isCursorAnswered(trx, { conversationId, cursor, afterMessageId }));
+      const turnRow = await userRow(conversationId, stamp, IN_2, IN_1, "words");
+
+      // The turn's own user row is not a reply.
+      expect(await answered(IN_2, null)).toBe(false);
+      await reply(conversationId, stamp, IN_2, ["reply"]);
+      expect(await answered(IN_2, turnRow)).toBe(true);
+      expect(await answered(IN_3, null)).toBe(false);
+    });
+
+    it("isCursorAnswered reads only rows newer than afterMessageId", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const older = await reply(conversationId, stamp, IN_2, ["old reply"]);
+
+      expect(
+        await tx((trx) =>
+          store.isCursorAnswered(trx, { conversationId, cursor: IN_2, afterMessageId: older }),
+        ),
+      ).toBe(false);
+    });
+
+    it("isCursorAnswered ignores another conversation's replies", async () => {
+      const { userId, profileId, conversationId, stamp } = await seedConversation(tx);
+      const other = await tx((trx) =>
+        conversationStore.createConversation(trx, { userId, profileId, isPrivate: true }),
+      );
+      await reply(other.id, stamp, IN_2, ["reply"]);
+
+      expect(
+        await tx((trx) =>
+          store.isCursorAnswered(trx, { conversationId, cursor: IN_2, afterMessageId: null }),
+        ),
+      ).toBe(false);
+    });
+
     it("isCursorRebatched reads only rows newer than afterMessageId", async () => {
       const { conversationId, stamp } = await seedConversation(tx);
       await userRow(conversationId, stamp, IN_3, IN_1, "words");
