@@ -64,7 +64,7 @@ def _lossy(value: object) -> str | None:
         if isinstance(item, dict):
             # pydantic's own key conversion, which the JSON dump applies: `b"x"`, `1` and `True` become
             # `"x"`, `"1"` and `"true"`.
-            if len(to_jsonable_python(item)) < len(item):
+            if len(to_jsonable_python(dict.fromkeys(item))) < len(item):
                 return "two keys of one dict are written alike as JSON strings, so one would be lost"
             pending.extend(item.values())
         elif isinstance(item, list | tuple | set | frozenset):
@@ -99,14 +99,19 @@ async def call_run(
         output = await run(inputs, ctx)
         output_model = _model(namespace, "Output")
         if output_model is not None:
+            from pydantic import ValidationError
+
             try:
                 validated = output_model.model_validate(output)
+            except ValidationError as e:
+                return ("output_invalid", _describe(e)), output
+            try:
                 dumped = validated.model_dump(mode="json")
-            # `ValueError`: a `ValidationError`, a `PydanticSerializationError`, or the `UnicodeDecodeError` of a
-            # `bytes` field that is not UTF-8. `TypeError`: a dict key JSON cannot hold.
+                lossy = _lossy(validated.model_dump(mode="python"))
+            # `ValueError`: a `PydanticSerializationError`, or the `UnicodeDecodeError` of a `bytes` field that is
+            # not UTF-8. `TypeError`: a dict key JSON cannot hold.
             except (ValueError, TypeError) as e:
                 return ("output_invalid", _describe(e)), output
-            lossy = _lossy(validated.model_dump(mode="python"))
             if lossy is not None:
                 return ("output_invalid", lossy), output
             output = dumped

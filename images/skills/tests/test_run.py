@@ -147,6 +147,39 @@ async def test_keys_pydantic_writes_alike_or_cannot_write_are_output_invalid() -
 
 
 @pytest.mark.asyncio
+async def test_a_model_s_own_json_serialization_stands() -> None:
+    from pydantic import ConfigDict
+
+    class Encoded(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="base64")
+        raw: bytes
+
+    async def run(inputs: object, ctx: Ctx) -> object:
+        return {"raw": b"\xff"}
+
+    assert await call_run({"Output": Encoded}, run, {}, CTX) == (None, {"raw": "_w=="})
+
+
+@pytest.mark.asyncio
+async def test_a_type_error_an_output_validator_raises_propagates() -> None:
+    from pydantic import field_validator
+
+    class Checked(BaseModel):
+        n: int
+
+        @field_validator("n")
+        @classmethod
+        def broken(cls, n: int) -> int:
+            raise TypeError("a bug in the validator")
+
+    async def run(inputs: object, ctx: Ctx) -> object:
+        return {"n": 1}
+
+    with pytest.raises(TypeError, match="a bug in the validator"):
+        await call_run({"Output": Checked}, run, {}, CTX)
+
+
+@pytest.mark.asyncio
 async def test_a_refusal_names_twenty_fields_and_counts_the_rest() -> None:
     class Many(BaseModel):
         items: list[int]
