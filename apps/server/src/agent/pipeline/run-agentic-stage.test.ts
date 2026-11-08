@@ -366,10 +366,15 @@ describe("runAgenticStage", () => {
         result: { ...violated.result, requests: { ...violated.result.requests, violatedAt: 1 } },
       });
 
-      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+      await runAgenticStage(
+        { ...h.deps, prefixViolation: "reopen" },
+        stageArgs(),
+        recordingSteps().steps,
+        log,
+      );
 
       const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
-      expect(loopParams.prefixViolation).toBe(TEST_PREFIX_VIOLATION);
+      expect(loopParams.prefixViolation).toBe("reopen");
       expect(replyHead(h)).toMatchObject({ status: "diverged" });
       expect(add.mock.calls).toEqual([[1, { site: "stage" }]]);
     });
