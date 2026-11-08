@@ -1327,13 +1327,17 @@ class Input(BaseModel):
 
   it("reports a child that does not start as unavailable", async () => {
     const unbooted = await importSchemas("x = 1\n", { builtins: ["not-a-package"] });
-    const unlaunched = await importer.importSchemas({
-      body: "x = 1\n",
-      packages: { builtins: [], wheelDir: join(tmpdir(), "cogmo-no-such-wheels") },
-      packageCacheDir: cacheDir,
-      memoryMb: 128,
-      timeoutMs: 30_000,
-    });
+    // A child of a fresh directory, so nothing left in /tmp can make it exist.
+    const parent = await mkdtemp(join(tmpdir(), "cogmo-wasm-wheels-"));
+    const unlaunched = await importer
+      .importSchemas({
+        body: "x = 1\n",
+        packages: { builtins: [], wheelDir: join(parent, "cogmo-no-such-wheels") },
+        packageCacheDir: cacheDir,
+        memoryMb: 128,
+        timeoutMs: 30_000,
+      })
+      .finally(() => rm(parent, { recursive: true, force: true }));
 
     expect(unbooted._unsafeUnwrapErr()).toEqual({
       kind: "unavailable",
