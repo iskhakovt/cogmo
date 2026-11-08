@@ -83,7 +83,7 @@ jobs:
             -p semantic-release@25.0.9 \
             -p @semantic-release/commit-analyzer@13.0.1 \
             -p @semantic-release/release-notes-generator@14.1.1 \
-            -p @semantic-release/github@12.0.9 \
+            -p @semantic-release/github@12.0.10 \
             -p conventional-changelog-conventionalcommits@9.3.1 \
             semantic-release
           if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
