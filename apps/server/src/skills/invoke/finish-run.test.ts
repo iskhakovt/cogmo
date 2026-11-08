@@ -3,6 +3,7 @@ import { profiles, users } from "../../agent/store/schema.js";
 import type { Database, Transactor } from "../../db/index.js";
 import { assertStatus, expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { frontmatterSchemas } from "../deploy/schemas.js";
 import { parseManifest } from "../manifest.js";
 import { SkillSourceCache, type SkillSourceCacheEntry } from "../source-cache.js";
 import { DrizzleSkillStore } from "../store/index.js";
@@ -30,7 +31,12 @@ let cached: SkillSourceCacheEntry;
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   const { manifest } = expectOk(parseManifest(MANIFEST));
-  cached = new SkillSourceCache(undefined).put("sha-1", { manifest, body: "" }, null);
+  cached = new SkillSourceCache(undefined).put(
+    "sha-1",
+    { manifest, body: "" },
+    expectDefined(frontmatterSchemas(manifest), "the manifest's schemas"),
+    null,
+  );
 });
 
 afterEach(async () => {

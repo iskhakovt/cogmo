@@ -1,5 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
 import { classifyManifest } from "../classifier.js";
@@ -8,8 +8,8 @@ import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
-import type { ClassifierLog, SkillManifest } from "../types.js";
-import { describeWasmPackagesError } from "../worker-wasm/wasm.js";
+import type { ClassifierLog, SkillManifest, SkillSchemas } from "../types.js";
+import { describeWasmPackagesError, type SkillSchemaImportError } from "../worker-wasm/wasm.js";
 import { lintWasmCompat } from "../worker-wasm/wasm-lint.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
@@ -18,6 +18,7 @@ import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult } from "./register-result.js";
+import { registerSchemas } from "./schemas.js";
 
 const NON_FAST_FORWARD = "non_fast_forward: rebase branch onto main and retry";
 
@@ -30,6 +31,7 @@ interface PreparedRegister {
   body: string;
   classifierLog: ClassifierLog;
   lockfile: LockfileSnapshot | null;
+  schemas: SkillSchemas;
 }
 
 /**
@@ -50,7 +52,7 @@ export async function registerSkill(
   // rejection it caused.
   opts.signal?.throwIfAborted();
   if (prepared.isErr()) return prepared.error;
-  const { branchSha, manifest, body, classifierLog, lockfile } = prepared.value;
+  const { branchSha, manifest, body, classifierLog, lockfile, schemas } = prepared.value;
 
   const schedule = manifest.schedule ?? null;
   const executed = await runDeployTx(deps.runInTx, (tx) =>
@@ -63,8 +65,8 @@ export async function registerSkill(
       scheduleNextRunAt: deps.scheduleNextRunAt(schedule),
       branchTipSha: branchSha,
       lockfileHash: lockfile?.hash ?? null,
-      inputs: manifest.inputs,
-      outputs: manifest.outputs ?? null,
+      inputs: schemas.inputs,
+      outputs: schemas.outputs,
       classifierLog,
       runAs: deployRunAs(deps.defaultRunAs, opts.origin),
       applyFilesystem: async () => {
@@ -97,6 +99,7 @@ export async function registerSkill(
     manifest,
     body,
     lockfile,
+    schemas,
   });
 }
 
@@ -114,7 +117,7 @@ async function deleteFeatureBranch(repoPath: string, branch: string): Promise<vo
 /**
  * Every check `register` makes before its transaction: the branch, its
  * manifest and body, the classifier, the lockfile and its runtime pins,
- * Pyodide compatibility.
+ * Pyodide compatibility, and the schemas it puts live.
  * Errs with the rejection `register` returns.
  */
 async function prepareRegister(
@@ -164,23 +167,6 @@ async function prepareRegister(
   }
   const { manifest, body } = source.value;
 
-  // Compile the manifest's JSON Schemas BEFORE any filesystem / DB write.
-  // Without this, an invalid `inputs` / `outputs` schema would only surface
-  // at first invoke — by which point `update-ref refs/heads/main` has
-  // already moved main + the skills row is committed. Running ajv up-front
-  // makes "schema parses" part of the deploy contract, alongside manifest
-  // YAML and effect declarations.
-  const schemaErrors = deps.sourceCache.prevalidate(manifest);
-  if (schemaErrors.length > 0) {
-    return err({
-      name: manifest.name,
-      riskTier: "notify",
-      status: "rejected",
-      gitSha: branchSha,
-      errors: schemaErrors,
-    });
-  }
-
   // Wasm bodies get the Pyodide-compatibility scan before anything is
   // written. Its whole purpose is turning "imports fine, dies on first
   // invoke" into a rejection here, which only holds if it actually runs
@@ -229,40 +215,102 @@ async function prepareRegister(
     if (compat.isErr()) {
       return err(rejectedResult(branchSha, formatPyodideCompatIssues(compat.error)));
     }
-    // Fetch and publish the lockfile's wheels now, so the first run pays no
-    // download. A wheel that fails its hash, or has no pure build, is a
-    // verdict on the lockfile; a network, cache or Pyodide-lockfile failure is
-    // not, nor is a built-in whose cached or downloaded file fails Pyodide's
-    // pinned sha256, and the run fetches again.
-    const packages = await deps.wasm.resolvePackages(lockfile, signal);
-    if (packages.isErr()) {
-      const refused = match(packages.error)
-        .with({ kind: "hash_mismatch" }, { kind: "wheel_unavailable" }, () => true)
-        .with(
-          { kind: "network_failed" },
-          { kind: "prefetch_failed" },
-          { kind: "publish_failed" },
-          { kind: "bundled_unreadable" },
-          { kind: "builtin_integrity" },
-          () => false,
-        )
-        .exhaustive();
-      if (refused) {
-        return err(
-          rejectedResult(
-            branchSha,
-            `wasm_dependency_unavailable: ${describeWasmPackagesError(packages.error)}`,
-          ),
-        );
-      }
-      log.warn(
-        { skillName: manifest.name, error: describeWasmPackagesError(packages.error) },
-        "wasm packages not fetched at register; the first run fetches them",
-      );
-    }
   }
 
-  return ok({ branchSha, manifest, body, classifierLog, lockfile });
+  const schemas = await resolveSchemas(deps, { manifest, body, lockfile, signal });
+  if (schemas.isErr()) {
+    return err({
+      name: manifest.name,
+      riskTier: "notify",
+      status: "rejected",
+      gitSha: branchSha,
+      errors: schemas.error,
+    });
+  }
+
+  // Compile the JSON Schemas BEFORE any filesystem / DB write. Without this,
+  // an invalid `inputs` / `outputs` schema would only surface at first invoke
+  // — by which point `update-ref refs/heads/main` has already moved main +
+  // the skills row is committed. Running ajv up-front makes "schema parses"
+  // part of the deploy contract, alongside manifest YAML and effect
+  // declarations.
+  const schemaErrors = deps.sourceCache.prevalidate(schemas.value);
+  if (schemaErrors.length > 0) {
+    return err({
+      name: manifest.name,
+      riskTier: "notify",
+      status: "rejected",
+      gitSha: branchSha,
+      errors: schemaErrors,
+    });
+  }
+
+  return ok({ branchSha, manifest, body, classifierLog, lockfile, schemas: schemas.value });
+}
+
+/**
+ * The schemas register puts live. A wasm skill is imported in a child, which
+ * fetches and publishes its packages on the way, so the first run pays no
+ * download; a container skill takes the legacy schema path, its frontmatter
+ * (design/skills.md → Contracts).
+ */
+async function resolveSchemas(
+  deps: DeployDeps,
+  args: {
+    manifest: SkillManifest;
+    body: string;
+    lockfile: LockfileSnapshot | null;
+    signal: AbortSignal | undefined;
+  },
+): Promise<Result<SkillSchemas, string[]>> {
+  const { manifest } = args;
+  return match(manifest.tier)
+    .with("container", async () => registerSchemas(manifest, null))
+    .with("wasm", async () => {
+      const imported = await deps.wasm.importSchemas(
+        { body: args.body, lockfile: args.lockfile, resources: manifest.resources },
+        args.signal,
+      );
+      if (imported.isErr()) return err([describeSchemaImportError(imported.error)]);
+      return registerSchemas(manifest, imported.value);
+    })
+    .exhaustive();
+}
+
+/**
+ * A failed import as a rejection. A wheel that fails its hash, or has no pure
+ * build, is a verdict on the lockfile; a network, cache or Pyodide-lockfile
+ * failure is not, nor is a built-in whose cached or downloaded file fails
+ * Pyodide's pinned sha256, and a retry may clear it.
+ */
+function describeSchemaImportError(error: SkillSchemaImportError): string {
+  return match(error)
+    .with(
+      { kind: "packages", error: { kind: P.union("hash_mismatch", "wheel_unavailable") } },
+      (e) => `wasm_dependency_unavailable: ${describeWasmPackagesError(e.error)}`,
+    )
+    .with(
+      {
+        kind: "packages",
+        error: {
+          kind: P.union(
+            "network_failed",
+            "prefetch_failed",
+            "publish_failed",
+            "bundled_unreadable",
+            "builtin_integrity",
+          ),
+        },
+      },
+      (e) =>
+        `schema_import_unavailable: the skill's packages were not fetched (${describeWasmPackagesError(e.error)}); retry the register`,
+    )
+    .with({ kind: "refused" }, (e) => `schema_import_failed: ${e.message}`)
+    .with(
+      { kind: "unavailable" },
+      (e) => `schema_import_unavailable: ${e.message}; retry the register`,
+    )
+    .exhaustive();
 }
 
 function registerResultToRpc(
@@ -275,9 +323,10 @@ function registerResultToRpc(
     manifest: SkillManifest;
     body: string;
     lockfile: LockfileSnapshot | null;
+    schemas: SkillSchemas;
   },
 ): RegisterResult {
-  const { name, branchSha, classifierLog, result, manifest, body, lockfile } = args;
+  const { name, branchSha, classifierLog, result, manifest, body, lockfile, schemas } = args;
   if (result.kind === "rejected") {
     return rejectedResult(branchSha, result.reason);
   }
@@ -292,7 +341,7 @@ function registerResultToRpc(
   if (result.kind === "live") {
     // Warm the source cache with the just-registered manifest+body so the
     // next `invoke` (or tool-list rebuild) doesn't re-read git.
-    deps.sourceCache.put(branchSha, { manifest, body }, lockfile);
+    deps.sourceCache.put(branchSha, { manifest, body }, schemas, lockfile);
     return {
       name,
       riskTier: classifierLog.risk_tier,
@@ -304,7 +353,7 @@ function registerResultToRpc(
     };
   }
   // pending_approval — also warm cache so a follow-up approve doesn't re-read.
-  deps.sourceCache.put(branchSha, { manifest, body }, lockfile);
+  deps.sourceCache.put(branchSha, { manifest, body }, schemas, lockfile);
   return {
     name,
     riskTier: classifierLog.risk_tier,

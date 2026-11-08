@@ -1,5 +1,6 @@
 import type { Result } from "neverthrow";
 import { match } from "ts-pattern";
+import type { SkillInputs, SkillIo } from "../types.js";
 
 /**
  * What a wasm child installs before it signals `ready`
@@ -54,6 +55,47 @@ export interface WasmProbe {
     names: readonly string[],
     opts: { packageCacheDir: string; signal?: AbortSignal },
   ): Promise<Result<void, WasmProbeError>>;
+}
+
+/** A skill's `Input` and `Output` JSON Schemas, null for a model it does not define. */
+export interface ImportedSchemas {
+  inputs: SkillInputs | null;
+  outputs: SkillIo | null;
+}
+
+/**
+ * Why a schema import gave no schemas: `refused` is a verdict on the skill
+ * (it did not import, or a model could not be described, or `Input` does not
+ * describe an object); `unavailable` means the import did not run to its end
+ * (the child could not start, crashed or timed out).
+ */
+export type SchemaImportError =
+  | { kind: "refused"; message: string }
+  | { kind: "unavailable"; message: string };
+
+/**
+ * Why register's wasm schema import gave no schemas: the skill's packages
+ * could not be provided, which the import needs, or the import itself failed.
+ */
+export type SkillSchemaImportError =
+  | { kind: "packages"; error: WasmPackagesError }
+  | SchemaImportError;
+
+/** The wasm tier's schema import at register (design/skills.md → Contracts). */
+export interface WasmSchemaImporter {
+  /**
+   * Import `body` in a child under a task's boundary and memory cap, with
+   * `packages` from local files and no network, and read its models' JSON
+   * Schemas. The child outlives neither `timeoutMs` nor `signal`.
+   */
+  importSchemas(params: {
+    body: string;
+    packages: WasmPackages;
+    packageCacheDir: string;
+    memoryMb: number;
+    timeoutMs: number;
+    signal?: AbortSignal;
+  }): Promise<Result<ImportedSchemas, SchemaImportError>>;
 }
 
 /**

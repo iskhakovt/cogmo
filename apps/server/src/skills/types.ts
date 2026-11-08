@@ -87,6 +87,18 @@ export const SkillInputsSchema = z
 export type SkillInputs = z.infer<typeof SkillInputsSchema>;
 
 /**
+ * The schemas a deploy put live: the skill's `inputs` (the LLM tool schema and
+ * the pre-flight check) and `outputs`, null for a skill with no output schema.
+ * Register reads them from the skill's models, or from the frontmatter on the
+ * legacy path (design/skills.md → Contracts).
+ */
+export const SkillSchemasSchema = z.object({
+  inputs: SkillInputsSchema,
+  outputs: SkillIoSchema.nullable(),
+});
+export type SkillSchemas = z.infer<typeof SkillSchemasSchema>;
+
+/**
  * Manifest-declared secret entry. v1 supports a string (secret name only); the
  * binding object form belongs to stage 2 of `design/skills.md` → Secret
  * exposure and egress control, where a bound secret reaches the skill as an
@@ -190,7 +202,8 @@ export const SkillManifestSchema = z
     triggers: z.array(z.enum(["manual", "cron", "event"])).default(["manual"]),
     schedule: z.string().optional(),
 
-    inputs: SkillInputsSchema,
+    /** The legacy schema path: a skill with an `Input` model on the import path declares none. */
+    inputs: SkillInputsSchema.optional(),
     outputs: SkillIoSchema.optional(),
 
     effects: SkillEffectsSchema.default([]),
