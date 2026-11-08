@@ -152,7 +152,7 @@ export function inngestKeyed(opts: { eventKey: string; signingKey: string }) {
  * Gitea's own registry, off the Docker Hub rate-limit budget.
  */
 export function gitea() {
-  return new GenericContainer("docker.gitea.com/gitea:28.2.0")
+  return new GenericContainer("docker.gitea.com/gitea:28.3.0")
     .withExposedPorts(3000)
     .withEnvironment({ GITEA__security__INSTALL_LOCK: "true" })
     .withWaitStrategy(Wait.forHttp("/api/v1/version", 3000))
