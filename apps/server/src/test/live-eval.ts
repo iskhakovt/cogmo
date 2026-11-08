@@ -291,6 +291,7 @@ export async function runEvalTurn(params: {
     maxTokens: resolveLimits(EVAL_MODEL).maxOutputTokens,
     onEvent: async () => {},
     cache: { key: params.cacheKey, retention: "short" },
+    site: "iteration",
     turnLogger: logger,
   }).then(expectFinished);
   return { systemPrompt, userMessage, result };

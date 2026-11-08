@@ -9,6 +9,7 @@ import { renderForkSpan } from "../attachments/render-fork-span.js";
 import {
   compactMessages,
   extractSummaryText,
+  rewroteWithoutSummary,
   shouldSkipCounting,
   summarizationRequest,
 } from "../context.js";
@@ -59,6 +60,13 @@ export interface CompactedTurn {
   messages: Message[];
   /** The cutoff of the summary this turn stored, which later turns' history starts after. */
   storedCutoff: string | null;
+  /**
+   * Whether this turn's compaction rewrote the view without a stored summary:
+   * Strategy 3 truncated it, or Strategy 2 summarized it and stored nothing.
+   * The next turn can't rebuild such a view from rows, so the turn's heads are
+   * `compacted` (design/prompt-caching.md → Head check).
+   */
+  rewroteView: boolean;
 }
 
 /**
@@ -151,7 +159,11 @@ export async function compactTurn(
         })
       : null;
 
-  return { messages: compactResult.messages, storedCutoff };
+  return {
+    messages: compactResult.messages,
+    storedCutoff,
+    rewroteView: rewroteWithoutSummary(compactResult.event, storedCutoff),
+  };
 }
 
 /**

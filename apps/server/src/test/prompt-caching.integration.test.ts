@@ -353,10 +353,33 @@ describe("prompt caching", () => {
       .where(eq(coreMemoryBlocks.userId, userId));
     expect(blocks.map((b) => b.content).join("\n")).toMatch(/Lisbon/);
     const snapshots = await db
-      .select({ openedBy: systemPromptSnapshots.openedBy })
+      .select({ openedBy: systemPromptSnapshots.openedBy, reason: systemPromptSnapshots.reason })
       .from(systemPromptSnapshots)
       .where(eq(systemPromptSnapshots.conversationId, conversation.id));
-    expect(snapshots).toHaveLength(1);
+    expect(snapshots).toEqual([
+      { openedBy: expectDefined(rows[0], "first row").id, reason: "first_turn" },
+    ]);
+
+    // ── Every reply row carries an intact head under the epoch's one base, its
+    // length the row's position in the transcript ──
+    const heads = await db
+      .select({ id: messages.id, role: messages.role, head: messages.transcriptHead })
+      .from(messages)
+      .where(eq(messages.conversationId, conversation.id))
+      .orderBy(asc(messages.id));
+    const replyHeads = heads.flatMap((row, i) =>
+      row.role === "assistant" ? [{ position: i, head: row.head }] : [],
+    );
+    expect(replyHeads.length).toBeGreaterThanOrEqual(8);
+    for (const { position, head } of replyHeads) {
+      expect(head).toMatchObject({
+        length: position + 1,
+        historyStart: expectDefined(rows[0], "first row").id,
+        status: "intact",
+      });
+    }
+    expect(new Set(replyHeads.map(({ head }) => head?.base)).size).toBe(1);
+    expect(heads.filter((row) => row.role === "user").every((row) => row.head === null)).toBe(true);
 
     // ── Every loop request caches for an hour: tools, system and the tail ──
     for (const request of requests) {

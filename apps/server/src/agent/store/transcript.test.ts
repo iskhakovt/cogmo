@@ -3,10 +3,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { HARNESS_ROW_TAGS } from "../../llm/types.js";
 import { seedConversation } from "../../test/agent-store-fixtures.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectPgError } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import type { StoredContent, StoredMessage } from "../stored-content.js";
+import type { TranscriptHead } from "../transcript-head.js";
 import { DrizzleConversationStore } from "./conversations.js";
 import { conversationSummaries, messages, systemPromptSnapshots } from "./schema.js";
 import { DrizzleTranscriptStore } from "./transcript.js";
@@ -364,6 +365,106 @@ describe("DrizzleTranscriptStore", () => {
       for (const r of otherRows) {
         expect(r.outputTokens).toBe(-1);
       }
+    });
+
+    describe("transcript heads", () => {
+      const INBOUND = "019d0000-0000-7000-8000-000000000001";
+      const HEAD: TranscriptHead = {
+        length: 3,
+        digest: "b".repeat(64),
+        base: "a".repeat(64),
+        historyStart: "019d0000-0000-7000-8000-0000000000a1",
+        status: "intact",
+      };
+
+      /** Every row's head, in insertion order, decoded through the column. */
+      async function heads(conversationId: string) {
+        const rows = await db
+          .select({ transcriptHead: messages.transcriptHead })
+          .from(messages)
+          .where(eq(messages.conversationId, conversationId))
+          .orderBy(messages.id);
+        return rows.map((r) => r.transcriptHead);
+      }
+
+      it("stores the head an assistant row carries, and none on the rest", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+
+        await tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [
+              { role: "assistant", content: [{ type: "text", text: "calling" }] },
+              { role: "user", content: "tool output" },
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "done" }],
+                transcriptHead: HEAD,
+              },
+            ],
+            lastInboundMessageId: INBOUND,
+            lastMessageOutputTokens: 7,
+            ...stamp,
+          }),
+        );
+
+        expect(await heads(conversationId)).toEqual([null, null, HEAD]);
+      });
+
+      it("refuses a malformed head on write", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+        const malformed = { ...HEAD, status: "unknown" } as unknown as TranscriptHead;
+
+        await expect(
+          tx((trx) =>
+            store.insertMessages(trx, {
+              conversationId,
+              messages: [{ role: "assistant", content: "reply", transcriptHead: malformed }],
+              lastInboundMessageId: INBOUND,
+              lastMessageOutputTokens: 7,
+              ...stamp,
+            }),
+          ),
+        ).rejects.toThrow(/status/);
+        expect(await heads(conversationId)).toEqual([]);
+      });
+
+      it("refuses a malformed head on read", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+        await tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [{ role: "assistant", content: "reply", transcriptHead: HEAD }],
+            lastInboundMessageId: INBOUND,
+            lastMessageOutputTokens: 7,
+            ...stamp,
+          }),
+        );
+        await db.execute(
+          sql`UPDATE messages SET transcript_head = '{"junk":true}'::jsonb WHERE conversation_id = ${conversationId}`,
+        );
+
+        await expect(heads(conversationId)).rejects.toThrow(/junk|Unrecognized/);
+      });
+
+      it("refuses a head on a user row", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+
+        const error = await tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [{ role: "user", content: "hello", transcriptHead: HEAD }],
+            lastInboundMessageId: INBOUND,
+            lastMessageOutputTokens: 7,
+            ...stamp,
+          }),
+        ).then(
+          () => null,
+          (err: unknown) => err,
+        );
+
+        expectPgError(error, "23514", "chk_messages_transcript_head_assistant");
+      });
     });
 
     it("getLastAssistantMessage returns most recent", async () => {
@@ -1496,6 +1597,7 @@ describe("system prompt snapshots", () => {
       rendered,
       configDigest: `digest of ${rendered}`,
       attachmentCutoff: null,
+      reason: "first_turn" as const,
     };
   }
 
@@ -1577,6 +1679,21 @@ describe("system prompt snapshots", () => {
 
     const latest = await tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId));
     expect(latest?.attachmentCutoff).toBe(earlier);
+  });
+
+  it("keeps the reason an epoch opens for", async () => {
+    const { conversationId, stamp } = await seedConversation(tx);
+    const opener = await userRow(conversationId, stamp);
+
+    await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, {
+        ...snapshot(conversationId, opener, "first"),
+        reason: "attachments",
+      }),
+    );
+
+    const latest = await tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId));
+    expect(latest?.reason).toBe("attachments");
   });
 
   it("refuses a snapshot opened by a message that doesn't exist", async () => {

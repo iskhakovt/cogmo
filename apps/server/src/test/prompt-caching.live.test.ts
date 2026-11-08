@@ -228,6 +228,7 @@ async function converse(params: {
       maxTokens: 16000,
       onEvent: async () => {},
       cache: turnCacheIntent(nonce, "chat"),
+      site: "iteration",
       ...(params.clearToolResults && { clearToolResults: params.clearToolResults }),
       turnLogger: logger,
     }).then(expectFinished);
