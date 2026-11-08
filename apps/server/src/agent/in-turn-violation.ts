@@ -5,8 +5,8 @@ import type { LoopRequests } from "./transcript-head.js";
 /**
  * Count and log the loop's in-turn head check failure, if it had one: the
  * first iteration whose rebuilt request differed from its memoized head. Its
- * callers count once, in the persist step that wrote the turn's diverged
- * heads, so the count matches what is stored.
+ * callers count once, in the persist step that wrote the turn's rows and
+ * heads.
  */
 export function reportInTurnViolation(
   requests: LoopRequests,

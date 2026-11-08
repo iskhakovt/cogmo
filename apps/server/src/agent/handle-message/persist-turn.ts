@@ -83,8 +83,7 @@ type PersistWrite =
  * Otherwise it is `superseded` when a later turn row covers the cursor, and
  * inserts when none does, each assistant row with its transcript head
  * ({@link rowHeads}). A loop whose in-turn head check failed counts
- * `cogmo.prompt.prefix_violations{site: "iteration"}` once, with
- * `cogmo.agent.iterations`.
+ * `cogmo.prompt.prefix_violations{site: "iteration"}` once, when it inserts.
  *
  * Steps, in order: `persist-new-messages`, `emit-cooldown-cleared` (when
  * `persisted` and the turn probed an elapsed cooldown),
@@ -162,8 +161,8 @@ export async function persistTurn(
     // the result records the turn twice. For a histogram read to spot
     // runaway iteration counts, repeated copies of one value are worse than
     // a missing one, and that retry window is the only source of them.
-    // The in-turn violation is counted where the turn's diverged heads were
-    // written, so the count matches the stored divergence.
+    // The in-turn violation is counted where the turn's rows and heads were
+    // written.
     return match(write)
       .returnType<PersistOutcome>()
       .with({ kind: "inserted" }, ({ messageId }) => {

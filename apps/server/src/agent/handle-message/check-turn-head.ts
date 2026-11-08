@@ -54,9 +54,10 @@ interface HeadedRow {
  *
  * Under `throw`, a `violated` verdict throws {@link PrefixViolationError}.
  *
- * Bare body, on every invocation. Its inputs are memoized —
- * `load-turn-transcript`'s rows and heads, `load-system-prompt`'s snapshot and
- * the frozen tool table — so every invocation reaches the same verdict; the
+ * Bare body, on every invocation. Its inputs are memoized, or the view
+ * rendered from them — `load-turn-transcript`'s rows and heads,
+ * `load-system-prompt`'s snapshot and the frozen tool table — so every
+ * invocation reaches the same verdict; the
  * render and the hash re-run each time. `open-system-prompt-epoch` counts and
  * logs a violation.
  */
@@ -146,11 +147,9 @@ function chainDigests(base: string, messages: ReadonlyArray<Message>, through: n
   const hasher = new TranscriptHasher();
   const end = Math.min(through, messages.length);
   return messages.slice(0, end).reduce<string[]>(
-    (chain, _, i) => {
+    (chain, message, i) => {
       const previous = chain.at(-1) ?? base;
-      chain.push(
-        hasher.extend({ length: i, digest: previous }, messages.slice(0, i + 1), i).digest,
-      );
+      chain.push(hasher.extend({ length: i, digest: previous }, [message], 0).digest);
       return chain;
     },
     [base],

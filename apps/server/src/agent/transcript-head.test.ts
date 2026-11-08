@@ -187,6 +187,30 @@ describe("baseDigest", () => {
 });
 
 describe("TranscriptHasher", () => {
+  it("digests a tool input nested past the call stack, or holding a cycle, without throwing", () => {
+    const deep = Array.from({ length: 50_000 }).reduce<unknown>((inner) => ({ inner }), {});
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const call = (input: unknown): Message => ({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "toolu_1", name: "calc", input }],
+    });
+
+    expect(() => new TranscriptHasher().head(BASE, [USER, call(deep)])).not.toThrow();
+    expect(() => new TranscriptHasher().head(BASE, [USER, call(cyclic)])).not.toThrow();
+  });
+
+  it("digests a parsed __proto__ key as an own key", () => {
+    const call = (json: string): Message => ({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "toolu_1", name: "calc", input: JSON.parse(json) }],
+    });
+
+    expect(new TranscriptHasher().head(BASE, [call('{"__proto__":{"a":1},"k":2}')])).not.toEqual(
+      new TranscriptHasher().head(BASE, [call('{"__proto__":{"a":2},"k":2}')]),
+    );
+  });
+
   it("digests a non-finite number as the null JSON sends", () => {
     const call = (n: number | null): Message => ({
       role: "assistant",

@@ -8,10 +8,9 @@
  * Imports nothing else from `agent/`, so the store schema can import it.
  */
 
-import * as R from "remeda";
 import { z } from "zod";
 import type { InputTransformation, Message, ToolDefinition } from "../llm/types.js";
-import { canonicalJson, sha256 } from "../util/canonical-json.js";
+import { canonicalJson, canonicalJsonAsSent, sha256 } from "../util/canonical-json.js";
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
@@ -57,21 +56,9 @@ function withoutHarness(message: Message): Message {
   };
 }
 
-/**
- * `value` as JSON carries it: a non-finite number, which `JSON.stringify` and
- * so every adapter, memo and row sends as `null`, is `null`. A message the
- * loop holds and the same message reloaded then digest the same.
- */
-function asSent(value: unknown): unknown {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (Array.isArray(value)) return value.map(asSent);
-  if (R.isPlainObject(value)) return R.mapValues(value, asSent);
-  return value;
-}
-
 /** One message's digest: its canonical JSON as sent, without `harness`. */
 function messageDigest(message: Message): string {
-  return sha256(canonicalJson(asSent(withoutHarness(message))));
+  return sha256(canonicalJsonAsSent(withoutHarness(message)));
 }
 
 /** h₀: the digest of the system prompt and the provider-neutral tool definitions. */

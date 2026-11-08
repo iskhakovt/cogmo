@@ -18,7 +18,7 @@ import {
 } from "./core-memory/scope.js";
 import type { SystemPromptSnapshot } from "./store/index.js";
 import { type SystemPromptEpochReason, systemPromptEpochReason } from "./store/schema.js";
-import type { HeadExplanation, HeadVerdict } from "./transcript-head.js";
+import type { HeadVerdict } from "./transcript-head.js";
 
 /** An epoch's snapshot as a step returns it. */
 export interface EpochSnapshot {
@@ -128,9 +128,9 @@ export function continuesEpoch(
 }
 
 /** The epoch reason a head verdict gives, if any: an unexplained divergence is a `prefix_violation`. */
-function headReason(head: HeadVerdict): HeadExplanation | null {
+function headReason(head: HeadVerdict): SystemPromptEpochReason | null {
   return match(head)
-    .returnType<HeadExplanation | null>()
+    .returnType<SystemPromptEpochReason | null>()
     .with({ kind: "skipped" }, { kind: "matched" }, () => null)
     .with({ kind: "explained" }, ({ reason }) => reason)
     .with({ kind: "violated" }, () => "prefix_violation")
@@ -158,21 +158,20 @@ export function epochReason(
     head: HeadVerdict;
   },
 ): SystemPromptEpochReason {
-  const fromHead = headReason(turn.head);
-  const applies: Record<SystemPromptEpochReason, boolean> = {
+  const fromTurn: Record<SystemPromptEpochReason, boolean> = {
     first_turn: snapshot === null,
-    configuration: snapshot?.configDigest !== turn.configDigest || fromHead === "configuration",
+    configuration: snapshot?.configDigest !== turn.configDigest,
     summary:
-      snapshot?.historyStart !== turn.loadedStart ||
-      snapshot?.historyStart !== turn.epochStart ||
-      fromHead === "summary",
-    compaction: fromHead === "compaction",
+      snapshot?.historyStart !== turn.loadedStart || snapshot?.historyStart !== turn.epochStart,
+    compaction: false,
     attachments: match(turn.cutoff)
       .with({ kind: "advanced" }, () => true)
       .with({ kind: "kept" }, () => false)
       .exhaustive(),
-    prefix_violation: fromHead === "prefix_violation",
+    prefix_violation: false,
   };
+  const fromHead = headReason(turn.head);
+  const applies = fromHead === null ? fromTurn : { ...fromTurn, [fromHead]: true };
   const reason = systemPromptEpochReason.enumValues.find((r) => applies[r]);
   if (reason === undefined) {
     throw new Error("a turn opened an epoch that no reason in the epoch rule explains");
