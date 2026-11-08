@@ -115,6 +115,7 @@ describe("epochReason", () => {
     configDigest: "d1",
     loadedStart: "m1",
     epochStart: "m1",
+    compacted: false,
     cutoff: kept,
     head: matched,
   };
@@ -136,6 +137,7 @@ describe("epochReason", () => {
         configDigest: "d2",
         loadedStart: "m3",
         epochStart: "m5",
+        compacted: true,
         cutoff: advanced,
         head: violated,
       },
@@ -170,6 +172,30 @@ describe("epochReason", () => {
       current: snapshot,
       turn: { ...same, head: explained("summary") },
       reason: "summary",
+    },
+    {
+      name: "a view this turn's compaction rewrote",
+      current: snapshot,
+      turn: { ...same, compacted: true },
+      reason: "compaction",
+    },
+    {
+      name: "a summary this turn stored and a view its compaction rewrote after it",
+      current: snapshot,
+      turn: { ...same, epochStart: "m5", compacted: true },
+      reason: "summary",
+    },
+    {
+      name: "a view this turn's compaction rewrote and an advanced cutoff",
+      current: snapshot,
+      turn: { ...same, compacted: true, cutoff: advanced },
+      reason: "compaction",
+    },
+    {
+      name: "a view this turn's compaction rewrote and a violated head",
+      current: snapshot,
+      turn: { ...same, compacted: true, head: violated },
+      reason: "compaction",
     },
     {
       name: "a compacted head",

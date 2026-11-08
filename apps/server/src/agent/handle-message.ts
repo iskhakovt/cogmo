@@ -303,6 +303,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         view,
         continuing: context.continuing,
         storedCutoff: compacted.storedCutoff,
+        rewroteView: compacted.rewroteView,
         loadedSystemPrompt,
         head,
         systemPromptArgs: frozen.systemPromptArgs,
