@@ -87,6 +87,10 @@ describe("reapSkillVenvs", () => {
         image: "cogmo-skills:test",
         depsCacheVolume: { volumeName: "deps-vol-x" },
         network: "none",
+        // Local-Docker names the session's cgroup slice after its task id, which must be a UUID.
+        taskId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        ),
       }),
     );
     // Hashes streamed on stdin so the script can `grep -qxF` against

@@ -119,7 +119,8 @@ export async function reapSkillVenvs(
   opts: ReapSkillVenvsOptions,
 ): Promise<Result<ReapSkillVenvsResult, ReapSkillVenvsError>> {
   const graceDays = opts.graceDays ?? DEPS_REAP_GRACE_DAYS;
-  const taskId = `skill-venvs-reaper-${randomUUID()}`;
+  // A bare UUID: Local-Docker names the session's cgroup slice after it.
+  const taskId = randomUUID();
   const expiresAt = new Date(Date.now() + REAP_TIMEOUT_MS + 30_000);
 
   let session: SandboxSession;

@@ -32,6 +32,7 @@ function sharedVolumeCapabilities(): SandboxCapabilities {
     volumes: "docker",
     workingTreeTransport: "bind-mount",
     depsCacheSharing: "shared-volume",
+    noNetworkSessions: true,
   };
 }
 
@@ -43,6 +44,7 @@ function perSandboxCapabilities(): SandboxCapabilities {
     volumes: "managed",
     workingTreeTransport: "git-remote",
     depsCacheSharing: "per-sandbox",
+    noNetworkSessions: false,
   };
 }
 

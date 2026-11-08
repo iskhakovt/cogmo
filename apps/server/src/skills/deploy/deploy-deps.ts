@@ -3,15 +3,11 @@ import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { SkillsCapabilities } from "../capabilities.js";
 import type { LockfileCompiler, LockfileSnapshot } from "../deps.js";
+import type { ImportedSchemas, SchemaImportError } from "../schema-import.js";
 import type { SkillSourceCache } from "../source-cache.js";
 import type { SkillRunIdentity, SkillStore } from "../store/index.js";
 import type { SkillManifest } from "../types.js";
-import type {
-  FillBuiltins,
-  ImportedSchemas,
-  SkillSchemaImportError,
-  WasmProbe,
-} from "../worker-wasm/wasm.js";
+import type { FillBuiltins, SkillSchemaImportError, WasmProbe } from "../worker-wasm/wasm.js";
 
 /** What the deploy use cases (register, approve, rollback, enable) share. */
 export interface DeployDeps {
@@ -33,6 +29,26 @@ export interface DeployDeps {
   scheduleNextRunAt(schedule: string | null): Date | null;
   /** What this deployment enforces; the classifier reads it for the tier. */
   capabilities: SkillsCapabilities;
+  /**
+   * The container tier's schema import at register, or undefined when the
+   * backend creates no session with no network: every container skill then
+   * takes the legacy schema path, its frontmatter. Without the shared venv
+   * volume (`installsDependencies` false), so does one with dependencies
+   * (design/skills.md → Contracts).
+   */
+  containerSchemas:
+    | {
+        installsDependencies: boolean;
+        importSchemas(
+          source: {
+            body: string;
+            lockfile: LockfileSnapshot | null;
+            resources: SkillManifest["resources"];
+          },
+          signal?: AbortSignal,
+        ): Promise<Result<ImportedSchemas, SchemaImportError>>;
+      }
+    | undefined;
   /**
    * The wasm tier's host side at register: the probe that load-tests native
    * built-ins under the boundary's flags, the fill of the cache it loads

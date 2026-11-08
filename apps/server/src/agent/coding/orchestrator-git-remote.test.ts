@@ -239,6 +239,7 @@ function fakeGitRemoteSandbox(execScript?: ExecScript): FakeGitRemoteSandboxResu
       volumes: "managed",
       workingTreeTransport: "git-remote",
       depsCacheSharing: "per-sandbox",
+      noNetworkSessions: false,
     },
     healthCheck: async () => ({ ok: true, runtime: "daytona" }),
     reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),

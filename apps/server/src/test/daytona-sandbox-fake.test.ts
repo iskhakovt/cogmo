@@ -116,6 +116,7 @@ describe("FakeDaytonaSandboxClient — capabilities + handshake", () => {
       volumes: "managed",
       workingTreeTransport: "git-remote",
       depsCacheSharing: "per-sandbox",
+      noNetworkSessions: false,
     });
   });
 

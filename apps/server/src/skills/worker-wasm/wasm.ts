@@ -1,6 +1,6 @@
 import type { Result } from "neverthrow";
 import { match } from "ts-pattern";
-import type { SkillInputs, SkillIo } from "../types.js";
+import type { ImportedSchemas, SchemaImportError } from "../schema-import.js";
 
 /**
  * What a wasm child installs before it signals `ready`
@@ -56,22 +56,6 @@ export interface WasmProbe {
     opts: { packageCacheDir: string; signal?: AbortSignal },
   ): Promise<Result<void, WasmProbeError>>;
 }
-
-/** A skill's `Input` and `Output` JSON Schemas, null for a model it does not define. */
-export interface ImportedSchemas {
-  inputs: SkillInputs | null;
-  outputs: SkillIo | null;
-}
-
-/**
- * Why a schema import gave no schemas: `refused` is a verdict on the skill
- * (it did not import, or a model could not be described, or `Input` does not
- * describe an object); `unavailable` means the import did not run to its end
- * (the child could not start, crashed or timed out).
- */
-export type SchemaImportError =
-  | { kind: "refused"; message: string }
-  | { kind: "unavailable"; message: string };
 
 /**
  * Why register's wasm schema import gave no schemas: the skill's packages
