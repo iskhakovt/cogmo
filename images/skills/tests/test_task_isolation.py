@@ -12,6 +12,7 @@ teardown around that.
 """
 
 import json
+import math
 import os
 import queue
 import subprocess
@@ -572,8 +573,15 @@ class TestSupervisorProtocol:
 
     @pytest.mark.parametrize(
         "wall_clock",
-        [{}, {"wallClockS": 0}, {"wallClockS": -1}, {"wallClockS": "5"}, {"wallClockS": True}],
-        ids=["absent", "0", "-1", "str", "bool"],
+        [
+            {},
+            {"wallClockS": 0},
+            {"wallClockS": -1},
+            {"wallClockS": "5"},
+            {"wallClockS": True},
+            {"wallClockS": math.nan},
+        ],
+        ids=["absent", "0", "-1", "str", "bool", "nan"],
     )
     def test_an_invalid_wall_clock_falls_back_to_the_default(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str], protocol: ProtocolCheck, wall_clock: dict[str, object]
@@ -585,6 +593,31 @@ class TestSupervisorProtocol:
             frame = {"type": "task_invoke", "run": RUN, "id": "t-wall", "skill": "wall", "inputs": {}, "body": body}
             frame |= wall_clock
             sup.send(frame, conforming=not wall_clock)
+            results = [f for f in sup.frames_until_exit() if f.get("type") == "task_result"]
+            assert [r.get("error") for r in results] == ["wall_clock_exceeded"], results
+            assert "wall-clock 0.5s exceeded" in capfd.readouterr().err
+        finally:
+            sup.close()
+
+    # Each is past the longest wait epoll takes. A frame's `1e400` parses to
+    # `inf`, sent here as `Infinity`.
+    @pytest.mark.parametrize("wall_clock_s", [3_000_000, 10**400, math.inf], ids=["finite", "huge-int", "inf"])
+    def test_runs_a_task_whose_wall_clock_is_past_any_wait(self, sup: _Supervisor, wall_clock_s: float) -> None:
+        body = "async def run(inputs, ctx):\n    return 1\n"
+        frame = {"type": "task_invoke", "run": RUN, "id": "t-long", "skill": "long", "inputs": {}, "body": body}
+        sup.send(frame | {"wallClockS": wall_clock_s}, conforming=wall_clock_s != math.inf)
+        frames = sup.frames_until_exit()
+        results = [(f.get("ok"), f.get("output")) for f in frames if f.get("type") == "task_result"]
+        assert results == [(True, 1)], frames
+        assert frames[-1] == {"type": "task_exited", "id": "t-long"}
+
+    def test_caps_the_wall_clock_at_the_ceiling(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str], protocol: ProtocolCheck
+    ) -> None:
+        sup = _Supervisor(cwd=tmp_path, protocol=protocol, patch="supervisor.MAX_WALL_CLOCK_S = 0.5")
+        try:
+            body = "import asyncio\nasync def run(inputs, ctx):\n    await asyncio.sleep(30)\n"
+            sup.send_task("t-capped", body, {}, wall_clock_s=60)
             results = [f for f in sup.frames_until_exit() if f.get("type") == "task_result"]
             assert [r.get("error") for r in results] == ["wall_clock_exceeded"], results
             assert "wall-clock 0.5s exceeded" in capfd.readouterr().err
