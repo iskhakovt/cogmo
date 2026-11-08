@@ -24,6 +24,7 @@ notes/
 __pycache__/
 *.py[cod]
 .venv/
+images/skills/mutation-report.txt
 .pytest_cache/
 .ruff_cache/
 .direnv/
