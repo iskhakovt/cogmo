@@ -153,8 +153,8 @@ function chainDigests(base: string, messages: ReadonlyArray<Message>, through: n
  * The loaded history as the epoch's requests send it, before the turn's own
  * compaction: the turn's view, which renders it under the epoch's cutoff when
  * the turn kept that cutoff. Null when the turn advanced it: the turn opens an
- * `attachments` epoch whatever the comparison finds, so it compares no digest
- * rather than render attachments it won't send.
+ * epoch whatever the comparison finds, so it compares no digest rather than
+ * render attachments it won't send.
  */
 function sentHistory(view: TurnView, openerIndex: number): Message[] | null {
   return match(view.cutoff)
