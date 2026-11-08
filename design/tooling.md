@@ -216,7 +216,7 @@ The TypeScript host is the primary stack, but container-tier skills run inside a
 - **ruff** for lint + format. Single tool replaces flake8/black/isort. `select = ["F", "E", "W", "I", "B", "UP", "RUF"]` — tight at the small scale we run.
 - **pyrefly** for typechecking — Meta's Rust typechecker, replaces Pyre. Picked over `mypy` (slower, weaker inference on partial annotations) and Astral's `ty` (still beta, ~53% spec conformance vs pyrefly's ~88% as of May 2026). Re-evaluate when `ty` hits 1.0 (Astral's track record on `ruff` / `uv` makes it the long-term favourite).
 - **pytest** + `pytest-asyncio` (`asyncio_mode = "auto"`).
-- **mutmut** for mutation testing, in its own `mutation` dependency group, which neither CI nor the image installs (`design/testing.md` → Mutation Testing).
+- **mutmut** for mutation testing of `images/skills/`, in its own `mutation` dependency group, which neither CI nor the published image installs (`design/testing.md` → Mutation Testing).
 - src layout: `src/<package_name>/`, `tests/`, `py.typed` marker.
 - Every python sub-project ships its CI in `.github/workflows/ci.yml` as a separate job that runs `uv sync --locked`, `ruff check`, `ruff format --check`, `pyrefly check`, `pytest`.
 - Multi-stage Dockerfile: builder syncs locked deps into a venv; runtime stage copies just the venv to `/opt/<name>/.venv` and adds it to `PATH`. `UV_NO_DEV=1`, `UV_NO_EDITABLE=1`, `UV_COMPILE_BYTECODE=1`. No build deps in the runtime stage.
