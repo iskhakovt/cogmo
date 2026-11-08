@@ -58,6 +58,10 @@ export function createModelCatalogFunctions(core: CoreDeps) {
               runInTx: core.runInTx,
               modelCatalogStore: core.modelCatalogStore,
               url: catalogUrl,
+              openRouterUrl:
+                env.MODEL_CATALOG_OPENROUTER_URL === "off"
+                  ? null
+                  : env.MODEL_CATALOG_OPENROUTER_URL,
               fetch: globalThis.fetch,
               installCatalog: installLiveCatalog,
               bundled: bundledSnapshot(),

@@ -26,7 +26,7 @@ export function createModelCatalogRefresh(
   return inngest.createFunction(
     {
       id: "model-catalog-refresh",
-      // Covers a network blip or a GitHub 5xx. A rejected registry throws
+      // Covers a network blip or an upstream 5xx. A rejected source throws
       // `NonRetriableError`, since refetching returns the same bytes.
       retries: 3,
       concurrency: { limit: 1 },

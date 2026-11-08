@@ -6,6 +6,7 @@ import { type RefreshModelCatalogDeps, refreshModelCatalog } from "./refresh-mod
 import type { ModelCatalogStore } from "./store/index.js";
 
 const URL = "https://registry.test/models.json";
+const OPENROUTER_URL = "https://openrouter.test/api/v1/models";
 const FETCHED_AT = new Date("2026-09-28T06:17:00.000Z");
 const LIMITS = { contextWindow: 200_000, maxOutputTokens: 8_192 };
 
@@ -21,8 +22,25 @@ function upstream(ids: ReadonlyArray<string>): Record<string, unknown> {
   );
 }
 
+/** An OpenRouter model list holding `ids`, each served with {@link LIMITS}. */
+function openRouterList(ids: ReadonlyArray<string>): Record<string, unknown> {
+  return {
+    data: ids.map((id) => ({
+      id,
+      context_length: 200_000,
+      top_provider: { context_length: 200_000, max_completion_tokens: 8_192 },
+    })),
+  };
+}
+
 function makeDeps(
-  opts: { response?: Response | Error; previousIds?: string[] | null; url?: string } = {},
+  opts: {
+    response?: Response | Error;
+    openRouter?: Response | Error | null;
+    previousIds?: string[] | null;
+    url?: string;
+    bundled?: LitellmCatalog;
+  } = {},
 ): RefreshModelCatalogDeps & {
   store: ReturnType<typeof mock<ModelCatalogStore>>;
   installed: LiveCatalog[];
@@ -31,17 +49,25 @@ function makeDeps(
   store.latestModelIds.mockResolvedValue(opts.previousIds ?? null);
   store.replace.mockResolvedValue({ id: "new", createdAt: FETCHED_AT });
   const installed: LiveCatalog[] = [];
-  const response = opts.response ?? Response.json(upstream(Object.keys(BUNDLED)));
+  const bundled = opts.bundled ?? BUNDLED;
+  const url = opts.url ?? URL;
+  const responses = new Map<string, Response | Error>([
+    [url, opts.response ?? Response.json(upstream(Object.keys(bundled)))],
+  ]);
+  if (opts.openRouter) responses.set(OPENROUTER_URL, opts.openRouter);
   return {
     runInTx: fakeRunInTx,
     modelCatalogStore: store,
-    url: opts.url ?? URL,
-    fetch: vi.fn(async () => {
+    url,
+    openRouterUrl: opts.openRouter ? OPENROUTER_URL : null,
+    fetch: vi.fn(async (input: string | URL | Request) => {
+      const response = responses.get(String(input));
+      if (response === undefined) throw new Error(`unexpected fetch of ${String(input)}`);
       if (response instanceof Error) throw response;
       return response;
     }),
     installCatalog: (catalog) => installed.push(catalog),
-    bundled: BUNDLED,
+    bundled,
     store,
     installed,
   };
@@ -139,5 +165,129 @@ describe("refreshModelCatalog", () => {
     expect(error).toMatchObject({ kind: "rejected", message: expect.stringMatching(/only 1 /) });
     expect(deps.store.replace).not.toHaveBeenCalled();
     expect(deps.installed).toEqual([]);
+  });
+
+  describe("with OpenRouter's model list", () => {
+    it("fills the openrouter/ namespace from it and LiteLLM's registry fills the rest", async () => {
+      const deps = makeDeps({
+        response: Response.json(upstream([...Object.keys(BUNDLED), "openrouter/retired/model"])),
+        openRouter: Response.json({
+          data: [
+            {
+              id: "x-ai/grok-9",
+              context_length: 256_000,
+              top_provider: { context_length: 200_000, max_completion_tokens: 16_000 },
+            },
+          ],
+        }),
+      });
+
+      const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
+
+      expect(deps.fetch).toHaveBeenCalledWith(URL, expect.anything());
+      expect(deps.fetch).toHaveBeenCalledWith(OPENROUTER_URL, expect.anything());
+      const stored = deps.store.replace.mock.calls[0]?.[1];
+      expect(stored).toEqual({
+        ...BUNDLED,
+        "openrouter/x-ai/grok-9": { contextWindow: 200_000, maxOutputTokens: 16_000 },
+      });
+      expect(deps.installed).toEqual([{ entries: stored, fetchedAt: FETCHED_AT }]);
+      expect(result.models).toBe(5);
+      expect(result.added).toEqual(["openrouter/x-ai/grok-9"]);
+    });
+
+    it("keeps LiteLLM's openrouter/ entries when the OpenRouter source is off", async () => {
+      const deps = makeDeps({
+        response: Response.json(upstream([...Object.keys(BUNDLED), "openrouter/legacy/model"])),
+      });
+
+      await refreshModelCatalog(deps);
+
+      expect(deps.fetch).toHaveBeenCalledTimes(1);
+      expect(deps.store.replace.mock.calls[0]?.[1]).toHaveProperty(["openrouter/legacy/model"]);
+    });
+
+    it.each([
+      [
+        "a non-2xx status",
+        new Response("rate limited", { status: 429 }),
+        /openrouter\.test.* returned 429/,
+      ],
+      [
+        "a network failure",
+        new Error("ECONNRESET"),
+        /fetching https:\/\/openrouter\.test.*ECONNRESET/,
+      ],
+    ])(
+      "reports %s as unavailable and keeps the stored catalog",
+      async (_label, openRouter, message) => {
+        const deps = makeDeps({ openRouter });
+
+        const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
+
+        expect(error.kind).toBe("unavailable");
+        expect(error.message).toMatch(message);
+        expect(deps.store.replace).not.toHaveBeenCalled();
+        expect(deps.installed).toEqual([]);
+      },
+    );
+
+    it("rejects a list that isn't a { data: [...] } object", async () => {
+      const deps = makeDeps({ openRouter: Response.json(upstream(["x-ai/grok-9"])) });
+
+      const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
+
+      expect(error.kind).toBe("rejected");
+      expect(deps.store.replace).not.toHaveBeenCalled();
+    });
+
+    it("rejects a list with under half the bundled snapshot's openrouter/ entries", async () => {
+      const bundled: LitellmCatalog = {
+        ...BUNDLED,
+        ...Object.fromEntries(
+          ["a/1", "a/2", "a/3", "a/4"].map((id) => [`openrouter/${id}`, LIMITS]),
+        ),
+      };
+      const deps = makeDeps({ bundled, openRouter: Response.json(openRouterList(["a/1"])) });
+
+      const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
+
+      expect(error).toMatchObject({
+        kind: "rejected",
+        message:
+          "only 1 usable OpenRouter models, under the floor of 2 (half the bundled snapshot)",
+      });
+      expect(deps.store.replace).not.toHaveBeenCalled();
+      expect(deps.installed).toEqual([]);
+    });
+
+    it("rejects an empty list even when the bundled snapshot has no openrouter/ entries", async () => {
+      const deps = makeDeps({ openRouter: Response.json(openRouterList([])) });
+
+      const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
+
+      expect(error).toMatchObject({ kind: "rejected", message: expect.stringMatching(/only 0 /) });
+    });
+
+    it("counts LiteLLM's floor outside the openrouter/ namespace", async () => {
+      const bundled: LitellmCatalog = {
+        ...BUNDLED,
+        ...Object.fromEntries(
+          ["a/1", "a/2", "a/3", "a/4"].map((id) => [`openrouter/${id}`, LIMITS]),
+        ),
+      };
+      const deps = makeDeps({
+        bundled,
+        response: Response.json(upstream(["model-a", "openrouter/a/1", "openrouter/a/2"])),
+        openRouter: Response.json(openRouterList(["a/1", "a/2", "a/3", "a/4"])),
+      });
+
+      const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
+
+      expect(error).toMatchObject({
+        kind: "rejected",
+        message: expect.stringMatching(/only 1 usable entries/),
+      });
+    });
   });
 });

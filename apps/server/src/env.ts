@@ -1,6 +1,6 @@
 import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
-import { LITELLM_REGISTRY_URL } from "./llm/litellm-registry-url.js";
+import { LITELLM_REGISTRY_URL, OPENROUTER_MODELS_URL } from "./llm/catalog-urls.js";
 import { resolveEnvFile } from "./secrets/env-file.js";
 
 /**
@@ -166,6 +166,13 @@ export const env = createEnv({
      * and the integration and e2e tiers, which must not reach GitHub).
      */
     MODEL_CATALOG_URL: ModelCatalogUrlSchema.default(LITELLM_REGISTRY_URL),
+    /**
+     * Where the same refresh fetches OpenRouter's model list, which supplies
+     * the limits of `openrouter/*` ids, or `off` to refresh LiteLLM's registry
+     * alone and leave those ids to the bundled snapshot. Unread while
+     * `MODEL_CATALOG_URL` is `off`.
+     */
+    MODEL_CATALOG_OPENROUTER_URL: ModelCatalogUrlSchema.default(OPENROUTER_MODELS_URL),
     S3_ENDPOINT: z.string().optional(),
     S3_BUCKET: z.string().default("cogmo-files"),
     S3_ACCESS_KEY: z.string().optional(),

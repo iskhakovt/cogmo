@@ -43,7 +43,7 @@ A fixed low-detail figure (85 tokens) would undercount, since from Append-only s
 
 ## Model Registry
 
-Context window and output limits are properties of the model, not the profile. `resolveLimits` (`src/llm/models.ts`) takes each from, in order: an operator override on the routing row, LiteLLM's catalog (a live copy refreshed every six hours, then the snapshot bundled with the release), and a conservative 128k / 4k default that logs a warning. An unknown model never fails; it compacts early. See [providers.md](providers.md#limits-resolution).
+Context window and output limits are properties of the model, not the profile. `resolveLimits` (`src/llm/models.ts`) takes each from, in order: an operator override on the routing row, the model catalog built from LiteLLM's registry and OpenRouter's model list (a live copy refreshed every six hours, then the snapshot bundled with the release), and a conservative 128k / 4k default that logs a warning. An unknown model never fails; it compacts early. See [providers.md](providers.md#limits-resolution).
 
 ## Context Budget
 

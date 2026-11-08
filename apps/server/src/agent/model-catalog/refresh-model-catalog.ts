@@ -1,17 +1,24 @@
 /**
- * Refresh the live model catalog from LiteLLM's upstream registry: fetch,
- * prune to the resolver's two fields, store as the newest `model_catalogs`
- * row, and install it in this process. A model upstream learns about reaches
- * the resolver at the next refresh, with no release in between.
+ * Refresh the live model catalog from its sources: fetch LiteLLM's registry and
+ * OpenRouter's model list, prune each to the resolver's two fields, store the
+ * union as the newest `model_catalogs` row, and install it in this process.
+ * OpenRouter supplies the `openrouter/*` namespace, LiteLLM everything else. A
+ * model either source learns about reaches the resolver at the next refresh,
+ * with no release in between.
  */
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import type { LitellmCatalog, LiveCatalog } from "../../llm/litellm-data.js";
-import { pruneLitellmRegistry } from "../../llm/litellm-upstream.js";
+import { type PrunedRegistry, pruneLitellmRegistry } from "../../llm/litellm-upstream.js";
+import {
+  isOpenRouterKey,
+  pruneOpenRouterModels,
+  withOpenRouterNamespace,
+} from "../../llm/openrouter-models.js";
 import { describeError } from "../../util/describe-error.js";
 import type { ModelCatalogStore } from "./store/index.js";
 
-/** The upstream file is a few MB; this bounds a stalled connection. */
+/** LiteLLM's registry is a few MB; this bounds a stalled connection. */
 const FETCH_TIMEOUT_MS = 60_000;
 
 /** How many new ids the result names. The count covers the rest. */
@@ -22,9 +29,11 @@ export interface RefreshModelCatalogDeps {
   modelCatalogStore: ModelCatalogStore;
   /** Where LiteLLM's registry is fetched from. */
   url: string;
+  /** Where OpenRouter's model list is fetched from; `null` refreshes LiteLLM's registry alone. */
+  openRouterUrl: string | null;
   fetch: typeof globalThis.fetch;
   installCatalog: (catalog: LiveCatalog) => void;
-  /** The snapshot shipped with the release: the size floor, and the baseline for `added` before the first refresh. */
+  /** The snapshot shipped with the release: each source's size floor, and the baseline for `added` before the first refresh. */
   bundled: LitellmCatalog;
 }
 
@@ -38,42 +47,43 @@ export interface ModelCatalogRefreshed {
 }
 
 export type ModelCatalogRefreshError =
-  /** The fetch failed or returned no JSON; a later attempt may succeed. */
+  /** A source's fetch failed or returned no JSON; a later attempt may succeed. */
   | { kind: "unavailable"; message: string }
-  /** The registry arrived but is unusable; refetching returns the same bytes. */
+  /** A source arrived but is unusable; refetching returns the same bytes. */
   | { kind: "rejected"; message: string };
 
 export async function refreshModelCatalog(
   deps: RefreshModelCatalogDeps,
 ): Promise<Result<ModelCatalogRefreshed, ModelCatalogRefreshError>> {
-  const source = withoutQuery(deps.url);
-  let raw: unknown;
-  try {
-    const res = await deps.fetch(deps.url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    if (!res.ok) {
-      await res.body?.cancel();
-      return err({ kind: "unavailable", message: `${source} returned ${res.status}` });
-    }
-    raw = await res.json();
-  } catch (e) {
-    return err({ kind: "unavailable", message: `fetching ${source}: ${describeError(e)}` });
-  }
+  const [litellmRaw, openRouterRaw] = await Promise.all([
+    fetchJson(deps.fetch, deps.url),
+    deps.openRouterUrl === null ? null : fetchJson(deps.fetch, deps.openRouterUrl),
+  ]);
+  if (litellmRaw.isErr()) return err(litellmRaw.error);
 
-  const pruned = pruneLitellmRegistry(raw);
-  if (pruned.isErr()) return err({ kind: "rejected", message: pruned.error });
-  const { entries } = pruned.value;
+  const litellm = pruneLitellmRegistry(litellmRaw.value);
+  if (litellm.isErr()) return err({ kind: "rejected", message: litellm.error });
+  const litellmFloor = belowFloor(
+    "usable entries",
+    litellm.value,
+    deps.bundled,
+    (key) => !isOpenRouterKey(key),
+  );
+  if (litellmFloor) return err({ kind: "rejected", message: litellmFloor });
 
-  // A truncated or reshaped upstream would still parse, and would replace a
-  // good catalog with a sliver of one. The bundled snapshot still answers for
-  // anything missing, but a live catalog that small has stopped tracking
-  // upstream.
-  const models = Object.keys(entries).length;
-  const floor = Math.ceil(Object.keys(deps.bundled).length / 2);
-  if (models < floor) {
-    return err({
-      kind: "rejected",
-      message: `only ${models} usable entries, under the floor of ${floor} (half the bundled snapshot)`,
-    });
+  let entries = litellm.value.entries;
+  if (openRouterRaw !== null) {
+    if (openRouterRaw.isErr()) return err(openRouterRaw.error);
+    const openRouter = pruneOpenRouterModels(openRouterRaw.value);
+    if (openRouter.isErr()) return err({ kind: "rejected", message: openRouter.error });
+    const openRouterFloor = belowFloor(
+      "usable OpenRouter models",
+      openRouter.value,
+      deps.bundled,
+      isOpenRouterKey,
+    );
+    if (openRouterFloor) return err({ kind: "rejected", message: openRouterFloor });
+    entries = withOpenRouterNamespace(entries, openRouter.value.entries);
   }
 
   const { previousIds, stored } = await deps.runInTx(async (tx) => ({
@@ -87,11 +97,49 @@ export async function refreshModelCatalog(
     .filter((id) => !baseline.has(id))
     .sort();
   return ok({
-    models,
+    models: Object.keys(entries).length,
     fetchedAt: stored.createdAt.toISOString(),
     added: added.slice(0, ADDED_SAMPLE),
     addedCount: added.length,
   });
+}
+
+async function fetchJson(
+  fetch: typeof globalThis.fetch,
+  url: string,
+): Promise<Result<unknown, ModelCatalogRefreshError>> {
+  const source = withoutQuery(url);
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!res.ok) {
+      await res.body?.cancel();
+      return err({ kind: "unavailable", message: `${source} returned ${res.status}` });
+    }
+    return ok(await res.json());
+  } catch (e) {
+    return err({ kind: "unavailable", message: `fetching ${source}: ${describeError(e)}` });
+  }
+}
+
+/**
+ * Why a source's pruned entries are too few to replace a good catalog, or
+ * `null` when they are enough. A truncated or reshaped upstream would still
+ * parse, and would replace a good catalog with a sliver of one. The bundled
+ * snapshot still answers for anything missing, but a live catalog that small
+ * has stopped tracking upstream. The floor is half the bundled snapshot's
+ * entries in the source's namespace, and at least one.
+ */
+function belowFloor(
+  what: string,
+  pruned: PrunedRegistry,
+  bundled: LitellmCatalog,
+  inNamespace: (key: string) => boolean,
+): string | null {
+  const count = Object.keys(pruned.entries).filter(inNamespace).length;
+  const floor = Math.max(1, Math.ceil(Object.keys(bundled).filter(inNamespace).length / 2));
+  return count < floor
+    ? `only ${count} ${what}, under the floor of ${floor} (half the bundled snapshot)`
+    : null;
 }
 
 /** The URL minus any query string, which is where a mirror's token would sit. */
