@@ -1,11 +1,12 @@
 # The wasm tier's half of `cogmo_ctx`: the `Bridge` over the worker's
-# `MessagePort`, and the call into the skill's `run`. `pyodide-worker.ts`
-# runs this file in the Pyodide globals the skill body shares, once it has
-# written `cogmo_ctx` into Pyodide's filesystem. It stays out of
-# `cogmo_ctx` because it imports `pyodide.ffi`, which only Pyodide has.
+# `MessagePort`, and `_cogmo_call_run` (`cogmo_ctx._run.call_run`), which
+# the run stage awaits. `pyodide-worker.ts` runs this file in the Pyodide
+# globals the skill body shares, once it has written `cogmo_ctx` into
+# Pyodide's filesystem. The bridge stays out of `cogmo_ctx` because it
+# imports `pyodide.ffi`, which only Pyodide has.
 
 from cogmo_ctx import CtxError as _CogmoCtxError
-from cogmo_ctx import SkillError as _CogmoSkillError
+from cogmo_ctx._run import call_run as _cogmo_call_run  # noqa: F401  (the run stage calls it)
 
 
 class _CogmoBridge:
@@ -25,12 +26,3 @@ class _CogmoBridge:
             raise _CogmoCtxError(reply["kind"], reply["message"])
         value = reply.get("value")
         return None if value is jsnull else value
-
-
-async def _cogmo_call_run(run, inputs, ctx):
-    """Await the skill's `run`: `(None, output)`, or `((kind, message), None)` for a `SkillError`."""
-    try:
-        return None, await run(inputs, ctx)
-    except _CogmoSkillError as e:
-        kind = "skill_retryable" if e.retryable else "skill_failed"
-        return (kind, f"{e.kind}: {e.message}"), None

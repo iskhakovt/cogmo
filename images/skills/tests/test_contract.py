@@ -17,6 +17,16 @@ from cogmo_skills_runtime.runner import _main
 
 RUN = {"id": "run-1", "key": "key-1"}
 
+# A skill whose `Input` refuses the empty inputs every case runs with, and one whose `Output` refuses a
+# JSON-safe result, which the frame keeps.
+OUTPUT_KEPT = (
+    "from pydantic import BaseModel\nclass Output(BaseModel):\n    n: int\n"
+    "async def run(inputs, ctx):\n    return {'m': 1}\n"
+)
+INPUT_INVALID = (
+    "from pydantic import BaseModel\nclass Input(BaseModel):\n    n: int\nasync def run(inputs, ctx):\n    return 1\n"
+)
+
 # The `protocol` fixture (conftest.py).
 type ProtocolCheck = Callable[[str, object], None]
 
@@ -82,6 +92,8 @@ async def _task_result(body: str) -> dict[str, Any]:
         "def run(inputs, ctx):\n    return 1\n",
         "def broken(:\n",
         "async def run(inputs, ctx):\n    raise MemoryError()\n",
+        INPUT_INVALID,
+        OUTPUT_KEPT,
     ],
 )
 async def test_every_task_result_the_runner_writes_matches_the_schema(protocol: ProtocolCheck, body: str) -> None:

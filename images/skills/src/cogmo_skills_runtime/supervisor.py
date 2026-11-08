@@ -67,7 +67,7 @@ from cogmo_skills_runtime.runner import _main as _run_main
 # a supervisor announcing any other version (`SUPERVISOR_PROTOCOL_VERSION`
 # in `src/skills/protocol.ts`), so it also marks what else the host runs
 # in this image.
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 
 DEFAULT_WALL_CLOCK_S = 60
 SIGKILL_GRACE_S = 2.0

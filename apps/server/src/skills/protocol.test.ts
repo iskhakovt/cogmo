@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CtxCallSchema,
   CtxResultSchema,
+  fromTaskResult,
   TaskInvokeSchema,
   TaskResultSchema,
   WorkerMessageSchema,
@@ -158,6 +159,35 @@ describe("TaskResultSchema (discriminated)", () => {
     expect(() =>
       TaskResultSchema.parse({ type: "task_result", id: "t", ok: false, error: "boom" }),
     ).toThrow();
+  });
+
+  it.each(["input_invalid", "output_invalid", "skill_failed", "skill_retryable"])(
+    "ok:false accepts the %s a worker reports for a failure the run holds as a value",
+    (errorKind) => {
+      expect(
+        TaskResultSchema.parse({ type: "task_result", id: "t", ok: false, errorKind, error: "x" }),
+      ).toMatchObject({ errorKind });
+    },
+  );
+
+  it("keeps the output of an output_invalid, and of no other kind", () => {
+    const frame = {
+      type: "task_result",
+      id: "t",
+      ok: false,
+      error: "x",
+      output: { n: 1 },
+    } as const;
+    expect(
+      fromTaskResult(TaskResultSchema.parse({ ...frame, errorKind: "output_invalid" })),
+    ).toEqual({ ok: false, errorKind: "output_invalid", error: "x", output: { n: 1 } });
+    expect(fromTaskResult(TaskResultSchema.parse({ ...frame, errorKind: "skill_raised" }))).toEqual(
+      {
+        ok: false,
+        errorKind: "skill_raised",
+        error: "x",
+      },
+    );
   });
 
   it("ok:false rejects a kind no worker reports", () => {

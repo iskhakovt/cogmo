@@ -17,7 +17,7 @@ import type { SkillRunErrorKind } from "./store/index.js";
  * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
  * change, and when the host comes to run something new in the image.
  */
-export const SUPERVISOR_PROTOCOL_VERSION = 5;
+export const SUPERVISOR_PROTOCOL_VERSION = 6;
 
 /** Container tier only: the supervisor's first frame, announcing its protocol version. */
 export const SupervisorReadySchema = z.object({
@@ -131,11 +131,12 @@ const TaskResultOkSchema = z.object({
  * The run error kinds a worker reports in a failed `task_result`
  * (design/skills.md → Run failures → who decides each kind): the runner's
  * `load_failed`, `skill_raised`, `memory_exceeded` and `output_invalid`, a
- * `SkillError`'s `skill_failed` and `skill_retryable`, and the relay's and
- * the task process's own.
+ * refused `Input`'s `input_invalid`, a `SkillError`'s `skill_failed` and
+ * `skill_retryable`, and the relay's and the task process's own.
  */
 const WORKER_ERROR_KINDS = [
   "load_failed",
+  "input_invalid",
   "skill_raised",
   "skill_failed",
   "skill_retryable",
@@ -163,20 +164,50 @@ const TaskResultErrSchema = z.object({
   error: z.string(),
   rusage: RuntimeRusageSchema.optional(),
 });
-export const TaskResultSchema = z.union([TaskResultOkSchema, TaskResultErrSchema]);
+/**
+ * An `output_invalid` that keeps what the skill returned, which JSON carries
+ * but its `Output` model refused (design/skills.md → Run failures).
+ */
+const TaskResultKeptOutputSchema = TaskResultErrSchema.extend({
+  errorKind: z.literal("output_invalid"),
+  output: z.unknown(),
+});
+export const TaskResultSchema = z.union([
+  TaskResultOkSchema,
+  TaskResultKeptOutputSchema,
+  TaskResultErrSchema,
+]);
 export type TaskResult = z.infer<typeof TaskResultSchema>;
 
 /** A task's result as a host hands it to the runner: the wire result without its framing. */
 export type TaskOutcome =
   | { ok: true; output?: unknown; rusage?: RuntimeRusage }
-  | { ok: false; errorKind: TaskErrorKind; error: string; rusage?: RuntimeRusage };
+  | {
+      ok: false;
+      errorKind: Exclude<TaskErrorKind, "output_invalid">;
+      error: string;
+      rusage?: RuntimeRusage;
+    }
+  | {
+      ok: false;
+      errorKind: "output_invalid";
+      error: string;
+      /** What the skill returned, when its worker kept it. */
+      output?: unknown;
+      rusage?: RuntimeRusage;
+    };
 
 /** The task's outcome without its framing. */
 export function fromTaskResult(result: TaskResult): TaskOutcome {
   return {
     ...(result.ok
       ? { ok: true, output: result.output }
-      : { ok: false, errorKind: result.errorKind, error: result.error }),
+      : {
+          ok: false,
+          errorKind: result.errorKind,
+          error: result.error,
+          ...("output" in result && { output: result.output }),
+        }),
     ...(result.rusage !== undefined && { rusage: result.rusage }),
   };
 }

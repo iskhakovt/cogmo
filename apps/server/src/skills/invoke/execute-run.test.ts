@@ -155,6 +155,29 @@ describe("executeRun", () => {
     );
   });
 
+  it("records the output a worker's output_invalid kept", async () => {
+    vi.mocked(dispatchToRuntime).mockImplementation(
+      sendingRuntime({
+        ok: false,
+        errorKind: "output_invalid",
+        error: "doubled: Field required",
+        output: { receipt: "r-1" },
+      }),
+    );
+
+    expect(await execute()).toEqual({
+      kind: "executed",
+      outcome: {
+        kind: "error",
+        error: {
+          kind: "output_invalid",
+          message: "doubled: Field required",
+          output: { receipt: "r-1" },
+        },
+      },
+    });
+  });
+
   it("records a task that failed before its gate from started, saying no skill code ran", async () => {
     vi.mocked(dispatchToRuntime).mockImplementation(
       failingRuntime({

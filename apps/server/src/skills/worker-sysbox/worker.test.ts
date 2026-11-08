@@ -20,7 +20,7 @@ import {
 } from "../protocol.js";
 import { type InvokeParams, SysboxSkillWorker } from "./worker.js";
 
-const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 5 });
+const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 6 });
 
 /** sha256-shaped, as `task_invoke.lockfileHash` requires. */
 const LOCKFILE_HASH = "ab".repeat(32);
@@ -298,7 +298,7 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 })}\n`);
 
       await expect(create(bundle)).rejects.toThrow(
-        /supervisor speaks protocol v2; this Cogmo requires v5 — use the skills image matching this Cogmo version/,
+        /supervisor speaks protocol v2; this Cogmo requires v6 — use the skills image matching this Cogmo version/,
       );
       expect(bundle.execDisposeCalls.count).toBe(1);
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
@@ -311,7 +311,7 @@ describe("SysboxSkillWorker", () => {
         silentSupervisor(bundle);
         const created = create(bundle);
         const outcome = expect(created).rejects.toThrow(
-          /did not announce protocol v5 within 30s; a skills image without the handshake never does/,
+          /did not announce protocol v6 within 30s; a skills image without the handshake never does/,
         );
         await vi.advanceTimersByTimeAsync(30_000);
         await outcome;

@@ -21,7 +21,8 @@ import uuid
 from collections.abc import Mapping
 from typing import Any, BinaryIO, TextIO
 
-from cogmo_ctx import Ctx, CtxError, RunInfo, SkillError
+from cogmo_ctx import Ctx, CtxError, RunInfo
+from cogmo_ctx._run import call_run
 
 
 def _current_rusage() -> dict[str, int]:
@@ -232,12 +233,45 @@ def _encode_output(output: object) -> str:
     return encoded
 
 
+def _emit_kept_output(bridge: _Bridge, stdout: TextIO, task_id: str, error: str, encoded: str) -> None:
+    """Emit an `output_invalid` `task_result` that keeps what the skill returned, already encoded."""
+    bridge.close()
+    head = json.dumps(
+        {
+            "type": "task_result",
+            "id": task_id,
+            "ok": False,
+            "errorKind": "output_invalid",
+            "error": error,
+            "rusage": _current_rusage(),
+        }
+    )
+    stdout.write(f'{head[:-1]}, "output": {encoded}}}\n')
+    stdout.flush()
+
+
 def _emit_output(bridge: _Bridge, stdout: TextIO, task_id: str, encoded: str) -> None:
     """Emit a successful `task_result` carrying the already-encoded output."""
     bridge.close()
     head = json.dumps({"type": "task_result", "id": task_id, "ok": True, "rusage": _current_rusage()})
     stdout.write(f'{head[:-1]}, "output": {encoded}}}\n')
     stdout.flush()
+
+
+def _kept_output(output: object, error: str) -> str | None:
+    """`output` encoded for an `output_invalid` frame beside `error`, or None when it would not fit.
+
+    JSON that cannot carry the output, a frame the message and the output together would overflow, and
+    memory that runs out while encoding all keep nothing: the run is `output_invalid` either way.
+    """
+    if output is None:
+        return None
+    try:
+        encoded = _encode_output(output)
+    except TypeError, ValueError, RecursionError, MemoryError:
+        return None
+    limit = _MAX_FRAME_BYTES - _RESULT_FRAME_OVERHEAD_BYTES
+    return encoded if len(encoded) + len(json.dumps(error)) <= limit else None
 
 
 async def _main(
@@ -299,10 +333,7 @@ async def _main(
 
     ctx = Ctx(bridge, run)
     try:
-        output = await run_fn(inputs, ctx)
-    except SkillError as e:
-        kind = "skill_retryable" if e.retryable else "skill_failed"
-        _emit_failure(bridge, out, task_id, kind, f"{e.kind}: {e.message}")
+        failure, output = await call_run(skill_module, run_fn, inputs, ctx)
     except CtxError as e:
         _emit_failure(bridge, out, task_id, "skill_raised", f"{e.kind}: {e.message}")
     except MemoryError as e:
@@ -312,6 +343,14 @@ async def _main(
         err.write(traceback.format_exc())
         _emit_failure(bridge, out, task_id, "skill_raised", f"{type(e).__name__}: {e}")
     else:
+        if failure is not None:
+            kind, message = failure
+            kept = _kept_output(output, message) if kind == "output_invalid" else None
+            if kept is None:
+                _emit_failure(bridge, out, task_id, kind, message)
+            else:
+                _emit_kept_output(bridge, out, task_id, message, kept)
+            return
         try:
             encoded = _encode_output(output)
         except MemoryError as e:
