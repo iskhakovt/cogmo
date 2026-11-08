@@ -73,14 +73,18 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # commitlint 21 needs Node 22.12; pinned rather than left to the runner image.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
       - name: Validate Conventional Commits format
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
           echo "$PR_TITLE" | npx --yes \
-            -p @commitlint/cli@20.5.0 \
-            -p @commitlint/config-conventional@20.5.0 \
+            -p @commitlint/cli@21.2.4 \
+            -p @commitlint/config-conventional@21.2.4 \
             commitlint
 
   # A PR that changes stored shape changes the design doc that owns it
