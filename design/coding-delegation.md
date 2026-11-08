@@ -82,6 +82,8 @@ type CodingEvent =
 
 Two concrete impls: `ClaudeCodeBackend` (slices 1+2), `CodexBackend` (later). Selection per-task via `coding_tasks.backend`. Both `plan(ctx)` and `execute(ctx, sessionId)` return `AsyncIterable<CodingEvent>` directly — there is no bidirectional control-channel handle. `execute` resumes a prior session via `claude --resume <sid>`; session id is captured during the plan phase. Neither runner passes `--permission-prompt-tool stdio`, so the CLI resolves every tool decision locally and emits no `control_request` frames. Both runners write the prompt as a single stream-json `user` frame and immediately close stdin — the CLI treats stdin EOF as the graceful-shutdown signal under `--input-format stream-json`. See [Sandbox isolation](#sandbox-isolation-confirmed) for the security-boundary rationale.
 
+A repo with a `connector_id` runs its tasks on a connector instead of the sandbox: the stages that touch the execution environment dispatch jobs. The statuses and transitions are unchanged; `coding_task_failure_reason` gains four connector reasons. See [connectors.md](connectors.md) `[proposed]`.
+
 ## Prompt Construction `[proposed]`
 
 What Cogmo actually *tells* the CLI. The prompt is first-class — it governs how the CLI behaves on its own initiative (verifying, fixing, summarizing), how it interacts with the target repo's conventions, and what stays out of its hands (credentials, PR opening, tool policy).
