@@ -85,8 +85,9 @@ function toCanonicalizable(
  * `BigInt` or a throwing `toJSON`, or nested past the call stack. Distinct
  * unencodable inputs share it and compare equal; for tool arguments that can
  * only inflate Class D's counters for repeated calls to the *same* tool, which
- * the loop's side-effect gate and iteration cap bound. The alternative,
- * propagating the throw, ends the turn outright.
+ * the loop's side-effect gate and iteration cap bound; for a transcript head,
+ * an edit inside such a message goes unseen. The alternative, propagating the
+ * throw, ends the turn outright.
  */
 const UNENCODABLE_ARGS = `${ESCAPE}unencodable`;
 
