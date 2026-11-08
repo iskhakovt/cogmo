@@ -252,7 +252,7 @@ async def run(inputs, ctx):
     for name in os.listdir("/proc/self/fd"):
         try:
             fds[name] = os.readlink(f"/proc/self/fd/{name}")
-        except OSError:
+        except FileNotFoundError:
             pass  # the fd of the scan itself
     return fds
 """
@@ -549,16 +549,19 @@ class TestSupervisorProtocol:
             sup.close()
 
     def test_ignores_a_non_object_frame_from_the_task(self, sup: _Supervisor) -> None:
+        # One write, so the relay reads the frame after it in the same read.
         body = (
-            "import sys\n"
+            "import json, sys\n"
             "async def run(inputs, ctx):\n"
-            "    sys.stdout.write('[]\\n')\n"
+            "    call = {'type': 'ctx_call', 'id': 'ctx-1', 'method': 'now', 'args': {}}\n"
+            "    sys.stdout.write('[]\\n' + json.dumps(call) + '\\n')\n"
             "    sys.stdout.flush()\n"
             "    return 'done'\n"
         )
-        result = sup.run_task("t-array", body, {})
-        assert result["ok"] is True, result
-        assert result["output"] == "done"
+        sup.send_task("t-array", body, {})
+        frames = sup.frames_until_exit()
+        assert [f["id"] for f in frames if f.get("type") == "ctx_call"] == ["ctx-1"], frames
+        assert [f.get("output") for f in frames if f.get("type") == "task_result"] == ["done"], frames
 
     def test_forwards_every_frame_of_a_single_write_with_its_args(self, sup: _Supervisor) -> None:
         sup.send_task("t-batch", _TWO_CTX_CALLS, {})
