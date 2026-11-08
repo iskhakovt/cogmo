@@ -28,16 +28,42 @@ def _model(namespace: Mapping[str, object], name: str) -> Any | None:
     return candidate
 
 
+def _rooted(schema: dict[str, Any]) -> dict[str, Any]:
+    """`schema` with a root `$ref`, which a model that refers to itself gets, replaced by the definition it names.
+
+    The root then states its own `type`, which a tool schema needs; the definition stays in `$defs` for the
+    references inside it.
+    """
+    ref, definitions = schema.get("$ref"), schema.get("$defs", {})
+    name = ref.removeprefix("#/$defs/") if isinstance(ref, str) else None
+    if name is None or name not in definitions:
+        return schema
+    return {**definitions[name], **{key: value for key, value in schema.items() if key != "$ref"}}
+
+
 def contract_schemas(namespace: Mapping[str, object]) -> str:
     """The skill's `Input` and `Output` JSON Schemas as one JSON object, `null` for a model it does not define.
 
-    `inputs` is what `Input` validation accepts; `outputs` is what `Output`'s JSON writes, which is what the
-    host receives. A model pydantic cannot describe raises, as does a schema JSON cannot carry (a `NaN` default).
+    `inputs` is what `Input` validation accepts, by alias unless the model validates by name only; `outputs` is
+    what `Output`'s JSON writes, which `call_run` sends the host, by field name unless the model serializes by
+    alias. A model pydantic cannot describe raises, as does a schema JSON cannot carry (a `NaN` default).
     """
     input_model, output_model = _model(namespace, "Input"), _model(namespace, "Output")
     schemas = {
-        "inputs": None if input_model is None else input_model.model_json_schema(mode="validation"),
-        "outputs": None if output_model is None else output_model.model_json_schema(mode="serialization"),
+        "inputs": None
+        if input_model is None
+        else _rooted(
+            input_model.model_json_schema(
+                mode="validation", by_alias=input_model.model_config.get("validate_by_alias", True)
+            )
+        ),
+        "outputs": None
+        if output_model is None
+        else _rooted(
+            output_model.model_json_schema(
+                mode="serialization", by_alias=output_model.model_config.get("serialize_by_alias", False)
+            )
+        ),
     }
     return json.dumps(schemas, allow_nan=False)
 

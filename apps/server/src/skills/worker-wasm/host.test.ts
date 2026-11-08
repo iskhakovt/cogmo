@@ -1219,13 +1219,14 @@ describe("createWasmSchemaImporter", () => {
 
   it("reads what Input validation accepts and what Output's JSON writes", async () => {
     const imported = await importSchemas(`
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 class Input(BaseModel):
     city: str
     days: int = 3
 
 class Output(BaseModel):
+    model_config = ConfigDict(serialize_by_alias=True)
     celsius: float = Field(serialization_alias="tempC")
 
 async def run(inputs, ctx):
@@ -1238,6 +1239,7 @@ async def run(inputs, ctx):
       required: ["city"],
       properties: { days: { default: 3 } },
     });
+    // The model's JSON writes the alias, so its schema names it.
     expect(Object.keys(expectDefined(outputs, "outputs").properties ?? {})).toEqual(["tempC"]);
   });
 
