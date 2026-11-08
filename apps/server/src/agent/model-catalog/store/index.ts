@@ -1,10 +1,16 @@
 import { desc, eq, ne, sql } from "drizzle-orm";
+import { err, ok, type Result } from "neverthrow";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
-import type { LitellmCatalog } from "../../../llm/litellm-data.js";
+import { type LitellmCatalog, LitellmCatalogSchema } from "../../../llm/litellm-data.js";
 import { modelCatalogs } from "./schema.js";
 
 // --- Interface ---
+
+export interface ModelCatalogUnreadable {
+  kind: "unreadable";
+  message: string;
+}
 
 export interface StoredModelCatalog {
   id: string;
@@ -13,8 +19,12 @@ export interface StoredModelCatalog {
 }
 
 export interface ModelCatalogStore {
-  /** The newest catalog, or `null` before the first refresh. */
-  latest(tx: Transaction): Promise<StoredModelCatalog | null>;
+  /**
+   * The newest catalog, or `null` before the first refresh. A row whose
+   * `entries` no longer parse (an older `LitellmCatalogSchema` wrote it) is
+   * `unreadable`.
+   */
+  latest(tx: Transaction): Promise<Result<StoredModelCatalog | null, ModelCatalogUnreadable>>;
 
   /**
    * The model ids in the newest catalog, or `null` before the first refresh
@@ -31,13 +41,25 @@ export interface ModelCatalogStore {
 // --- Implementation ---
 
 export class DrizzleModelCatalogStore implements ModelCatalogStore {
-  async latest(tx: Transaction): Promise<StoredModelCatalog | null> {
-    const rows = await tx
-      .select()
+  async latest(
+    tx: Transaction,
+  ): Promise<Result<StoredModelCatalog | null, ModelCatalogUnreadable>> {
+    const [row] = await tx
+      .select({
+        id: modelCatalogs.id,
+        createdAt: modelCatalogs.createdAt,
+        // The bare column, past `jsonbZod`'s parse, so a row that no longer
+        // parses comes back as a value to check rather than a throw.
+        entries: sql<unknown>`${modelCatalogs.entries}`,
+      })
       .from(modelCatalogs)
       .orderBy(desc(modelCatalogs.createdAt), desc(modelCatalogs.id))
       .limit(1);
-    return rows[0] ?? null;
+    if (!row) return ok(null);
+    const entries = LitellmCatalogSchema.safeParse(row.entries);
+    return entries.success
+      ? ok({ id: row.id, entries: entries.data, createdAt: row.createdAt })
+      : err({ kind: "unreadable", message: entries.error.message });
   }
 
   async latestModelIds(tx: Transaction): Promise<string[] | null> {

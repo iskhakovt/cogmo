@@ -11,11 +11,12 @@
  *      on `model_providers`. Set by the setup wizard or `cogmo model add`
  *      when the operator wants explicit control. Highest priority — when
  *      either column is set we trust it without further lookup.
- *   2. **LiteLLM catalog** — the live copy a scheduled refresh keeps in
+ *   2. **Model catalog** — the live copy a scheduled refresh keeps in
  *      `model_catalogs`, then `data/litellm-models.json`, the snapshot shipped
  *      with the release (`src/llm/litellm-data.ts`). Covers a few thousand
- *      models from the community-curated registry; bridges OpenRouter slugs
- *      to vendor-direct ids via key normalization.
+ *      models from LiteLLM's community-curated registry and OpenRouter's model
+ *      list; key normalization finds an OpenRouter slug's own entry or a
+ *      vendor-direct one.
  *   3. **Conservative default** — 128k context, 4k max output, with a
  *      `WARN` log so operators see the fallback fire and can pin explicit
  *      limits if compaction quality matters.

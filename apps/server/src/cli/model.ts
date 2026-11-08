@@ -89,7 +89,7 @@ export function modelCli(io: CliIo, loadDeps: LoadDeps<ModelCliDeps>) {
         },
         examples: [
           {
-            description: "A model LiteLLM knows the limits of",
+            description: "A model the catalog knows the limits of",
             command: "cogmo model add x-ai/grok-4.3 --provider openrouter",
           },
           {
@@ -177,7 +177,7 @@ export function modelCli(io: CliIo, loadDeps: LoadDeps<ModelCliDeps>) {
       refresh: command({
         name: "refresh",
         description:
-          "Ask `cogmo serve` to fetch LiteLLM's model registry now rather than at its next six-hourly refresh.",
+          "Ask `cogmo serve` to fetch LiteLLM's model registry and OpenRouter's model list now rather than at its next six-hourly refresh.",
         args: {},
         handler: async () => refreshCatalog(await loadDeps(), io),
       }),

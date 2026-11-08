@@ -11,7 +11,6 @@ import { sql as rawSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { z } from "zod";
 import { transactor } from "../../../db/index.js";
 import * as schema from "../../../db/schemas.js";
 import { bundledSnapshot } from "../../../llm/litellm-data.js";
@@ -43,7 +42,7 @@ describe("DrizzleModelCatalogStore (real Postgres)", () => {
     const catalog = bundledSnapshot();
 
     const stored = await tx((trx) => store.replace(trx, catalog));
-    const latest = expectDefined(await tx((trx) => store.latest(trx)), "latest");
+    const latest = expectDefined((await tx((trx) => store.latest(trx)))._unsafeUnwrap(), "latest");
     const ids = expectDefined(await tx((trx) => store.latestModelIds(trx)), "ids");
 
     expect(latest.id).toBe(stored.id);
@@ -71,16 +70,20 @@ describe("DrizzleModelCatalogStore (real Postgres)", () => {
 
     const catalog = { a: { contextWindow: 100_000, maxOutputTokens: 4_096 } };
     await tx((trx) => store.replace(trx, catalog));
-    expect(expectDefined(await tx((trx) => store.latest(trx)), "latest").entries).toEqual(catalog);
+    expect(
+      expectDefined((await tx((trx) => store.latest(trx)))._unsafeUnwrap(), "latest").entries,
+    ).toEqual(catalog);
   });
 
-  it("lists the ids of a row that no longer parses", async () => {
+  it("reports a row that no longer parses as unreadable and still lists its ids", async () => {
     // Written under an older schema, bypassing the store's write-side parse.
     await db.execute(
       rawSql`INSERT INTO model_catalogs (entries) VALUES (${JSON.stringify({ m: { contextWindow: "big" } })}::jsonb)`,
     );
 
-    await expect(tx((trx) => store.latest(trx))).rejects.toBeInstanceOf(z.ZodError);
+    expect((await tx((trx) => store.latest(trx)))._unsafeUnwrapErr()).toMatchObject({
+      kind: "unreadable",
+    });
     expect(await tx((trx) => store.latestModelIds(trx))).toEqual(["m"]);
   });
 });

@@ -16,6 +16,7 @@ import {
   createDbProviderResolver,
   type LlmProviderResolver,
 } from "../llm/resolver.js";
+import { logger } from "../logger.js";
 import type { DrizzleSecretsStore } from "../secrets/store/index.js";
 import type { BootstrapOptions, CoreDeps } from "./stages.js";
 
@@ -58,11 +59,16 @@ export function createModelCatalogFunctions(core: CoreDeps) {
               runInTx: core.runInTx,
               modelCatalogStore: core.modelCatalogStore,
               url: catalogUrl,
+              openRouterUrl:
+                env.MODEL_CATALOG_OPENROUTER_URL === "off"
+                  ? null
+                  : env.MODEL_CATALOG_OPENROUTER_URL,
               fetch: globalThis.fetch,
               installCatalog: installLiveCatalog,
               bundled: bundledSnapshot(),
             }),
           inngest,
+          logger.child({ component: "model-catalog.refresh" }),
         ),
       ];
 }

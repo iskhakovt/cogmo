@@ -3,6 +3,7 @@ import {
   bundledSnapshot,
   candidateKeys,
   installLiveCatalog,
+  isOpenRouterKey,
   LitellmCatalogSchema,
   liveCatalogStatus,
   lookupLitellm,
@@ -137,5 +138,15 @@ describe("live catalog", () => {
       contextWindow: 1_000_000,
       maxOutputTokens: 64_000,
     });
+  });
+});
+
+describe("isOpenRouterKey", () => {
+  it.each([
+    ["openrouter/x-ai/grok-9", true],
+    ["x-ai/grok-9", false],
+    ["vertex_ai/openrouter/x", false],
+  ])("%s → %s", (key, expected) => {
+    expect(isOpenRouterKey(key)).toBe(expected);
   });
 });

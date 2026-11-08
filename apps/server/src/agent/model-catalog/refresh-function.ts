@@ -10,11 +10,10 @@
  */
 import { type Inngest, NonRetriableError } from "inngest";
 import type { Result } from "neverthrow";
+import type { Logger } from "pino";
+import { match } from "ts-pattern";
 import { modelCatalogRefreshRequested } from "../../inngest/events.js";
-import { logger } from "../../logger.js";
 import type { ModelCatalogRefreshError, ModelCatalogRefreshed } from "./refresh-model-catalog.js";
-
-const log = logger.child({ component: "model-catalog.refresh" });
 
 /** Minute 17 keeps it off the top of the hour, where the other crons cluster. */
 export const MODEL_CATALOG_REFRESH_CRON = "17 */6 * * *";
@@ -22,11 +21,12 @@ export const MODEL_CATALOG_REFRESH_CRON = "17 */6 * * *";
 export function createModelCatalogRefresh(
   refresh: () => Promise<Result<ModelCatalogRefreshed, ModelCatalogRefreshError>>,
   inngest: Inngest,
+  log: Pick<Logger, "info" | "warn">,
 ) {
   return inngest.createFunction(
     {
       id: "model-catalog-refresh",
-      // Covers a network blip or a GitHub 5xx. A rejected registry throws
+      // Covers a network blip or an upstream 5xx. A rejected source throws
       // `NonRetriableError`, since refetching returns the same bytes.
       retries: 3,
       concurrency: { limit: 1 },
@@ -39,7 +39,17 @@ export function createModelCatalogRefresh(
           const { kind, message } = result.error;
           throw kind === "rejected" ? new NonRetriableError(message) : new Error(message);
         }
-        log.info(result.value, "model catalog refreshed");
+        match(result.value.openRouter)
+          .with({ kind: "failed" }, () =>
+            log.warn(
+              result.value,
+              "model catalog refreshed without OpenRouter's model list — keeping whatever openrouter/ entries the previous catalog held",
+            ),
+          )
+          .with({ kind: "off" }, { kind: "refreshed" }, () =>
+            log.info(result.value, "model catalog refreshed"),
+          )
+          .exhaustive();
         return result.value;
       }),
   );

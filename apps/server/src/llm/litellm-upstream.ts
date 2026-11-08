@@ -79,6 +79,19 @@ function pruneEntry(value: unknown): PrunedEntry {
   if (typeof contextWindow !== "number" || typeof rawOutput !== "number") {
     return { kind: "no-token-data" };
   }
+  return budgetEntry(contextWindow, rawOutput);
+}
+
+/**
+ * The catalog entry for an upstream's context window and output limit, or
+ * `unusable` when they leave no chat budget. Every catalog source goes through
+ * it, so the same upstream limits produce the same entry whichever source
+ * published them.
+ */
+export function budgetEntry(
+  contextWindow: number,
+  rawOutput: number,
+): { kind: "kept"; entry: LitellmEntry } | { kind: "unusable" } {
   // Cap output at 64k AND at one-quarter of the context window. The
   // quarter-of-context cap keeps small models (16k context, where 64k
   // would still produce a negative budget) sane; the 64k cap keeps

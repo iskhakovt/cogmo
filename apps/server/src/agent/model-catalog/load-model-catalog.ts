@@ -3,12 +3,10 @@
  * resolves limits from what the last refresh fetched rather than from the
  * bundled snapshot alone.
  */
-import { z } from "zod";
 import type { Transactor } from "../../db/index.js";
 import type { LiveCatalog } from "../../llm/litellm-data.js";
 import { logger } from "../../logger.js";
-import { describeError } from "../../util/describe-error.js";
-import type { ModelCatalogStore, StoredModelCatalog } from "./store/index.js";
+import type { ModelCatalogStore } from "./store/index.js";
 
 export interface LoadModelCatalogDeps {
   runInTx: Transactor;
@@ -30,16 +28,15 @@ export interface LoadModelCatalogDeps {
  */
 export async function loadModelCatalog(deps: LoadModelCatalogDeps): Promise<void> {
   if (deps.catalogUrl === "off") return;
-  let stored: StoredModelCatalog | null;
-  try {
-    stored = await deps.runInTx((tx) => deps.modelCatalogStore.latest(tx));
-  } catch (e) {
-    if (!(e instanceof z.ZodError)) throw e;
+  const stored = await deps.runInTx((tx) => deps.modelCatalogStore.latest(tx));
+  if (stored.isErr()) {
     logger.warn(
-      { err: describeError(e) },
+      { err: stored.error.message },
       "stored model catalog unreadable — resolving limits from the bundled snapshot until the next refresh",
     );
     return;
   }
-  if (stored) deps.installCatalog({ entries: stored.entries, fetchedAt: stored.createdAt });
+  if (stored.value) {
+    deps.installCatalog({ entries: stored.value.entries, fetchedAt: stored.value.createdAt });
+  }
 }
