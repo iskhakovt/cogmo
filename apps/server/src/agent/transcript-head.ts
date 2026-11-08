@@ -30,8 +30,8 @@ export type RequestHead = z.infer<typeof RequestHeadSchema>;
  * including the row.
  *
  * - `base`: h₀, the system prompt and tools the chain starts from.
- * - `historyStart`: the first message after the summary the turn's view
- *   started from.
+ * - `historyStart`: the first message after the summary the turn's requests
+ *   were sent under, including one the turn stored.
  * - `status`: `compacted` when the turn's own compaction rewrote its view
  *   without a stored summary, else `diverged` when a request saw a
  *   server-reported mismatch, else `intact`.

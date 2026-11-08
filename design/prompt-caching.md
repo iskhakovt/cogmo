@@ -350,14 +350,14 @@ No method edits a sent message. Compaction returns the view unchanged or a rewri
 
 ### Head check `[confirmed]`
 
-Rollout 5a records heads and the epoch reason; the heads in `load-turn-transcript`'s result, the comparisons, the policy and `cogmo.prompt.prefix_violations` come with 5b, and counting forks with step 7.
+Rollout 5a records heads and the epoch reason, of which it opens only `first_turn`, `configuration`, `summary` and `attachments`; the heads in `load-turn-transcript`'s result, the comparisons, the policy and `cogmo.prompt.prefix_violations` come with 5b, and counting forks with step 7.
 
 A digest chain runs over the provider-neutral request with `harness` removed, so a message the loop holds in memory and its persisted row digest the same: `h₀ = H(system, tools)`, `hᵢ = H(hᵢ₋₁, H(messageᵢ))`, each part as canonical JSON. Key order is the byte-level tests' concern ([Canonical Tool Inputs](#canonical-tool-inputs-confirmed)). A request's head is `(length, hₙ)`. Hashing is incremental, one pass per message per invocation.
 
 - **In a turn.** `llm-iter<N>` computes the head of the request it sends inside its body and returns it in the memoized outcome. Every invocation compares that head with the head of the request it rebuilds for the iteration. A difference means a replay rebuilt input the provider never saw.
 - **Across turns.** Each assistant row a turn writes stores `transcript_head`: `{ length, base, historyStart, digest, status }`, validated by `TranscriptHeadSchema`.
   - `base` is `h₀`, the prompt and tools the head was built under.
-  - `historyStart` is the first message after the summary the view started from.
+  - `historyStart` is the first message after the summary the turn's requests were sent under, including one the turn stored.
   - The digest is the memoized head of the row's request, extended by every message the loop appended after that request, the row included.
   - `status` is `intact`; `compacted` when the turn's own Strategy 3 or unstored summary rewrote its view; or `diverged` when the turn saw an in-turn difference or a server-reported mismatch. A turn that is both is `compacted`, as the epoch rule records `compaction` before `prefix_violation`; its divergence was already counted where it was seen. The adapter surfaces `input_transformations` on the response; `llm-iter<N>` counts them in its body and returns them in its outcome with the head, and `persist-new-messages` sets `diverged` from the outcomes.
 
@@ -382,7 +382,7 @@ A digest chain runs over the provider-neutral request with `harness` removed, so
   When several apply, the first in this list is recorded.
 - **Replay safety.** Every input is memoized or derived from memoized values: the iteration outcomes, `load-turn-transcript`, the frozen tool table, the snapshot and its attachment cutoff, the sizes the refs carry and the frozen attachment limits, and `count-tokens-<n>` and `summarize-prefix-outcome`, which decide a `compacted` head and source (b)'s epoch. `[proposed]` An object deleted after a turn sent it (bucket lifecycle) renders as a placeholder on a later invocation, and that turn's head diverges, a residual of the same class as a concurrent operator action. `persist-new-messages` writes the head, and the verdict gates `open-system-prompt-epoch` on memoized state alone. The only bare-body cost is re-running the hash. The head is optional in `llm-iter<N>`'s outcome and in `load-turn-transcript`'s result, because a memo written before the deploy lacks it. Absent means skip: an iteration without a head gets no comparison, a turn whose last request has none stores no head, and the next turn, like one whose latest row predates the column, skips the check.
 
-`transcript_head` is a nullable JSONB column on `messages` (`TranscriptHeadSchema`), set on assistant rows as they are written; a CHECK keeps it off other rows. A row takes the head of the last request no longer than its position, extended through every message up to it; a row after a request whose memo predates heads gets none. `historyStart` is the first message after the summary the turn's requests were sent under, one the turn stored included. A stream that fails reports no transformations, so a `degrade` outcome carries a head and no transformations.
+`transcript_head` is a nullable JSONB column on `messages` (`TranscriptHeadSchema`), set on assistant rows as they are written; a CHECK keeps it off other rows. A row takes the head of the last request no longer than its position, extended through every message up to it; a row after a request whose memo predates heads gets none. A stream that fails reports no transformations, so a `degrade` outcome carries a head and no transformations.
 
 **On unexplained divergence:**
 
@@ -390,7 +390,7 @@ A digest chain runs over the provider-neutral request with `harness` removed, so
 |-|-|-|
 | Across turns | Open an epoch (`prefix_violation`); `open-system-prompt-epoch` counts `cogmo.prompt.prefix_violations{site: "turn"}` and logs a warning naming the first assistant row whose stored head no longer matches | Throw `PrefixViolationError` |
 | In a turn | Store the head as `diverged` so the next turn opens an epoch; `persist-new-messages` counts `site: "iteration"`. The request proceeds on an unenforced account, which reports the invalidated blocks; an enforced account rejects it unless `drop_block` is set | Throw |
-| Server-reported: `thinking_mismatch_allowed`, or `thinking_dropped` for `prefix_binding_mismatch` or `organization_binding_mismatch` | Count `cogmo.prompt.server_mismatches{type, reason, site}` and store the head as `diverged`, so the next epoch strips | `prefix_mismatch_behavior: "error"` makes it a 400 that fails the test |
+| Server-reported: `thinking_dropped` or `thinking_mismatch_allowed` for `prefix_binding_mismatch` or `organization_binding_mismatch` | Count `cogmo.prompt.server_mismatches{type, reason, site}` and store the head as `diverged`, so the next epoch strips | `prefix_mismatch_behavior: "error"` makes it a 400 that fails the test |
 
 Both metrics carry `site`: `turn`, `iteration`, `stage` or `fork`. The bare-body verdicts count nothing; the steps above count once. A `model_binding_mismatch` entry follows a model switch: it is counted under its reason and changes nothing. From Rollout step 7, when a fork sends the turn's prefix, a fork's entries are counted with `site: "fork"` and change no head, since no later request replays a fork.
 
@@ -426,7 +426,7 @@ The adapter also reports what the provider sees, the last layer and the ground t
    - **5a** `[confirmed]` records without checking: request heads and `input_transformations` in `llm-iter<N>` outcomes, `messages.transcript_head` with the `compacted` status for a turn whose compaction rewrote its view, `system_prompt_snapshots.reason` with its backfill, and `cogmo.prompt.server_mismatches`, in `handle-message` and `run-agentic-stage` alike. Below 5a, a build can't open an epoch: `reason` is NOT NULL.
    - **5b** adds both checks, the heads in `load-turn-transcript`'s result, `cogmo.prompt.prefix_violations` and logs (stage turns skip the across-turn check until [One Prefix per Conversation](#one-prefix-per-conversation-proposed)). `reopen` in production and `throw` in unit tests. The heads `load-turn-transcript` returns ship with the check that reads them: a run in flight across the deploy would otherwise change its epoch decision mid-run.
 6. **Compaction opens an epoch (b).** A run in flight that has planned a parallel group meets the `step-not-found` residual ([crash-recovery.md](crash-recovery.md#handle-message-durability-map-confirmed) → Turn inputs are frozen).
-7. **Forks keep the prefix (h)**, and summarization switches to its own intent at the summarization model's budget.
+7. **Forks keep the prefix (h)**, and summarization switches to its own intent at the summarization model's budget. Forks' `input_transformations` are counted with `site: "fork"`.
 8. **`drop_block` in production**, after a soak with no unexplained mismatch outside `site: "stage"`.
 9. **The `Transcript` type.**
 10. **Strict mode everywhere**, after [One Prefix per Conversation](#one-prefix-per-conversation-proposed): `throw` in the integration tier, no declared exceptions, and live scenario B extended.
@@ -635,8 +635,8 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
   - the binding-controls header goes on first-party requests only, and `block_binding` only to the listed models;
   - each count is recorded once across invocations, in the step that owns it, and a turn both compacted and diverged stores `compacted` and counts its divergence once;
   - the summarization and degraded-reply requests carry the turn's `system` and `tools` with `tool_choice: none` (neither on the OpenAI-compatible adapter) and their Strategy 1 intents; summarization renders its span from `load-turn-transcript`'s rows with its attachments, and a summarization route with a smaller budget advances the fork's cutoff and strips its thinking; `/compact` carries the summarization intent; a summarization on a turn that opens an epoch, and `/compact`, carry no thinking block;
-  - the `input_transformations` parser counts every entry by type and reason, and sets `diverged` for `thinking_mismatch_allowed` and for `thinking_dropped` with reason `prefix_binding_mismatch` or `organization_binding_mismatch`, not for `model_binding_mismatch`;
-  - the `reason` migration, run over pre-migration rows as `src/db/migration-0059.test.ts` runs 0059, each conversation's snapshots ordered by `opened_by`: `first_turn` for a first snapshot, `configuration` for a changed `config_digest` whether or not `history_start` changed, `summary` for a changed `history_start` alone, `attachments` for a changed `attachment_cutoff` alone (`[proposed]`, with (d)), `configuration` for the rest, and the column NOT NULL after;
+  - the `input_transformations` parser counts every entry by type and reason, and sets `diverged` for `thinking_dropped` or `thinking_mismatch_allowed` with reason `prefix_binding_mismatch` or `organization_binding_mismatch`, not for `model_binding_mismatch`;
+  - the `reason` migration, run over pre-migration rows as `src/db/migration-0059.test.ts` runs 0059, each conversation's snapshots ordered by `opened_by`: `first_turn` for a first snapshot, `configuration` for a changed `config_digest` whether or not `history_start` changed, `summary` for a changed `history_start` alone, `attachments` for a changed `attachment_cutoff` alone, `configuration` for the rest, and the column NOT NULL after;
   - under `throw`, each of the above fails the test at the request that diverges.
 
 ### Integration tier (replay, every PR)

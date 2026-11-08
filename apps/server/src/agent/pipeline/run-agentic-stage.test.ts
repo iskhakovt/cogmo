@@ -11,7 +11,7 @@ import { installLiveCatalog } from "../../llm/litellm-data.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../../llm/request-size.js";
-import type { ToolDefinition } from "../../llm/types.js";
+import type { StopReason, ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { SkillRunner } from "../../skills/runner.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
@@ -338,102 +338,64 @@ describe("runAgenticStage", () => {
       expect(replyHead(h)).toMatchObject({ length: 2, historyStart: "msg-1", status: "intact" });
     });
 
-    it("heads the reply compacted when its summary wasn't stored", async () => {
+    const STAGE_HISTORY = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"];
+
+    /** A stage over eight earlier messages whose compaction summarizes, as `summary` says. */
+    async function summarizingStage(summary: {
+      stopReason: StopReason;
+      storeFails: boolean;
+    }): Promise<Awaited<ReturnType<typeof harness>>> {
       const h = await harness();
       vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
       vi.mocked(h.agentStore.listMessages).mockResolvedValue([
-        { id: "m1", role: "user", content: "m1" },
-        { id: "m2", role: "assistant", content: "r1" },
-        { id: "m3", role: "user", content: "m2" },
-        { id: "m4", role: "assistant", content: "r2" },
-        { id: "m5", role: "user", content: "m3" },
-        { id: "m6", role: "assistant", content: "r3" },
-        { id: "m7", role: "user", content: "m4" },
-        { id: "m8", role: "assistant", content: "r4" },
+        ...STAGE_HISTORY.map((id, i) => ({
+          id,
+          role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+          content: id,
+        })),
         { id: "msg-1", role: "user", content: "Draft a plan." },
       ]);
       const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
       vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
-      // Cut at its output cap, so the stage uses it and stores nothing.
       vi.mocked(provider.chat).mockResolvedValueOnce({
         content: [{ type: "text", text: "Summary of the run" }],
-        stopReason: "max_tokens",
+        stopReason: summary.stopReason,
         model: "claude-sonnet-4-6",
         usage: { inputTokens: 1, outputTokens: 1 },
       });
+      if (summary.storeFails) {
+        vi.mocked(h.agentStore.insertOrRecoverSummary).mockRejectedValue(new Error("db down"));
+      }
       h.runStreamingAgentLoop.mockResolvedValue(headedLoop(7));
-      const { steps } = recordingSteps();
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+      return h;
+    }
 
-      await runAgenticStage(h.deps, stageArgs(), steps, log);
+    it("heads the reply compacted when its summary wasn't stored", async () => {
+      // Cut at its output cap, so the stage uses it and stores nothing.
+      const h = await summarizingStage({ stopReason: "max_tokens", storeFails: false });
 
       expect(h.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
       expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
     });
 
     it("heads the reply compacted when storing its summary failed", async () => {
-      const h = await harness();
-      vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
-      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
-        { id: "m1", role: "user", content: "m1" },
-        { id: "m2", role: "assistant", content: "r1" },
-        { id: "m3", role: "user", content: "m2" },
-        { id: "m4", role: "assistant", content: "r2" },
-        { id: "m5", role: "user", content: "m3" },
-        { id: "m6", role: "assistant", content: "r3" },
-        { id: "m7", role: "user", content: "m4" },
-        { id: "m8", role: "assistant", content: "r4" },
-        { id: "msg-1", role: "user", content: "Draft a plan." },
-      ]);
-      const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
-      vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
-      vi.mocked(provider.chat).mockResolvedValueOnce({
-        content: [{ type: "text", text: "Summary of the run" }],
-        stopReason: "end_turn",
-        model: "claude-sonnet-4-6",
-        usage: { inputTokens: 1, outputTokens: 1 },
-      });
-      vi.mocked(h.agentStore.insertOrRecoverSummary).mockRejectedValue(new Error("db down"));
-      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(7));
-      const { steps } = recordingSteps();
-
-      await runAgenticStage(h.deps, stageArgs(), steps, log);
+      const h = await summarizingStage({ stopReason: "end_turn", storeFails: true });
 
       expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
     });
 
     it("heads the reply intact, from after the summary it stored", async () => {
-      const h = await harness();
-      vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
-      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
-        { id: "m1", role: "user", content: "m1" },
-        { id: "m2", role: "assistant", content: "r1" },
-        { id: "m3", role: "user", content: "m2" },
-        { id: "m4", role: "assistant", content: "r2" },
-        { id: "m5", role: "user", content: "m3" },
-        { id: "m6", role: "assistant", content: "r3" },
-        { id: "m7", role: "user", content: "m4" },
-        { id: "m8", role: "assistant", content: "r4" },
-        { id: "msg-1", role: "user", content: "Draft a plan." },
-      ]);
-      const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
-      vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
-      vi.mocked(provider.chat).mockResolvedValueOnce({
-        content: [{ type: "text", text: "Summary of the run" }],
-        stopReason: "end_turn",
-        model: "claude-sonnet-4-6",
-        usage: { inputTokens: 1, outputTokens: 1 },
-      });
-      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(7));
-      const { steps } = recordingSteps();
-
-      await runAgenticStage(h.deps, stageArgs(), steps, log);
+      const h = await summarizingStage({ stopReason: "end_turn", storeFails: false });
 
       const [, stored] = expectDefined(
         vi.mocked(h.agentStore.insertOrRecoverSummary).mock.calls[0],
         "stored summary",
       );
-      const ids = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"];
-      const start = expectDefined(ids[ids.indexOf(stored.throughMessageId) + 1], "history start");
+      const start = expectDefined(
+        STAGE_HISTORY[STAGE_HISTORY.indexOf(stored.throughMessageId) + 1],
+        "history start",
+      );
       expect(start).not.toBe("m1");
       expect(replyHead(h)).toMatchObject({ historyStart: start, status: "intact" });
     });

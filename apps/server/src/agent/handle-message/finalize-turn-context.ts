@@ -84,7 +84,7 @@ export async function finalizeTurnContext(
               configDigest: args.loadedSystemPrompt.configDigest,
               loadedStart: historyStart(turnHistory.messageIds, null),
               epochStart,
-              cutoffAdvanced: args.view.cutoff.kind === "advanced",
+              cutoff: args.view.cutoff,
             }),
           }),
         );

@@ -90,7 +90,9 @@ describe("continuesEpoch", () => {
 
 describe("epochReason", () => {
   const snapshot = { configDigest: "d1", historyStart: "m1" };
-  const same = { configDigest: "d1", loadedStart: "m1", epochStart: "m1", cutoffAdvanced: false };
+  const kept = { kind: "kept", cutoff: null } as const;
+  const advanced = { kind: "advanced", cutoff: "m2" } as const;
+  const same = { configDigest: "d1", loadedStart: "m1", epochStart: "m1", cutoff: kept };
 
   it.each([
     { name: "no snapshot", current: null, turn: same, reason: "first_turn" },
@@ -103,7 +105,7 @@ describe("epochReason", () => {
     {
       name: "another digest and a summary",
       current: snapshot,
-      turn: { configDigest: "d2", loadedStart: "m3", epochStart: "m5", cutoffAdvanced: true },
+      turn: { configDigest: "d2", loadedStart: "m3", epochStart: "m5", cutoff: advanced },
       reason: "configuration",
     },
     {
@@ -121,7 +123,7 @@ describe("epochReason", () => {
     {
       name: "only an advanced attachment cutoff",
       current: snapshot,
-      turn: { ...same, cutoffAdvanced: true },
+      turn: { ...same, cutoff: advanced },
       reason: "attachments",
     },
   ] as const)("records $name as $reason", ({ current, turn, reason }) => {

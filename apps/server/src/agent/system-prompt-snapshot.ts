@@ -7,7 +7,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { match } from "ts-pattern";
 import type { Message } from "../llm/types.js";
+import type { FixedCutoff } from "./attachments/attachment-cutoff.js";
 import {
   type CoreMemoryScope,
   type CoreMemoryView,
@@ -131,7 +133,7 @@ export function epochReason(
     configDigest: string;
     loadedStart: string;
     epochStart: string;
-    cutoffAdvanced: boolean;
+    cutoff: FixedCutoff;
   },
 ): SystemPromptEpochReason {
   if (snapshot === null) return "first_turn";
@@ -139,8 +141,12 @@ export function epochReason(
   if (snapshot.historyStart !== turn.loadedStart || snapshot.historyStart !== turn.epochStart) {
     return "summary";
   }
-  if (turn.cutoffAdvanced) return "attachments";
-  throw new Error("a turn opened an epoch that no reason in the epoch rule explains");
+  return match(turn.cutoff)
+    .with({ kind: "advanced" }, (): SystemPromptEpochReason => "attachments")
+    .with({ kind: "kept" }, () => {
+      throw new Error("a turn opened an epoch that no reason in the epoch rule explains");
+    })
+    .exhaustive();
 }
 
 /**

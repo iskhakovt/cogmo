@@ -38,7 +38,7 @@ export interface PersistTurnArgs {
   /** The conversation's cooldown when admission let the turn through: an elapsed one this turn probes. */
   priorCooldown: CooldownState | null;
   result: AgentLoopResult;
-  /** The view the turn loaded, which its assistant rows' transcript heads record. */
+  /** The view the turn's requests sent, which its assistant rows' transcript heads record. */
   view: HeadView;
 }
 

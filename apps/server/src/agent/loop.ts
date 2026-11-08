@@ -1023,8 +1023,9 @@ export async function runStreamingAgentLoop(
   // iteration outcomes (cached or live) — see AgentLoopResult.streamed.
   const streamed: EmittedLedger = { text: "", toolUseIds: [] };
   // The requests the iterations sent, rebuilt every invocation from their
-  // outcomes like the ledger above. Heads are hashed inside the step bodies,
-  // so a replayed iteration costs no hashing.
+  // outcomes like the ledger above. Every invocation hashes h₀ once, over the
+  // system prompt and tool definitions; message heads are hashed inside the
+  // step bodies, so a replayed iteration hashes no messages.
   const hasher = new TranscriptHasher();
   const base = baseDigest(systemPrompt, toolDefs);
   const sent: SentRequest[] = [];

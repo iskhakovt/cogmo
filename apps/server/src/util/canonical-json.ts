@@ -77,11 +77,13 @@ function toCanonicalizable(value: unknown, ancestors: Set<object>): unknown {
 }
 
 /**
- * Stand-in hash input for a value no encoder could render. Distinct
- * unencodable inputs share it and therefore compare equal; for tool arguments
- * that can only inflate Class D's counters for repeated calls to the *same*
- * tool, which the loop's side-effect gate and iteration cap bound. The
- * alternative — propagating the throw — ends the turn outright.
+ * Stand-in hash input for a value no encoder could render: one holding a
+ * `BigInt` or a throwing `toJSON`. Distinct unencodable inputs share it and
+ * compare equal; for tool arguments that can only inflate Class D's counters
+ * for repeated calls to the *same* tool, which the loop's side-effect gate and
+ * iteration cap bound. A transcript head never meets one: messages are JSON
+ * from a provider or a row. The alternative, propagating the throw, ends the
+ * turn outright.
  */
 const UNENCODABLE_ARGS = `${ESCAPE}unencodable`;
 
