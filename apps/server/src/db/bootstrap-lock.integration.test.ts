@@ -47,4 +47,19 @@ describe("bootstrapLock (real Postgres)", () => {
     const [row] = await lock(() => sql<{ one: number }[]>`SELECT 1 AS one`);
     expect(row?.one).toBe(1);
   });
+
+  // The lock accepts a `max` it reads as a string because postgres-js opens
+  // that many connections; with one, `fn`'s query would wait on the reserved
+  // connection forever.
+  it("runs `fn` on a pool sized by the URL's ?max=2", async () => {
+    const url = new URL(fileDatabaseUrl());
+    url.searchParams.set("max", "2");
+    const urlSql = postgres(url.toString());
+    try {
+      const [row] = await bootstrapLock(urlSql)(() => urlSql<{ one: number }[]>`SELECT 1 AS one`);
+      expect(row?.one).toBe(1);
+    } finally {
+      await urlSql.end();
+    }
+  });
 });
