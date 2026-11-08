@@ -31,7 +31,7 @@ allowBuilds:
 # minimatch 9, two majors back, stays exposed.
 overrides:
   "@hono/node-server@>=2 <2.1.3": ">=2.1.3 <3" # GHSA-rmxm-3fg6-px4f (moderate) via @modelcontextprotocol/sdk
-  "@stryker-mutator/core>minimatch": ">=11.0.1 <12" # GHSA-g3hv-75wg-m249 (moderate) via @stryker-mutator/core
+  "@stryker-mutator/core>minimatch@<11.0.1": ">=11.0.1 <12" # GHSA-g3hv-75wg-m249 (moderate) via @stryker-mutator/core
   "body-parser@>=2 <2.4.0": ">=2.4.0 <3" # GHSA-27r3-jxmh-p828 (high) via express
   "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
   "follow-redirects@>=1 <1.16.2": ">=1.16.2 <2" # GHSA-mrwp-f3q8-3g9p (high) via @daytona/sdk, axios
