@@ -38,7 +38,7 @@ service ConnectorService {
 }
 
 message ConnectRequest {
-  repeated string held_job_ids = 1;   // accepted jobs it still holds
+  repeated string held_job_ids = 1;   // jobs it has persisted and still holds
   repeated string held_task_ids = 2;  // tasks whose workspaces it holds
 }
 
@@ -96,6 +96,7 @@ message FinishJobRequest {
     JobError failed = 3;
     Cancelled cancelled = 4;
   }
+  uint64 last_seq = 5;                // the last event seq it reported; 0 if none
 }
 message FinishJobResponse {}
 message Cancelled {}
@@ -145,14 +146,14 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 
 **Connector rules**, which the contract suite (*Testing*) checks:
 
-1. **Accept, then start.** The connector persists a job and calls `AcceptJob` before starting it, so a job it has not accepted has not started.
+1. **Accept, then start.** The connector persists a job, calls `AcceptJob`, and starts the job only once that call succeeds. It retries a call that fails in transit. When the hub refuses `AcceptJob` with `NOT_FOUND`, because the job has ended or is unknown, the connector drops the job unstarted. So a job without an acknowledged acceptance has not started.
 2. **Reattach.** A `Job` whose `job_id` it holds is not new work. It re-sends `FinishJob` if the job has ended, and otherwise keeps reporting from where it was. It may forget a job once cogmo has acknowledged its `FinishJob`; an id it no longer holds is new work.
 3. **Conflict.** A `Job` for a task and phase it holds under another running `job_id` fails with `JOB_CONFLICT`.
 4. **Restarts.** It keeps accepted jobs across its own restarts and lists them in `held_job_ids`, and lists the tasks whose workspaces it holds in `held_task_ids`. An accepted job it cannot recover is left out, and cogmo reads it as lost.
-5. **Not awaited.** It stops a held job that `awaited_job_ids` omits, or whose report comes back `NOT_FOUND`, and keeps that job's workspace until `release`.
-6. **Reports.** `seq` rises strictly from 1, and a retried report re-sends the same `seq`.
+5. **Not awaited.** It stops a held job that `awaited_job_ids` omits, or whose `AcceptJob` or report comes back `NOT_FOUND`, and keeps that job's workspace until `release`.
+6. **Reports.** `seq` rises strictly from 1, and a retried report re-sends the same `seq`. The connector calls `FinishJob` only once every report for the job has been acknowledged, and passes the last `seq` it sent.
 7. **Cancel.** Cancelling is cooperative: it answers with `FinishJob(cancelled)`, or with the job's real outcome if that came first.
-8. **Workspaces.** `prepare` adopts an existing workspace for the task on `work_branch`. `release` stops the task's running job first, is idempotent, succeeds for a task it never prepared, and keeps the workspace when the salvage push fails.
+8. **Workspaces.** `prepare` adopts an existing workspace for the task on `work_branch`. `release` stops the task's running job first, is idempotent, succeeds for a task it never prepared, and keeps the workspace when the salvage push fails. After a `kept` or failed release, the connector stops listing the task in `held_task_ids`, and the workspace becomes the operator's.
 
 **Auth.** Each call carries `authorization: Bearer <token>`.
 - `cogmo connector add <name> --kind coding` mints a 32-byte token, prints it once and stores its SHA-256, as `web_sessions` does. `rotate` replaces the token. `revoke` moves the connector to `revoked`, and refuses while a repo points at it; tasks running on it lose their jobs. `list` shows the connectors.
@@ -210,15 +211,17 @@ dispatched ──► accepted ──► completed | failed | cancelled
 | Transition | Trigger | Guard and effect |
 |-|-|-|
 | → `dispatched` | a stage's step calls `run` | sent on the connector's session, now or when one opens |
-| `dispatched → dispatched` | a new session whose `held_job_ids` omit the job | sent again: never accepted, so never started (rule 1) |
+| `dispatched → dispatched` | a new session whose `held_job_ids` omit the job | sent again: never persisted, so never started (rule 1) |
+| `dispatched → dispatched` | a new session whose `held_job_ids` name the job | not sent again; the connector's retried `AcceptJob` moves it on |
 | `dispatched → accepted` | `AcceptJob` | — |
 | `accepted → accepted` | `ReportEvents` | events with a new `seq` go to `onEvent`; resets the idle cap |
 | `timed_out / lost / unavailable → dispatched` | `run` on the same id | — |
-| `dispatched / accepted → completed / failed / cancelled` | `FinishJob` (on `dispatched` it implies acceptance) | the first one wins |
+| `dispatched / accepted → completed / failed / cancelled` | `FinishJob` (on `dispatched` it implies acceptance) | the first one wins; a `last_seq` beyond the events received is logged as a gap |
 | `dispatched → unavailable` | no session accepts it within `CONNECTOR_LEASE_SECONDS` (default 120) | — |
 | `accepted → lost` | the session closed and none holding the job opened within the lease, or a new session's `held_job_ids` omitted it | — |
 | `dispatched / accepted → timed_out` | the job kind's total or idle cap | `CancelJob` sent |
 | any terminal state | a late `FinishJob` or `ReportEvents` | acknowledged and dropped; the hub keeps the id until the task's `release` finishes |
+| any terminal state | a late `AcceptJob` | refused with `NOT_FOUND`; the connector drops the job unstarted (rule 1) |
 
 | Job | Total cap | Idle cap |
 |-|-|-|
@@ -239,7 +242,7 @@ The connector enforces `token_budget` inside the turn. The hub also cancels a tu
 
 The session's held tasks are its `held_task_ids` plus the tasks it prepared since. The use case `release-ended-workspaces.ts` in `src/agent/coding/` reads their status, picks the salvage ref and dispatches through `ConnectorJobs`; the hub calls it on connect and on its timer, wired by boot. A held task with no row is released too. One that belongs to another connector is released once it is terminal, and until then only dropped from the held set. The salvage ref is `refs/cogmo-wip/<task-id>` unless the task reached `pr_open`.
 
-A release's result is logged, like the sandbox path's teardown result, and never becomes a `TaskFailure`. The hub updates the held set on every release result, whichever path dispatched it. A `removed_*` outcome drops the task. A `kept` outcome leaves the workspace for the operator, as `wip_push_failed_kept` does on the sandbox path. That outcome, a failed release, or a release that resolves with a hub error stops the sweep for that task until the next connect.
+A release's result is logged, like the sandbox path's teardown result, and never becomes a `TaskFailure`. The hub updates the held set on every release result, whichever path dispatched it. A `removed_clean` or `salvaged_and_removed` outcome drops the task. A `kept` outcome or a failed release also drops the task from the held set, and the connector stops listing it (rule 8): the workspace is the operator's, as `wip_push_failed_kept` is on the sandbox path, and nothing retries it. A release that resolves with a hub error stays held and is dispatched again at the next connect.
 
 ## Coding on a connector `[proposed]`
 
@@ -278,7 +281,9 @@ Each dispatching step is durable for the reason its sandbox counterpart is: the 
 | Crash point or race | State left | Why safe, or the residual |
 |-|-|-|
 | The stream drops mid-job, and the connector reconnects within the lease | job `accepted` | `held_job_ids` carries it over; reports resume and re-sent `seq`s are dropped (rules 2, 6) |
-| The stream drops after cogmo wrote a `Job` and before `AcceptJob` | job `dispatched` | sent again on the next session (rule 1) |
+| The stream drops after cogmo wrote a `Job` and before `AcceptJob` | job `dispatched` | sent again on the next session if the connector had not persisted it; otherwise the connector's retried `AcceptJob` takes it (rule 1) |
+| `AcceptJob` reaches cogmo after the job ended (`timed_out`, `unavailable`) | job unchanged | refused with `NOT_FOUND`; the connector drops it unstarted (rule 1) |
+| `FinishJob` overtakes an in-flight report | job terminal | a conforming connector cannot do this (rule 6). Otherwise the events past the hub's last `seq` are logged as a gap and the outcome stands. |
 | The connector restarts and has lost an accepted job | task `failed`, `connector_job_lost` | rule 4 |
 | The connector lost the plan's agent session before execute (a restart or archive while the task waited at the gate) | task `failed`, `connector_job_failed` (`SESSION_LOST`) | the execute job reports it |
 | The connector stays away past the lease | task `failed`, `connector_job_lost` or `connector_unavailable` | its workspace is released when it next connects |

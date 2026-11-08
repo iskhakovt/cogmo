@@ -72,7 +72,6 @@
 - [ ] `p2` Connectors slice 1: `packages/connector-proto` (the `.proto`, generated TypeScript, `buf lint` / `buf breaking` / generate-drift CI), `src/connector/` (h2c server on `CONNECTOR_PORT`, bearer auth, session hub with leases, `connectors` store and migration, shutdown order), `cogmo connector add | rotate | revoke | list`, and the unit tier over `createRouterTransport`. Gated on approving the design.
 - [ ] `p2` Connectors slice 2: coding on a connector. `coding_repos.connector_id`, `coding_tasks.connector_id`, the `connector` worktree-assignment variant and its CHECKs, the dispatching steps, the four failure reasons, `release-ended-workspaces` and the release sweep, and the integration test against a fake connector.
 - [ ] `p2` Connectors slice 3: the Paseo spike (plan-mode end state, `idempotencyKey` across reconnects, mode switch through the public SDK, agents across a daemon restart), then `connectors/paseo` and the contract suite.
-- [ ] `p3` Connectors slice 4: channel connectors (the per-channel `Transport` over the connector session). Gated on operator-facade slice 3.
 - [ ] `p3` Dispatch `CancelJob` when a coding task on a connector is cancelled mid-job, so the connector stops at once instead of at the next release sweep (up to 10 minutes).
 
 ### Operator facade (design/operator-facade.md)
@@ -449,6 +448,10 @@ One PR per slice, in order; each later slice assumes the earlier ones.
 - [ ] `p3` Web UI voice — mic-in (STT) + audio-out (TTS) in the chat cockpit, reusing the existing voice provider. Deferred from v1 scope.
 - [ ] `p3` Web UI programmatic API channel — stabilize and document the oRPC OpenAPI surface as a real API channel for scripting the agent over HTTP. Internal-only until then.
 - [ ] `p3` Web UI shows attachment originals: an ownership-checked route serving `image_ref.original`, allowlisted image types inline with the sniffed type and `nosniff`, anything else as a download ([design/transport/attachments.md](design/transport/attachments.md#security-confirmed)).
+
+### Connectors (design/connectors.md)
+
+- [ ] `p3` Connectors slice 4: channel connectors (the per-channel `Transport` over the connector session). Gated on operator-facade slice 3.
 
 ### Future infrastructure
 
