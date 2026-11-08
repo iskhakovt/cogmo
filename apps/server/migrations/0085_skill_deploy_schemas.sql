@@ -1,0 +1,1 @@
+ALTER TABLE "skill_deploys" ADD COLUMN "schemas" jsonb;

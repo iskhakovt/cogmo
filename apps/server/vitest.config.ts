@@ -1,5 +1,5 @@
 import { availableParallelism } from "node:os";
-import { defineConfig } from "vitest/config";
+import { defineConfig, defineProject } from "vitest/config";
 
 /** Integration worker count. Set explicitly because `test/integration-setup.ts`
  * starts one Inngest dev server per worker slot, and `globalSetup` runs before
@@ -72,6 +72,27 @@ const UNIT_ENV = {
   ...GIT_NO_BACKGROUND_MAINTENANCE,
 } as const;
 
+/** `vitest.stryker.config.ts` runs this project alone. */
+export const UNIT_PROJECT = defineProject({
+  test: {
+    name: "unit",
+    environment: "node",
+    include: ["src/**/*.test.ts"],
+    // Pyodide-heavy files routed to `unit-pyodide` (capped parallelism).
+    exclude: [
+      "src/**/*.integration.test.ts",
+      "src/**/*.e2e.test.ts",
+      "src/**/*.live.test.ts",
+      ...PYODIDE_HEAVY_UNIT_GLOBS,
+    ],
+    // PGlite `pushSchema` runs in `beforeAll` of every store test file
+    // and takes 2–7s each under parallel CPU contention. The default
+    // 10s hookTimeout flakes once enough store files exist.
+    hookTimeout: 30_000,
+    env: UNIT_ENV,
+  },
+});
+
 export default defineConfig({
   test: {
     reporters: ["default", "junit"],
@@ -82,25 +103,7 @@ export default defineConfig({
       reportsDirectory: "coverage",
     },
     projects: [
-      {
-        test: {
-          name: "unit",
-          environment: "node",
-          include: ["src/**/*.test.ts"],
-          // Pyodide-heavy files routed to `unit-pyodide` (capped parallelism).
-          exclude: [
-            "src/**/*.integration.test.ts",
-            "src/**/*.e2e.test.ts",
-            "src/**/*.live.test.ts",
-            ...PYODIDE_HEAVY_UNIT_GLOBS,
-          ],
-          // PGlite `pushSchema` runs in `beforeAll` of every store test file
-          // and takes 2–7s each under parallel CPU contention. The default
-          // 10s hookTimeout flakes once enough store files exist.
-          hookTimeout: 30_000,
-          env: UNIT_ENV,
-        },
-      },
+      UNIT_PROJECT,
       {
         test: {
           // Caps parallelism so Vitest's default `maxWorkers`

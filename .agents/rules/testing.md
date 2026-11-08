@@ -27,7 +27,7 @@
 | **e2e** `.e2e.test.ts` | Docker (full stack) + llmock | subprocess | llmock fixtures | Binary boots, migrations apply, full stack smoke |
 | **live** `.live.test.ts` | none, or the integration stack | in-process | real provider APIs | Provider behaviour replay can't show — e.g. that prompt caching actually reads (`design/prompt-caching.md` → Live tier) |
 
-Commands: `pnpm test` (unit), `pnpm test:integration`, `pnpm test:e2e`, `pnpm test:all`, `pnpm test:live` (skipped unless `LIVE=1` and the provider's key is set; costs real money; never on PRs).
+Commands: `pnpm test` (unit), `pnpm test:integration`, `pnpm test:e2e`, `pnpm test:all`, `pnpm test:live` (skipped unless `LIVE=1` and the provider's key is set; costs real money; never on PRs). `pnpm test:mutation` is a manual tool outside the tiers: `design/testing.md` → Mutation Testing.
 
 ## Store Tests with PGlite
 

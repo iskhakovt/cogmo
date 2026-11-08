@@ -21,6 +21,7 @@ import {
   SkillInvocationOutputSchema,
   SkillIoSchema,
   SkillRunResourceUsageSchema,
+  SkillSchemasSchema,
 } from "../types.js";
 
 // --- Enums ---
@@ -199,6 +200,12 @@ export const skillDeploys = pgTable(
     status: skillDeployStatus("status").notNull(),
     approvedBy: uuid("approved_by").references(() => userIdentities.id),
     classifierLog: jsonbZod("classifier_log", ClassifierLogSchema).notNull(),
+    /**
+     * The schemas register checked for this deploy, which approve and
+     * rollback put live. Null only on rows from before the column, whose
+     * sha's frontmatter carries them.
+     */
+    schemas: jsonbZod("schemas", SkillSchemasSchema),
     createdAt: ts(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   },

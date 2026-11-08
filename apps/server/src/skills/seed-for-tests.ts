@@ -1,5 +1,6 @@
 import type { Transactor } from "../db/index.js";
 import { STUB_CLASSIFIER_VERSION } from "./classifier.js";
+import { frontmatterSchemas } from "./deploy/schemas.js";
 import { hashLockfileContents } from "./deps.js";
 import { manifestErrorIssues, parseManifest } from "./manifest.js";
 import type { SkillSourceCache } from "./source-cache.js";
@@ -65,6 +66,12 @@ export async function seedSkillForTests(
     );
   }
 
+  // Seeds take the legacy schema path: the frontmatter's.
+  const schemas = frontmatterSchemas(manifest);
+  if (schemas === null) {
+    throw new Error(`__registerForTests: manifest '${manifest.name}' declares no inputs`);
+  }
+
   const gitSha = params.gitSha ?? hashStub(params.manifestSource + params.body);
   const schedule = manifest.schedule ?? null;
   const lockfileSnapshot = params.lockfileContents
@@ -83,8 +90,8 @@ export async function seedSkillForTests(
     scheduleRunAs: schedule === null ? null : deps.defaultRunAs,
     gitSha,
     lockfileHash: lockfileSnapshot?.hash ?? null,
-    inputs: manifest.inputs,
-    outputs: manifest.outputs ?? null,
+    inputs: schemas.inputs,
+    outputs: schemas.outputs,
   };
 
   const row = await deps.runInTx((tx) => deps.store.insertSkill(tx, insertParams));
@@ -109,11 +116,12 @@ export async function seedSkillForTests(
       riskTier: "auto",
       status: "live",
       classifierLog: testClassifierLog,
+      schemas,
       resolvedAt: new Date(),
     }),
   );
 
-  deps.sourceCache.put(gitSha, { manifest, body: params.body }, lockfileSnapshot);
+  deps.sourceCache.put(gitSha, { manifest, body: params.body }, schemas, lockfileSnapshot);
 
   return row;
 }

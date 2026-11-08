@@ -4,7 +4,7 @@ import { describeError } from "../util/describe-error.js";
 import { type LockfileSnapshot, readLockfileAtSha } from "./deps.js";
 import { readSkillSource, type SkillSource } from "./skill-source.js";
 import type { SkillRow } from "./store/index.js";
-import type { SkillInputs, SkillManifest } from "./types.js";
+import type { SkillInputs, SkillManifest, SkillSchemas } from "./types.js";
 
 export interface SkillLockfileCacheValue {
   /** sha256, matches `skills.lockfile_hash`. */
@@ -17,7 +17,7 @@ export interface SkillSourceCacheEntry {
   readonly manifest: SkillManifest;
   readonly body: string;
   readonly inputsValidator: ValidateFunction;
-  /** Present iff the manifest declares `outputs`. */
+  /** Present iff the deploy put an `outputs` schema live. */
   readonly outputsValidator?: ValidateFunction;
   /**
    * Lockfile-derived data, populated atomically when the manifest declares
@@ -62,29 +62,28 @@ export class SkillSourceCache {
   }
 
   /**
-   * Compile the manifest's `inputs` and (if declared) `outputs` JSON Schemas
-   * *before* a deploy advances main or writes DB rows. Returns a flat list of
-   * human-readable errors; an empty list means both compile.
+   * Compile a deploy's `inputs` and (if any) `outputs` JSON Schemas *before*
+   * it advances main or writes DB rows. Returns a flat list of human-readable
+   * errors; an empty list means both compile.
    */
-  prevalidate(manifest: SkillManifest): string[] {
-    const inputs = this.#compileSchema(manifest.inputs).mapErr(
-      (e) => `invalid_inputs_schema: ${e}`,
-    );
+  prevalidate(schemas: SkillSchemas): string[] {
+    const inputs = this.#compileSchema(schemas.inputs).mapErr((e) => `invalid_inputs_schema: ${e}`);
     const outputs =
-      manifest.outputs === undefined
+      schemas.outputs === null
         ? ok(undefined)
-        : this.#compileSchema(manifest.outputs).mapErr((e) => `invalid_outputs_schema: ${e}`);
+        : this.#compileSchema(schemas.outputs).mapErr((e) => `invalid_outputs_schema: ${e}`);
     return [inputs, outputs].flatMap((r) => (r.isErr() ? [r.error] : []));
   }
 
   /**
-   * Cache a manifest that passed {@link prevalidate} with its compiled
-   * validators, keyed by `(name, gitSha)`, so the next invoke or tool-list
-   * read skips git. A schema failing to compile here is a bug.
+   * Cache a source whose schemas passed {@link prevalidate} with their
+   * compiled validators, keyed by `(name, gitSha)`, so the next invoke or
+   * tool-list read skips git. A schema failing to compile here is a bug.
    */
   put(
     gitSha: string,
     source: SkillSource,
+    schemas: SkillSchemas,
     lockfile: LockfileSnapshot | null,
   ): SkillSourceCacheEntry {
     const { manifest, body } = source;
@@ -98,8 +97,8 @@ export class SkillSourceCache {
     const entry: SkillSourceCacheEntry = {
       manifest,
       body,
-      inputsValidator: compiled(manifest.inputs),
-      ...(manifest.outputs !== undefined && { outputsValidator: compiled(manifest.outputs) }),
+      inputsValidator: compiled(schemas.inputs),
+      ...(schemas.outputs !== null && { outputsValidator: compiled(schemas.outputs) }),
       ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
     };
     this.#entries.set(cacheKey(manifest.name, gitSha), entry);
@@ -143,11 +142,17 @@ export class SkillSourceCache {
       }
       lockfile = snapshot.value;
     }
-    return this.put(row.gitSha, source.value, lockfile);
+    // The row's schemas are the ones its deploy put live with its sha.
+    return this.put(
+      row.gitSha,
+      source.value,
+      { inputs: row.inputs, outputs: row.outputs },
+      lockfile,
+    );
   }
 
   /**
-   * Compile one of a manifest's JSON Schemas, or err with why it can't
+   * Compile one of a deploy's JSON Schemas, or err with why it can't
    * validate: ajv rejects it, or it is `$async`, whose validator returns a
    * promise that a truthiness check would read as valid.
    */

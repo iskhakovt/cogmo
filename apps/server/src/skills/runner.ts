@@ -40,13 +40,21 @@ import type { SkillRunAs } from "./run-as.js";
 import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests.js";
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
-import { createWasmProbe, pyodideDistDir } from "./worker-wasm/host.js";
+import { wallClockSOf } from "./wall-clock.js";
+import {
+  createWasmProbe,
+  createWasmSchemaImporter,
+  DEFAULT_WASM_MEMORY_MB,
+  pyodideDistDir,
+  wasmSchemaImportTimeoutMs,
+} from "./worker-wasm/host.js";
 import { resolveSkillWasmPackages, type SkillPackageSource } from "./worker-wasm/skill-packages.js";
 import type {
   FillBuiltins,
   WasmPackages,
   WasmPackagesError,
   WasmProbe,
+  WasmSchemaImporter,
 } from "./worker-wasm/wasm.js";
 import { ensureWasmPackages, fillBuiltinCache } from "./worker-wasm/wheel-cache.js";
 
@@ -199,6 +207,8 @@ export interface SkillRunnerOptions {
       lockfile: LockfileSnapshot,
       signal?: AbortSignal,
     ) => Promise<Result<WasmPackages, WasmPackagesError>>;
+    /** Tests inject a schema importer that spawns no child. */
+    schemaImporter?: WasmSchemaImporter;
   };
   /**
    * Sandbox handle for running container-tier (sysbox) skills. Optional —
@@ -335,6 +345,26 @@ export class SkillRunnerImpl implements SkillRunner {
         },
         { ...source, ...(signal && { signal }) },
       );
+    const schemaImporter =
+      wasm.schemaImporter ??
+      createWasmSchemaImporter({ pyodideDistDir: distDir, childrenDir: wasm.childrenDir });
+    // Register's import loads what a run of the skill loads, so it publishes
+    // the packages the first run would otherwise fetch.
+    const importSchemas: DeployDeps["wasm"]["importSchemas"] = async (source, signal) => {
+      const packages = await resolveWasmPackages(
+        { lockfile: source.lockfile ?? undefined, body: source.body },
+        signal,
+      );
+      if (packages.isErr()) return err({ kind: "packages", error: packages.error });
+      return schemaImporter.importSchemas({
+        body: source.body,
+        packages: packages.value,
+        packageCacheDir,
+        memoryMb: source.resources?.memory_mb ?? DEFAULT_WASM_MEMORY_MB,
+        timeoutMs: wasmSchemaImportTimeoutMs(wallClockSOf("wasm", source.resources)),
+        ...(signal && { signal }),
+      });
+    };
     this.#warmPool = new LazyWarmPool({
       image: containerImage,
       depsCacheVolumeName,
@@ -346,7 +376,7 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
-      wasm: { fetchImpl, probe, fillBuiltins, packageCacheDir, resolvePackages },
+      wasm: { fetchImpl, probe, fillBuiltins, packageCacheDir, importSchemas },
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed

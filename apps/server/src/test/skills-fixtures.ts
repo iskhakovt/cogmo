@@ -9,7 +9,7 @@ import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { DeployFacts } from "../skills/deploy/deploy-facts.js";
 import type { RegisterResult, SkillRunnerOptions } from "../skills/runner.js";
-import type { WasmProbe } from "../skills/worker-wasm/wasm.js";
+import type { WasmProbe, WasmSchemaImporter } from "../skills/worker-wasm/wasm.js";
 
 type LiveResult = Extract<RegisterResult, { status: "live" }>;
 type PendingResult = Extract<RegisterResult, { status: "pending_approval" }>;
@@ -61,16 +61,20 @@ export function pendingRegisterResult(overrides: Partial<PendingResult> = {}): P
 /**
  * The wasm tier without the network, its directories under `root`: a probe that
  * spawns no child and answers ok, a fetch that fails every request (so the
- * register's cache fill fails open and the probe is skipped), and a resolver
- * that fetches nothing. A wasm skill with no dependencies still runs in a
- * real child; one whose lockfile needs packages gets none, so a test that
- * runs one passes the real resolver instead.
+ * register's cache fill fails open and the probe is skipped), a resolver
+ * that fetches nothing, and a schema importer that spawns no child and finds
+ * no models, so register takes the frontmatter's schemas. A wasm skill with
+ * no dependencies still runs in a real child; one whose lockfile needs
+ * packages gets none, so a test that runs one passes the real resolver
+ * instead.
  */
 export function offlineWasm(
   root: string,
 ): Pick<SkillRunnerOptions, "pyodidePackageCacheDir" | "wasm"> {
   const probe = mock<WasmProbe>();
   probe.probeBuiltins.mockResolvedValue(ok());
+  const schemaImporter = mock<WasmSchemaImporter>();
+  schemaImporter.importSchemas.mockResolvedValue(ok({ inputs: null, outputs: null }));
   const fetchImpl = vi.fn<typeof fetch>(async () => {
     throw new TypeError("offline: wasm tests reach no network");
   });
@@ -82,6 +86,7 @@ export function offlineWasm(
       probe,
       fetchImpl,
       resolvePackages: async () => ok({ builtins: [], wheelDir: null }),
+      schemaImporter,
     },
   };
 }
