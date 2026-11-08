@@ -4,6 +4,7 @@ import { CTX_CONTRACT, CtxErrorKindSchema } from "./ctx-contract.js";
 import {
   CtxCallSchema,
   CtxResultSchema,
+  SchemaImportReplySchema,
   SupervisorReadySchema,
   TaskExitedSchema,
   TaskInvokeSchema,
@@ -53,6 +54,7 @@ export function renderContractSchema(): string {
     ctx_result: CtxResultSchema,
     task_exited: TaskExitedSchema,
     supervisor_ready: SupervisorReadySchema,
+    schema_import_reply: SchemaImportReplySchema,
   };
   const methods = R.entries(CTX_CONTRACT).flatMap(([method, { args, result }]) => [
     [`ctx.${method}.args`, schemaOf(args)] as const,

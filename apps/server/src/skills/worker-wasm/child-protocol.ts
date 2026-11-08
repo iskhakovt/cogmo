@@ -43,18 +43,3 @@ export const ProbeReplySchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("fatal"), error: z.string() }),
 ]);
-
-/**
- * A `schema` child's one reply: the skill's `Input` and `Output` JSON Schemas,
- * null for a model it does not define, or why the skill did not import or its
- * models could not be described. The host parses each schema further.
- */
-export const SchemaReplySchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("schemas"),
-    inputs: z.record(z.string(), z.unknown()).nullable(),
-    outputs: z.record(z.string(), z.unknown()).nullable(),
-  }),
-  z.object({ type: z.literal("schema_failed"), error: z.string() }),
-  z.object({ type: z.literal("fatal"), error: z.string() }),
-]);

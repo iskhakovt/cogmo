@@ -251,7 +251,9 @@ async function prepareRegister(
 /**
  * The schemas register puts live. A wasm skill is imported in a child, which
  * fetches and publishes its packages on the way, so the first run pays no
- * download; a container skill takes the legacy schema path, its frontmatter
+ * download. A container skill is imported in a session created with no
+ * network, after an install session for its dependencies, or takes the
+ * legacy schema path, its frontmatter, where the deployment cannot import it
  * (design/skills.md → Contracts).
  */
 async function resolveSchemas(
@@ -265,7 +267,18 @@ async function resolveSchemas(
 ): Promise<Result<SkillSchemas, string[]>> {
   const { manifest } = args;
   return match(manifest.tier)
-    .with("container", async () => registerSchemas(manifest, null))
+    .with("container", async () => {
+      const importer = deps.containerSchemas;
+      if (importer === undefined || (args.lockfile !== null && !importer.installsDependencies)) {
+        return registerSchemas(manifest, null);
+      }
+      const imported = await importer.importSchemas(
+        { body: args.body, lockfile: args.lockfile, resources: manifest.resources },
+        args.signal,
+      );
+      if (imported.isErr()) return err([describeSchemaImportError(imported.error)]);
+      return registerSchemas(manifest, imported.value);
+    })
     .with("wasm", async () => {
       const imported = await deps.wasm.importSchemas(
         { body: args.body, lockfile: args.lockfile, resources: manifest.resources },

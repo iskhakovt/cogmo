@@ -1456,6 +1456,7 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
         volumes: "managed",
         workingTreeTransport: "git-remote",
         depsCacheSharing: "per-sandbox",
+        noNetworkSessions: false,
       },
     });
 
@@ -1496,6 +1497,7 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
         volumes: "docker",
         workingTreeTransport: "bind-mount",
         depsCacheSharing: "shared-volume",
+        noNetworkSessions: true,
       },
     });
 

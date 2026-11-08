@@ -258,6 +258,8 @@ interface SandboxCapabilities {
   customImage: boolean;
   volumes: "docker" | "managed" | "none";
   workingTreeTransport: "bind-mount" | "git-remote";
+  depsCacheSharing: "shared-volume" | "per-sandbox";
+  noNetworkSessions: boolean;   // creates a session with `network: "none"`
 }
 ```
 
@@ -272,6 +274,8 @@ Hard transport differences (how working-tree material moves into the sandbox) li
 | `customImage` | local pull | registry pull |
 | `volumes` | `docker` | `managed` |
 | `workingTreeTransport` | `bind-mount` | `git-remote` |
+| `depsCacheSharing` | `shared-volume` | `per-sandbox` |
+| `noNetworkSessions` | `true` (`NetworkMode: none`) | `false`: a Tier 1 or 2 organisation's policy overrides `networkBlockAll` |
 | Userns isolation | sysbox (default) | provider-owned |
 | Cogmo cgroup parent | yes | n/a |
 | Cogmo Docker proxy | yes | n/a |

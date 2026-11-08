@@ -288,6 +288,7 @@ export function fakeCodingSandbox(
       volumes: "docker",
       workingTreeTransport: "bind-mount",
       depsCacheSharing: "shared-volume",
+      noNetworkSessions: true,
     },
     healthCheck: vi.fn(async () => ({ ok: true as const, runtime: "runc" })),
     reconcileCrashedInstances: vi.fn(async () => ({ orphansReaped: 0 })),
