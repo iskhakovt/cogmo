@@ -25,7 +25,7 @@ How messages flow from platform to agent and back, across all channels.
 | `profiles` | name, model | Org-scoped — shared across users. |
 | `channel_sessions` | id, channelId, platformAddress, conversationId, status, receive, expiresAt | Maps platform address to conversation. `status`: `active` \| `closed`, at most one `active` row per `(channelId, platformAddress)` (`uq_sessions_active_address`). `receive`: `none` \| `routed` \| `all`. See [sessions.md](sessions.md). |
 | `conversations` | id, userId, profileId, isPrivate | Agent-side. No reference to channels. `isPrivate` controls memory scope. |
-| `messages` | id, conversationId, role, content, profileId, model, lastInboundMessageId | Immutable. `lastInboundMessageId` on all messages for attribution. `profileId` + `model` stamp which profile+model was active — required because a conversation's profile can change and a profile's model can change, so neither alone identifies what produced a given turn. |
+| `messages` | id, conversationId, role, content, profileId, model, lastInboundMessageId, transcript_head | Immutable. `transcript_head` is set on assistant rows only (`chk_messages_transcript_head_assistant`; [prompt-caching.md](../prompt-caching.md#head-check-confirmed)). `lastInboundMessageId` on all messages for attribution. `profileId` + `model` stamp which profile+model was active — required because a conversation's profile can change and a profile's model can change, so neither alone identifies what produced a given turn. |
 | `inbound_messages` | id, channelSessionId, conversationId, content, platformTs | Immutable. `content` is `InboundContentSchema`, the domain's inbound block model in `src/agent/conversation/inbound-content.ts`; the transport store imports it for the column, and the table stays transport's to migrate. `platformTs` = when user sent it (from platform API). `conversationId` denormalized from channel_sessions for query performance. User derived from `conversation.userId`. |
 
 ### Core Table Schemas
@@ -174,7 +174,7 @@ WHERE conversation_id = ?
 
 No join table, no FK from inbound to messages. Both tables stay immutable (insert-only). The cursor is set once at message creation.
 
-**Batch range.** A `handle-message` turn row (the user row `create-user-message` writes) also carries `first_inbound_message_id`, the batch's first inbound, so `[first_inbound_message_id, last_inbound_message_id]` is the batch that turn re-read. It is NULL on every other row (assistant, tool and harness rows, pipeline stage prompts) and on turn rows written before the column existed. `persist-new-messages` reads it to refuse a late reply whose inbounds a later turn re-batched ([crash-recovery.md](../crash-recovery.md#late-replies-confirmed) → Late replies).
+**Batch range.** A `handle-message` turn row (the user row `create-user-message` writes) also carries `first_inbound_message_id`, the batch's first inbound, so `[first_inbound_message_id, last_inbound_message_id]` is the batch that turn re-read. It is NULL on every other row (assistant, tool and harness rows, pipeline stage prompts) and on turn rows written before the column existed. `persist-new-messages` reads it to refuse a late reply whose inbounds a later turn re-batched, and each `llm-iter<N>` step of `handle-message` to stop one before it streams ([crash-recovery.md](../crash-recovery.md#late-replies-confirmed) → Late replies).
 
 **Why ID cursor over timestamp?** Monotonic UUIDv7, no clock skew, no precision edge cases. Same pattern as Kafka offsets and Stripe settlement cursors.
 

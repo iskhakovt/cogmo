@@ -91,6 +91,7 @@ export function createConversationTriggers(
     compactConversation(conversationId, {
       runInTx: core.runInTx,
       agentStore: core.agentStore,
+      transportStore: core.transportStore,
       resolveProvider: core.resolveProvider,
       promptSource,
       attachmentReader,
@@ -148,6 +149,9 @@ export function createAgentFunctions(
     skillRunner,
     mcpRegistry,
     userTimezone: env.USER_TIMEZONE,
+    // An unexplained divergence opens an epoch and is counted; tests throw
+    // (design/prompt-caching.md → Head check).
+    prefixViolation: "reopen",
   };
 
   const handleMessage = createHandleMessage({

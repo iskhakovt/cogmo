@@ -21,12 +21,14 @@ import type { Transaction } from "../../db/index.js";
 import { NOT_TURN_ROW_JSONPATH } from "../../llm/content.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import type { StoredContent, StoredMessage } from "../stored-content.js";
+import type { TranscriptHead } from "../transcript-head.js";
 import type { TurnContext } from "../turn-context.js";
 import {
   conversationSummaries,
   type MessageRole,
   messages,
   type SummarySourceValue,
+  type SystemPromptEpochReason,
   systemPromptSnapshots,
   turnContexts,
 } from "./schema.js";
@@ -74,8 +76,32 @@ export interface SystemPromptSnapshot {
   configDigest: string;
   /** The last row whose attachments render as placeholders; null: none. */
   attachmentCutoff: string | null;
+  /** Why the epoch opened. */
+  reason: SystemPromptEpochReason;
   createdAt: Date;
 }
+
+/**
+ * A row `insertMessages` writes. An assistant row may carry its transcript
+ * head; `messages` refuses one on a user row.
+ */
+export interface NewMessageRow extends StoredMessage {
+  transcriptHead?: TranscriptHead;
+}
+
+/** A transcript row as the history reads return it, with its transcript head (null on user rows and rows written before heads). */
+export interface TranscriptRow extends StoredMessage {
+  id: string;
+  transcriptHead: TranscriptHead | null;
+}
+
+/** The columns of a {@link TranscriptRow}. */
+const TRANSCRIPT_ROW = {
+  id: messages.id,
+  role: messages.role,
+  content: messages.content,
+  transcriptHead: messages.transcriptHead,
+};
 
 /**
  * An attachment a history message carried: an image or a document by name,
@@ -154,7 +180,7 @@ export interface TranscriptStore {
     tx: Transaction,
     params: {
       conversationId: string;
-      messages: ReadonlyArray<StoredMessage>;
+      messages: ReadonlyArray<NewMessageRow>;
       profileId: string;
       model: string;
       lastInboundMessageId: string;
@@ -193,6 +219,15 @@ export interface TranscriptStore {
   ): Promise<{ id: string; sameContent: boolean } | undefined>;
 
   /**
+   * Whether an assistant row newer than `afterMessageId` (any row when `null`)
+   * carries `cursor`: a committed `persist-new-messages` answered that batch.
+   */
+  isCursorAnswered(
+    tx: Transaction,
+    params: { conversationId: string; cursor: string; afterMessageId: string | null },
+  ): Promise<boolean>;
+
+  /**
    * Whether a non-pipeline turn row newer than `afterMessageId` (any row when
    * `null`) re-batched the inbound `cursor`: its batch range
    * `[first_inbound_message_id, last_inbound_message_id]` holds `cursor`
@@ -213,10 +248,16 @@ export interface TranscriptStore {
    * durable summaries on top of this for the LLM-facing path, while the
    * Observer and the web history read take it as-is.
    */
-  listMessages(
+  listMessages(tx: Transaction, conversationId: string): Promise<ReadonlyArray<TranscriptRow>>;
+
+  /**
+   * The user rows newer than `afterMessageId` (any row when `null`) with
+   * their cursors, ordered by id: the batches no reply has answered yet.
+   */
+  listUserRowsAfter(
     tx: Transaction,
-    conversationId: string,
-  ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
+    params: { conversationId: string; afterMessageId: string | null },
+  ): Promise<ReadonlyArray<TurnMessage>>;
 
   /** The rows of the conversation's turns with these cursors, ordered by id: what the Observer renders. */
   listTurnMessages(
@@ -275,11 +316,12 @@ export interface TranscriptStore {
    * Store the snapshot a turn opens, or return the one already stored for that
    * turn. `(conversationId, openedBy)` is the opening step's idempotency key: a
    * retry that re-runs a committed insert gets the first attempt's row back.
+   * `kind` reports which arm ran, so what the opening counts is counted once.
    */
   insertOrRecoverSystemPromptSnapshot(
     tx: Transaction,
     params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
-  ): Promise<SystemPromptSnapshot>;
+  ): Promise<{ kind: "new" | "recovered"; row: SystemPromptSnapshot }>;
 
   /**
    * Append a summary, or recover the existing row when this
@@ -312,7 +354,7 @@ export interface TranscriptStore {
     tx: Transaction,
     conversationId: string,
     afterMessageId: string,
-  ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
+  ): Promise<ReadonlyArray<TranscriptRow>>;
 
   /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
@@ -400,7 +442,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     params: {
       conversationId: string;
-      messages: ReadonlyArray<StoredMessage>; // must be non-empty
+      messages: ReadonlyArray<NewMessageRow>; // must be non-empty
       profileId: string;
       model: string;
       lastInboundMessageId: string;
@@ -419,6 +461,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       profileId: params.profileId,
       model: params.model,
       lastInboundMessageId: params.lastInboundMessageId,
+      transcriptHead: msg.transcriptHead ?? null,
       ...(i === lastIdx &&
         params.lastMessageInputTokens != null && {
           inputTokens: params.lastMessageInputTokens,
@@ -474,17 +517,22 @@ export class DrizzleTranscriptStore implements TranscriptStore {
         sameContent: eq(messages.content, params.content).mapWith(Boolean),
       })
       .from(messages)
-      .where(
-        and(
-          eq(messages.conversationId, params.conversationId),
-          afterMessageId(params.afterMessageId),
-          eq(messages.lastInboundMessageId, params.inboundId),
-          eq(messages.role, "assistant"),
-        ),
-      )
+      .where(replyOnCursor(params.conversationId, params.inboundId, params.afterMessageId))
       .orderBy(desc(messages.id))
       .limit(1);
     return rows[0];
+  }
+
+  async isCursorAnswered(
+    tx: Transaction,
+    params: { conversationId: string; cursor: string; afterMessageId: string | null },
+  ): Promise<boolean> {
+    const rows = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(replyOnCursor(params.conversationId, params.cursor, params.afterMessageId))
+      .limit(1);
+    return rows.length > 0;
   }
 
   async isCursorRebatched(
@@ -515,9 +563,9 @@ export class DrizzleTranscriptStore implements TranscriptStore {
   async listMessages(
     tx: Transaction,
     conversationId: string,
-  ): Promise<ReadonlyArray<StoredMessage & { id: string }>> {
+  ): Promise<ReadonlyArray<TranscriptRow>> {
     return tx
-      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .select(TRANSCRIPT_ROW)
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
       .orderBy(asc(messages.id));
@@ -622,18 +670,44 @@ export class DrizzleTranscriptStore implements TranscriptStore {
   async insertOrRecoverSystemPromptSnapshot(
     tx: Transaction,
     params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
-  ): Promise<SystemPromptSnapshot> {
+  ): Promise<{ kind: "new" | "recovered"; row: SystemPromptSnapshot }> {
     // Keyed insert: see `.agents/rules/inngest.md`.
-    return single(
-      await tx
-        .insert(systemPromptSnapshots)
-        .values(params)
-        .onConflictDoUpdate({
-          target: [systemPromptSnapshots.conversationId, systemPromptSnapshots.openedBy],
-          set: { openedBy: params.openedBy },
-        })
-        .returning(),
-    );
+    const rows = await tx
+      .insert(systemPromptSnapshots)
+      .values(params)
+      .onConflictDoUpdate({
+        target: [systemPromptSnapshots.conversationId, systemPromptSnapshots.openedBy],
+        set: { openedBy: params.openedBy },
+      })
+      .returning({
+        ...getTableColumns(systemPromptSnapshots),
+        inserted: sql<boolean>`(xmax = 0)`,
+      });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
+  }
+
+  async listUserRowsAfter(
+    tx: Transaction,
+    params: { conversationId: string; afterMessageId: string | null },
+  ): Promise<ReadonlyArray<TurnMessage>> {
+    const { conversationId, afterMessageId } = params;
+    return tx
+      .select({
+        id: messages.id,
+        role: messages.role,
+        content: messages.content,
+        cursor: messages.lastInboundMessageId,
+      })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.role, "user"),
+          afterMessageId === null ? undefined : gt(messages.id, afterMessageId),
+        ),
+      )
+      .orderBy(asc(messages.id));
   }
 
   async listTurnMessages(
@@ -683,9 +757,9 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     conversationId: string,
     afterMessageId: string,
-  ): Promise<ReadonlyArray<StoredMessage & { id: string }>> {
+  ): Promise<ReadonlyArray<TranscriptRow>> {
     return tx
-      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .select(TRANSCRIPT_ROW)
       .from(messages)
       .where(and(eq(messages.conversationId, conversationId), gt(messages.id, afterMessageId)))
       .orderBy(asc(messages.id));
@@ -727,4 +801,22 @@ export class DrizzleTranscriptStore implements TranscriptStore {
 /** Rows newer than `id`, or every row when `null`: a range scan on `idx_messages_conv_id`. */
 function afterMessageId(id: string | null): SQL | undefined {
   return id === null ? undefined : gt(messages.id, id);
+}
+
+/**
+ * The assistant rows newer than `after` that carry `cursor`: the rows a
+ * committed `persist-new-messages` wrote for that batch. The pre-stream check
+ * and the persist check read the same rows through it.
+ */
+function replyOnCursor(
+  conversationId: string,
+  cursor: string,
+  after: string | null,
+): SQL | undefined {
+  return and(
+    eq(messages.conversationId, conversationId),
+    afterMessageId(after),
+    eq(messages.lastInboundMessageId, cursor),
+    eq(messages.role, "assistant"),
+  );
 }

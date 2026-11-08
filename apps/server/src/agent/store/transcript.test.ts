@@ -3,10 +3,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { HARNESS_ROW_TAGS } from "../../llm/types.js";
 import { seedConversation } from "../../test/agent-store-fixtures.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectPgError } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import type { StoredContent, StoredMessage } from "../stored-content.js";
+import type { TranscriptHead } from "../transcript-head.js";
 import { DrizzleConversationStore } from "./conversations.js";
 import { conversationSummaries, messages, systemPromptSnapshots } from "./schema.js";
 import { DrizzleTranscriptStore } from "./transcript.js";
@@ -92,8 +93,13 @@ describe("DrizzleTranscriptStore", () => {
 
       const list = await tx((trx) => store.listMessages(trx, conversationId));
       expect(list).toEqual([
-        { id: first.id, role: "user", content: "Hello" },
-        { id: second.id, role: "assistant", content: [{ type: "text", text: "Hi" }] },
+        { id: first.id, role: "user", content: "Hello", transcriptHead: null },
+        {
+          id: second.id,
+          role: "assistant",
+          content: [{ type: "text", text: "Hi" }],
+          transcriptHead: null,
+        },
       ]);
     });
 
@@ -364,6 +370,138 @@ describe("DrizzleTranscriptStore", () => {
       for (const r of otherRows) {
         expect(r.outputTokens).toBe(-1);
       }
+    });
+
+    describe("transcript heads", () => {
+      const INBOUND = "019d0000-0000-7000-8000-000000000001";
+      const HEAD: TranscriptHead = {
+        length: 3,
+        digest: "b".repeat(64),
+        base: "a".repeat(64),
+        historyStart: "019d0000-0000-7000-8000-0000000000a1",
+        status: "intact",
+      };
+
+      /** Every row's head, in insertion order, decoded through the column. */
+      async function heads(conversationId: string) {
+        const rows = await db
+          .select({ transcriptHead: messages.transcriptHead })
+          .from(messages)
+          .where(eq(messages.conversationId, conversationId))
+          .orderBy(messages.id);
+        return rows.map((r) => r.transcriptHead);
+      }
+
+      it("stores the head an assistant row carries, and none on the rest", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+
+        await tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [
+              { role: "assistant", content: [{ type: "text", text: "calling" }] },
+              { role: "user", content: "tool output" },
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "done" }],
+                transcriptHead: HEAD,
+              },
+            ],
+            lastInboundMessageId: INBOUND,
+            lastMessageOutputTokens: 7,
+            ...stamp,
+          }),
+        );
+
+        expect(await heads(conversationId)).toEqual([null, null, HEAD]);
+      });
+
+      it("returns each row's head from both history reads", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+        const first = await tx((trx) =>
+          store.insertMessage(trx, {
+            conversationId,
+            role: "user",
+            content: "hello",
+            lastInboundMessageId: INBOUND,
+            firstInboundMessageId: null,
+            ...stamp,
+          }),
+        );
+        await tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [
+              { role: "user", content: "again" },
+              { role: "assistant", content: "reply", transcriptHead: HEAD },
+            ],
+            lastInboundMessageId: INBOUND,
+            lastMessageOutputTokens: 7,
+            ...stamp,
+          }),
+        );
+
+        const listed = await tx((trx) => store.listMessages(trx, conversationId));
+        const after = await tx((trx) => store.getHistoryAfter(trx, conversationId, first.id));
+
+        expect(listed.map((row) => row.transcriptHead)).toEqual([null, null, HEAD]);
+        expect(after.map((row) => row.transcriptHead)).toEqual([null, HEAD]);
+      });
+
+      it("refuses a malformed head on write", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+        const malformed = { ...HEAD, status: "unknown" } as unknown as TranscriptHead;
+
+        await expect(
+          tx((trx) =>
+            store.insertMessages(trx, {
+              conversationId,
+              messages: [{ role: "assistant", content: "reply", transcriptHead: malformed }],
+              lastInboundMessageId: INBOUND,
+              lastMessageOutputTokens: 7,
+              ...stamp,
+            }),
+          ),
+        ).rejects.toThrow(/status/);
+        expect(await heads(conversationId)).toEqual([]);
+      });
+
+      it("refuses a malformed head on read", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+        await tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [{ role: "assistant", content: "reply", transcriptHead: HEAD }],
+            lastInboundMessageId: INBOUND,
+            lastMessageOutputTokens: 7,
+            ...stamp,
+          }),
+        );
+        await db.execute(
+          sql`UPDATE messages SET transcript_head = '{"junk":true}'::jsonb WHERE conversation_id = ${conversationId}`,
+        );
+
+        await expect(heads(conversationId)).rejects.toThrow(/junk|Unrecognized/);
+      });
+
+      it("refuses a head on a user row", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+
+        const error = await tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [{ role: "user", content: "hello", transcriptHead: HEAD }],
+            lastInboundMessageId: INBOUND,
+            lastMessageOutputTokens: 7,
+            ...stamp,
+          }),
+        ).then(
+          () => null,
+          (err: unknown) => err,
+        );
+
+        expectPgError(error, "23514", "chk_messages_transcript_head_assistant");
+      });
     });
 
     it("getLastAssistantMessage returns most recent", async () => {
@@ -702,6 +840,44 @@ describe("DrizzleTranscriptStore", () => {
       ).toBeUndefined();
     });
 
+    it("isCursorAnswered is true once a reply carries the cursor", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const answered = (cursor: string, afterMessageId: string | null) =>
+        tx((trx) => store.isCursorAnswered(trx, { conversationId, cursor, afterMessageId }));
+      const turnRow = await userRow(conversationId, stamp, IN_2, IN_1, "words");
+
+      // The turn's own user row is not a reply.
+      expect(await answered(IN_2, null)).toBe(false);
+      await reply(conversationId, stamp, IN_2, ["reply"]);
+      expect(await answered(IN_2, turnRow)).toBe(true);
+      expect(await answered(IN_3, null)).toBe(false);
+    });
+
+    it("isCursorAnswered reads only rows newer than afterMessageId", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const older = await reply(conversationId, stamp, IN_2, ["old reply"]);
+
+      expect(
+        await tx((trx) =>
+          store.isCursorAnswered(trx, { conversationId, cursor: IN_2, afterMessageId: older }),
+        ),
+      ).toBe(false);
+    });
+
+    it("isCursorAnswered ignores another conversation's replies", async () => {
+      const { userId, profileId, conversationId, stamp } = await seedConversation(tx);
+      const other = await tx((trx) =>
+        conversationStore.createConversation(trx, { userId, profileId, isPrivate: true }),
+      );
+      await reply(other.id, stamp, IN_2, ["reply"]);
+
+      expect(
+        await tx((trx) =>
+          store.isCursorAnswered(trx, { conversationId, cursor: IN_2, afterMessageId: null }),
+        ),
+      ).toBe(false);
+    });
+
     it("isCursorRebatched reads only rows newer than afterMessageId", async () => {
       const { conversationId, stamp } = await seedConversation(tx);
       await userRow(conversationId, stamp, IN_3, IN_1, "words");
@@ -836,6 +1012,42 @@ describe("DrizzleTranscriptStore", () => {
         [TURN_2, "reply two"],
       ]);
       expect(await tx((trx) => store.listTurnMessages(trx, conversationId, []))).toEqual([]);
+    });
+
+    it("lists the user rows after a reply with their cursors", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const cursor = (n: number) => `019d0000-0000-7000-8000-0000000000b${n}`;
+      const write = (role: "user" | "assistant", n: number, content: string) =>
+        tx((trx) =>
+          store.insertMessage(trx, {
+            conversationId,
+            role,
+            content,
+            lastInboundMessageId: cursor(n),
+            firstInboundMessageId: null,
+            ...stamp,
+          }),
+        );
+      await write("user", 1, "one");
+      const reply = await write("assistant", 1, "reply one");
+      await write("user", 2, "failed earlier");
+      await write("user", 3, "refused");
+      const latest = await write("user", 4, "written since");
+      const unanswered = (afterMessageId: string | null) =>
+        tx((trx) => store.listUserRowsAfter(trx, { conversationId, afterMessageId }));
+
+      expect((await unanswered(reply.id)).map((r) => [r.cursor, r.content])).toEqual([
+        [cursor(2), "failed earlier"],
+        [cursor(3), "refused"],
+        [cursor(4), "written since"],
+      ]);
+      expect((await unanswered(null)).map((r) => r.content)).toEqual([
+        "one",
+        "failed earlier",
+        "refused",
+        "written since",
+      ]);
+      expect(await unanswered(latest.id)).toEqual([]);
     });
 
     it("finds the turn answered last before a turn's first row, past an unanswered one", async () => {
@@ -1422,6 +1634,7 @@ describe("system prompt snapshots", () => {
       rendered,
       configDigest: `digest of ${rendered}`,
       attachmentCutoff: null,
+      reason: "first_turn" as const,
     };
   }
 
@@ -1429,10 +1642,11 @@ describe("system prompt snapshots", () => {
     const { conversationId, stamp } = await seedConversation(tx);
     const opener = await userRow(conversationId, stamp);
 
-    const row = await tx((trx) =>
+    const { kind, row } = await tx((trx) =>
       store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "first")),
     );
 
+    expect(kind).toBe("new");
     expect(row).toMatchObject(snapshot(conversationId, opener, "first"));
     expect(row.createdAt).toBeInstanceOf(Date);
     await expect(
@@ -1451,7 +1665,8 @@ describe("system prompt snapshots", () => {
       store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "retry")),
     );
 
-    expect(retry).toEqual(first);
+    expect(first.kind).toBe("new");
+    expect(retry).toEqual({ kind: "recovered", row: first.row });
     const rows = await db.select().from(systemPromptSnapshots);
     expect(rows).toHaveLength(1);
   });
@@ -1503,6 +1718,21 @@ describe("system prompt snapshots", () => {
 
     const latest = await tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId));
     expect(latest?.attachmentCutoff).toBe(earlier);
+  });
+
+  it("keeps the reason an epoch opens for", async () => {
+    const { conversationId, stamp } = await seedConversation(tx);
+    const opener = await userRow(conversationId, stamp);
+
+    await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, {
+        ...snapshot(conversationId, opener, "first"),
+        reason: "attachments",
+      }),
+    );
+
+    const latest = await tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId));
+    expect(latest?.reason).toBe("attachments");
   });
 
   it("refuses a snapshot opened by a message that doesn't exist", async () => {

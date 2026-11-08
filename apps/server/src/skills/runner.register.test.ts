@@ -55,10 +55,19 @@ const DEFAULT_RUN_AS = {
 /** The CLI's origin: the install owner with the default profile. */
 const OWNER: SkillDeployOrigin = { kind: "owner" };
 
-const RUN_AS: SkillRunAs = {
-  userId: "user-1",
-  service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
-};
+/** A run-as over real user and profile rows, which a run row references. */
+async function seededRunAs(): Promise<SkillRunAs> {
+  const [user] = await db.insert(users).values({}).returning({ id: users.id });
+  const [profile] = await db
+    .insert(profiles)
+    .values({ userId: null, name: "run-as", basePrompt: "", model: "m", toolSet: [] })
+    .returning({ id: profiles.id });
+  return {
+    userId: expectDefined(user, "user").id,
+    profileId: expectDefined(profile, "profile").id,
+    service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
+  };
+}
 
 function makeMockSecrets(): SecretsStore {
   return mock<SecretsStore>();
@@ -836,6 +845,20 @@ outputs:
         expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], {});
       });
 
+      it("rejects a fresh lockfile that pins pydantic at another version than the runtime's", async () => {
+        const lockfile = "httpx==0.27.0 --hash=sha256:0\npydantic==2.14.3 --hash=sha256:1\n";
+        const compiler = { compile: vi.fn().mockResolvedValue(ok(lockfile)) };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        await commitWithLockfile("skill/echo-pydantic", lockfile);
+
+        const result = await runner.register({ branch: "skill/echo-pydantic", origin: OWNER });
+        assertStatus(result, "rejected");
+        expect(result.errors?.[0]).toMatch(
+          /^runtime_package_conflict: requirements\.lock pins pydantic==2\.14\.3 \(the runtime's is 2\.12\.5\)/,
+        );
+        expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+      });
+
       it("rejects with requirements_lock_stale when the compile output differs", async () => {
         const committed = "httpx==0.27.0 --hash=sha256:OLD\n";
         const fresh = "httpx==0.27.0 --hash=sha256:NEW\n";
@@ -952,7 +975,7 @@ outputs:
     await runner.register({ branch: "skill/echo", origin: OWNER });
 
     const result = (
-      await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS })
+      await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: await seededRunAs() })
     )._unsafeUnwrap();
     assertStatus(result, "success");
     expect(result.output).toEqual({ echo: 8 });
@@ -973,7 +996,7 @@ outputs:
 
     const r2 = await makeRunner();
     const result = (
-      await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS })
+      await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: await seededRunAs() })
     )._unsafeUnwrap();
     assertStatus(result, "success");
     expect(result.output).toEqual({ echo: 8 });
@@ -989,9 +1012,10 @@ outputs:
     });
     await runner.register({ branch: "skill/bad-out", origin: OWNER });
     const result = (
-      await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS })
+      await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: await seededRunAs() })
     )._unsafeUnwrap();
     assertStatus(result, "error");
+    expect(result.errorKind).toBe("output_invalid");
     expect(result.error).toMatch(/output failed schema/);
   });
 

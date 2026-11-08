@@ -237,6 +237,8 @@ async function inSalvageContainer<T>(
         resourceLimits: opts.resourceLimits,
         expiresAt: new Date(Date.now() + SALVAGE_TTL_MS),
         worktree: { type: "host-path", hostPath: opts.worktreePath },
+        // The push reaches the git remote.
+        network: "bridge",
         ...(askpass && {
           askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
         }),

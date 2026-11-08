@@ -131,6 +131,8 @@ export async function reapSkillVenvs(
       resourceLimits: { cpus: 1, memory_bytes: 256 * 1024 * 1024, pids: 64 },
       expiresAt,
       depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
+      // The sweep only lists and removes directories on the volume.
+      network: "none",
     });
   } catch (e) {
     return err({

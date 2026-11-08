@@ -42,6 +42,8 @@ import {
   type ContentBlock,
   type CountTokensParams,
   DEFAULT_MAX_TOKENS,
+  type InputTransformation,
+  InputTransformationSchema,
   type JsonSchema,
   type LlmResponse,
   type Message,
@@ -146,6 +148,7 @@ export class AnthropicProvider implements LlmProvider {
         let model = "";
         let stopReason: StopReason = "end_turn";
         let usage: Usage = { inputTokens: 0, outputTokens: 0 };
+        let inputTransformations: InputTransformation[] | undefined;
         // A tool block whose arguments failed to parse, held until the stream
         // shows whether the output cap cut it off: a response that stops at
         // `max_tokens` with no further block did, and one that goes on to
@@ -168,6 +171,9 @@ export class AnthropicProvider implements LlmProvider {
             case "message_start":
               model = event.message.model;
               usage = fromAnthropicUsage(event.message.usage);
+              inputTransformations = fromAnthropicTransformations(
+                event.message.input_transformations,
+              );
               break;
 
             case "content_block_start":
@@ -248,6 +254,11 @@ export class AnthropicProvider implements LlmProvider {
             case "message_delta":
               stopReason = fromAnthropicStopReason(event.delta.stop_reason);
               usage.outputTokens = event.usage.output_tokens;
+              // Carried only after a server-side model fallback mid-stream:
+              // the serving model's entries, which replace `message_start`'s.
+              if (event.input_transformations != null) {
+                inputTransformations = fromAnthropicTransformations(event.input_transformations);
+              }
               break;
           }
         }
@@ -256,7 +267,10 @@ export class AnthropicProvider implements LlmProvider {
         if (unparsed !== undefined) throw unparsed;
         recordChatUsage(span, providerName, model, usage, stopReason);
         completed = true;
-        yield { type: "done", meta: { stopReason, model, usage } };
+        yield {
+          type: "done",
+          meta: { stopReason, model, usage, ...(inputTransformations && { inputTransformations }) },
+        };
       } catch (err) {
         completed = true;
         const cause = abortReasonOr(err, signal);
@@ -320,6 +334,7 @@ export class AnthropicProvider implements LlmProvider {
       const { response, toolPath } = await this.#create(clampForNonStreaming(params), signal);
 
       const usage = fromAnthropicUsage(response.usage);
+      const inputTransformations = fromAnthropicTransformations(response.input_transformations);
 
       const stopReason = fromAnthropicStopReason(response.stop_reason);
       recordChatUsage(span, this.name, response.model, usage, stopReason);
@@ -337,6 +352,7 @@ export class AnthropicProvider implements LlmProvider {
             stopReason: stopReason === "tool_use" ? "end_turn" : stopReason,
             model: response.model,
             usage,
+            ...(inputTransformations && { inputTransformations }),
           };
         }
         // `tool_choice: auto` lets the model answer in text instead. A cut-off
@@ -358,6 +374,7 @@ export class AnthropicProvider implements LlmProvider {
         stopReason,
         model: response.model,
         usage,
+        ...(inputTransformations && { inputTransformations }),
       };
     } catch (err) {
       const cause = abortReasonOr(err, signal);
@@ -735,6 +752,22 @@ function fromAnthropicUsage(usage: Anthropic.Beta.BetaUsage): Usage {
     ...(cacheRead != null && { cacheReadTokens: cacheRead }),
     ...(cacheCreation != null && { cacheCreationTokens: cacheCreation }),
   };
+}
+
+/**
+ * The response's `input_transformations`, or `undefined` when it reported
+ * none: a request without the binding-controls beta, or a model without
+ * extended thinking. An entry missing a field the schema needs is dropped,
+ * as the API says to ignore entry types it doesn't describe.
+ */
+function fromAnthropicTransformations(
+  entries: ReadonlyArray<Anthropic.Beta.BetaInputTransformation> | null | undefined,
+): InputTransformation[] | undefined {
+  if (entries == null) return undefined;
+  return entries.flatMap((entry) => {
+    const parsed = InputTransformationSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
 }
 
 // --- To Anthropic format ---

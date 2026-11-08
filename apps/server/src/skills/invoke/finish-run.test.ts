@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { profiles, users } from "../../agent/store/schema.js";
 import type { Database, Transactor } from "../../db/index.js";
-import { assertStatus, expectOk } from "../../test/assertions.js";
+import { assertStatus, expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { parseManifest } from "../manifest.js";
 import { SkillSourceCache, type SkillSourceCacheEntry } from "../source-cache.js";
@@ -57,13 +58,26 @@ async function executedRun(output: unknown): Promise<string> {
       outputs: null,
     }),
   );
+  const [user] = await db.insert(users).values({}).returning({ id: users.id });
+  const [profile] = await db
+    .insert(profiles)
+    .values({ userId: null, name: "default", basePrompt: "", model: "m", toolSet: [] })
+    .returning({ id: profiles.id });
   const { row } = await tx((trx) =>
     store.startOrRecoverRun(trx, {
       skillId: skill.id,
       trigger: "cron",
       inputs: {},
+      gitSha: "sha-1",
+      runAs: {
+        userId: expectDefined(user, "user").id,
+        profileId: expectDefined(profile, "profile").id,
+      },
       idempotencyKey: "skill-cron:echo:1",
     }),
+  );
+  await tx((trx) =>
+    store.transitionToDispatched(trx, { id: row.id, deadlineAt: new Date(Date.now() + 90_000) }),
   );
   await tx((trx) =>
     store.transitionToExecuted(trx, {
@@ -91,7 +105,7 @@ describe("finishRun", () => {
     expect(row?.status).toBe("success");
   });
 
-  it("finishes an output failing the outputs schema as an error", async () => {
+  it("finishes an output failing the outputs schema as output_invalid, keeping the output", async () => {
     const runId = await executedRun({ other: 1 });
 
     const result = await finishRun(
@@ -100,7 +114,35 @@ describe("finishRun", () => {
     );
 
     assertStatus(result, "error");
+    expect(result).toMatchObject({ errorKind: "output_invalid", output: { other: 1 } });
     expect(result.error).toMatch(/output failed schema validation for skill 'echo'/);
+    const row = await tx((trx) => store.getRun(trx, runId));
+    expect(row).toMatchObject({
+      status: "error",
+      errorKind: "output_invalid",
+      output: { other: 1 },
+    });
+  });
+
+  it("finishes an executed error with the kind the worker reported", async () => {
+    const runId = await executedRun({ echo: 1 });
+    // The row's own payload is the worker's; the verdict follows `executed`.
+    const result = await finishRun(
+      { store, runInTx: tx },
+      {
+        runId,
+        skillName: "echo",
+        cached,
+        executed: { kind: "error", error: { kind: "wall_clock_exceeded", message: "slow" } },
+      },
+    );
+
+    expect(result).toEqual({
+      runId,
+      status: "error",
+      errorKind: "wall_clock_exceeded",
+      error: "slow",
+    });
   });
 
   it("returns the settled result when another attempt finished the row first", async () => {

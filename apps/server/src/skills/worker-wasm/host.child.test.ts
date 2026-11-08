@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { sendingGate } from "../../test/factories.js";
 import type { CtxHandler } from "../dispatcher.js";
-import type { HostMessage } from "../protocol.js";
+import { type DispatchGate, type HostMessage, withheldOutcome } from "../protocol.js";
 import { buildWasmChild } from "./child-bundle.js";
 import {
   createWasmProbe,
@@ -73,11 +74,13 @@ const WALL_CLOCK_S = 30;
 function run(t: StandIn, wallClockS = WALL_CLOCK_S): Promise<RunOnWorkerResult> {
   return runOnChild(t.child, {
     taskId: "task-1",
+    run: { id: "run-1", key: "key-1" },
     skillName: "skill",
     inputs: {},
     wallClockS,
     readyTimeoutMs: 5_000,
     ctxHandler: mock<CtxHandler>(),
+    dispatch: sendingGate(),
   });
 }
 
@@ -142,7 +145,11 @@ describe("runOnChild", () => {
     await settle();
 
     expect(watched.settled()).toBe(true);
-    expect(await result).toEqual({ ok: false, error: "worker crashed: out of memory" });
+    expect(await result).toEqual({
+      ok: false,
+      errorKind: "result_lost",
+      error: "worker crashed: out of memory",
+    });
   });
 
   it("fails a task at once when its child exits mid-task", async () => {
@@ -155,7 +162,11 @@ describe("runOnChild", () => {
     await settle();
 
     expect(watched.settled()).toBe(true);
-    expect(await result).toEqual({ ok: false, error: "worker exited (code 3)" });
+    expect(await result).toEqual({
+      ok: false,
+      errorKind: "result_lost",
+      error: "worker exited (code 3)",
+    });
   });
 
   it("interrupts at the wall clock, and reports a crash after it as wall_clock_exceeded", async () => {
@@ -171,7 +182,11 @@ describe("runOnChild", () => {
     t.ipc.emit("error", new Error("KeyboardInterrupt"));
     await settle();
 
-    expect(await result).toEqual({ ok: false, error: "wall_clock_exceeded" });
+    expect(await result).toEqual({
+      ok: false,
+      errorKind: "wall_clock_exceeded",
+      error: "wall_clock_exceeded",
+    });
   });
 
   it("reports a result that arrives after the interrupt as wall_clock_exceeded", async () => {
@@ -185,7 +200,36 @@ describe("runOnChild", () => {
     t.ipc.emit("message", { type: "task_result", id: "task-1", ok: true, output: { ok: true } });
     await settle();
 
-    expect(await result).toEqual({ ok: false, error: "wall_clock_exceeded" });
+    expect(await result).toEqual({
+      ok: false,
+      errorKind: "wall_clock_exceeded",
+      error: "wall_clock_exceeded",
+    });
+    expect(t.kill).toHaveBeenCalled();
+  });
+
+  it("asks the gate once the child is ready, and sends nothing it withholds", async () => {
+    const t = standIn();
+    const sent: HostMessage[] = [];
+    t.ipc.on("sent", (m: HostMessage) => sent.push(m));
+    const dispatch = vi.fn<DispatchGate>(async () => ({ kind: "withhold" }));
+    const result = runOnChild(t.child, {
+      taskId: "task-1",
+      run: { id: "run-1", key: "key-1" },
+      skillName: "skill",
+      inputs: {},
+      wallClockS: WALL_CLOCK_S,
+      readyTimeoutMs: 5_000,
+      ctxHandler: mock<CtxHandler>(),
+      dispatch,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    t.ipc.emit("message", { type: "ready" });
+    await settle();
+
+    expect(await result).toEqual(withheldOutcome());
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(sent.filter((m) => m.type === "task_invoke")).toEqual([]);
     expect(t.kill).toHaveBeenCalled();
   });
 
@@ -195,10 +239,16 @@ describe("runOnChild", () => {
     await readyAndInvoked(t);
 
     await vi.advanceTimersByTimeAsync(WALL_CLOCK_S * 1000 - 1);
-    t.ipc.emit("message", { type: "task_result", id: "task-1", ok: false, error: "boom" });
+    t.ipc.emit("message", {
+      type: "task_result",
+      id: "task-1",
+      ok: false,
+      errorKind: "skill_raised",
+      error: "boom",
+    });
     await settle();
 
-    expect(await result).toEqual({ ok: false, error: "boom" });
+    expect(await result).toEqual({ ok: false, errorKind: "skill_raised", error: "boom" });
     expect(t.interrupt).not.toHaveBeenCalled();
   });
 
@@ -214,7 +264,11 @@ describe("runOnChild", () => {
     await vi.advanceTimersByTimeAsync(1);
     await settle();
 
-    expect(await result).toEqual({ ok: false, error: "wall_clock_exceeded" });
+    expect(await result).toEqual({
+      ok: false,
+      errorKind: "wall_clock_exceeded",
+      error: "wall_clock_exceeded",
+    });
   });
 
   it("reports a child that fails to load", async () => {
@@ -225,6 +279,7 @@ describe("runOnChild", () => {
 
     expect(await result).toEqual({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: "worker init failed: micropip: no matching wheel",
     });
   });
@@ -237,6 +292,7 @@ describe("runOnChild", () => {
 
     expect(await result).toEqual({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: "worker init failed: worker exited (code 7)",
     });
   });
@@ -252,14 +308,21 @@ describe("runOnChild", () => {
         { ipc: proc, interrupt: () => {}, kill: () => proc.kill("SIGKILL"), exited },
         {
           taskId: "task-1",
+          run: { id: "run-1", key: "key-1" },
           skillName: "skill",
           inputs: {},
+          wallClockS: WALL_CLOCK_S,
           readyTimeoutMs: 5_000,
           ctxHandler: mock<CtxHandler>(),
+          dispatch: sendingGate(),
         },
       );
 
-      expect(result).toEqual({ ok: false, error: "worker init failed: worker exited (code 1)" });
+      expect(result).toEqual({
+        ok: false,
+        errorKind: "runtime_unavailable",
+        error: "worker init failed: worker exited (code 1)",
+      });
     } finally {
       // A failed assertion or a hang must not leave the process behind.
       proc.kill("SIGKILL");
@@ -272,7 +335,11 @@ describe("runOnChild", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await settle();
 
-    expect(await result).toEqual({ ok: false, error: "worker_init_timeout after 5000ms" });
+    expect(await result).toEqual({
+      ok: false,
+      errorKind: "runtime_unavailable",
+      error: "worker_init_timeout after 5000ms",
+    });
     expect(t.kill).toHaveBeenCalled();
   });
 });
@@ -285,10 +352,13 @@ describe("the child bundle built from source", () => {
   function workerParams(): RunOnWorkerParams {
     return {
       taskId: "task-1",
+      run: { id: "run-1", key: "key-1" },
       skillName: "skill",
       body: "",
       inputs: {},
       ctxHandler: mock<CtxHandler>(),
+      dispatch: sendingGate(),
+      wallClockS: WALL_CLOCK_S,
       packages: { builtins: [], wheelDir: null },
       packageCacheDir: "/nonexistent/cache",
       pyodideDistDir: "/nonexistent/dist",
@@ -316,6 +386,7 @@ describe("the child bundle built from source", () => {
 
     expect(await runOnWorker(workerParams())).toEqual({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: "worker init failed: cannot build the wasm child: esbuild unavailable",
     });
   });

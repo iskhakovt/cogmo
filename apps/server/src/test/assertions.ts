@@ -11,6 +11,7 @@
 import type { TextOptions } from "@clack/prompts";
 import type { Result } from "neverthrow";
 import { expect } from "vitest";
+import type { AgentLoopResult, StreamingLoopOutcome } from "../agent/loop.js";
 import { constraintNameOf, findPgErrorByCode } from "../db/pg-errors.js";
 
 import type { Adapter, StreamingAdapter } from "../transport/types.js";
@@ -49,6 +50,12 @@ export function expectOk<T, E>(result: Result<T, E>): T {
   return result.value;
 }
 
+/** The result of a streaming loop that finished; throws when it ended superseded. */
+export function expectFinished(outcome: StreamingLoopOutcome): AgentLoopResult {
+  if (outcome.kind !== "finished") throw new Error(`expected a finished loop, got ${outcome.kind}`);
+  return outcome.result;
+}
+
 /**
  * Narrow a discriminated-union value to a specific variant. The `asserts`
  * annotation propagates the narrowing without a cast at the call site.
@@ -85,6 +92,16 @@ export function assertStatus<U extends { status: string }, S extends U["status"]
   }
   if (value.status !== status) {
     throw new Error(`expected status '${status}', got ${JSON.stringify(value)}`);
+  }
+}
+
+/** Narrow `value` to an instance of `ctor`, naming what it was otherwise. */
+export function assertInstanceOf<T>(
+  value: unknown,
+  ctor: abstract new (...args: never[]) => T,
+): asserts value is T {
+  if (!(value instanceof ctor)) {
+    throw new Error(`expected an instance of ${ctor.name}, got ${String(value)}`);
   }
 }
 

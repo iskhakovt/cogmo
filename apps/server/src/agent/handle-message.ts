@@ -20,11 +20,13 @@ import type { DebounceConfig } from "./debounce.js";
 import { admitTurn } from "./handle-message/admit-turn.js";
 import { assembleTurnContext } from "./handle-message/assemble-turn-context.js";
 import { buildChatTurnService } from "./handle-message/chat-turn-service.js";
+import { checkTurnHead } from "./handle-message/check-turn-head.js";
 import { compactTurn } from "./handle-message/compact-turn.js";
 import { deliverReply } from "./handle-message/deliver-reply.js";
 import { finalizeTurnContext } from "./handle-message/finalize-turn-context.js";
 import { freezeTurnInputs } from "./handle-message/freeze-turn-inputs.js";
 import { batchCursors, routingKindOf } from "./handle-message/inbound-batch.js";
+import { isTurnSuperseded } from "./handle-message/is-turn-superseded.js";
 import { loadTurnTranscript } from "./handle-message/load-turn-transcript.js";
 import { persistTurn } from "./handle-message/persist-turn.js";
 import { recordUserMessage } from "./handle-message/record-user-message.js";
@@ -33,13 +35,15 @@ import { reportTurnFailure } from "./handle-message/report-turn-failure.js";
 import { resolveTurnModel } from "./handle-message/resolve-turn-model.js";
 import { runTurnLoop } from "./handle-message/run-turn-loop.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
-import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
+import type { StreamingAgentLoopParams, StreamingLoopOutcome } from "./loop.js";
 import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import type { PromptSource } from "./prompt.js";
 import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import type { StoredContent } from "./stored-content.js";
+import { historyStart } from "./system-prompt-snapshot.js";
 import type { ToolRegistry } from "./tools.js";
+import type { PrefixViolationPolicy } from "./transcript-head.js";
 import { createTurnStepRunner } from "./turn-step-runner.js";
 
 export interface HandleMessageDeps {
@@ -75,7 +79,7 @@ export interface HandleMessageDeps {
   images: NormalizeArrivalDeps["images"];
   debounceConfig: DebounceConfig;
   deliveryRouter: DeliveryRouter;
-  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
+  runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<StreamingLoopOutcome>;
   /**
    * Optional factory that constructs a coding service scoped to this turn's
    * conversation. Bootstrap supplies it when the sandbox module is
@@ -132,6 +136,12 @@ export interface HandleMessageDeps {
    * is of such a type.
    */
   pipelineGateChannelTypes?: ReadonlySet<string>;
+  /**
+   * What the transcript head checks do on an unexplained divergence
+   * (design/prompt-caching.md → Head check): production reopens an epoch,
+   * unit tests throw.
+   */
+  prefixViolation: PrefixViolationPolicy;
 }
 
 /**
@@ -139,9 +149,9 @@ export interface HandleMessageDeps {
  *
  * Receives inbound/ready events (debounce router has decided it's time to
  * process) and runs the turn's phases in order: admission, the user message,
- * the transcript, the frozen turn inputs, context assembly and compaction, the
- * agent loop, persistence, delivery, and the post-turn events. Each phase
- * plans its own steps; their ids, order and memoized shapes are the
+ * the transcript, the frozen turn inputs, the head check, context assembly and
+ * compaction, the agent loop, persistence, delivery, and the post-turn events.
+ * Each phase plans its own steps; their ids, order and memoized shapes are the
  * durability map in design/crash-recovery.md.
  */
 export function createHandleMessage(deps: HandleMessageDeps) {
@@ -153,7 +163,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       concurrency: conversationTurnConcurrency,
       onFailure: async ({ event, error, step }) => {
         const { conversationId, triggerInboundId } = event.data.event.data;
-        await reportTurnFailure(fromStepTools(step), deps.deliveryRouter, {
+        await reportTurnFailure(fromStepTools(step), deps, {
           conversationId,
           triggerInboundId,
           runId: event.data.run_id,
@@ -235,7 +245,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // In-turn durable boundary wrapper — per-step-kind retry policy lives in
       // `createTurnStepRunner`.
-      const stepRun = createTurnStepRunner(durable.run);
+      const stepRun = createTurnStepRunner(durable.run, { cursor: maxInboundId });
 
       // Ahead of the view, whose attachment cutoff reads the route's frozen limits.
       const turnModel = await resolveTurnModel(stepRun, deps.resolveProvider, snapshot.model);
@@ -247,6 +257,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         substitutedMessages,
       });
 
+      const head = checkTurnHead({
+        transcript,
+        view,
+        snapshot: loadedSystemPrompt.snapshot,
+        toolDefs: frozen.toolDefs,
+        policy: deps.prefixViolation,
+      });
+
       const context = await assembleTurnContext(stepRun, service, {
         userId,
         autoRecallMode: profile?.autoRecall ?? "heuristic",
@@ -254,6 +272,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         transcript,
         view,
         loadedSystemPrompt,
+        head,
         voiceMode: frozen.voiceMode,
         coreMemoryScope,
         timezone: deps.userTimezone,
@@ -285,30 +304,42 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         continuing: context.continuing,
         storedCutoff: compacted.storedCutoff,
         loadedSystemPrompt,
+        head,
         systemPromptArgs: frozen.systemPromptArgs,
         recalledMemories: context.recalledMemories,
         handledAt: context.handledAt,
         voiceMode: frozen.voiceMode,
         coreMemoryScope,
         timezone: deps.userTimezone,
+        turnLogger,
       });
 
-      const { result, unstreamed } = await runTurnLoop(
-        durable,
-        stepRun,
-        deps.runStreamingAgentLoop,
-        {
-          conversationId,
-          turnModel,
-          systemPrompt: finalized.systemPrompt,
-          messages: finalized.messages,
-          tools: frozen.turnTools,
-          service,
-          delivery,
-          firstInboundId,
-          turnLogger,
-        },
-      );
+      const lastAnsweredMessageId = lastAssistant?.id ?? null;
+      const looped = await runTurnLoop(durable, stepRun, deps.runStreamingAgentLoop, {
+        conversationId,
+        turnModel,
+        systemPrompt: finalized.systemPrompt,
+        messages: finalized.messages,
+        tools: frozen.turnTools,
+        service,
+        delivery,
+        firstInboundId,
+        superseded: () =>
+          isTurnSuperseded(deps, {
+            conversationId,
+            cursor: maxInboundId,
+            afterMessageId: lastAnsweredMessageId,
+          }),
+        prefixViolation: deps.prefixViolation,
+        turnLogger,
+      });
+      if (looped.kind === "superseded") {
+        // Another reply owned this batch's inbounds before an iteration
+        // streamed; the persist check would refuse this turn's reply.
+        turnLogger.warn("another reply owns this turn's inbounds; stopped before streaming");
+        return { status: "skipped" as const, reason: "superseded" as const };
+      }
+      const { result, unstreamed } = looped;
 
       turnLogger.info(
         {
@@ -325,9 +356,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         triggerInboundId,
         snapshot,
         maxInboundId,
-        lastAnsweredMessageId: lastAssistant?.id ?? null,
+        lastAnsweredMessageId,
         priorCooldown: conv.cooldownState,
         result,
+        // The view the turn's requests sent starts after any summary it stored.
+        view: {
+          historyStart: historyStart(transcript.history.messageIds, compacted.storedCutoff),
+          compacted: compacted.rewroteView,
+        },
+        turnLogger,
       });
 
       return match(persisted)

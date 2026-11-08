@@ -3,6 +3,7 @@ import { assert, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
 import { expectDefined } from "../../test/assertions.js";
+import { sendingGate } from "../../test/factories.js";
 import { seededRandom } from "../../test/seeded-random.js";
 import type { CtxHandler } from "../dispatcher.js";
 import type { Death } from "../worker-state.js";
@@ -103,10 +104,13 @@ const noopCtx = mock<CtxHandler>();
 function invokeParams(taskId: string): InvokeParams {
   return {
     taskId,
+    run: { id: taskId, key: `key-${taskId}` },
     skillName: "test",
     body: "async def run(inputs, ctx): return {}",
     inputs: {},
     ctxHandler: noopCtx,
+    dispatch: sendingGate(),
+    wallClockS: 60,
   };
 }
 
@@ -331,7 +335,16 @@ describe("SysboxWorkerPool", () => {
 
   it("recycles a worker that returns a non-reusable result", async () => {
     const h = buildPoolHarness({
-      scripts: [[{ ok: false, error: "wall_clock_exceeded", workerReusable: false }]],
+      scripts: [
+        [
+          {
+            ok: false,
+            errorKind: "wall_clock_exceeded",
+            error: "wall_clock_exceeded",
+            workerReusable: false,
+          },
+        ],
+      ],
       poolOptions: { min: 1, max: 1 },
     });
     const pool = await h.pool;
@@ -386,6 +399,7 @@ describe("SysboxWorkerPool", () => {
               await task;
               return {
                 ok: false,
+                errorKind: "runtime_unavailable",
                 error: "dispatcher_error: worker is dead",
                 workerReusable: false,
               };
@@ -622,6 +636,7 @@ describe("SysboxWorkerPool", () => {
         // An acquirer waits on one probe, and fails when it dies too.
         await expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({
           ok: false,
+          errorKind: "runtime_unavailable",
           error: expect.stringMatching(/keep dying before their first task/),
         });
         expect(h.spawned).toHaveLength(4);
@@ -696,6 +711,7 @@ describe("SysboxWorkerPool", () => {
       const pool = await h.pool;
       await expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({
         ok: false,
+        errorKind: "runtime_unavailable",
         error: expect.stringMatching(/keep dying before their first task/),
       });
       await vi.waitFor(() => expect(h.spawned).toHaveLength(4));
@@ -736,6 +752,7 @@ describe("SysboxWorkerPool", () => {
       }).pool;
       await expect(pool.invoke(invokeParams("t-0"))).resolves.toMatchObject({
         ok: false,
+        errorKind: "runtime_unavailable",
         error: expect.stringMatching(/keep dying before their first task/),
       });
       await vi.waitFor(() => expect(creating).toBe(0));
@@ -746,6 +763,7 @@ describe("SysboxWorkerPool", () => {
       const failed = ["t-1", "t-2", "t-3", "t-4"].map((id) =>
         expect(pool.invoke(invokeParams(id))).resolves.toMatchObject({
           ok: false,
+          errorKind: "runtime_unavailable",
           error: expect.stringMatching(/keep dying before their first task/),
         }),
       );
@@ -780,6 +798,7 @@ describe("SysboxWorkerPool", () => {
               w.die("supervisor exited");
               return {
                 ok: false,
+                errorKind: "runtime_unavailable",
                 error: "dispatcher_error: worker is dead",
                 workerReusable: false,
               };
@@ -898,6 +917,7 @@ describe("SysboxWorkerPool", () => {
 
     await expect(queued).resolves.toMatchObject({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: expect.stringMatching(/replacement spawn failed/),
     });
     await pool.dispose();
@@ -935,6 +955,7 @@ describe("SysboxWorkerPool", () => {
 
     await expect(b).resolves.toMatchObject({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: expect.stringMatching(/replacement spawn failed/),
     });
     await expect(c).resolves.toMatchObject({ ok: true });
@@ -966,6 +987,7 @@ describe("SysboxWorkerPool", () => {
 
     await expect(a).resolves.toMatchObject({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: expect.stringMatching(/spawn failed/),
     });
     await expect(b).resolves.toMatchObject({ ok: true });
@@ -1055,6 +1077,7 @@ describe("SysboxWorkerPool", () => {
 
     await expect(queued).resolves.toMatchObject({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: expect.stringMatching(/disposed before worker available/),
     });
     await disposePromise;
@@ -1224,6 +1247,7 @@ describe("SysboxWorkerPool", () => {
     // No worker is idle, so this spawns one, held until the pool is disposed.
     const fails = expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: expect.stringMatching(/disposed before worker available/),
     });
 
@@ -1305,7 +1329,12 @@ describe("SysboxWorkerPool", () => {
         return fakeWorker(workerId, {
           invoke: async () => {
             await first.promise;
-            return { ok: false, error: "wall_clock_exceeded", workerReusable: false };
+            return {
+              ok: false,
+              errorKind: "wall_clock_exceeded",
+              error: "wall_clock_exceeded",
+              workerReusable: false,
+            };
           },
         });
       },
@@ -1321,6 +1350,7 @@ describe("SysboxWorkerPool", () => {
     await a; // resolves with non-reusable result
     await expect(b).resolves.toMatchObject({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: expect.stringMatching(/replacement spawn failed/),
     });
     await pool.dispose();
@@ -1342,7 +1372,12 @@ describe("SysboxWorkerPool", () => {
           invoke: async () => {
             if (idx > 0) return { ok: true, output: { x: idx }, workerReusable: true };
             await first.promise;
-            return { ok: false, error: "wall_clock_exceeded", workerReusable: false };
+            return {
+              ok: false,
+              errorKind: "wall_clock_exceeded",
+              error: "wall_clock_exceeded",
+              workerReusable: false,
+            };
           },
         });
       },
@@ -1410,6 +1445,7 @@ describe("SysboxWorkerPool", () => {
     // Disposal fails the acquire waiting on that spawn.
     const secondFails = expect(second).resolves.toMatchObject({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: expect.stringMatching(/disposed before worker available/),
     });
 
@@ -1502,7 +1538,12 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
                 if (healthy) return succeed();
                 if (chance(0.1)) w.die("supervisor exited");
                 return chance(0.1)
-                  ? { ok: false, error: "wall_clock_exceeded", workerReusable: false }
+                  ? {
+                      ok: false,
+                      errorKind: "wall_clock_exceeded",
+                      error: "wall_clock_exceeded",
+                      workerReusable: false,
+                    }
                   : succeed();
               } finally {
                 running.delete(w);

@@ -13,12 +13,13 @@ import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
 import type { PromptSource } from "../prompt.js";
 import type { AgentStore } from "../store/index.js";
 import { loadConversationContext } from "./load-conversation-context.js";
-import { loadTurnHistory, summarizedSpan } from "./load-turn-history.js";
+import { type LoadTurnHistoryDeps, loadTurnHistory, summarizedSpan } from "./load-turn-history.js";
 
 /** Stores and services `compactConversation` needs; see that function's doc. */
 export interface CompactConversationDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
+  transportStore: LoadTurnHistoryDeps["transportStore"];
   resolveProvider: LlmProviderResolver;
   promptSource: PromptSource;
   /** Renders the prefix's attachment refs. */
@@ -109,7 +110,7 @@ export async function compactConversation(
   const { profile, userId } = loaded;
 
   const { messages, messageIds } = await loadTurnHistory(
-    { runInTx: deps.runInTx, agentStore: deps.agentStore },
+    { runInTx: deps.runInTx, agentStore: deps.agentStore, transportStore: deps.transportStore },
     { conversationId, turnInboundId: null },
   );
 

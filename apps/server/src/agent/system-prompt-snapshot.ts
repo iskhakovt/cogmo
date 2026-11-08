@@ -7,7 +7,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { match } from "ts-pattern";
 import type { Message } from "../llm/types.js";
+import type { FixedCutoff } from "./attachments/attachment-cutoff.js";
 import {
   type CoreMemoryScope,
   type CoreMemoryView,
@@ -15,6 +17,8 @@ import {
   type ScopedCoreMemoryBlock,
 } from "./core-memory/scope.js";
 import type { SystemPromptSnapshot } from "./store/index.js";
+import { type SystemPromptEpochReason, systemPromptEpochReason } from "./store/schema.js";
+import type { HeadVerdict } from "./transcript-head.js";
 
 /** An epoch's snapshot as a step returns it. */
 export interface EpochSnapshot {
@@ -104,16 +108,75 @@ export function historyStart(
   return start;
 }
 
-/** Whether a turn sends `snapshot`: it exists and its digest and history start are the turn's. */
+/**
+ * Whether a turn sends `snapshot`: it exists, its digest and history start are
+ * the turn's, and the head check found nothing to reopen for.
+ */
 export function continuesEpoch(
   snapshot: { configDigest: string; historyStart: string } | null,
-  current: { configDigest: string; historyStart: string },
+  current: { configDigest: string; historyStart: string; head: HeadVerdict },
 ): boolean {
   return (
     snapshot !== null &&
     snapshot.configDigest === current.configDigest &&
-    snapshot.historyStart === current.historyStart
+    snapshot.historyStart === current.historyStart &&
+    match(current.head)
+      .with({ kind: "skipped" }, { kind: "matched" }, () => true)
+      .with({ kind: "explained" }, { kind: "violated" }, () => false)
+      .exhaustive()
   );
+}
+
+/** The epoch reason a head verdict gives, if any: an unexplained divergence is a `prefix_violation`. */
+function headReason(head: HeadVerdict): SystemPromptEpochReason | null {
+  return match(head)
+    .returnType<SystemPromptEpochReason | null>()
+    .with({ kind: "skipped" }, { kind: "matched" }, () => null)
+    .with({ kind: "explained" }, ({ reason }) => reason)
+    .with({ kind: "violated" }, () => "prefix_violation")
+    .exhaustive();
+}
+
+/**
+ * Why a turn that doesn't continue its epoch opens one: the first that applies
+ * in the epoch rule's precedence, which is `system_prompt_epoch_reason`'s
+ * order. No snapshot is the conversation's first turn; a different digest, or
+ * a head under another `base`, is `configuration`; a history start other than
+ * the snapshot's (the loaded one or the one after a summary this turn stored)
+ * or the head's is `summary`; a `compacted` head is `compaction`; an advanced
+ * attachment cutoff is `attachments`; a `diverged` head or a violated one is
+ * `prefix_violation`. A turn opening with none of these is a bug in the
+ * decision that opened it.
+ */
+export function epochReason(
+  snapshot: { configDigest: string; historyStart: string } | null,
+  turn: {
+    configDigest: string;
+    loadedStart: string;
+    epochStart: string;
+    cutoff: FixedCutoff;
+    head: HeadVerdict;
+  },
+): SystemPromptEpochReason {
+  const fromTurn: Record<SystemPromptEpochReason, boolean> = {
+    first_turn: snapshot === null,
+    configuration: snapshot?.configDigest !== turn.configDigest,
+    summary:
+      snapshot?.historyStart !== turn.loadedStart || snapshot?.historyStart !== turn.epochStart,
+    compaction: false,
+    attachments: match(turn.cutoff)
+      .with({ kind: "advanced" }, () => true)
+      .with({ kind: "kept" }, () => false)
+      .exhaustive(),
+    prefix_violation: false,
+  };
+  const fromHead = headReason(turn.head);
+  const applies = fromHead === null ? fromTurn : { ...fromTurn, [fromHead]: true };
+  const reason = systemPromptEpochReason.enumValues.find((r) => applies[r]);
+  if (reason === undefined) {
+    throw new Error("a turn opened an epoch that no reason in the epoch rule explains");
+  }
+  return reason;
 }
 
 /**

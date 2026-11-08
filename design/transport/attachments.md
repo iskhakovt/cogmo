@@ -27,13 +27,13 @@ Surveyed September 2026.
 
 ### Original records
 
-A failed turn writes no assistant row, so every later turn re-batches its inbound messages and meets the same originals again. `attachment_originals` keeps one record per original that arrival decoded or a provider rejected, and arrival and rendering both read it:
+A failed turn writes no assistant row, so every later turn re-batches its inbound messages and meets the same originals again. `attachment_originals` keeps one record per original that arrival decoded or a provider rejected, and arrival and the transcript load both read it:
 
-| State | Set when | Arrival | Rendering |
+| State | Set when | Arrival | Load |
 |-|-|-|-|
 | `decoding` | committed before an image's first sharp call | a process died decoding it: decode again, or after two deaths the decode-crash placeholder, recorded `ready` | — |
 | `ready` | after the decode, with its `result`: the ref or a placeholder | reuses the result without reading the original | the ref |
-| `rejected` | [Rejected attachments](#rejected-attachments-proposed) | the rejection placeholder | the rejection placeholder |
+| `rejected` | [Rejected attachments](#rejected-attachments-confirmed), with its `rejection` | the rejection placeholder | the rejection placeholder |
 
 ```mermaid
 stateDiagram-v2
@@ -41,11 +41,11 @@ stateDiagram-v2
   decoding --> decoding: claim after a death (attempt + 1)
   decoding --> ready: decoded, or refused, or attempt 3
   decoding --> [*]: the upload threw, or the decode timed out
-  [*] --> rejected: 4c
-  ready --> rejected: 4c
+  [*] --> rejected: a provider refused it
+  ready --> rejected: a provider refused it
 ```
 
-Only JavaScript checks (the byte cap, the HEIC brand sniff) run before the marker commits, so a crafted header that kills the process inside libvips leaves a `decoding` record. sharp refusing an input is an outcome, recorded `ready` with its placeholder; a timeout says as much about the host's load as about the input, so it deletes the record and the row gets its placeholder unrecorded, unless another attempt has recorded a result, which the row then adopts. A decoder that throws leaves the record, so the next claim counts it like a death; a failed upload of the normalized copy deletes it, since storage failing says nothing about the input. A process death isn't proof of a poison input either (a deploy or an OOM kills a healthy decode too), hence the second decode. Only images get a record in 4b. One table carries both markers because each is per original, must commit on its own and outlive a failed run, and is read at arrival and with the transcript's rows; S3 metadata can't change without rewriting the object, and message rows are immutable.
+Only JavaScript checks (the byte cap, the HEIC brand sniff) run before the marker commits, so a crafted header that kills the process inside libvips leaves a `decoding` record. sharp refusing an input is an outcome, recorded `ready` with its placeholder; a timeout says as much about the host's load as about the input, so it deletes the record and the row gets its placeholder unrecorded, unless another attempt has recorded a result, which the row then adopts. A decoder that throws leaves the record, so the next claim counts it like a death; a failed upload of the normalized copy deletes it, since storage failing says nothing about the input. A process death isn't proof of a poison input either (a deploy or an OOM kills a healthy decode too), hence the second decode. Arrival records only images; a rejection records any original. One table carries both markers because each is per original, must commit on its own and outlive a failed run, and is read at arrival and with the transcript's rows; S3 metadata can't change without rewriting the object, and message rows are immutable.
 
 ```
 attachment_originals
@@ -54,8 +54,9 @@ attachment_originals
   state            attachment_original_state NOT NULL   -- decoding | ready | rejected
   decode_attempts  INTEGER NOT NULL             -- claims that found no finished record
   result           JSONB                        -- NormalizedImageResultSchema, set only when ready
+  rejection        attachment_rejection         -- bad_request (a 400) | too_large (a 413), set only when rejected
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-  CHECK (state <> 'decoding' OR result IS NULL), CHECK (state <> 'ready' OR result IS NOT NULL), CHECK (state <> 'rejected' OR result IS NULL)
+  CHECK (state <> 'decoding' OR result IS NULL), CHECK (state <> 'ready' OR result IS NOT NULL), CHECK (state <> 'rejected' OR result IS NULL), CHECK ((state = 'rejected') = (rejection IS NOT NULL))
 ```
 
 `NormalizedImageResultSchema` is `{ kind: "image", path, mediaType, width, height, bytes }` or `{ kind: "placeholder", reason }`, with `reason` one of `undecodable` (sharp refused it), `too_large` (the pixel guard) and `decode_crashed`. Only per-original outcomes are recorded: the per-turn cap applies to each row after the records are read, so a re-batched turn makes its own cap decision. The result holds no name either; the label and placeholder take it from the inbound block. Written through keyed upserts (`.agents/rules/inngest.md`). Owned by `transport/store/`.
@@ -66,7 +67,7 @@ attachment_originals
 | `decoding` → `decoding` | the same claim finding a record a dead process left | as above |
 | `decoding` → `ready` | this attempt's decode returned and its normalized copy is uploaded, or sharp refused it, or the claim's attempt is the third | `UPDATE … WHERE state = 'decoding'`; stale returns the record, absent returns nothing |
 | `decoding` → deleted | the normalized copy's upload threw, or the decode timed out | `DELETE … WHERE state = 'decoding'`, returning whether it happened |
-| none or `ready` → `rejected` | 4c: [Rejected attachments](#rejected-attachments-proposed) | upsert `SET state = 'rejected', result = NULL WHERE state <> 'decoding'` |
+| none or `ready` → `rejected` | the provider refused a turn's first request carrying the original with a 400 or 413 ([Rejected attachments](#rejected-attachments-confirmed)) | upsert `SET state = 'rejected', result = NULL, rejection = <why> WHERE state = 'ready'`; a `decoding` or `rejected` record stays as it is |
 
 A stale `ready` UPDATE (another attempt finished first) uses the record's result, so every row naming the original agrees. An absent one (another attempt's DELETE ran) uses its own result unrecorded; the next arrival decodes again.
 
@@ -82,13 +83,29 @@ A stale `ready` UPDATE (another attempt finished first) uses the record's result
 | A run in flight across the deploy | none | a memoized `create-user-message` wrote the JSON string, which 4a renders |
 | Two steps on one original at once | one record | the conversation's concurrency key runs one step at a time; past it (a lease lost mid-step), the later claim counts an attempt and decodes too, and whichever UPDATE lands second goes stale and adopts the first's result; residual: the second's DELETE after a throw can remove the first's live marker, which only costs a decode |
 
-### Rejected attachments `[proposed]`
+### Rejected attachments `[confirmed]`
 
-A turn that fails permanently with a 400 or a 413 while its rows carry attachments marks their originals `rejected`, in a `mark-rejected-attachments` step of `handle-message`'s `onFailure`. The step runner carries the provider's status on the non-retriable error it raises, since `onFailure` receives a serialized error. The failed turn's rows are the user rows after the conversation's last assistant row. From then on the originals render and arrive as the rejection placeholder, so the next turn re-batches them as text and the conversation recovers.
+A turn whose first count or first iteration the provider refuses with a 400 or a 413 marks the originals its rows carry `rejected`. `handle-message`'s `onFailure` runs `emit-conversation-errored`, then `mark-rejected-attachments`, then `notify-user`, so the marks commit before the user is asked to try again. The turn's rows are the user rows after the conversation's last reply whose cursor is at or below the turn's: its own and the failed batches it re-sent. An original a later turn's row re-sent is left to that turn: its reply shows the provider takes it, and its own refusal marks it. From then on a ref to a rejected original loads as the rejection placeholder, and arrival stores the original as that placeholder, so the next turn sends neither and the conversation recovers.
 
-- **Classification.** 413 is a request over the size cap, which only attachments reach. A 400 from anything else, such as a tool schema the provider refuses, turns that turn's attachments into placeholders too, and the user re-sends them. 401, 403, 429 and 5xx never mark.
-- **No epoch.** Only the failed turn's rows can hold a rejected original, so re-rendering them edits nothing a head describes ([prompt-caching.md](../prompt-caching.md#one-renderer-confirmed) → One renderer).
+- **The refusal.** `onFailure` receives the run's error serialized, and Inngest keeps only a cause's `name`, `message`, `stack` and `cause`. So a chat turn's step runner, which `handle-message` gives the turn's cursor, has `asNonRetriable` put, outside tool steps, a `ProviderRefusal` link between the `NonRetriableError` and a provider's error, its message the refusal as JSON: the status, the step and the cursor. Every other caller keeps the provider's error as the cause. `failureCause` reads it back, which `turn-step-runner.integration.test.ts` pins against the Inngest dev server.
+- **Classification.** Only a refusal of `count-tokens-1` or `llm-iter1` marks: a later count or iteration carried the rows after the provider accepted them. 413 is a request over the size cap, which attachments reach; `rejection` records `too_large`. A 400 records `bad_request`, and one from anything else, such as a tool schema the provider refuses, turns the turn's attachments into placeholders too, and the user re-sends them. No other status marks.
+- **Loaded, not rendered.** `load-turn-history` replaces a ref to a rejected original, and an image's label with it, with the rejection placeholder, inside `load-turn-transcript`. The cutoff stops counting the refused bytes, and compaction, every request, every fork and `/compact` see the placeholder. A memo from before the marks holds the ref, as the database did then.
+- **Arrival** reads the record of every original with a key, documents included, before reading its bytes, and an inline document's by the key its upload returns; an inline image's comes back from its decode claim.
+- **No epoch.** Only the failed turn's rows can hold a rejected original, so loading them as placeholders edits nothing a head describes, except where a reply commits after the marker's snapshot, which the table below records ([prompt-caching.md](../prompt-caching.md#one-renderer-confirmed) → One renderer).
 - **Residual.** An attachment in an earlier turn's row that a newly selected route rejects isn't marked, since that row precedes a stored head: the conversation fails on every turn until `/model` returns to a route that reads it, or `/new`.
+
+| Crash point | Leaves | Why safe, or residual |
+|-|-|-|
+| Inside the step, before its transaction commits | no mark | the step's retry marks |
+| After the commit, before Inngest records the step | the marks | the retry's upsert finds them `rejected` and changes nothing |
+| The step fails after its retries | no mark | caught around the step and logged, and the notification still goes; residual: the next turn sends the attachments again, fails the same way, and its `onFailure` marks them |
+| The next turn writes its row before the marker's snapshot | its row, and what it re-sent, unmarked | that turn sends them: its reply shows the provider takes them, and its refusal marks them; residual: a turn that fails another way leaves them to the turn after |
+| A second run on the failed turn's batch ([crash-recovery.md](../crash-recovery.md#late-replies-confirmed) → Late replies, two runs of the same batch) | its row marked with the batch, unless its reply committed before the marker's snapshot | residual: if the provider accepted that run's first request and its reply commits after that snapshot, a row its head describes loads the placeholder |
+| A later turn's reply commits before the marker's snapshot | nothing marked | that reply's request carried the originals and the provider accepted it; residual: a route that refuses them again fails as an earlier turn's row does, and a reply that commits after the snapshot leaves a row its head describes loading the placeholder |
+| The next turn loads its transcript before the marks commit | unmarked originals in its memo | residual: that turn fails the same way and marks them; the cooldown armed on `conversation/errored` skips a turn that soon unless it lands before the cooldown is written |
+| Another arrival is decoding the original | `decoding`, unmarked | residual: only a row holding the original's ref unrecorded (an abandoned decode another attempt finished) gets here; that turn sends it, fails the same way and marks it |
+| Two marks on one original at once | one `rejected` record | the later upsert raises `40001`, and the transactor's retry finds the record `rejected` |
+| A run that failed on the build before | no refusal on its error | residual: its `onFailure` marks nothing; the next turn fails the same way and marks |
 
 ## Images `[confirmed]`
 
@@ -108,7 +125,7 @@ A 48-megapixel JPEG normalizes in about half a second on one thread. The worst c
 
 ## Documents `[confirmed]`
 
-- **PDFs** are stored as sent, as a `document_ref`: no rasterizing and no page count, which would take a second untrusted-input parser. A file without the `%PDF-` header, or with an `/Encrypt` entry, gets a placeholder. A PDF over the route's page limit or window, or one the provider can't parse, is [rejected](#rejected-attachments-proposed) by the provider and marked.
+- **PDFs** are stored as sent, as a `document_ref`: no rasterizing and no page count, which would take a second untrusted-input parser. A file without the `%PDF-` header, or with an `/Encrypt` entry, gets a placeholder. A PDF over the route's page limit or window, or one the provider can't parse, is [rejected](#rejected-attachments-confirmed) by the provider and marked.
 - **Text-like documents** (`text/*`, JSON, XML, YAML, one predicate both adapters share) are truncated at arrival, with an elision marker, to the lesser of the adapter's per-document cap (100,000 UTF-8 bytes on the OpenAI-compatible adapter, `AttachmentLimits.textDocumentBytes`) and, for the turn's text documents together, a quarter of the route's input budget, counted with its `countTokens`. Before the first count the text is cut to eight characters per token of allowance, more than any text holds, so a 20 MB file never goes to the count endpoint whole. The text sent is stored as the document's normalized copy beside the original. Anthropic sends it as a text source, and the OpenAI-compatible adapter inlines it.
 - **Other binary documents** (`.docx`, `.xlsx`, archives, `application/octet-stream`) get a placeholder at arrival, not a stub at the wire. No route Cogmo serves reads them. A wire stub would read and base64-encode the bytes on every invocation for each adapter to discard, count them against the attachment budget, and send stub text that a deploy could change under a cached prefix. A placeholder is stored as sent, so the head stays the same on every route and nothing is re-read. The OpenAI-compatible adapter still stubs a PDF, which Anthropic reads. `[confirmed]` Until arrival placeholders ship, and in rows stored before them, such types reach the adapters. Anthropic stubs a document that is neither PDF nor text-like, and a base64 image that isn't JPEG, PNG, GIF or WebP, rather than failing the request: the row replays on every later turn, so a failure would end the conversation.
 
@@ -153,10 +170,10 @@ libvips and its codecs run native code in the server process over bytes anyone c
   - A mislabelled media type decodes by content, and an Ultra HDR JPEG decodes through the JPEG loader.
   - `create-user-message` uploads inline originals and normalized copies under derived keys and writes refs and labels; cached, it does neither. The cap follows the turn's route, and text documents are truncated to it.
   - Original records: a `decoding` record left behind decodes again and after two deaths records the decode-crash placeholder, a thrown or timed-out decode leaves no record, and a re-batched original reuses its result without decoding.
-  - Rejected attachments: after a 400 on a turn carrying a PDF, the next turn shows the PDF as the rejection placeholder in the failed turn's row and in its own re-batched row, and the head check stays clean under `throw`; a 401 marks nothing.
+  - Rejected attachments: a 400 or 413 to the turn's first count or iteration marks the originals in its rows up to its cursor, between the event and the notification, with the reason; a 401, a later count's or iteration's refusal and a stage turn's mark nothing, and a failed mark still notifies. A rejected PDF loads as the placeholder in the failed turn's row and arrives as it in the re-batched row, without reading the original, and an inline document's rejection is found by its upload key. The turn after a rejection passes the head check under `throw`, and fails it once the reply before the rejected row is edited.
   - The Telegram adapter emits a named block for an image document, and a size-only block for a document over 20 MB; it replies to a voice note over 20 MB and to `getFile` refusing a file as too big.
 - **Boot.** The boot check covers the built image ([infrastructure.md](../infrastructure.md#image-processing-confirmed)).
-- **Integration.** `prompt-caching.integration.test.ts`'s image turn runs through sharp and the test bucket, and the turn after it extends the image turn's request ([prompt-caching.md](../prompt-caching.md#integration-tier-replay-every-pr)).
+- **Integration.** A refused turn step's error reaches `onFailure` with its refusal through the real server. `prompt-caching.integration.test.ts`'s image turn runs through sharp and the test bucket, and the turn after it extends the image turn's request ([prompt-caching.md](../prompt-caching.md#integration-tier-replay-every-pr)).
 - **Live.** One request of 21 normalized 2000-px images returns 200 on Haiku 4.5 and Sonnet 5, which pins the many-image rule for this output. It costs cents.
 
 ## Sources

@@ -5,9 +5,11 @@ import type { ContentBlock, Message, ToolDefinition, ToolResultClearing } from "
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import {
+  type CompactionEvent,
   type ContextManagerDeps,
   compactMessages,
   extractSummaryText,
+  rewroteWithoutSummary,
   SUMMARIZATION_PROMPT,
   shouldSkipCounting,
   snapToPairBoundary,
@@ -1143,6 +1145,31 @@ describe("truncations", () => {
     [[]],
   ])("stops at a view no cut shortens: %j", (messages: Message[]) => {
     expect(truncations(messages)).toEqual([messages]);
+  });
+});
+
+describe("rewroteWithoutSummary", () => {
+  const event = (strategies: CompactionEvent["strategies"]): CompactionEvent => ({
+    strategies,
+    tokensBefore: 900,
+    tokensAfter: 500,
+    requestBytesBefore: 4000,
+    messagesSummarized: strategies.includes("summarize") ? 4 : 0,
+  });
+
+  it.each([
+    { name: "no compaction", compacted: undefined, stored: null, rewrote: false },
+    { name: "a stored summary", compacted: event(["summarize"]), stored: "m4", rewrote: false },
+    { name: "an unstored summary", compacted: event(["summarize"]), stored: null, rewrote: true },
+    { name: "a truncation", compacted: event(["truncate"]), stored: null, rewrote: true },
+    {
+      name: "a stored summary, then a truncation",
+      compacted: event(["summarize", "truncate"]),
+      stored: "m4",
+      rewrote: true,
+    },
+  ])("is $rewrote for $name", ({ compacted, stored, rewrote }) => {
+    expect(rewroteWithoutSummary(compacted, stored)).toBe(rewrote);
   });
 });
 

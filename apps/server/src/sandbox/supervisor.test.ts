@@ -76,6 +76,7 @@ interface DockerCreateCallArgs {
     NanoCpus?: number;
     Memory?: number;
     PidsLimit?: number;
+    NetworkMode?: string;
     // StorageOpt is Docker's per-container disk quota knob (only honored by
     // some storage drivers). Tracked here so the "disk_bytes silently ignored
     // on local-docker" test can assert the supervisor never sets it.
@@ -204,6 +205,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     expect(handle.state.dockerId).toBe("docker-task-xyz");
 
@@ -270,6 +272,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
         disk_bytes: 5 * 1024 * 1024 * 1024,
       },
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     const create0 = expectDefined(calls.create[0], "first create call");
     // The other three caps still flow through, proving the supervisor
@@ -298,6 +301,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
       depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
     });
     const withVolume = expectDefined(calls.create[0], "first create call");
@@ -325,11 +329,39 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     const without = expectDefined(calls.create[0], "first create call");
     const targets = (without.HostConfig?.Mounts ?? []).map((m) => m.Target);
     expect(targets).not.toContain("/skill-venvs");
   });
+
+  it.each(["none", "bridge"] as const)(
+    "creates a %s session with that NetworkMode",
+    async (network) => {
+      const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+      const { docker, calls } = fakeDocker({ dockerId: `docker-${network}` });
+      const { proxy } = fakeProxy();
+      const sandbox = await LocalDockerSandboxClient.create({
+        docker,
+        store,
+        runInTx: tx,
+        runtime: "runc",
+        instanceId: inst.id,
+        proxy,
+      });
+      await sandbox.create({
+        taskId: "019d0000-0000-7000-8000-0000000000d4",
+        image: "alpine",
+        resourceLimits: RESOURCE_LIMITS,
+        expiresAt: new Date(Date.now() + 60_000),
+        network,
+      });
+      expect(expectDefined(calls.create[0], "first create call").HostConfig?.NetworkMode).toBe(
+        network,
+      );
+    },
+  );
 
   it("unregisters the proxy on stopTask", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
@@ -351,6 +383,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     await sandbox.deleteByTaskId("019d0000-0000-7000-8000-000000000bbb");
     expect(unregisters).toEqual(["019d0000-0000-7000-8000-000000000bbb"]);
@@ -378,6 +411,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
         image: "alpine",
         resourceLimits: RESOURCE_LIMITS,
         expiresAt: new Date(Date.now() + 60_000),
+        network: "bridge",
       }),
     ).rejects.toThrow("daemon refused");
 
@@ -406,6 +440,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
         image: "alpine",
         resourceLimits: RESOURCE_LIMITS,
         expiresAt: new Date(Date.now() + 60_000),
+        network: "bridge",
       }),
     ).rejects.toThrow("boom");
 
@@ -439,6 +474,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
 
     const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
@@ -464,6 +500,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
       askpass: {
         hostDir: "/var/lib/cogmo/askpass/019d0000-0000-7000-8000-000000000fff",
         containerDir: "/tmp/cogmo-askpass",
@@ -504,6 +541,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     expect(existsSync(taskDir)).toBe(true);
 
@@ -565,6 +603,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     expect(existsSync(taskDir)).toBe(true);
 
@@ -595,6 +634,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     // Just shouldn't throw — there's nothing on disk to clean.
     await sandbox.deleteByTaskId("019d0000-0000-7000-8000-0000000fffff");
@@ -621,6 +661,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
       env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-test-123", FOO: "bar" },
     });
     const createSpec = calls.create[0] as DockerCreateCallArgs & { Env?: string[] };
@@ -647,6 +688,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     const createSpec = calls.create[0] as DockerCreateCallArgs & { Env?: string[] };
     expect(createSpec.Env).toBeUndefined();
@@ -678,6 +720,7 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     image: "alpine",
     resourceLimits: RESOURCE_LIMITS,
     expiresAt: new Date(Date.now() + 60_000),
+    network: "bridge" as const,
   };
 
   it("deleteByTaskId leaves a row the reaper finished during the kill untouched", async () => {
@@ -973,6 +1016,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     const handle = await session.execStreaming(["sleep", "infinity"]);
 
@@ -1034,6 +1078,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     const handle = await session.execStreaming(["sleep", "infinity"], {
       timeoutMs: 50,
@@ -1108,6 +1153,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
     });
     return {
       session,

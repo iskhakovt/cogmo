@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { __resetParserForTests, classifyWithAst } from "./ast-classifier.js";
+import { __resetParserForTests, classifyWithAst, importRoots } from "./ast-classifier.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillManifest } from "./types.js";
@@ -677,5 +677,27 @@ async def run(inputs, ctx):
     expect(withNetwork.declared_network).toEqual(["api.example.com"]);
     const without = await classifyWithAst(manifestWith(), HARMLESS, BUILD_CAPABILITIES);
     expect(without.declared_network).toBeNull();
+  });
+});
+
+describe("importRoots", () => {
+  it("names each absolute import's top-level package, at any depth", async () => {
+    const roots = await importRoots(
+      [
+        "import os, json as j",
+        "import email.mime.text",
+        "from pydantic import BaseModel",
+        "from collections.abc import Mapping",
+        "from . import sibling",
+        "async def run(inputs, ctx):",
+        "    import httpx",
+        "    return None",
+      ].join("\n"),
+    );
+    expect([...roots].sort()).toEqual(["collections", "email", "httpx", "json", "os", "pydantic"]);
+  });
+
+  it("names nothing in a body with no imports", async () => {
+    expect((await importRoots("async def run(inputs, ctx):\n    return 1\n")).size).toBe(0);
   });
 });

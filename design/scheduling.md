@@ -301,7 +301,7 @@ remove_task({ id }) → Result<void, NotFound>
 Cron strings are validated with `croner` (zero-dep, `Intl.DateTimeFormat`-backed for IANA tz). The handler restricts to standard 5-field cron (rejecting croner's optional 6-field-with-seconds form so "minutes" stays the smallest unit) and enforces a per-user task cap (start at 50). Validation errors are structured (`unsupported_field_count` / `invalid_timezone` / `malformed` / `interval_too_short` / `no_next_occurrence`) so the LLM can self-correct from the `tool_result` — the openclaw#9283 cautionary tale shows unstructured cron errors cause infinite retry loops.
 
 DST contract (verified empirically in `src/agent/scheduling/cron.test.ts`):
-- **Spring forward**: a cron targeting a missing local hour shifts to the next valid instant. "Every day at 01:00 local" in `Europe/London` fires once at 02:00 BST on the DST-start day (= 01:00 UTC), then resumes normal cadence. Preserves "fires daily" semantics across the transition.
+- **Spring forward**: a cron targeting a missing local time fires at the first valid instant after the gap, as Vixie cron does. "Every day at 01:00 local" in `Europe/London` fires once at 02:00 BST on the DST-start day (= 01:00 UTC), and 02:30 in `Australia/Sydney`'s 02:00 → 03:00 gap fires at 03:00, then normal cadence resumes. Preserves "fires daily" semantics across the transition.
 - **Fall back**: a cron targeting a repeated local hour fires once at the first occurrence and skips the second. "Every day at 01:00 local" fires at 01:00 BST, not again at 01:00 GMT the same day.
 
 ### Synthetic conversation turn

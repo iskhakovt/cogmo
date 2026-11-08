@@ -1,6 +1,6 @@
 import { NonRetriableError } from "inngest";
 import { err, ok } from "neverthrow";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import {
@@ -11,8 +11,9 @@ import { installLiveCatalog } from "../../llm/litellm-data.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../../llm/request-size.js";
-import type { ToolDefinition } from "../../llm/types.js";
+import type { StopReason, ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
+import { promptPrefixViolations } from "../../metrics.js";
 import type { SkillRunner } from "../../skills/runner.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
 import {
@@ -26,14 +27,18 @@ import {
   mockFilesService,
   mockMemoryProvider,
   mockTransportStore,
+  TEST_PREFIX_VIOLATION,
 } from "../../test/factories.js";
 import { liveRegisterResult } from "../../test/skills-fixtures.js";
 import type { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import { createAttachmentReader } from "../attachments/attachment-reader.js";
 import { toolResultClearing } from "../context.js";
-import type { AgentLoopResult, StepRunner } from "../loop.js";
+import type { AgentLoopResult, StepRunner, StreamingLoopOutcome } from "../loop.js";
+import type { TranscriptRow } from "../store/index.js";
+import type { StoredMessage } from "../stored-content.js";
 import { defineTool, ToolRegistry } from "../tools.js";
+import { baseDigest } from "../transcript-head.js";
 import {
   type AgenticStageArgs,
   type AgenticStageDeps,
@@ -81,6 +86,16 @@ function planResult(overrides?: Partial<AgentLoopResult>): AgentLoopResult {
     streamed: { text: "Here is the plan.", toolUseIds: [] },
     ...overrides,
   });
+}
+
+/** A stage loop that finished with {@link planResult}'s result. */
+function planLoop(overrides?: Partial<AgentLoopResult>): StreamingLoopOutcome {
+  return { kind: "finished", result: planResult(overrides) };
+}
+
+/** History rows written before heads: none carries one. */
+function unheaded(rows: ReadonlyArray<StoredMessage & { id: string }>): TranscriptRow[] {
+  return rows.map((row) => ({ ...row, transcriptHead: null }));
 }
 
 function toolNamed(name: string) {
@@ -160,7 +175,7 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
   for (const name of ["web_search", "read_file", "start_pipeline"]) tools.register(toolNamed(name));
   const runStreamingAgentLoop = vi
     .fn<AgenticStageDeps["runStreamingAgentLoop"]>()
-    .mockResolvedValue(planResult());
+    .mockResolvedValue(planLoop());
   const provider = providerReplying();
 
   const deps: AgenticStageDeps = {
@@ -179,6 +194,7 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
     runStreamingAgentLoop,
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
+    prefixViolation: TEST_PREFIX_VIOLATION,
   };
   return { deps, agentStore, transportStore, delivery, deliveryRouter, runStreamingAgentLoop };
 }
@@ -269,17 +285,19 @@ describe("runAgenticStage", () => {
   it("sends the summarization fork the stage's intent", async () => {
     const h = await harness();
     vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
-    vi.mocked(h.agentStore.listMessages).mockResolvedValue([
-      { id: "m1", role: "user", content: "m1" },
-      { id: "m2", role: "assistant", content: "r1" },
-      { id: "m3", role: "user", content: "m2" },
-      { id: "m4", role: "assistant", content: "r2" },
-      { id: "m5", role: "user", content: "m3" },
-      { id: "m6", role: "assistant", content: "r3" },
-      { id: "m7", role: "user", content: "m4" },
-      { id: "m8", role: "assistant", content: "r4" },
-      { id: "msg-1", role: "user", content: "Draft a plan." },
-    ]);
+    vi.mocked(h.agentStore.listMessages).mockResolvedValue(
+      unheaded([
+        { id: "m1", role: "user", content: "m1" },
+        { id: "m2", role: "assistant", content: "r1" },
+        { id: "m3", role: "user", content: "m2" },
+        { id: "m4", role: "assistant", content: "r2" },
+        { id: "m5", role: "user", content: "m3" },
+        { id: "m6", role: "assistant", content: "r3" },
+        { id: "m7", role: "user", content: "m4" },
+        { id: "m8", role: "assistant", content: "r4" },
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]),
+    );
     const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
     // Past 80% of any budget, then under it once summarized.
     vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
@@ -299,22 +317,202 @@ describe("runAgenticStage", () => {
     expect(fork.clearToolResults).toBeDefined();
   });
 
+  describe("transcript heads", () => {
+    // A spy left by a failing test would leak into the rest of the file.
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** A stage loop whose one request carried a head. */
+    function headedLoop(historyLength: number): StreamingLoopOutcome {
+      return planLoop({
+        requests: {
+          base: baseDigest("SYSTEM PROMPT", []),
+          historyLength,
+          sent: [{ length: historyLength, digest: "f".repeat(64) }],
+          diverged: false,
+          violatedAt: null,
+        },
+      });
+    }
+
+    function replyHead(h: Awaited<ReturnType<typeof harness>>) {
+      const [, params] = expectDefined(
+        vi.mocked(h.agentStore.insertMessages).mock.calls[0],
+        "insertMessages call",
+      );
+      return params.messages.at(-1)?.transcriptHead;
+    }
+
+    it("counts under site stage and heads the reply from the loaded history's start", async () => {
+      const h = await harness();
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(1));
+      const { steps } = recordingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+      expect(loopParams.site).toBe("stage");
+      expect(replyHead(h)).toMatchObject({ length: 2, historyStart: "msg-1", status: "intact" });
+    });
+
+    it("hands the loop its policy, heads the reply diverged and counts an in-turn violation once under site stage", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const h = await harness();
+      const violated = headedLoop(1);
+      assertKind(violated, "finished");
+      h.runStreamingAgentLoop.mockResolvedValue({
+        kind: "finished",
+        result: { ...violated.result, requests: { ...violated.result.requests, violatedAt: 1 } },
+      });
+
+      await runAgenticStage(
+        { ...h.deps, prefixViolation: "reopen" },
+        stageArgs(),
+        recordingSteps().steps,
+        log,
+      );
+
+      const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+      expect(loopParams.prefixViolation).toBe("reopen");
+      expect(replyHead(h)).toMatchObject({ status: "diverged" });
+      expect(add.mock.calls).toEqual([[1, { site: "stage" }]]);
+    });
+
+    it("counts no in-turn violation for a stage that wrote no rows", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const h = await harness();
+      const violated = headedLoop(1);
+      assertKind(violated, "finished");
+      h.runStreamingAgentLoop.mockResolvedValue({
+        kind: "finished",
+        result: {
+          ...violated.result,
+          newMessages: [],
+          requests: { ...violated.result.requests, violatedAt: 1 },
+        },
+      });
+
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      expect(add).not.toHaveBeenCalled();
+    });
+
+    it("leaves the transcript heads out of its load-turn-transcript memo", async () => {
+      const h = await harness();
+      const head = {
+        length: 1,
+        base: "a".repeat(64),
+        historyStart: "m1",
+        digest: "b".repeat(64),
+        status: "intact" as const,
+      };
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+        { id: "m1", role: "user", content: "earlier", transcriptHead: null },
+        { id: "m2", role: "assistant", content: "reply", transcriptHead: head },
+        { id: "msg-1", role: "user", content: "Draft a plan.", transcriptHead: null },
+      ]);
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(3));
+      const { memo, steps } = memoizingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      expect(memo.get("load-turn-transcript")).not.toHaveProperty("heads");
+    });
+
+    it("counts nothing for a stage whose requests all matched", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const h = await harness();
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(1));
+
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      expect(add).not.toHaveBeenCalled();
+    });
+
+    const STAGE_HISTORY = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"];
+
+    /** A stage over eight earlier messages whose compaction summarizes, as `summary` says. */
+    async function summarizingStage(summary: {
+      stopReason: StopReason;
+      storeFails: boolean;
+    }): Promise<Awaited<ReturnType<typeof harness>>> {
+      const h = await harness();
+      vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue(
+        unheaded([
+          ...STAGE_HISTORY.map((id, i) => ({
+            id,
+            role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            content: id,
+          })),
+          { id: "msg-1", role: "user", content: "Draft a plan." },
+        ]),
+      );
+      const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+      vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
+      vi.mocked(provider.chat).mockResolvedValueOnce({
+        content: [{ type: "text", text: "Summary of the run" }],
+        stopReason: summary.stopReason,
+        model: "claude-sonnet-4-6",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+      if (summary.storeFails) {
+        vi.mocked(h.agentStore.insertOrRecoverSummary).mockRejectedValue(new Error("db down"));
+      }
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(7));
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+      return h;
+    }
+
+    it("heads the reply compacted when its summary wasn't stored", async () => {
+      // Cut at its output cap, so the stage uses it and stores nothing.
+      const h = await summarizingStage({ stopReason: "max_tokens", storeFails: false });
+
+      expect(h.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+      expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply compacted when storing its summary failed", async () => {
+      const h = await summarizingStage({ stopReason: "end_turn", storeFails: true });
+
+      expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply intact, from after the summary it stored", async () => {
+      const h = await summarizingStage({ stopReason: "end_turn", storeFails: false });
+
+      const [, stored] = expectDefined(
+        vi.mocked(h.agentStore.insertOrRecoverSummary).mock.calls[0],
+        "stored summary",
+      );
+      const start = expectDefined(
+        STAGE_HISTORY[STAGE_HISTORY.indexOf(stored.throughMessageId) + 1],
+        "history start",
+      );
+      expect(start).not.toBe("m1");
+      expect(replyHead(h)).toMatchObject({ historyStart: start, status: "intact" });
+    });
+  });
+
   it("summarizes a view past 80% of the view cap without counting it", async () => {
     const h = await harness();
     // Past 80% of the view cap, within 80% of the request cap it leaves the wire room under.
     const huge = "x".repeat(Math.floor(MAX_REQUEST_BYTES * 0.8) - 20_000);
     expect(huge.length).toBeGreaterThan(MAX_VIEW_BYTES * 0.8);
-    vi.mocked(h.agentStore.listMessages).mockResolvedValue([
-      { id: "m1", role: "user", content: huge },
-      { id: "m2", role: "assistant", content: "r1" },
-      { id: "m3", role: "user", content: "m2" },
-      { id: "m4", role: "assistant", content: "r2" },
-      { id: "m5", role: "user", content: "m3" },
-      { id: "m6", role: "assistant", content: "r3" },
-      { id: "m7", role: "user", content: "m4" },
-      { id: "m8", role: "assistant", content: "r4" },
-      { id: "msg-1", role: "user", content: "Draft a plan." },
-    ]);
+    vi.mocked(h.agentStore.listMessages).mockResolvedValue(
+      unheaded([
+        { id: "m1", role: "user", content: huge },
+        { id: "m2", role: "assistant", content: "r1" },
+        { id: "m3", role: "user", content: "m2" },
+        { id: "m4", role: "assistant", content: "r2" },
+        { id: "m5", role: "user", content: "m3" },
+        { id: "m6", role: "assistant", content: "r3" },
+        { id: "m7", role: "user", content: "m4" },
+        { id: "m8", role: "assistant", content: "r4" },
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]),
+    );
     const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
     // A 20 MB route, whose request cap `huge` is sized against.
     vi.spyOn(provider, "attachmentLimits").mockImplementation(openAICompatibleAttachmentLimits);
@@ -512,7 +710,7 @@ describe("runAgenticStage", () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockImplementation(async ({ service }) => {
       await service.coreMemory.update("preferences", "Dice");
-      return planResult();
+      return planLoop();
     });
     const { memo, steps } = memoizingSteps();
     memo.set("freeze-core-memory-scope", {
@@ -649,7 +847,9 @@ describe("runAgenticStage", () => {
       await expectDefined(params.tools.get("echo"), "echo tool").handler({}, params.service);
 
       expect(skillRunner.invoke).toHaveBeenCalledWith(
-        expect.objectContaining({ runAs: { userId: "user-2", service: params.service } }),
+        expect.objectContaining({
+          runAs: { userId: "user-2", profileId: "profile-7", service: params.service },
+        }),
       );
     });
 
@@ -690,7 +890,7 @@ describe("runAgenticStage", () => {
   it("fails the stage when the loop degrades, after persisting what it produced", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      planResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
+      planLoop({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
     );
 
     const outcome = await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
@@ -709,7 +909,7 @@ describe("runAgenticStage", () => {
     // an empty insert: writing it would fail the step instead of the stage.
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      planResult({
+      planLoop({
         text: "",
         newMessages: [],
         streamed: { text: "", toolUseIds: [] },
@@ -734,7 +934,7 @@ describe("runAgenticStage", () => {
   it("retracts a degraded turn's dropped output before closing the stream", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      planResult({
+      planLoop({
         text: "",
         newMessages: [],
         streamed: { text: "Writing it now.", toolUseIds: ["t1"] },
@@ -762,7 +962,7 @@ describe("runAgenticStage", () => {
   it("pushes no retraction when a degraded turn persists everything it streamed", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      planResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
+      planLoop({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
     );
     const steps = recordingSteps();
 
@@ -779,7 +979,7 @@ describe("runAgenticStage", () => {
     // the next stage a result that looks finished.
     const h = await harness();
     const partial = "Here is the pl\n\n[Reply cut off: it reached the model's output limit.]";
-    h.runStreamingAgentLoop.mockResolvedValue(planResult({ text: partial, truncated: true }));
+    h.runStreamingAgentLoop.mockResolvedValue(planLoop({ text: partial, truncated: true }));
     const steps = recordingSteps();
 
     const outcome = await runAgenticStage(h.deps, stageArgs(), steps.steps, log);
@@ -825,6 +1025,17 @@ describe("runAgenticStage", () => {
       boom,
     );
     expect(h.delivery.abort).toHaveBeenCalledWith("stream reset");
+    expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
+  });
+
+  it("fails without retries when its loop ends superseded, which a stage never asks for", async () => {
+    const h = await harness();
+    h.runStreamingAgentLoop.mockResolvedValue({ kind: "superseded" });
+
+    const failure = runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+    expect(h.delivery.abort).toHaveBeenCalled();
     expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
   });
 

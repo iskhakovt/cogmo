@@ -12,18 +12,19 @@ import { ProviderConfigError } from "../llm/resolver.js";
 import type { ChatParams, ChatStreamFrame, Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
-import { memoryRecallFailures } from "../metrics.js";
+import { memoryRecallFailures, promptPrefixViolations } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
-import { expectDefined } from "../test/assertions.js";
+import { assertInstanceOf, expectDefined } from "../test/assertions.js";
 import {
   directStep,
   doneFrame,
   FAKE_TX,
   fakeRunInTx,
+  finishedLoop,
   invokeInngestFn,
   invokeInngestOnFailure,
-  loopResult,
   MOCK_MESSAGE_CREATED_AT,
+  MOCK_SNAPSHOT_CREATED_AT,
   type MockStep,
   mockAgentStore,
   mockAttachmentStore,
@@ -40,13 +41,16 @@ import {
   mockVoiceBundle,
   mockVoiceResolver,
   scriptedStream,
+  TEST_PREFIX_VIOLATION,
   turnContextSent,
 } from "../test/factories.js";
 import { liveRegisterResult } from "../test/skills-fixtures.js";
 import type { StreamDeliveryError } from "../transport/delivery-router.js";
+import type { TransportStore } from "../transport/store/index.js";
 import { createAttachmentReader } from "./attachments/attachment-reader.js";
 import { toolResultClearing } from "./context.js";
 import type { InboundContent } from "./conversation/inbound-content.js";
+import { loadTurnHistory } from "./conversation/load-turn-history.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import { readFile } from "./file-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
@@ -55,8 +59,11 @@ import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { runStreamingAgentLoop, type StepRunner } from "./loop.js";
 import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
+import type { StoredTurnContext, SystemPromptSnapshot, TranscriptRow } from "./store/index.js";
 import type { StoredContent, StoredMessage } from "./stored-content.js";
 import { ToolRegistry, type ToolSpec } from "./tools.js";
+import { baseDigest, PrefixViolationError, type TranscriptHead } from "./transcript-head.js";
+import { asNonRetriable, failureCause } from "./turn-step-runner.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
 
@@ -104,7 +111,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "debounce" as const },
     deliveryRouter: mockDeliveryRouter(),
     runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-      loopResult({
+      finishedLoop({
         text: "Hello from assistant",
         newMessages: [
           { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
@@ -114,6 +121,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     images: mockImages(),
+    prefixViolation: TEST_PREFIX_VIOLATION,
     ...overrides,
   };
 }
@@ -423,7 +431,7 @@ describe("createHandleMessage", () => {
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         await params.onEvent({ type: "text_delta", text: "hi" });
-        return loopResult({
+        return finishedLoop({
           text: "hi",
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }],
         });
@@ -475,6 +483,38 @@ describe("createHandleMessage", () => {
     expect(handle.finish).not.toHaveBeenCalled();
   });
 
+  it("aborts the stream when the degraded apology can't be pushed", async () => {
+    // The failure comes after the loop returned, from the step that streams
+    // the apology, and still closes the stream as aborted.
+    const handle = mockDeliveryHandle({
+      push: vi
+        .fn()
+        .mockResolvedValue(
+          err({ failures: [{ sessionId: "session-tg", reason: "telegram: chat not found" }] }),
+        ),
+    });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        finishedLoop({
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      ),
+    });
+
+    await expect(
+      invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }),
+    ).rejects.toThrow("stream delivery failed: telegram: chat not found");
+
+    expect(handle.abort).toHaveBeenCalledWith("stream delivery failed: telegram: chat not found");
+    expect(handle.finish).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+  });
+
   // Provider-error → Inngest retry policy translation. A 400 (or any 4xx
   // except 408/425/429) is deterministic — same request, same failure.
   // Wrapping in NonRetriableError stops Inngest from burning retries.
@@ -497,10 +537,9 @@ describe("createHandleMessage", () => {
       caught = err;
     }
 
-    expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).constructor.name).toBe("NonRetriableError");
-    expect((caught as Error).message).toBe("Bad Request");
-    expect((caught as Error & { cause?: unknown }).cause).toBe(apiError);
+    assertInstanceOf(caught, NonRetriableError);
+    expect(caught.message).toBe("Bad Request");
+    expect(caught.cause).toBe(apiError);
     expect(handle.abort).toHaveBeenCalledWith("Bad Request");
   });
 
@@ -595,6 +634,115 @@ describe("createHandleMessage", () => {
         causeClass: "BadRequestError",
         errorMessage: "Bad Request",
       },
+    });
+  });
+
+  describe("onFailure on a provider refusal", () => {
+    const pdfRow = {
+      id: "m3",
+      cursor: "inbound-1",
+      role: "user" as const,
+      content: [
+        {
+          type: "document_ref" as const,
+          path: "inbound/r.pdf",
+          mediaType: "application/pdf",
+          name: "r.pdf",
+          bytes: 3,
+        },
+      ],
+    };
+
+    function refused(status: number) {
+      const callOrder: string[] = [];
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getLastAssistantMessage: vi
+            .fn()
+            .mockResolvedValue({ id: "m2", lastInboundMessageId: "inbound-0" }),
+          listUserRowsAfter: vi.fn().mockResolvedValue([pdfRow]),
+        }),
+        transportStore: mockTransportStore({
+          rejectAttachmentOriginals: vi.fn(async () => {
+            callOrder.push("reject");
+            return 1;
+          }),
+        }),
+        deliveryRouter: mockDeliveryRouter({
+          notifyConversation: vi.fn(async () => {
+            callOrder.push("notify");
+          }),
+        }),
+      });
+      const stepRun = vi.fn(async (_id: string, body: () => Promise<unknown>) => body());
+      const sendEvent = vi.fn(async () => {
+        callOrder.push("emit");
+      });
+      // As the step runner raises it on the turn's first iteration.
+      const upstream = Object.assign(new Error(`${status} refused`), {
+        name: "BadRequestError",
+        status,
+      });
+      const invoke = () =>
+        invokeInngestOnFailure<HandleMessageFailureCtx>(createHandleMessage(deps), {
+          event: {
+            data: {
+              run_id: "run-refused",
+              event: { data: { conversationId: "conv-1", triggerInboundId: "inbound-1" } },
+            },
+          },
+          error: asNonRetriable(upstream, { step: "llm-iter1", cursor: "inbound-1" }),
+          step: { run: stepRun, sendEvent },
+        });
+      return { deps, stepRun, sendEvent, callOrder, invoke };
+    }
+
+    it("marks the failed turn's attachments rejected before telling the user to try again", async () => {
+      const { deps, stepRun, sendEvent, callOrder, invoke } = refused(400);
+
+      await invoke();
+
+      expect(callOrder).toEqual(["emit", "reject", "notify"]);
+      expect(stepRun.mock.calls.map(([id]) => id)).toEqual([
+        "mark-rejected-attachments",
+        "notify-user",
+      ]);
+      expect(deps.transportStore.rejectAttachmentOriginals).toHaveBeenCalledWith(
+        expect.anything(),
+        ["inbound/r.pdf"],
+        "bad_request",
+      );
+      // The refusal link doesn't hide the provider's class from the reflector.
+      expect(sendEvent.mock.calls[0]).toEqual([
+        "emit-conversation-errored",
+        expect.objectContaining({
+          data: expect.objectContaining({
+            errorClass: "NonRetriableError",
+            causeClass: "BadRequestError",
+          }),
+        }),
+      ]);
+    });
+
+    it("marks nothing on a 401", async () => {
+      const { deps, stepRun, callOrder, invoke } = refused(401);
+
+      await invoke();
+
+      expect(callOrder).toEqual(["emit", "notify"]);
+      expect(stepRun.mock.calls.map(([id]) => id)).toEqual(["notify-user"]);
+      expect(deps.transportStore.rejectAttachmentOriginals).not.toHaveBeenCalled();
+    });
+
+    it("still tells the user when the marks fail", async () => {
+      const { deps, callOrder, invoke } = refused(400);
+      vi.mocked(deps.transportStore.rejectAttachmentOriginals).mockRejectedValue(
+        new Error("db down"),
+      );
+
+      await expect(invoke()).resolves.toBeUndefined();
+
+      expect(callOrder).toEqual(["emit", "notify"]);
     });
   });
 
@@ -891,7 +1039,7 @@ describe("createHandleMessage", () => {
         download: vi.fn().mockResolvedValue(docBytes),
       }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "here you go",
           newMessages: [
             {
@@ -956,7 +1104,7 @@ describe("createHandleMessage", () => {
         download,
       }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "here",
           newMessages: [
             {
@@ -1027,7 +1175,7 @@ describe("createHandleMessage", () => {
         download,
       }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "pictures",
           newMessages: [
             {
@@ -1456,7 +1604,7 @@ describe("createHandleMessage", () => {
     // own tests (anthropic.test.ts → usage totals).
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "Hello from assistant",
           newMessages: [
             { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
@@ -1927,7 +2075,9 @@ describe("createHandleMessage", () => {
       await expectDefined(loop.tools.get("echo"), "echo tool").handler({}, loop.service);
 
       expect(skillRunner.invoke).toHaveBeenCalledWith(
-        expect.objectContaining({ runAs: { userId: "user-2", service: loop.service } }),
+        expect.objectContaining({
+          runAs: { userId: "user-2", profileId: "profile-1", service: loop.service },
+        }),
       );
     });
 
@@ -3771,7 +3921,7 @@ describe("createHandleMessage", () => {
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 2,
           degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
         }),
@@ -3851,7 +4001,7 @@ describe("createHandleMessage", () => {
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         await params.onEvent({ type: "text_delta", text: "The three key points are: (1) the dep" });
-        return loopResult({
+        return finishedLoop({
           streamed: { text: "The three key points are: (1) the dep", toolUseIds: [] },
           degraded: {
             reason: "request exceeded the model's context window",
@@ -3938,7 +4088,7 @@ describe("createHandleMessage", () => {
           name: "get_weather",
           input: { city: "Tokyo" },
         });
-        return loopResult({
+        return finishedLoop({
           newMessages: persisted,
           iterations: 2,
           streamed: {
@@ -4005,7 +4155,7 @@ describe("createHandleMessage", () => {
         await params.onEvent({ type: "text_delta", text: "Still working on it." });
         await params.onEvent({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
         await params.onEvent({ type: "tool_result", name: "get_weather", output: "18C" });
-        return loopResult({
+        return finishedLoop({
           newMessages: [
             {
               role: "assistant",
@@ -4058,7 +4208,7 @@ describe("createHandleMessage", () => {
       resolveProvider: mockResolver(failingSynthesis),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 2,
           degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
         }),
@@ -4095,7 +4245,7 @@ describe("createHandleMessage", () => {
       resolveProvider: mockResolver(failingSynthesis),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           degraded: { reason: "model refused the request", subtype: "refusal" },
         }),
       ),
@@ -4120,7 +4270,7 @@ describe("createHandleMessage", () => {
   it("emits conversation/degraded with subtype, reason, runId, conversationId, triggerInboundId", async () => {
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 2,
           degraded: {
             reason: "streamed tool-call arguments could not be parsed",
@@ -4159,7 +4309,7 @@ describe("createHandleMessage", () => {
   it("emits conversation/degraded with subtype: stuck_loop for the Class D consecutive trip", async () => {
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 3,
           degraded: { reason: "stuck_loop", subtype: "stuck_loop" },
         }),
@@ -4191,7 +4341,7 @@ describe("createHandleMessage", () => {
   it("emits conversation/degraded with subtype: stuck_loop_cumulative for the Class D cumulative trip", async () => {
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           iterations: 9,
           degraded: { reason: "stuck_loop", subtype: "stuck_loop_cumulative" },
         }),
@@ -4251,7 +4401,7 @@ describe("createHandleMessage", () => {
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           // The successful tool round IS persisted; the apology is appended.
           // The failing iteration's assistant content is already excluded
           // upstream by the loop.
@@ -4292,7 +4442,7 @@ describe("createHandleMessage", () => {
   it("still emits response/ready on the degraded path so downstream consumers run", async () => {
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           degraded: { reason: "model refused the request", subtype: "refusal" },
         }),
       ),
@@ -4319,12 +4469,13 @@ describe("createHandleMessage", () => {
   // directly: mockStep's passthrough runs the wrapper body, so the
   // rejection type IS what Inngest would see.
   describe("stepRun wrapper retry policy", () => {
-    async function captureStepRun(): Promise<StepRunner> {
+    async function captureStepRun(transportStore?: TransportStore): Promise<StepRunner> {
       let captured: StepRunner | undefined;
       const deps = mockDeps({
+        ...(transportStore !== undefined && { transportStore }),
         runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
           captured = params.stepRun;
-          return loopResult({
+          return finishedLoop({
             text: "ok",
             newMessages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
           });
@@ -4371,7 +4522,15 @@ describe("createHandleMessage", () => {
     });
 
     it("translates deterministic provider 4xx on llm-iter steps to NonRetriableError", async () => {
-      const stepRun = await captureStepRun();
+      // A batch of two: the turn's cursor is its last inbound, not the trigger.
+      const stepRun = await captureStepRun(
+        mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            { id: "inbound-1", content: "hello", source: "user" },
+            { id: "inbound-2", content: "and this", source: "user" },
+          ]),
+        }),
+      );
       const badRequest = Object.assign(new Error("Bad Request"), { status: 400 });
       let caught: unknown;
       try {
@@ -4379,8 +4538,11 @@ describe("createHandleMessage", () => {
       } catch (err) {
         caught = err;
       }
-      expect(caught).toBeInstanceOf(NonRetriableError);
-      expect((caught as NonRetriableError).cause).toBe(badRequest);
+      assertInstanceOf(caught, NonRetriableError);
+      expect(failureCause(caught)).toEqual({
+        refusal: { status: 400, step: "llm-iter1", cursor: "inbound-2" },
+        cause: badRequest,
+      });
     });
   });
 
@@ -4411,8 +4573,8 @@ describe("createHandleMessage", () => {
       const caught = await runTurn(deps);
 
       expect(handle.abort).toHaveBeenCalledWith("Bad Request");
-      expect(caught).toBeInstanceOf(NonRetriableError);
-      expect((caught as NonRetriableError).cause).toBe(badRequest);
+      assertInstanceOf(caught, NonRetriableError);
+      expect(caught.cause).toBe(badRequest);
     });
 
     it("rethrows a retriable loop error as itself when the abort fails", async () => {
@@ -4491,11 +4653,12 @@ describe("createHandleMessage", () => {
 
 describe("durable conversation summaries", () => {
   /** `n` alternating messages carrying the ids the loader aligns against. */
-  function rows(n: number): (StoredMessage & { id: string })[] {
+  function rows(n: number): TranscriptRow[] {
     return Array.from({ length: n }, (_, i) => ({
       id: `m${i + 1}`,
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
       content: `turn ${i + 1}`,
+      transcriptHead: null,
     }));
   }
 
@@ -4915,6 +5078,7 @@ describe("system prompt snapshot", () => {
         rendered: "FIRST PROMPT",
         configDigest: expect.any(String),
         attachmentCutoff: null,
+        reason: "first_turn",
       },
     );
     expect(loopParams(deps).systemPrompt).toBe("FIRST PROMPT");
@@ -4998,7 +5162,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3" }),
+      expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3", reason: "attachments" }),
     );
     const { messages } = loopParams(deps);
     expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
@@ -5229,7 +5393,7 @@ describe("system prompt snapshot", () => {
 
     expect(next.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1" }),
+      expect.objectContaining({ openedBy: "msg-1", reason: "configuration" }),
     );
     expect(loopParams(next).systemPrompt).toContain("## identity\nName: Sam");
     expect(loopParams(next).systemPrompt).not.toContain("You don't know your user yet.");
@@ -5261,7 +5425,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", historyStart: "m1" }),
+      expect.objectContaining({ openedBy: "msg-1", historyStart: "m1", reason: "configuration" }),
     );
     const { systemPrompt, messages } = loopParams(deps);
     expect(systemPrompt).toBe("system prompt");
@@ -5335,7 +5499,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", historyStart: "m3" }),
+      expect.objectContaining({ openedBy: "msg-1", historyStart: "m3", reason: "summary" }),
     );
     expect(loopParams(deps).messages[2]).toEqual({
       role: "assistant",
@@ -5386,7 +5550,7 @@ describe("system prompt snapshot", () => {
       // 8 messages, 6 retained: the summary covers m1 and m2.
       expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ openedBy: "m7", historyStart: "m3" }),
+        expect.objectContaining({ openedBy: "m7", historyStart: "m3", reason: "summary" }),
       );
       // The retained turns before m7 replay without the thinking bound to the
       // old prefix; m8, after it, keeps its own.
@@ -5422,5 +5586,304 @@ describe("system prompt snapshot", () => {
       expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
       expect(loopParams(deps).systemPrompt).toBe("EPOCH PROMPT");
     });
+
+    /** A loop whose one request carried a head, and whose reply is the turn's one row. */
+    function headedLoop() {
+      return vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        finishedLoop({
+          text: "reply",
+          newMessages: [{ role: "assistant", content: [{ type: "text", text: "reply" }] }],
+          requests: {
+            base: baseDigest("EPOCH PROMPT", []),
+            historyLength: 8,
+            sent: [{ length: 8, digest: "f".repeat(64) }],
+            diverged: false,
+            violatedAt: null,
+          },
+        }),
+      );
+    }
+
+    /** The transcript head the turn wrote on its reply. */
+    function replyHead(deps: HandleMessageDeps) {
+      const [, params] = expectDefined(
+        vi.mocked(deps.agentStore.insertMessages).mock.calls[0],
+        "insertMessages call",
+      );
+      return params.messages.at(-1)?.transcriptHead;
+    }
+
+    it("heads the reply compacted, from the loaded history's start, when its summary wasn't stored", async () => {
+      const deps = summarizingDeps(await defaultDigest(), "max_tokens");
+      deps.runStreamingAgentLoop = headedLoop();
+
+      await run(deps);
+
+      expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply intact, from after the summary the turn stored", async () => {
+      const deps = summarizingDeps(await defaultDigest());
+      deps.runStreamingAgentLoop = headedLoop();
+
+      await run(deps);
+
+      // The summary covers m1 and m2: the epoch the turn opened, and the
+      // view its requests sent, start at m3.
+      expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalled();
+      expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m3", status: "intact" });
+    });
+  });
+});
+
+describe("transcript head check", () => {
+  // A spy left by a failing test would leak into the rest of the file.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function run(deps: HandleMessageDeps, step: MockStep): Promise<void> {
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+  }
+
+  /** A provider whose every streamed request replies `text`. */
+  function replying(text: string) {
+    return mockResolver(
+      mockProvider({
+        chatStream: vi.fn(() =>
+          scriptedStream(
+            [{ type: "text_delta", text }],
+            doneFrame("end_turn", { inputTokens: 10, outputTokens: 5 }),
+          ),
+        ),
+      }),
+    );
+  }
+
+  const FIRST: TranscriptRow = { id: "m1", role: "user", content: "first", transcriptHead: null };
+  const TURN: TranscriptRow = { id: "msg-1", role: "user", content: "hello", transcriptHead: null };
+
+  interface FirstTurn {
+    /** Its reply as stored, with the head the turn wrote, as row `m2`. */
+    reply: TranscriptRow & { transcriptHead: TranscriptHead };
+    turnContext: StoredTurnContext;
+    epoch: SystemPromptSnapshot;
+  }
+
+  /** Turn A, the conversation's first, through the real loop: what it stored. */
+  async function firstTurn(): Promise<FirstTurn> {
+    const deps = mockDeps({
+      resolveProvider: replying("one"),
+      runStreamingAgentLoop,
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue([FIRST]),
+        findUserMessageByInbound: vi
+          .fn()
+          .mockResolvedValue({ id: "m1", createdAt: MOCK_MESSAGE_CREATED_AT }),
+      }),
+    });
+    await run(deps, mockStep());
+    const [, inserted] = expectDefined(
+      vi.mocked(deps.agentStore.insertMessages).mock.calls[0],
+      "reply insert",
+    );
+    const reply = expectDefined(inserted.messages[0], "reply row");
+    const [, turnContext] = expectDefined(
+      vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+      "turn context",
+    );
+    const [, opened] = expectDefined(
+      vi.mocked(deps.agentStore.insertOrRecoverSystemPromptSnapshot).mock.calls[0],
+      "first epoch",
+    );
+    return {
+      reply: {
+        id: "m2",
+        role: reply.role,
+        content: reply.content,
+        transcriptHead: expectDefined(reply.transcriptHead, "reply head"),
+      },
+      turnContext,
+      epoch: { id: "snapshot-1", createdAt: MOCK_SNAPSHOT_CREATED_AT, ...opened },
+    };
+  }
+
+  /** This turn, after turn A's rows and `between`, in turn A's epoch. */
+  function laterTurn(
+    a: FirstTurn,
+    between: ReadonlyArray<TranscriptRow>,
+    overrides: Partial<HandleMessageDeps>,
+  ): HandleMessageDeps {
+    return mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue([FIRST, a.reply, ...between, TURN]),
+        listTurnContexts: vi.fn().mockResolvedValue([a.turnContext]),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(a.epoch),
+      }),
+      ...overrides,
+    });
+  }
+
+  /** Turn A's reply with its stored content changed after its head was written. */
+  function editedReply(a: FirstTurn): FirstTurn {
+    return { ...a, reply: { ...a.reply, content: [{ type: "text", text: "edited" }] } };
+  }
+
+  function loopParams(deps: HandleMessageDeps) {
+    return expectDefined(vi.mocked(deps.runStreamingAgentLoop).mock.calls[0], "agent loop call")[0];
+  }
+
+  it("continues the epoch when the history still has the stored head", async () => {
+    const a = await firstTurn();
+    const deps = laterTurn(a, [], {});
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    expect(loopParams(deps).systemPrompt).toBe(a.epoch.rendered);
+  });
+
+  it("keeps the check clean on the turn after a rejected attachment", async () => {
+    // Turn B's row holds a photo its provider then refused; turn B failed
+    // without a reply, so its row follows turn A's head.
+    const a = await firstTurn();
+    const refused: TranscriptRow = {
+      id: "m3",
+      role: "user",
+      content: [
+        { type: "text", text: "Image 1: normalized/b.jpg", harness: "image_label" },
+        {
+          type: "image_ref",
+          path: "normalized/b.jpg",
+          mediaType: "image/jpeg",
+          width: 10,
+          height: 10,
+          bytes: 3,
+          original: { path: "inbound/b.jpg", mediaType: "image/jpeg" },
+        },
+      ],
+      transcriptHead: null,
+    };
+    const deps = laterTurn(a, [refused], {
+      transportStore: mockTransportStore({
+        listRejectedAttachmentOriginals: vi.fn().mockResolvedValue(["inbound/b.jpg"]),
+      }),
+    });
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    // The refused photo went out as its placeholder.
+    expect(JSON.stringify(loopParams(deps).messages[2]?.content)).toContain(
+      "The model provider refused this file",
+    );
+
+    // The same turn after turn A's stored reply changed fails under `throw`.
+    const edited = laterTurn(editedReply(a), [refused], {
+      transportStore: mockTransportStore({
+        listRejectedAttachmentOriginals: vi.fn().mockResolvedValue(["inbound/b.jpg"]),
+      }),
+    });
+    await expect(run(edited, mockStep())).rejects.toThrow(PrefixViolationError);
+  });
+
+  it("opens a prefix_violation epoch under reopen, counting and warning once", async () => {
+    const add = vi.spyOn(promptPrefixViolations, "add");
+    const turnLogger = mock<ReturnType<typeof logger.child>>();
+    vi.spyOn(logger, "child").mockReturnValue(turnLogger);
+    const deps = laterTurn(editedReply(await firstTurn()), [], { prefixViolation: "reopen" });
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", reason: "prefix_violation" }),
+    );
+    expect(add.mock.calls).toEqual([[1, { site: "turn" }]]);
+    expect(turnLogger.warn).toHaveBeenCalledExactlyOnceWith(
+      { site: "turn", firstDivergingMessageId: "m2" },
+      expect.stringContaining("transcript head"),
+    );
+  });
+
+  it("counts nothing when the epoch's insert recovers an earlier attempt's row", async () => {
+    const add = vi.spyOn(promptPrefixViolations, "add");
+    const deps = laterTurn(editedReply(await firstTurn()), [], { prefixViolation: "reopen" });
+    vi.mocked(deps.agentStore.insertOrRecoverSystemPromptSnapshot).mockImplementation(
+      async (_tx, params) => ({
+        kind: "recovered",
+        row: { id: "snapshot-2", createdAt: MOCK_SNAPSHOT_CREATED_AT, ...params },
+      }),
+    );
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("opens a compaction epoch after a compacted head, counting nothing", async () => {
+    const add = vi.spyOn(promptPrefixViolations, "add");
+    const a = await firstTurn();
+    const compacted = {
+      ...a,
+      reply: {
+        ...a.reply,
+        transcriptHead: { ...a.reply.transcriptHead, status: "compacted" as const },
+      },
+    };
+    const deps = laterTurn(compacted, [], {});
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", reason: "compaction" }),
+    );
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("opens a configuration epoch on the chat turn after a stage turn", async () => {
+    const add = vi.spyOn(promptPrefixViolations, "add");
+    const a = await firstTurn();
+    const stage: TranscriptRow[] = [
+      { id: "m3", role: "user", content: "Draft a plan.", transcriptHead: null },
+      {
+        id: "m4",
+        role: "assistant",
+        content: [{ type: "text", text: "plan" }],
+        transcriptHead: {
+          ...a.reply.transcriptHead,
+          length: 4,
+          base: baseDigest("STAGE PROMPT", []),
+        },
+      },
+    ];
+    const deps = laterTurn(a, stage, {});
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", reason: "configuration" }),
+    );
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("skips the check for a transcript memoized before heads", async () => {
+    // Under `throw`, the edited reply would fail a check with heads.
+    const deps = laterTurn(editedReply(await firstTurn()), [], {});
+    const loaded = await loadTurnHistory(deps, {
+      conversationId: "conv-1",
+      turnInboundId: "inbound-1",
+    });
+
+    await run(deps, directStep({ "load-turn-transcript": R.omit(loaded, ["heads"]) }, null));
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
   });
 });

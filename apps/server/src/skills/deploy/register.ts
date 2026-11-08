@@ -113,7 +113,8 @@ async function deleteFeatureBranch(repoPath: string, branch: string): Promise<vo
 
 /**
  * Every check `register` makes before its transaction: the branch, its
- * manifest and body, the classifier, the lockfile, Pyodide compatibility.
+ * manifest and body, the classifier, the lockfile and its runtime pins,
+ * Pyodide compatibility.
  * Errs with the rejection `register` returns.
  */
 async function prepareRegister(

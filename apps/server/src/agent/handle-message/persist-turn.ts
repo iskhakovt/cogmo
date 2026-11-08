@@ -1,3 +1,5 @@
+import type { Logger } from "pino";
+import * as R from "remeda";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import type { Transactor } from "../../db/index.js";
@@ -8,10 +10,12 @@ import {
   conversationDegraded,
 } from "../../inngest/events.js";
 import { agentIterations } from "../../metrics.js";
+import { reportInTurnViolation } from "../in-turn-violation.js";
 import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
 import { toStoredContent, toStoredMessage } from "../stored-content.js";
+import { type HeadView, rowHeads } from "../transcript-head.js";
 
 export interface PersistTurnDeps {
   runInTx: Transactor;
@@ -36,6 +40,9 @@ export interface PersistTurnArgs {
   /** The conversation's cooldown when admission let the turn through: an elapsed one this turn probes. */
   priorCooldown: CooldownState | null;
   result: AgentLoopResult;
+  /** The view the turn's requests sent, which its assistant rows' transcript heads record. */
+  view: HeadView;
+  turnLogger: Logger;
 }
 
 /**
@@ -74,7 +81,9 @@ type PersistWrite =
  * earlier write (a re-run after commit): `persisted` with its id, nothing
  * written. A different one is another run of the same batch: `superseded`.
  * Otherwise it is `superseded` when a later turn row covers the cursor, and
- * inserts when none does.
+ * inserts when none does, each assistant row with its transcript head
+ * ({@link rowHeads}). A loop whose in-turn head check failed counts
+ * `cogmo.prompt.prefix_violations{site: "iteration"}` once, when it inserts.
  *
  * Steps, in order: `persist-new-messages`, `emit-cooldown-cleared` (when
  * `persisted` and the turn probed an elapsed cooldown),
@@ -91,6 +100,9 @@ export async function persistTurn(
   const memo = await step.run("persist-new-messages", async (): Promise<PersistOutcome> => {
     const finalMessage = result.newMessages.at(-1);
     if (finalMessage === undefined) throw new Error("persistTurn: the loop returned no messages");
+    // Hashed in the step body, so a replay of the persisted turn hashes
+    // nothing, and outside the transaction, so a retry of it doesn't hash again.
+    const heads = rowHeads(result.requests, result.newMessages, args.view);
     // Both checks read in the insert's transaction, so the decision and the
     // write share one snapshot. REPEATABLE READ takes no predicate lock: a
     // row committed by a transaction overlapping this one is missed
@@ -120,7 +132,10 @@ export async function persistTurn(
       if (rebatched) return { kind: "superseded" };
       const inserted = await deps.agentStore.insertMessages(tx, {
         conversationId,
-        messages: result.newMessages.map(toStoredMessage),
+        messages: R.zip(result.newMessages, heads).map(([message, transcriptHead]) => ({
+          ...toStoredMessage(message),
+          ...(transcriptHead !== null && { transcriptHead }),
+        })),
         profileId: snapshot.profileId,
         model: snapshot.model,
         lastInboundMessageId: maxInboundId,
@@ -146,10 +161,13 @@ export async function persistTurn(
     // the result records the turn twice. For a histogram read to spot
     // runaway iteration counts, repeated copies of one value are worse than
     // a missing one, and that retry window is the only source of them.
+    // The in-turn violation is counted where the turn's rows and heads were
+    // written.
     return match(write)
       .returnType<PersistOutcome>()
       .with({ kind: "inserted" }, ({ messageId }) => {
         agentIterations.record(result.iterations, { model: result.model });
+        reportInTurnViolation(result.requests, "iteration", args.turnLogger);
         return { kind: "persisted", messageId };
       })
       .with({ kind: "own_earlier_write" }, ({ messageId }) => ({ kind: "persisted", messageId }))

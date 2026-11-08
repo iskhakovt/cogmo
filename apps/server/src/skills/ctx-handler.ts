@@ -2,43 +2,26 @@ import type { LookupAddress } from "node:dns";
 import { lookup } from "node:dns/promises";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
-import { z } from "zod";
 import { describeFileError } from "../agent/files.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { isBlockedAddress, type ResolveHost } from "../util/blocked-address.js";
 import { describeError } from "../util/describe-error.js";
+import {
+  CTX_CONTRACT,
+  type CtxErrorKind,
+  type CtxMethod,
+  type CtxResultOf,
+  type CtxUser,
+  isCtxMethod,
+} from "./ctx-contract.js";
 import type { CtxFailure, CtxHandler } from "./dispatcher.js";
 import type { SkillRunServices } from "./run-as.js";
 import type { SkillManifest } from "./types.js";
-import { DEFAULT_WALL_CLOCK_S } from "./wall-clock.js";
+import { wallClockSOf } from "./wall-clock.js";
 
 const log = logger.child({ component: "skills.ctx" });
-
-/**
- * Wasm `ctx.*` v1 surface. Six methods cover the slice's end-to-end test
- * matrix; `attachments`, `llm.complete`, `notify` deferred to P3.2 (each
- * crosses module boundaries the slice does not otherwise touch — see plan).
- */
-export const CTX_METHODS = [
-  "secrets.get",
-  "memory.recall",
-  "memory.remember",
-  "files.read",
-  "files.write",
-  "files.list",
-  "now",
-  "user",
-  "log.info",
-  "http.request",
-] as const;
-export type CtxMethod = (typeof CTX_METHODS)[number];
-
-export interface CtxUser {
-  id: string;
-  timezone: string;
-}
 
 export interface DefaultCtxHandlerOptions {
   manifest: SkillManifest;
@@ -62,7 +45,7 @@ export interface DefaultCtxHandlerOptions {
    */
   recordContextCall: (call: {
     runId: string;
-    /** A method outside `CTX_METHODS` is recorded as the worker named it. */
+    /** A method outside `CTX_CONTRACT` is recorded as the worker named it. */
     method: string;
     target: string | null;
     ok: boolean;
@@ -96,7 +79,6 @@ export interface DefaultCtxHandlerOptions {
  */
 const MAX_HTTP_RESPONSE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_HTTP_TIMEOUT_MS = 10_000;
-const MAX_HTTP_TIMEOUT_MS = 120_000;
 /**
  * Headroom between a request timing out and the worker being terminated.
  * The wall clock kills the task outright, so a request allowed to run
@@ -126,35 +108,6 @@ function hostAllowed(hostname: string, allow: ReadonlyArray<string>): boolean {
     entry.startsWith("*.") ? host.endsWith(entry.slice(1)) : host === entry,
   );
 }
-
-const SecretsGetArgsSchema = z.object({ name: z.string().min(1) });
-const MemoryRecallArgsSchema = z.object({
-  query: z.string().min(1),
-  limit: z.number().int().positive().max(50).optional(),
-});
-const MemoryRememberArgsSchema = z.object({
-  content: z.string().min(1),
-  tags: z.array(z.string().min(1)).optional(),
-});
-const FilesReadArgsSchema = z.object({ path: z.string().min(1) });
-const FilesWriteArgsSchema = z.object({
-  path: z.string().min(1),
-  content: z.string(),
-});
-const FilesListArgsSchema = z.object({
-  prefix: z.string().optional(),
-});
-const LogInfoArgsSchema = z.object({
-  message: z.string(),
-  fields: z.record(z.string(), z.unknown()).optional(),
-});
-const HttpRequestArgsSchema = z.object({
-  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]),
-  url: z.string().url(),
-  headers: z.record(z.string(), z.string()).optional(),
-  body: z.string().optional(),
-  timeoutMs: z.number().int().positive().max(MAX_HTTP_TIMEOUT_MS).optional(),
-});
 
 /**
  * Bound a promise that has no abort signal of its own. `dns.lookup` takes
@@ -212,21 +165,6 @@ async function readCapped(response: Response, cap: number): Promise<Result<strin
   return ok(new TextDecoder().decode(joined));
 }
 
-/** The `kind` a refused ctx call raises in the skill as `CtxError.kind`. */
-type CtxErrorKind =
-  | "unknown_method"
-  | "invalid_args"
-  | "not_in_allowlist"
-  | "secret_not_found"
-  | "missing_effect"
-  | "read_failed"
-  | "write_failed"
-  | "list_failed"
-  | "blocked_destination"
-  | "timeout"
-  | "network_error"
-  | "response_too_large";
-
 /** A served call: its value, and the target its audit row names. */
 interface Served {
   value: unknown;
@@ -247,7 +185,12 @@ interface Refusal {
 
 type Outcome = Result<Served, Refusal>;
 
-function served(value: unknown, target: string | null): Outcome {
+/** `method`'s answer, typed by the contract, which the skill receives. */
+function served<M extends CtxMethod>(
+  _method: M,
+  value: CtxResultOf<M>,
+  target: string | null,
+): Outcome {
   return ok({ value, target });
 }
 
@@ -326,11 +269,18 @@ export class DefaultCtxHandler implements CtxHandler {
       .with("files.read", () => this.#filesRead(args))
       .with("files.write", () => this.#filesWrite(args))
       .with("files.list", () => this.#filesList(args))
-      .with("now", async () => served(this.#now(), null))
-      .with("user", async () => served(this.#user, null))
+      .with("now", async () => this.#noArgs("now", args, () => served("now", this.#now(), null)))
+      .with("user", async () => this.#noArgs("user", args, () => served("user", this.#user, null)))
       .with("log.info", async () => this.#logInfo(args))
       .with("http.request", () => this.#httpRequest(args))
       .exhaustive();
+  }
+
+  /** `serve()`, for a method that takes no arguments, once `args` holds none. */
+  #noArgs(method: "now" | "user", args: unknown, serve: () => Outcome): Outcome {
+    return CTX_CONTRACT[method].args.safeParse(args).success
+      ? serve()
+      : refused("invalid_args", `${method} takes no arguments`, null);
   }
 
   /** Refuse unless the manifest declares `effect`. */
@@ -349,7 +299,7 @@ export class DefaultCtxHandler implements CtxHandler {
   }
 
   async #secretsGet(args: unknown): Promise<Outcome> {
-    const parsed = SecretsGetArgsSchema.safeParse(args);
+    const parsed = CTX_CONTRACT["secrets.get"].args.safeParse(args);
     if (!parsed.success) {
       return refused("invalid_args", "secrets.get expects { name: string }", null);
     }
@@ -365,11 +315,11 @@ export class DefaultCtxHandler implements CtxHandler {
     if (value === undefined) {
       return refused("secret_not_found", `secret '${name}' is declared but not configured`, name);
     }
-    return served(value, name);
+    return served("secrets.get", value, name);
   }
 
   async #memoryRecall(args: unknown): Promise<Outcome> {
-    const parsed = MemoryRecallArgsSchema.safeParse(args);
+    const parsed = CTX_CONTRACT["memory.recall"].args.safeParse(args);
     if (!parsed.success) {
       return refused(
         "invalid_args",
@@ -386,11 +336,15 @@ export class DefaultCtxHandler implements CtxHandler {
     // when the backend returns more than the skill asked for.
     const limit = parsed.data.limit;
     const sliced = limit === undefined ? result.memories : result.memories.slice(0, limit);
-    return served({ memories: sliced.map((m) => ({ content: m.content, type: m.type })) }, null);
+    return served(
+      "memory.recall",
+      { memories: sliced.map((m) => ({ content: m.content, type: m.type })) },
+      null,
+    );
   }
 
   async #memoryRemember(args: unknown): Promise<Outcome> {
-    const parsed = MemoryRememberArgsSchema.safeParse(args);
+    const parsed = CTX_CONTRACT["memory.remember"].args.safeParse(args);
     if (!parsed.success) {
       return refused(
         "invalid_args",
@@ -411,14 +365,14 @@ export class DefaultCtxHandler implements CtxHandler {
       source: "skill",
       skillName,
     });
-    return served(null, null);
+    return served("memory.remember", null, null);
   }
 
   // A workspace operation's own failure (a missing file, a quota) is the
   // skill's to handle, so it refuses rather than throwing.
 
   async #filesRead(args: unknown): Promise<Outcome> {
-    const parsed = FilesReadArgsSchema.safeParse(args);
+    const parsed = CTX_CONTRACT["files.read"].args.safeParse(args);
     if (!parsed.success)
       return refused("invalid_args", "files.read expects { path: string }", null);
     const { path } = parsed.data;
@@ -428,14 +382,14 @@ export class DefaultCtxHandler implements CtxHandler {
       const read = await this.#files.read(path);
       return read.isErr()
         ? refused("read_failed", describeFileError(read.error), path)
-        : served(read.value, path);
+        : served("files.read", read.value, path);
     } catch (e) {
       return refused("read_failed", describeError(e), path);
     }
   }
 
   async #filesWrite(args: unknown): Promise<Outcome> {
-    const parsed = FilesWriteArgsSchema.safeParse(args);
+    const parsed = CTX_CONTRACT["files.write"].args.safeParse(args);
     if (!parsed.success) {
       return refused("invalid_args", "files.write expects { path: string, content: string }", null);
     }
@@ -446,14 +400,14 @@ export class DefaultCtxHandler implements CtxHandler {
       const written = await this.#files.write(path, content);
       return written.isErr()
         ? refused("write_failed", describeFileError(written.error), path)
-        : served(null, path);
+        : served("files.write", null, path);
     } catch (e) {
       return refused("write_failed", describeError(e), path);
     }
   }
 
   async #filesList(args: unknown): Promise<Outcome> {
-    const parsed = FilesListArgsSchema.safeParse(args);
+    const parsed = CTX_CONTRACT["files.list"].args.safeParse(args);
     if (!parsed.success)
       return refused("invalid_args", "files.list expects { prefix?: string }", null);
     const prefix = parsed.data.prefix ?? null;
@@ -462,6 +416,7 @@ export class DefaultCtxHandler implements CtxHandler {
     try {
       const entries = await this.#files.list(parsed.data.prefix);
       return served(
+        "files.list",
         {
           entries: entries.map((e) => ({
             path: e.path,
@@ -483,8 +438,7 @@ export class DefaultCtxHandler implements CtxHandler {
    * live gets the shorter of the two.
    */
   #httpTimeoutMs(requested: number | undefined): number {
-    const wallClockMs =
-      (this.#manifest.resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S[this.#manifest.tier]) * 1000;
+    const wallClockMs = wallClockSOf(this.#manifest.tier, this.#manifest.resources) * 1000;
     // Sized against the whole budget rather than what is left of it. The
     // accurate elapsed figure needs the moment the task reached a runtime,
     // and the only timestamps available here precede a container pool
@@ -521,7 +475,7 @@ export class DefaultCtxHandler implements CtxHandler {
    * a failure to *obtain* a response refuses.
    */
   async #httpRequest(args: unknown): Promise<Outcome> {
-    const parsed = HttpRequestArgsSchema.safeParse(args);
+    const parsed = CTX_CONTRACT["http.request"].args.safeParse(args);
     if (!parsed.success) {
       return refused(
         "invalid_args",
@@ -646,6 +600,7 @@ export class DefaultCtxHandler implements CtxHandler {
       );
     }
     return served(
+      "http.request",
       {
         status: response.status,
         headers: Object.fromEntries(response.headers),
@@ -656,7 +611,7 @@ export class DefaultCtxHandler implements CtxHandler {
   }
 
   #logInfo(args: unknown): Outcome {
-    const parsed = LogInfoArgsSchema.safeParse(args);
+    const parsed = CTX_CONTRACT["log.info"].args.safeParse(args);
     if (!parsed.success) {
       return refused(
         "invalid_args",
@@ -676,7 +631,7 @@ export class DefaultCtxHandler implements CtxHandler {
       },
       parsed.data.message,
     );
-    return served(null, null);
+    return served("log.info", null, null);
   }
 
   /**
@@ -703,8 +658,4 @@ export class DefaultCtxHandler implements CtxHandler {
       log.warn({ err: describeError(e), method }, "failed to record ctx audit row");
     }
   }
-}
-
-function isCtxMethod(method: string): method is CtxMethod {
-  return (CTX_METHODS as readonly string[]).includes(method);
 }

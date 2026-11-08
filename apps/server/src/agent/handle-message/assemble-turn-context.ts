@@ -12,6 +12,7 @@ import {
   historyStart,
   stripThinkingBefore,
 } from "../system-prompt-snapshot.js";
+import type { HeadVerdict } from "../transcript-head.js";
 import { renderTurnContext, withTurnContext } from "../turn-context.js";
 import type { SubstitutedInbound } from "./inbound-batch.js";
 import type { TurnTranscript } from "./load-turn-transcript.js";
@@ -26,6 +27,8 @@ export interface AssembleTurnContextArgs {
   /** The history as sent, before the turn context and the thinking strip. */
   view: TurnView;
   loadedSystemPrompt: LoadedSystemPrompt;
+  /** The across-turn head check's verdict on the loaded history. */
+  head: HeadVerdict;
   voiceMode: boolean;
   coreMemoryScope: CoreMemoryScope;
   timezone: string;
@@ -92,16 +95,17 @@ export async function assembleTurnContext(
   });
 
   // The epoch continues unless the configuration, the summary the history
-  // starts from or the attachment cutoff changed; compaction below can still
-  // open one. The turns
-  // before the epoch's opening row lose their thinking blocks, which are
-  // bound to an earlier system prompt or history.
+  // starts from or the attachment cutoff changed, or the head check found the
+  // history changed; compaction below can still open one. The turns before
+  // the epoch's opening row lose their thinking blocks, which are bound to an
+  // earlier system prompt or history.
   const loadedStart = historyStart(turnHistory.messageIds, null);
   const continuing =
     args.view.cutoff.kind === "kept" &&
     continuesEpoch(loadedSystemPrompt.snapshot, {
       configDigest: loadedSystemPrompt.configDigest,
       historyStart: loadedStart,
+      head: args.head,
     })
       ? loadedSystemPrompt.snapshot
       : null;

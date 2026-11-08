@@ -2,6 +2,7 @@
  * Shared mock factories for unit tests.
  * Every store interface method is mocked — tests override what they need.
  */
+
 import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
@@ -9,10 +10,11 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import type { NormalizeArrivalDeps } from "../agent/attachments/normalize-arrival.js";
 import type { HandleMessageDeps } from "../agent/handle-message.js";
-import type { AgentLoopResult } from "../agent/loop.js";
+import type { AgentLoopResult, StreamingLoopOutcome } from "../agent/loop.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
+import { baseDigest, type PrefixViolationPolicy } from "../agent/transcript-head.js";
 import type { CliIo } from "../cli/run.js";
 import type { Transactor } from "../db/transactor.js";
 import type { Durable, EventPublisher } from "../inngest/durable.js";
@@ -27,6 +29,7 @@ import type {
 } from "../llm/types.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import type { DispatchGate } from "../skills/protocol.js";
 import { type AttachmentStore, mediaTypeToExt } from "../transport/attachment-store.js";
 import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
@@ -61,6 +64,9 @@ export const MOCK_MESSAGE_CREATED_AT = new Date("2026-09-25T08:14:00.000Z");
 /** When `mockAgentStore`'s snapshot insert says the epoch opened. */
 export const MOCK_SNAPSHOT_CREATED_AT = new Date("2026-09-25T08:14:01.000Z");
 
+/** The head checks' policy in unit tests: an unexplained divergence fails the test. */
+export const TEST_PREFIX_VIOLATION = "throw" satisfies PrefixViolationPolicy;
+
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
   return {
     createUser: vi.fn().mockResolvedValue({ id: "user-1" }),
@@ -89,8 +95,11 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     insertMessages: vi.fn().mockResolvedValue({ id: "msg-1" }),
     getLastAssistantMessage: vi.fn().mockResolvedValue(null),
     findLastAssistantMessageByInbound: vi.fn().mockResolvedValue(undefined),
+    isCursorAnswered: vi.fn().mockResolvedValue(false),
     isCursorRebatched: vi.fn().mockResolvedValue(false),
-    listMessages: vi.fn().mockResolvedValue([{ id: "msg-1", role: "user", content: "hello" }]),
+    listMessages: vi
+      .fn()
+      .mockResolvedValue([{ id: "msg-1", role: "user", content: "hello", transcriptHead: null }]),
     getLatestSummary: vi.fn().mockResolvedValue(undefined),
     // Echoes the insert, as a first attempt does.
     insertOrRecoverTurnContext: vi.fn().mockImplementation(async (_tx, params) => params),
@@ -98,9 +107,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(undefined),
     // Echoes the insert as a first attempt stores it.
     insertOrRecoverSystemPromptSnapshot: vi.fn().mockImplementation(async (_tx, params) => ({
-      id: "snapshot-1",
-      createdAt: MOCK_SNAPSHOT_CREATED_AT,
-      ...params,
+      kind: "new",
+      row: { id: "snapshot-1", createdAt: MOCK_SNAPSHOT_CREATED_AT, ...params },
     })),
     insertOrRecoverSummary: vi.fn().mockResolvedValue({
       kind: "new",
@@ -117,6 +125,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     }),
     getHistoryAfter: vi.fn().mockResolvedValue([]),
     listTurnMessages: vi.fn().mockResolvedValue([]),
+    listUserRowsAfter: vi.fn().mockResolvedValue([]),
     findAnsweredCursorBefore: vi.fn().mockResolvedValue(undefined),
     getProfile: vi.fn().mockResolvedValue({
       id: "profile-1",
@@ -380,6 +389,8 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     finishAttachmentDecode: vi.fn().mockResolvedValue({ kind: "finished" }),
     findFinishedAttachmentOriginal: vi.fn().mockResolvedValue(null),
     abandonAttachmentDecode: vi.fn().mockResolvedValue({ kind: "abandoned" }),
+    rejectAttachmentOriginals: vi.fn().mockResolvedValue(0),
+    listRejectedAttachmentOriginals: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -643,6 +654,11 @@ export function mockAdapter(overrides?: Partial<Adapter>): Adapter {
   };
 }
 
+/** A dispatch gate that lets every task be sent, recording each time it is asked. */
+export function sendingGate() {
+  return vi.fn<DispatchGate>(async () => ({ kind: "send" }));
+}
+
 /**
  * Auto-mocked stub of `Service["files"]`. Every method is a `vi.fn()`;
  * `read` resolves to `ok("")`, `write` and `edit` to `ok(undefined)` and
@@ -811,7 +827,10 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
   };
 }
 
-/** An agent-loop result: an empty one-iteration turn that streamed nothing, unless overridden. */
+/**
+ * An agent-loop result: an empty one-iteration turn that streamed nothing and
+ * recorded no request heads, unless overridden.
+ */
 export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResult {
   return {
     text: "",
@@ -821,8 +840,20 @@ export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResul
     model: "mock-model",
     iterations: 1,
     streamed: { text: "", toolUseIds: [] },
+    requests: {
+      base: baseDigest("", []),
+      historyLength: 0,
+      sent: [],
+      diverged: false,
+      violatedAt: null,
+    },
     ...overrides,
   };
+}
+
+/** A streaming loop that ran to {@link loopResult}'s result. */
+export function finishedLoop(overrides?: Partial<AgentLoopResult>): StreamingLoopOutcome {
+  return { kind: "finished", result: loopResult(overrides) };
 }
 
 /** The `done` frame a scripted provider stream ends with. */

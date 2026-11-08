@@ -237,6 +237,37 @@ describe("runObserver phase isolation", () => {
     );
   });
 
+  it("keeps transcript heads out of the load-history memo", async () => {
+    const results = new Map<string, unknown>();
+    const step: ObserverStepHarness = {
+      async run<T>(id: string, fn: () => Promise<T>): Promise<T> {
+        const result = await fn();
+        results.set(id, result);
+        return result;
+      },
+    };
+    const head = {
+      length: 2,
+      base: "a".repeat(64),
+      historyStart: "msg-0",
+      digest: "b".repeat(64),
+      status: "intact" as const,
+    };
+    const rows = HISTORY.map((m, i) => ({
+      ...m,
+      id: `msg-${i}`,
+      transcriptHead: m.role === "assistant" ? head : null,
+    }));
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: { listMessages: vi.fn().mockResolvedValue(rows) },
+    });
+
+    await runObserver(EVENT, step, deps, "idle");
+
+    expect(results.get("load-history")).toEqual(rows.map(({ transcriptHead: _, ...row }) => row));
+  });
+
   it("plans the same later steps whether or not correction extraction fails", async () => {
     const clean = exhaustedRetriesStep();
     await runObserver(EVENT, clean, observerDeps({ provider: routedProvider() }), "idle");
