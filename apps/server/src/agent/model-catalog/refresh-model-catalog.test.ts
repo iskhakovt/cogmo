@@ -206,15 +206,17 @@ describe("refreshModelCatalog", () => {
       });
     });
 
-    it("stores no openrouter/ entries when the source is off", async () => {
+    it("stores no openrouter/ entries when the source is off, carrying none forward", async () => {
       const deps = makeDeps({
         response: Response.json(upstream([...Object.keys(BUNDLED), "openrouter/legacy/model"])),
+        previous: { ...BUNDLED, "openrouter/x-ai/grok-9": LIMITS },
       });
 
       const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
 
       expect(deps.fetch).toHaveBeenCalledTimes(1);
       expect(deps.store.replace.mock.calls[0]?.[1]).toEqual(BUNDLED);
+      expect(deps.store.latest).not.toHaveBeenCalled();
       expect(result.openRouter).toEqual({ kind: "off" });
     });
 
