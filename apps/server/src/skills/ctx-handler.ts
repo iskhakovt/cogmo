@@ -269,11 +269,18 @@ export class DefaultCtxHandler implements CtxHandler {
       .with("files.read", () => this.#filesRead(args))
       .with("files.write", () => this.#filesWrite(args))
       .with("files.list", () => this.#filesList(args))
-      .with("now", async () => served("now", this.#now(), null))
-      .with("user", async () => served("user", this.#user, null))
+      .with("now", async () => this.#noArgs("now", args, () => served("now", this.#now(), null)))
+      .with("user", async () => this.#noArgs("user", args, () => served("user", this.#user, null)))
       .with("log.info", async () => this.#logInfo(args))
       .with("http.request", () => this.#httpRequest(args))
       .exhaustive();
+  }
+
+  /** `serve()`, for a method that takes no arguments, once `args` holds none. */
+  #noArgs(method: "now" | "user", args: unknown, serve: () => Outcome): Outcome {
+    return CTX_CONTRACT[method].args.safeParse(args).success
+      ? serve()
+      : refused("invalid_args", `${method} takes no arguments`, null);
   }
 
   /** Refuse unless the manifest declares `effect`. */

@@ -37,9 +37,10 @@ function schemaOf(schema: z.ZodType): JsonSchema {
 }
 
 /**
- * The worker protocol's frames and each ctx method's arguments and result,
- * as one JSON Schema document whose `$defs` the Python side validates its
- * frames against.
+ * The worker protocol frames Python sends or reads, and each ctx method's
+ * arguments and result, as one JSON Schema document whose `$defs` the
+ * Python side's frames are checked against. The wasm worker's `ready` and
+ * `fatal` frames are left out: the host's JavaScript writes them.
  */
 export function renderContractSchema(): string {
   const frames = {
@@ -144,7 +145,7 @@ function pythonType(schema: JsonSchema, declared: Map<string, string>): string {
     const fieldType = pythonType(property, declared);
     return `    ${field}: ${required.has(field) ? fieldType : `NotRequired[${fieldType}]`}`;
   });
-  const source = `class ${title}(TypedDict):\n${fields.join("\n")}`;
+  const source = `class ${title}(TypedDict):\n${fields.length > 0 ? fields.join("\n") : "    pass"}`;
   const earlier = declared.get(title);
   if (earlier !== undefined && earlier !== source) {
     throw new Error(`two objects in the ctx contract share the title ${title}`);

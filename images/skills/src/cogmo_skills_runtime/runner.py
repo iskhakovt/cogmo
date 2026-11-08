@@ -16,6 +16,7 @@ import inspect
 import json
 import resource
 import sys
+import traceback
 import uuid
 from collections.abc import Mapping
 from typing import Any, BinaryIO, TextIO
@@ -307,6 +308,8 @@ async def _main(
     except MemoryError as e:
         _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}")
     except Exception as e:
+        # The stack reaches the host's log through stderr; the result carries the message.
+        err.write(traceback.format_exc())
         _emit_failure(bridge, out, task_id, "skill_raised", f"{type(e).__name__}: {e}")
     else:
         try:

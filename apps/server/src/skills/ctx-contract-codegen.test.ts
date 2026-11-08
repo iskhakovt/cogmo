@@ -105,6 +105,12 @@ describe("renderPythonModule", () => {
     );
   });
 
+  it("writes an object with no fields as a class with an empty body", () => {
+    expect(moduleFor(z.object({}).meta({ title: "Empty" }))).toContain(
+      "class Empty(TypedDict):\n    pass",
+    );
+  });
+
   it("refuses an object with no title, a shape it cannot type, and two objects sharing a title", () => {
     expect(() => moduleFor(z.object({ a: z.string() }))).toThrow(/has no title/);
     expect(() => moduleFor(z.tuple([z.string(), z.number()]))).toThrow(

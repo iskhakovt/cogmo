@@ -100,6 +100,21 @@ class TestErrors:
         assert "skill failed" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_skill_raises_writes_its_stack_to_stderr(self) -> None:
+        stderr = io.StringIO()
+        await _main(
+            "async def run(inputs, ctx):\n    raise RuntimeError('skill failed')\n",
+            {},
+            "t-stack",
+            RUN,
+            stdin=io.BytesIO(b""),
+            stdout=io.StringIO(),
+            stderr=stderr,
+        )
+        assert "Traceback (most recent call last)" in stderr.getvalue()
+        assert "RuntimeError: skill failed" in stderr.getvalue()
+
+    @pytest.mark.asyncio
     async def test_missing_run_function(self) -> None:
         result = await _drive(
             body="x = 1\n",
