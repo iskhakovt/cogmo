@@ -386,6 +386,28 @@ describe("makeSandboxSchemaImporter", () => {
     expect(h.sandbox.delete).toHaveBeenCalledTimes(1);
   });
 
+  it("returns the reply when disposing its exec fails", async () => {
+    const h = harness();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockImplementationOnce(async () => ({
+      ...fakeExec({ stdout: SCHEMAS_REPLY, exitCode: 0 }, undefined, () => {}),
+      dispose: async () => {
+        throw new Error("exec already gone");
+      },
+    }));
+    vi.mocked(h.sandbox.create).mockResolvedValueOnce(session);
+
+    const imported = await importer(h, undefined).importSchemas({
+      body: BODY,
+      lockfile: null,
+      resourceLimits: {},
+      timeoutMs: 60_000,
+    });
+
+    expect(imported.isOk()).toBe(true);
+    expect(h.deleted).toBe(1);
+  });
+
   it("reports a session that does not start as unavailable", async () => {
     const h = harness();
     vi.mocked(h.sandbox.create).mockRejectedValueOnce(new Error("daemon unreachable"));

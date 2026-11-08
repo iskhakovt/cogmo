@@ -609,6 +609,29 @@ idna==3.10 \\
 });
 
 describe("ensureVenvPopulated", () => {
+  it("hands its signal to the exec", async () => {
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockResolvedValue(exec.handle);
+    const { signal } = new AbortController();
+
+    const promise = ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0 --hash=sha256:0\n",
+      workerId: "worker-1",
+      signal,
+    });
+    await new Promise((r) => setImmediate(r));
+    exec.waitResolve(0);
+    await promise;
+
+    expect(session.execStreaming).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ signal }),
+    );
+  });
+
   it("succeeds when uv pip sync exits 0 (path computed by supervisor; host returns void)", async () => {
     const exec = makeFakeExec();
     const session = mock<SandboxSession>();

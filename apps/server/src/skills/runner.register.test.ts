@@ -2351,8 +2351,9 @@ tier: wasm
       return { runner, containerSchemaImporter };
     }
 
-    /** A container skill whose models carry its schemas, declaring idna and its lockfile. */
-    async function pushContainerWithDeps(branch: string): Promise<void> {
+    /** A container skill on `skill/weather` whose models carry its schemas, declaring idna and its lockfile. */
+    async function pushContainerWithDeps(): Promise<void> {
+      const branch = "skill/weather";
       await writeFile(
         join(repo.work, "SKILL.md"),
         CONTAINER_MANIFEST.replace(
@@ -2405,7 +2406,7 @@ tier: wasm
         ok({ inputs: CITY_INPUTS, outputs: null }),
         "cogmo-skills-venvs",
       );
-      await pushContainerWithDeps("skill/weather");
+      await pushContainerWithDeps();
 
       const result = await runner.register({ branch: "skill/weather", origin: OWNER });
 
@@ -2422,7 +2423,7 @@ tier: wasm
         ok({ inputs: CITY_INPUTS, outputs: null }),
         undefined,
       );
-      await pushContainerWithDeps("skill/weather");
+      await pushContainerWithDeps();
 
       const result = await runner.register({ branch: "skill/weather", origin: OWNER });
 
