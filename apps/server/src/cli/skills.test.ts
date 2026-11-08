@@ -14,6 +14,7 @@ function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
 /** The install owner with the default profile, as `main.ts` resolves them. */
 const OWNER_RUN_AS: SkillRunAs = {
   userId: "019d0000-0000-7000-8000-0000000000a1",
+  profileId: "019d0000-0000-7000-8000-0000000000b1",
   service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
 };
 
@@ -149,6 +150,7 @@ describe("skillsCli", () => {
         ok({
           runId: "run-2",
           status: "error",
+          errorKind: "skill_raised",
           error: "boom",
         }),
       ),

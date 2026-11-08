@@ -119,6 +119,7 @@ jobs:
               - 'apps/server/src/agent/evolution/memory-extraction-schema.ts'
               - 'apps/server/src/agent/pipeline/run-types.ts'
               - 'apps/server/src/agent/pipeline/types.ts'
+              - 'apps/server/src/agent/transcript-head.ts'
               - 'apps/server/src/agent/turn-context.ts'
               - 'apps/server/src/llm/cache-dialect.ts'
               - 'apps/server/src/llm/extra-body.ts'

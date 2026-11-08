@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { CtxErrorKindSchema } from "./ctx-contract.js";
+import type { SkillRunErrorKind } from "./store/index.js";
 
 /**
  * Worker JSON-RPC protocol — transport-agnostic message shapes used by the
@@ -15,10 +17,10 @@ import { z } from "zod";
  * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
  * change, and when the host comes to run something new in the image.
  */
-export const SUPERVISOR_PROTOCOL_VERSION = 3;
+export const SUPERVISOR_PROTOCOL_VERSION = 6;
 
 /** Container tier only: the supervisor's first frame, announcing its protocol version. */
-const SupervisorReadySchema = z.object({
+export const SupervisorReadySchema = z.object({
   type: z.literal("supervisor_ready"),
   protocolVersion: z.number().int(),
 });
@@ -29,9 +31,17 @@ const WorkerReadySchema = z.object({ type: z.literal("ready") });
 /** Wasm tier only: the Pyodide worker's first frame when it failed to load. */
 const WorkerFatalSchema = z.object({ type: z.literal("fatal"), error: z.string() });
 
+/**
+ * The run a task belongs to, which `ctx.run()` returns: its id, and the
+ * invocation's logical key (the caller's idempotency key, else the run id).
+ */
+const TaskRunSchema = z.object({ id: z.string().min(1), key: z.string().min(1) });
+export type TaskRun = z.infer<typeof TaskRunSchema>;
+
 export const TaskInvokeSchema = z.object({
   type: z.literal("task_invoke"),
   id: z.string().min(1),
+  run: TaskRunSchema,
   /** Skill name — informational; surfaced in worker logs. */
   skill: z.string().min(1),
   inputs: z.unknown(),
@@ -71,7 +81,8 @@ export const TaskInvokeSchema = z.object({
    *
    * Populated by the host via `ensureVenvPopulated` (see deps.ts) when the
    * skill declares dependencies. Absent for skills with empty
-   * `dependencies` — the task runs against the stdlib only.
+   * `dependencies` — the task runs against the stdlib and the runtime's
+   * pydantic.
    *
    * The wasm tier (Pyodide) ignores this field: its child installs the
    * packages it was forked with, before the handshake.
@@ -116,20 +127,107 @@ const TaskResultOkSchema = z.object({
   output: z.unknown(),
   rusage: RuntimeRusageSchema.optional(),
 });
+/**
+ * The run error kinds a worker reports in a failed `task_result`
+ * (design/skills.md → Run failures → who decides each kind): the runner's
+ * `load_failed`, `skill_raised`, `memory_exceeded` and `output_invalid`, a
+ * refused `Input`'s `input_invalid`, a `SkillError`'s `skill_failed` and
+ * `skill_retryable`, and the relay's and the task process's own.
+ */
+const WORKER_ERROR_KINDS = [
+  "load_failed",
+  "input_invalid",
+  "skill_raised",
+  "skill_failed",
+  "skill_retryable",
+  "memory_exceeded",
+  "output_invalid",
+  "wall_clock_exceeded",
+  "runtime_unavailable",
+  "dependency_unavailable",
+] as const satisfies readonly SkillRunErrorKind[];
+
+/**
+ * The kinds a task's outcome can carry: a worker's, or `result_lost`, which
+ * a runtime host gives a task it sent that reported nothing.
+ */
+export type TaskErrorKind = WorkerErrorKind | "result_lost";
+
+/** A kind a worker reports on the wire. */
+export type WorkerErrorKind = (typeof WORKER_ERROR_KINDS)[number];
+
 const TaskResultErrSchema = z.object({
   type: z.literal("task_result"),
   id: z.string().min(1),
   ok: z.literal(false),
+  errorKind: z.enum(WORKER_ERROR_KINDS),
   error: z.string(),
   rusage: RuntimeRusageSchema.optional(),
 });
-export const TaskResultSchema = z.union([TaskResultOkSchema, TaskResultErrSchema]);
+/**
+ * An `output_invalid` that keeps what the skill returned, which JSON carries
+ * but its `Output` model refused (design/skills.md → Run failures).
+ */
+const TaskResultKeptOutputSchema = TaskResultErrSchema.extend({
+  errorKind: z.literal("output_invalid"),
+  output: z.unknown(),
+});
+export const TaskResultSchema = z.union([
+  TaskResultOkSchema,
+  TaskResultKeptOutputSchema,
+  TaskResultErrSchema,
+]);
 export type TaskResult = z.infer<typeof TaskResultSchema>;
 
 /** A task's result as a host hands it to the runner: the wire result without its framing. */
 export type TaskOutcome =
   | { ok: true; output?: unknown; rusage?: RuntimeRusage }
-  | { ok: false; error: string; rusage?: RuntimeRusage };
+  | {
+      ok: false;
+      errorKind: Exclude<TaskErrorKind, "output_invalid">;
+      error: string;
+      rusage?: RuntimeRusage;
+    }
+  | {
+      ok: false;
+      errorKind: "output_invalid";
+      error: string;
+      /** What the skill returned, when its worker kept it. */
+      output?: unknown;
+      rusage?: RuntimeRusage;
+    };
+
+/** The task's outcome without its framing. */
+export function fromTaskResult(result: TaskResult): TaskOutcome {
+  return {
+    ...(result.ok
+      ? { ok: true, output: result.output }
+      : {
+          ok: false,
+          errorKind: result.errorKind,
+          error: result.error,
+          ...("output" in result && { output: result.output }),
+        }),
+    ...(result.rusage !== undefined && { rusage: result.rusage }),
+  };
+}
+
+/**
+ * Asked by a runtime immediately before it sends `task_invoke`: `send` once
+ * the run row is at `dispatched`, `withhold` when the sweeper finished the
+ * run first, and the task must not be sent (design/skills.md → Stuck runs).
+ */
+export type DispatchGate = () => Promise<DispatchDecision>;
+export type DispatchDecision = { kind: "send" } | { kind: "withhold" };
+
+/** What a runtime returns for a task its gate withheld: nothing was sent. */
+export function withheldOutcome(): TaskOutcome {
+  return {
+    ok: false,
+    errorKind: "runtime_unavailable",
+    error: "task withheld: its run was finished before dispatch",
+  };
+}
 
 export const CtxCallSchema = z.object({
   type: z.literal("ctx_call"),
@@ -159,8 +257,8 @@ const CtxResultErrSchema = z.object({
   taskId: z.string().min(1),
   id: z.string().min(1),
   ok: z.literal(false),
-  /** Typed error code surfaced to Python as a specific exception class. */
-  errorKind: z.string().min(1),
+  /** Raised in the skill as `CtxError.kind`. */
+  errorKind: CtxErrorKindSchema,
   message: z.string(),
 });
 export const CtxResultSchema = z.union([CtxResultOkSchema, CtxResultErrSchema]);

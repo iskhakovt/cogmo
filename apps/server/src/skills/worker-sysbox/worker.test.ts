@@ -10,11 +10,17 @@ import {
   type SandboxSession,
 } from "../../sandbox/index.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
+import { sendingGate } from "../../test/factories.js";
 import type { CtxHandler } from "../dispatcher.js";
-import { type TaskInvoke, TaskInvokeSchema } from "../protocol.js";
+import {
+  type DispatchGate,
+  type TaskInvoke,
+  TaskInvokeSchema,
+  withheldOutcome,
+} from "../protocol.js";
 import { type InvokeParams, SysboxSkillWorker } from "./worker.js";
 
-const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 3 });
+const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 6 });
 
 /** sha256-shaped, as `task_invoke.lockfileHash` requires. */
 const LOCKFILE_HASH = "ab".repeat(32);
@@ -109,10 +115,13 @@ const noopCtx: CtxHandler = { handle: async () => ok(null) };
 function invokeParams(taskId: string): InvokeParams {
   return {
     taskId,
+    run: { id: taskId, key: `key-${taskId}` },
     skillName: "test",
     body: 'async def run(inputs, ctx):\n    return {"ok": 1}\n',
     inputs: {},
     ctxHandler: noopCtx,
+    dispatch: sendingGate(),
+    wallClockS: 60,
   };
 }
 
@@ -144,7 +153,7 @@ function taskInvokesIn(chunk: Buffer): TaskInvoke[] {
  */
 function autoRespond(
   bundle: FakeSandboxBundle,
-  result: { ok: boolean; output?: unknown; error?: string },
+  result: { ok: boolean; output?: unknown; errorKind?: string; error?: string },
 ): void {
   bundle.stdin.on("data", (chunk: Buffer) => {
     for (const invoke of taskInvokesIn(chunk)) {
@@ -289,7 +298,7 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 })}\n`);
 
       await expect(create(bundle)).rejects.toThrow(
-        /supervisor speaks protocol v2; this Cogmo requires v3 — use the skills image matching this Cogmo version/,
+        /supervisor speaks protocol v2; this Cogmo requires v6 — use the skills image matching this Cogmo version/,
       );
       expect(bundle.execDisposeCalls.count).toBe(1);
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
@@ -302,7 +311,7 @@ describe("SysboxSkillWorker", () => {
         silentSupervisor(bundle);
         const created = create(bundle);
         const outcome = expect(created).rejects.toThrow(
-          /did not announce protocol v3 within 30s; a skills image without the handshake never does/,
+          /did not announce protocol v6 within 30s; a skills image without the handshake never does/,
         );
         await vi.advanceTimersByTimeAsync(30_000);
         await outcome;
@@ -459,12 +468,68 @@ describe("SysboxSkillWorker", () => {
       expect(w.state).toBe("busy");
     });
 
+    it("asks the gate before sending the task, and sends nothing it withholds", async () => {
+      const bundle = buildFakeSandbox();
+      autoRespond(bundle, { ok: true, output: { x: 1 } });
+      const sent: TaskInvoke[] = [];
+      bundle.stdin.on("data", (chunk: Buffer) => sent.push(...taskInvokesIn(chunk)));
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-gate",
+        sandbox: bundle.sandbox,
+        image: "python:3.14-slim",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      const dispatch = vi.fn<DispatchGate>(async () => {
+        // Asked before the frame goes out.
+        expect(sent).toEqual([]);
+        return { kind: "withhold" };
+      });
+
+      const r = await w.invoke({ ...invokeParams("t-gate"), dispatch });
+
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(r).toEqual({ ...withheldOutcome(), workerReusable: true });
+      expect(sent).toEqual([]);
+      // Nothing ran: the worker took no task and stays leased for its caller.
+      expect(w.taskCount).toBe(0);
+      expect(w.state).toBe("busy");
+    });
+
+    it("fails the task unsent when the worker dies while its gate writes the dispatch", async () => {
+      const bundle = buildFakeSandbox();
+      const sent: TaskInvoke[] = [];
+      bundle.stdin.on("data", (chunk: Buffer) => sent.push(...taskInvokesIn(chunk)));
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-gate-dies",
+        sandbox: bundle.sandbox,
+        image: "python:3.14-slim",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      const dispatch = vi.fn<DispatchGate>(async () => {
+        w.retire();
+        return { kind: "send" };
+      });
+
+      const r = await w.invoke({ ...invokeParams("t-gate-dies"), dispatch });
+
+      assert(!r.ok);
+      // Nothing was sent, so nothing ran: not the `result_lost` a sent task gets.
+      expect(r.errorKind).toBe("runtime_unavailable");
+      expect(sent).toEqual([]);
+    });
+
     it("supervisor-emitted error keeps the worker reusable (supervisor still alive)", async () => {
       // The supervisor handles a wall-clock kill itself and emits the
       // wall_clock_exceeded task_result; the supervisor process stays alive
       // and ready for the next task.
       const bundle = buildFakeSandbox();
-      autoRespond(bundle, { ok: false, error: "wall_clock_exceeded" });
+      autoRespond(bundle, {
+        ok: false,
+        errorKind: "wall_clock_exceeded",
+        error: "wall_clock_exceeded",
+      });
       const w = await SysboxSkillWorker.create({
         workerId: "w-walltime",
         sandbox: bundle.sandbox,
@@ -475,6 +540,7 @@ describe("SysboxSkillWorker", () => {
       const r = await w.invoke(invokeParams("t-wt"));
       expect(r).toMatchObject({
         ok: false,
+        errorKind: "wall_clock_exceeded",
         error: "wall_clock_exceeded",
         workerReusable: true,
       });
@@ -560,8 +626,9 @@ describe("SysboxSkillWorker", () => {
       expect(r.workerReusable).toBe(true);
       // Populate exec ran (sh + supervisor python3, in some order).
       expect(bundle.calls).toContain("exec:sh");
-      // Task invoke carried the venv path.
+      // Task invoke carried the venv path and the task's run.
       expect(taskInvokes[0]?.lockfileHash).toBe(LOCKFILE_HASH);
+      expect(taskInvokes[0]?.run).toEqual({ id: "t-deps", key: "key-t-deps" });
     });
 
     it("with deps: populate_failed retires the worker, no task is invoked", async () => {
@@ -600,8 +667,10 @@ describe("SysboxSkillWorker", () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
       w.tryAcquire();
+      const dispatch = sendingGate();
       const r = await w.invoke({
         ...invokeParams("t-fail"),
+        dispatch,
         deps: {
           lockfileHash: LOCKFILE_HASH,
           lockfileContents: "httpx==0.27.0\n",
@@ -609,8 +678,10 @@ describe("SysboxSkillWorker", () => {
       });
 
       assert(!r.ok);
+      expect(r.errorKind).toBe("dependency_unavailable");
       expect(r.error).toMatch(/skill_venv_populate_failed/);
       expect(r.error).toMatch(/hash mismatch/);
+      expect(dispatch).not.toHaveBeenCalled();
       expect(r.workerReusable).toBe(false);
       expect(w.state).toBe("dead");
       expect(taskInvokes).toHaveLength(0);
@@ -628,13 +699,19 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.end();
       await w.dead;
 
+      const dispatch = sendingGate();
       const r = await w.invoke({
         ...invokeParams("t-dead"),
         deps: { lockfileHash: LOCKFILE_HASH, lockfileContents: "httpx==0.27.0\n" },
+        dispatch,
       });
+
+      // Not dispatched: the dead worker fails the task unsent.
+      expect(dispatch).not.toHaveBeenCalled();
 
       expect(r).toEqual({
         ok: false,
+        errorKind: "runtime_unavailable",
         error: "dispatcher_error: worker is dead: worker closed its output",
         workerReusable: false,
       });
@@ -671,6 +748,7 @@ describe("SysboxSkillWorker", () => {
 
       expect(r).toEqual({
         ok: false,
+        errorKind: "runtime_unavailable",
         error: "dispatcher_error: worker is dead: worker closed its output",
         workerReusable: false,
       });
@@ -738,6 +816,7 @@ describe("SysboxSkillWorker", () => {
 
       await expect(pending).resolves.toMatchObject({
         ok: false,
+        errorKind: "result_lost",
         error: expect.stringMatching(/worker closed its output/),
         workerReusable: false,
       });
@@ -765,6 +844,7 @@ describe("SysboxSkillWorker", () => {
 
         await expect(pending).resolves.toMatchObject({
           ok: false,
+          errorKind: "result_lost",
           error: expect.stringMatching(/read ECONNRESET/),
           workerReusable: false,
         });
@@ -871,6 +951,7 @@ describe("SysboxSkillWorker", () => {
         await vi.advanceTimersByTimeAsync(1);
         await expect(pending).resolves.toMatchObject({
           ok: false,
+          errorKind: "result_lost",
           error: "supervisor_unresponsive",
           workerReusable: false,
         });

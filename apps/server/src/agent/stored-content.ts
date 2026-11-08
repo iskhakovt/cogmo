@@ -105,3 +105,13 @@ export function toStoredContent(content: string | ReadonlyArray<ContentBlock>): 
 export function toStoredMessage(message: Message): StoredMessage {
   return { role: message.role, content: toStoredContent(message.content) };
 }
+
+/** The key of the original a ref was made from: the file as the user sent it. */
+export function originalPath(ref: AttachmentRef): string {
+  return ref.original?.path ?? ref.path;
+}
+
+/** The originals `content`'s refs were made from. */
+export function refOriginals(content: StoredContent): string[] {
+  return typeof content === "string" ? [] : content.filter(isAttachmentRef).map(originalPath);
+}

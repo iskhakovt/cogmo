@@ -65,6 +65,13 @@ export const attachmentOriginalState = pgEnum("attachment_original_state", [
 export type AttachmentOriginalState = (typeof attachmentOriginalState.enumValues)[number];
 
 /**
+ * `attachment_originals.rejection` — why a provider refused a request carrying
+ * the original: `bad_request` for a 400, `too_large` for a 413.
+ */
+export const attachmentRejection = pgEnum("attachment_rejection", ["bad_request", "too_large"]);
+export type AttachmentRejection = (typeof attachmentRejection.enumValues)[number];
+
+/**
  * `channels.identity_mode` — how a platform handle resolves to a user. See
  * design/transport/identity.md.
  */
@@ -296,8 +303,8 @@ export const userIdentities = pgTable(
 
 /**
  * One record per attachment original that arrival decoded or a provider
- * rejected, keyed by the original's AttachmentStore path. Arrival and
- * rendering both read it, so a re-batched original reuses its result. Written
+ * rejected, keyed by the original's AttachmentStore path. Arrival and the
+ * transcript load read it, so a re-batched original reuses its result. Written
  * through keyed upserts; see design/transport/attachments.md → Original records.
  */
 export const attachmentOriginals = pgTable(
@@ -308,9 +315,11 @@ export const attachmentOriginals = pgTable(
     state: attachmentOriginalState("state").notNull(),
     // NULL while decoding and once rejected.
     result: jsonbZod("result", NormalizedImageResultSchema),
-    // Claims of a `decoding` record: 1 on insert, +1 each time an attempt
-    // meets the record a crashed attempt left.
+    // Claims that found no finished record: 1 when a decode inserts it, +1
+    // each time an attempt meets the record a crashed attempt left.
     decodeAttempts: integer("decode_attempts").notNull(),
+    // Set exactly when rejected.
+    rejection: attachmentRejection("rejection"),
     createdAt: ts(),
   },
   (t) => [
@@ -325,6 +334,10 @@ export const attachmentOriginals = pgTable(
     check(
       "chk_attachment_originals_rejected_result",
       sql`${t.state} <> 'rejected' OR ${t.result} IS NULL`,
+    ),
+    check(
+      "chk_attachment_originals_rejection",
+      sql`(${t.state} = 'rejected') = (${t.rejection} IS NOT NULL)`,
     ),
   ],
 );

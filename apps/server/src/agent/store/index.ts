@@ -147,6 +147,7 @@ export class DrizzleAgentStore implements AgentStore {
   readonly insertMessages = this.#transcript.insertMessages.bind(this.#transcript);
   readonly findLastAssistantMessageByInbound =
     this.#transcript.findLastAssistantMessageByInbound.bind(this.#transcript);
+  readonly isCursorAnswered = this.#transcript.isCursorAnswered.bind(this.#transcript);
   readonly isCursorRebatched = this.#transcript.isCursorRebatched.bind(this.#transcript);
   readonly getLastAssistantMessage = this.#transcript.getLastAssistantMessage.bind(
     this.#transcript,
@@ -164,6 +165,7 @@ export class DrizzleAgentStore implements AgentStore {
     this.#transcript.insertOrRecoverSystemPromptSnapshot.bind(this.#transcript);
   readonly insertOrRecoverSummary = this.#transcript.insertOrRecoverSummary.bind(this.#transcript);
   readonly listTurnMessages = this.#transcript.listTurnMessages.bind(this.#transcript);
+  readonly listUserRowsAfter = this.#transcript.listUserRowsAfter.bind(this.#transcript);
   readonly findAnsweredCursorBefore = this.#transcript.findAnsweredCursorBefore.bind(
     this.#transcript,
   );

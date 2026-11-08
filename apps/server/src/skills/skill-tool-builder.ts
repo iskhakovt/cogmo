@@ -3,8 +3,10 @@ import { match, P } from "ts-pattern";
 import { compileToolMatchers } from "../agent/tool-matchers.js";
 import { reject, ToolRegistry, type ToolRejection, type ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
+import { truncate } from "../util/string.js";
+import { skillRunErrorClass } from "./invoke/run-result.js";
 import { describeInvokeRejection, type SkillInvokeRejection } from "./invoke-rejection.js";
-import type { SkillRunner, SkillToolDef } from "./runner.js";
+import type { SkillRunner, SkillRunResult, SkillToolDef } from "./runner.js";
 import { summarizeWasmPackagesError } from "./worker-wasm/wasm.js";
 
 const log = logger.child({ component: "skills.tool-builder" });
@@ -52,9 +54,55 @@ function toolRejection(name: string, rejection: SkillInvokeRejection): ToolRejec
     .exhaustive();
 }
 
-/** The turn a skill tool is built for: the conversation's user, whom a run acts for. */
+/**
+ * A failed run as the model reads it, by what its error means: an
+ * `output_invalid` run acted and returned the kept output, a `lost` one may
+ * have acted, a `pausing` one may succeed later.
+ */
+function runFailureMessage(
+  name: string,
+  run: Extract<SkillRunResult, { status: "error" }>,
+): string {
+  return match(run)
+    .returnType<string>()
+    .with({ errorKind: "output_invalid" }, ({ runId, error, output }) => {
+      const returned = output === undefined ? "" : ` It returned: ${quotedOutput(output)}`;
+      return `skill ${name} ran, but its output failed validation (run ${runId}): ${error}. Its effects happened.${returned}`;
+    })
+    .with({ errorKind: P.not("output_invalid") }, ({ runId, error, errorKind }) =>
+      match(skillRunErrorClass(errorKind))
+        .returnType<string>()
+        .with(
+          "lost",
+          () =>
+            `skill ${name} lost its result (run ${runId}, ${errorKind}): ${error}. It may have done everything, nothing, or stopped partway. Do not run it again on your own: tell the user what was attempted and ask them to check the result before deciding.`,
+        )
+        .with(
+          "pausing",
+          () =>
+            `skill ${name} hit a temporary failure (run ${runId}, ${errorKind}): ${error}. A later attempt may succeed.`,
+        )
+        .with(
+          P.union("defect", "expected", "legacy"),
+          () => `skill ${name} failed (run ${runId}, ${errorKind}): ${error}`,
+        )
+        .exhaustive(),
+    )
+    .exhaustive();
+}
+
+/** How much of an `output_invalid` run's output the model is shown. */
+const QUOTED_OUTPUT_CHARS = 2000;
+
+/** The output a schema refused, as JSON, cut to {@link QUOTED_OUTPUT_CHARS}. */
+function quotedOutput(output: unknown): string {
+  return truncate(JSON.stringify(output), QUOTED_OUTPUT_CHARS);
+}
+
+/** The turn a skill tool is built for: the conversation's user and profile, whom a run acts for. */
 export interface SkillToolTurn {
   userId: string;
+  profileId: string;
 }
 
 /**
@@ -96,7 +144,7 @@ export function buildSkillToolSpec(
         name: def.name,
         inputs: input,
         trigger: "manual",
-        runAs: { userId: turn.userId, service },
+        runAs: { userId: turn.userId, profileId: turn.profileId, service },
         // Durability covers replay; the key covers the crash between the
         // skill's side effects committing and Inngest recording the step
         // result. `runner.invoke` routes it to the `recovery_point` state
@@ -107,7 +155,7 @@ export function buildSkillToolSpec(
         .mapErr((rejection) => toolRejection(def.name, rejection))
         .andThen((run) =>
           run.status === "error"
-            ? reject(`skill ${def.name} failed (run ${run.runId}): ${run.error}`)
+            ? reject(runFailureMessage(def.name, run))
             : ok(JSON.stringify({ ok: true, runId: run.runId, output: run.output ?? null })),
         );
     },

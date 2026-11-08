@@ -16,7 +16,7 @@ import type { SkillRunTrigger, SkillStore } from "../store/index.js";
 import { describeWasmPackagesError } from "../worker-wasm/wasm.js";
 import { executeRun } from "./execute-run.js";
 import { finishRun } from "./finish-run.js";
-import type { SkillRunResult } from "./run-result.js";
+import { finishedVerdictOf, reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
 import { planRuntime, type RuntimeConfig, type RuntimePlan, type SkillRuntime } from "./runtime.js";
 import { startRun } from "./start-run.js";
 import type { LazyWarmPool } from "./warm-pool.js";
@@ -101,6 +101,8 @@ export async function invokeSkill(
     skillId: skill.id,
     trigger,
     inputs: opts.inputs,
+    gitSha: skill.gitSha,
+    runAs: { userId: opts.runAs.userId, profileId: opts.runAs.profileId },
     ...(idempotencyKey !== undefined && { idempotencyKey }),
   });
   const logFields = {
@@ -134,21 +136,32 @@ export async function invokeSkill(
         throw new Error(`invoke: run ${runId} was inserted under a key that already had a row`);
       }
       const executed = await executeRun(deps, {
-        run: { id: runId, createdAt },
+        // The invocation's logical key, which `ctx.run()` hands the skill.
+        run: { id: runId, key: idempotencyKey ?? runId, createdAt },
         skill,
         cached,
         inputs: opts.inputs,
         runAs: opts.runAs,
         runtime,
       });
-      return ok(await finishRun(deps, { runId, skillName: name, cached, executed }));
+      // A run the sweeper finished first has the sweeper's error as its result.
+      return match(executed)
+        .returnType<Promise<Result<SkillRunResult, SkillInvokeRejection>>>()
+        .with({ kind: "executed" }, async ({ outcome }) =>
+          ok(await finishRun(deps, { runId, skillName: name, cached, executed: outcome })),
+        )
+        .with({ kind: "swept" }, async ({ row }) =>
+          ok(reconstructFinishedResult(runId, finishedVerdictOf(row))),
+        )
+        .exhaustive();
     })
     .exhaustive();
 }
 
 /**
- * The runtime a run executes on: the wasm packages the lockfile needs,
- * resolved by the host, or the started warm pool. A lockfile whose packages
+ * The runtime a run executes on: the wasm packages the skill needs (its
+ * lockfile's, and the runtime's pydantic when it imports it), resolved by
+ * the host, or the started warm pool. A lockfile whose packages
  * are unavailable rejects the invocation; a pool that can't start throws.
  */
 async function prepareRuntime(
@@ -159,7 +172,7 @@ async function prepareRuntime(
   return match(plan)
     .returnType<Promise<Result<SkillRuntime, SkillInvokeRejection>>>()
     .with({ kind: "wasm" }, async () =>
-      (await deps.runtime.resolveWasmPackages(cached.lockfile))
+      (await deps.runtime.resolveWasmPackages({ lockfile: cached.lockfile, body: cached.body }))
         .map((packages): SkillRuntime => ({ kind: "wasm", packages }))
         .mapErr((error): SkillInvokeRejection => {
           log.warn(

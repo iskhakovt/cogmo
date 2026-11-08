@@ -9,12 +9,23 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { err, ok, okAsync, type Result, ResultAsync } from "neverthrow";
 import * as R from "remeda";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { z } from "zod";
 import { logger } from "../../logger.js";
-import { type CtxHandler, Dispatcher } from "../dispatcher.js";
-import type { TaskOutcome, TaskResult } from "../protocol.js";
-import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
+import {
+  type CtxHandler,
+  Dispatcher,
+  type GateOutcome,
+  unreportedTaskKind,
+} from "../dispatcher.js";
+import {
+  type DispatchGate,
+  fromTaskResult,
+  type TaskOutcome,
+  type TaskRun,
+  withheldOutcome,
+} from "../protocol.js";
+import { timeoutSignal } from "../wall-clock.js";
 import type { StartFailure, WorkerFrame } from "../worker-state.js";
 import { type ChildInit, ProbeReplySchema } from "./child-protocol.js";
 import { INTERRUPT_MESSAGE } from "./interrupt-message.js";
@@ -63,13 +74,14 @@ export function pyodideDistDir(): string {
 
 export interface RunOnWorkerParams {
   taskId: string;
+  run: TaskRun;
   /** Skill name — informational only; surfaced in logs. */
   skillName: string;
   /** Source of `skill.py`. */
   body: string;
   inputs: unknown;
-  /** Wall-clock cap in seconds. Defaults to 30 s. */
-  wallClockS?: number;
+  /** Wall-clock cap in seconds (`wallClockSOf`), the one `deadline_at` counts from. */
+  wallClockS: number;
   /** Child init cap (fork, Pyodide boot, package installs). Defaults to 60 s. */
   readyTimeoutMs?: number;
   /** Pyodide's package cache, which the host fills and verifies (`fillBuiltinCache`). */
@@ -83,6 +95,8 @@ export interface RunOnWorkerParams {
   /** WebAssembly memory ceiling, in MiB. */
   memoryMb: number;
   ctxHandler: CtxHandler;
+  /** Asked once the child is ready, immediately before `task_invoke` is sent. */
+  dispatch: DispatchGate;
 }
 
 /**
@@ -105,7 +119,14 @@ export interface WasmChild {
 /** The parts of {@link RunOnWorkerParams} that drive a task on a running child. */
 type TaskParams = Pick<
   RunOnWorkerParams,
-  "taskId" | "skillName" | "inputs" | "wallClockS" | "readyTimeoutMs" | "ctxHandler"
+  | "taskId"
+  | "run"
+  | "skillName"
+  | "inputs"
+  | "wallClockS"
+  | "readyTimeoutMs"
+  | "ctxHandler"
+  | "dispatch"
 >;
 
 /**
@@ -119,7 +140,12 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
   const forked = await forkRunChild(params);
   return forked.match(
     (child) => runOnChild(child, params),
-    (reason) => Promise.resolve({ ok: false, error: `worker init failed: ${reason}` }),
+    (reason) =>
+      Promise.resolve({
+        ok: false,
+        errorKind: "runtime_unavailable",
+        error: `worker init failed: ${reason}`,
+      }),
   );
 }
 
@@ -188,7 +214,11 @@ export async function runOnChild(child: WasmChild, params: TaskParams): Promise<
     return await opened.match(
       (dispatcher) => runTask(dispatcher, params, child),
       (failure) =>
-        Promise.resolve({ ok: false, error: describeStartFailure(failure, readyTimeoutMs) }),
+        Promise.resolve({
+          ok: false,
+          errorKind: "runtime_unavailable",
+          error: describeStartFailure(failure, readyTimeoutMs),
+        }),
     );
   } finally {
     child.kill();
@@ -196,19 +226,43 @@ export async function runOnChild(child: WasmChild, params: TaskParams): Promise<
   }
 }
 
-/** Run the child's one task under the wall clock, then close its channel. */
+/**
+ * Run the child's one task under the wall clock once its gate lets it
+ * through, then close its channel.
+ */
 async function runTask(
   dispatcher: Dispatcher,
   params: TaskParams,
   child: WasmChild,
 ): Promise<RunOnWorkerResult> {
-  const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.wasm;
+  try {
+    // Refused only if the child died since its handshake; the invoke then
+    // fails the task as a value, unsent.
+    void dispatcher.tryAcquire();
+    const gate = await dispatcher.gate(params.dispatch);
+    return await match(gate)
+      .returnType<Promise<RunOnWorkerResult>>()
+      .with({ kind: "withhold" }, async () => withheldOutcome())
+      .with({ kind: P.union("send", "not_admitted") }, (taken) =>
+        sendTask(dispatcher, params, child, taken),
+      )
+      .exhaustive();
+  } finally {
+    dispatcher.close("finished");
+  }
+}
+
+/** Send the task under the wall clock, interrupting the child when it passes. */
+async function sendTask(
+  dispatcher: Dispatcher,
+  params: TaskParams,
+  child: WasmChild,
+  gate: Exclude<GateOutcome, { kind: "withhold" }>,
+): Promise<RunOnWorkerResult> {
+  const { wallClockS } = params;
+  const lost = unreportedTaskKind(gate);
   const finished = new AbortController();
   try {
-    // Refused only if the child died since its handshake; the invoke below
-    // then fails the task as a value.
-    void dispatcher.tryAcquire();
-
     const wallClock = timeoutSignal(wallClockS * 1000);
     wallClock.addEventListener(
       "abort",
@@ -222,7 +276,13 @@ async function runTask(
       { once: true, signal: finished.signal },
     );
     const { result } = await dispatcher.invoke(
-      { type: "task_invoke", id: params.taskId, skill: params.skillName, inputs: params.inputs },
+      {
+        type: "task_invoke",
+        id: params.taskId,
+        run: params.run,
+        skill: params.skillName,
+        inputs: params.inputs,
+      },
       {
         ctxHandler: params.ctxHandler,
         deadline: timeoutSignal(wallClockS * 1000 + TERMINATE_GRACE_MS),
@@ -230,18 +290,27 @@ async function runTask(
     );
     // Whatever arrives once the interrupt was sent is the wall clock's doing,
     // a result included: a skill can catch `KeyboardInterrupt` and return.
-    if (wallClock.aborted) return { ok: false, error: "wall_clock_exceeded" };
-    return result.match(fromTaskResult, (failure) => ({
-      ok: false,
-      error: match(failure)
-        .with({ kind: "timed_out" }, () => "wall_clock_exceeded")
-        .with({ kind: "failed" }, ({ reason }) => reason)
-        .with({ kind: "exited_without_result" }, () => "task_exited_without_result")
+    if (wallClock.aborted) {
+      return { ok: false, errorKind: "wall_clock_exceeded", error: "wall_clock_exceeded" };
+    }
+    return result.match(fromTaskResult, (failure) =>
+      match(failure)
+        .returnType<RunOnWorkerResult>()
+        .with({ kind: "timed_out" }, () => ({
+          ok: false,
+          errorKind: "wall_clock_exceeded",
+          error: "wall_clock_exceeded",
+        }))
+        .with({ kind: "failed" }, ({ reason }) => ({ ok: false, errorKind: lost, error: reason }))
+        .with({ kind: "exited_without_result" }, () => ({
+          ok: false,
+          errorKind: lost,
+          error: "task_exited_without_result",
+        }))
         .exhaustive(),
-    }));
+    );
   } finally {
     finished.abort();
-    dispatcher.close("finished");
   }
 }
 
@@ -263,13 +332,6 @@ function describeStartFailure(failure: StartFailure, readyTimeoutMs: number): st
     .with({ kind: "ended" }, ({ reason }) => `worker init failed: ${reason}`)
     .with({ kind: "closed" }, ({ reason }) => `worker closed before ready: ${reason}`)
     .exhaustive();
-}
-
-function fromTaskResult(result: TaskResult): RunOnWorkerResult {
-  return {
-    ...(result.ok ? { ok: true, output: result.output } : { ok: false, error: result.error }),
-    ...(result.rusage !== undefined && { rusage: result.rusage }),
-  };
 }
 
 export interface WasmProbeOptions {

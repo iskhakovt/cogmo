@@ -38,7 +38,7 @@ import { expectDefined } from "../test/assertions.js";
 import {
   doneFrame,
   fakeRunInTx,
-  loopResult,
+  finishedLoop,
   MOCK_MESSAGE_CREATED_AT,
   mockAgentStore,
   mockAttachmentStore,
@@ -55,6 +55,7 @@ import {
   mockVoiceResolver,
   scriptedStream,
   spyOnInngestSend,
+  TEST_PREFIX_VIOLATION,
   turnContextSent,
 } from "../test/factories.js";
 import { createWireRecorder } from "../test/wire-recorder.js";
@@ -117,7 +118,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
     }),
     runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-      loopResult({
+      finishedLoop({
         text: "Hello from assistant",
         newMessages: [
           { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
@@ -127,6 +128,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     images: mockImages(),
+    prefixViolation: TEST_PREFIX_VIOLATION,
     ...overrides,
   };
 }
@@ -436,7 +438,7 @@ describe("handle-message — crash recovery / step replay", () => {
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         const stepRun = expectDefined(params.stepRun, "stepRun");
         const cached = await stepRun("tool-iter1-0", handlerBody);
-        return loopResult({
+        return finishedLoop({
           text: cached,
           newMessages: [{ role: "assistant", content: [{ type: "text", text: cached }] }],
         });
@@ -691,7 +693,7 @@ describe("handle-message — crash recovery / step replay", () => {
       resolveProvider: mockResolver(provider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           streamed: { text: "dangling fragment", toolUseIds: [] },
           degraded: { reason: "model refused the request", subtype: "refusal" },
         }),
@@ -903,7 +905,7 @@ describe("handle-message — late replies", () => {
       }),
       debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "flush" },
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
-        loopResult({
+        finishedLoop({
           text: "late reply",
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "late reply" }] }],
           streamed: { text: "late reply", toolUseIds: [] },
@@ -1030,6 +1032,153 @@ describe("handle-message — late replies", () => {
     expect(R.intersection(POST_PERSIST_STEPS, plannedSteps(ctx))).toEqual(POST_PERSIST_STEPS);
     expect(announced(ctx)).toMatchObject({
       data: { conversationId: "conv-1", messageId: "asst-committed" },
+    });
+  });
+
+  describe("before an iteration streams", () => {
+    /**
+     * The REAL loop over a provider that would stream a late reply, with the
+     * store's answers to the pre-stream check.
+     */
+    function preStreamDeps(store: { answered: boolean; rebatched: boolean }) {
+      const chatStream = vi.fn(() =>
+        scriptedStream(
+          [{ type: "text_delta", text: "late reply" }],
+          doneFrame("end_turn", { inputTokens: 10, outputTokens: 5 }),
+        ),
+      );
+      const handle = mockDeliveryHandle();
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getLastAssistantMessage: vi
+            .fn()
+            .mockResolvedValue({ id: "asst-prev", lastInboundMessageId: "inbound-0" }),
+          isCursorAnswered: vi.fn().mockResolvedValue(store.answered),
+          isCursorRebatched: vi.fn().mockResolvedValue(store.rebatched),
+        }),
+        resolveProvider: mockResolver(mockProvider({ chatStream })),
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop,
+      });
+      return { deps, chatStream, handle };
+    }
+
+    it("stops a turn whose inbounds a younger turn re-batched, so nothing streams", async () => {
+      const { deps, chatStream, handle } = preStreamDeps({ answered: false, rebatched: true });
+
+      const { result, ctx } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+      }).execute();
+
+      expect(result).toEqual({ status: "skipped", reason: "superseded" });
+      expect(chatStream).not.toHaveBeenCalled();
+      expect(handle.push).not.toHaveBeenCalled();
+      // The stream closes as finished: nothing went wrong for the user to see.
+      expect(handle.finish).toHaveBeenCalled();
+      expect(handle.abort).not.toHaveBeenCalled();
+      const planned = plannedSteps(ctx);
+      expect(planned).toContain("llm-iter1");
+      expect(planned).toContain("finish-stream");
+      expect(planned).not.toContain("degraded-reply");
+      expect(planned).not.toContain("persist-new-messages");
+      expect(R.intersection(planned, POST_PERSIST_STEPS)).toEqual([]);
+      expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+      // The check reads only rows newer than the reply admission found.
+      expect(deps.agentStore.isCursorRebatched).toHaveBeenCalledWith(expect.anything(), {
+        conversationId: "conv-1",
+        cursor: "inbound-1",
+        afterMessageId: "asst-prev",
+      });
+    });
+
+    it("stops a turn whose batch another run already answered", async () => {
+      const { deps, chatStream, handle } = preStreamDeps({ answered: true, rebatched: false });
+
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+      }).execute();
+
+      expect(result).toEqual({ status: "skipped", reason: "superseded" });
+      expect(chatStream).not.toHaveBeenCalled();
+      expect(handle.push).not.toHaveBeenCalled();
+      expect(deps.agentStore.isCursorAnswered).toHaveBeenCalledWith(expect.anything(), {
+        conversationId: "conv-1",
+        cursor: "inbound-1",
+        afterMessageId: "asst-prev",
+      });
+    });
+
+    it("stops at a later iteration, after the tool iteration before it", async () => {
+      // The first iteration ran before the younger turn's row committed.
+      const { deps, chatStream, handle } = preStreamDeps({ answered: false, rebatched: true });
+
+      const { result, ctx } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+        steps: [
+          {
+            // A tool the turn's table doesn't hold, answered with an error
+            // result, so the loop goes on to a second iteration.
+            id: "llm-iter1",
+            handler: () => ({
+              kind: "drained",
+              content: [{ type: "tool_use", id: "t1", name: "ghost", input: {} }],
+              stopReason: "tool_use",
+              model: "mock-model",
+              usage: { inputTokens: 10, outputTokens: 5 },
+              repaired: null,
+              emitted: { text: "", toolUseIds: ["t1"] },
+            }),
+          },
+        ],
+      }).execute();
+
+      expect(result).toEqual({ status: "skipped", reason: "superseded" });
+      expect(chatStream).not.toHaveBeenCalled();
+      const textPushes = vi
+        .mocked(handle.push)
+        .mock.calls.flat()
+        .filter((e) => e.type === "text_delta");
+      expect(textPushes).toEqual([]);
+      const planned = plannedSteps(ctx);
+      expect(planned).toContain("llm-iter2");
+      expect(planned).toContain("finish-stream");
+      expect(planned).not.toContain("persist-new-messages");
+      expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+    });
+
+    it("streams and persists the reply while no other reply owns the inbounds", async () => {
+      // Non-vacuity check for the tests above: the same turn, unstopped.
+      const { deps, chatStream, handle } = preStreamDeps({ answered: false, rebatched: false });
+
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+      }).execute();
+
+      expect(result).toEqual({ status: "processed", conversationId: "conv-1" });
+      expect(chatStream).toHaveBeenCalledTimes(1);
+      expect(handle.push).toHaveBeenCalledWith({ type: "text_delta", text: "late reply" });
+      expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+    });
+
+    it("replays a stored superseded verdict without asking again", async () => {
+      // The check would now let the turn through; the stored verdict holds.
+      const { deps, chatStream } = preStreamDeps({ answered: false, rebatched: false });
+
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+        steps: [{ id: "llm-iter1", handler: () => ({ kind: "superseded" }) }],
+      }).execute();
+
+      expect(result).toEqual({ status: "skipped", reason: "superseded" });
+      expect(chatStream).not.toHaveBeenCalled();
+      expect(deps.agentStore.isCursorAnswered).not.toHaveBeenCalled();
+      expect(deps.agentStore.isCursorRebatched).not.toHaveBeenCalled();
+      expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
     });
   });
 });
@@ -1712,7 +1861,7 @@ describe("handle-message — core-memory scope frozen across re-invocations", ()
       }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async ({ service }) => {
         await service.coreMemory.update("identity", "Name: Thorin");
-        return loopResult({
+        return finishedLoop({
           text: "Saved.",
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "Saved." }] }],
         });

@@ -12,6 +12,7 @@ import {
   type ExecuteRegisterParams,
   type InsertDeployParams,
   type InsertSkillParams,
+  type NewRunParams,
   type SkillDeployStatus,
   type SkillRow,
   type SkillRunIdentity,
@@ -75,6 +76,23 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA_NEW = "fedcba9876543210fedcba9876543210fedcba98";
 const SHA_EDIT = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 const SHA_THIRD = "1111111111111111111111111111111111111111";
+
+/** The audit columns every new run records: the skill's sha and the owner as run-as. */
+function audit(): Pick<NewRunParams, "gitSha" | "runAs"> {
+  return { gitSha: SHA, runAs: owner };
+}
+
+/** A deadline well past any test's clock. */
+const DEADLINE = new Date("2099-01-01T00:00:00Z");
+
+/** Move a `started` run to `dispatched`, as a runtime does before it sends the task. */
+async function dispatch(id: string): Promise<void> {
+  expect(
+    await tx((trx) => store.transitionToDispatched(trx, { id, deadlineAt: DEADLINE })),
+  ).toEqual({
+    kind: "dispatched",
+  });
+}
 
 const INPUTS_SCHEMA: SkillInputs = {
   type: "object",
@@ -451,6 +469,7 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "manual",
           inputs: { x: 7 },
@@ -485,6 +504,8 @@ describe("DrizzleSkillStore", () => {
       expect(calls[0]?.target).toBe("slack_webhook");
       expect(calls[1]?.target).toBeNull();
 
+      await dispatch(run.id);
+
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
@@ -511,15 +532,17 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "manual",
           inputs: {},
         }),
       );
+      await dispatch(run.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          outcome: { kind: "error", error: "Boom" },
+          outcome: { kind: "error", error: { kind: "skill_raised", message: "Boom" } },
           resourceUsage: { wallClockMs: 7, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -527,7 +550,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToFinished(trx, {
           id: run.id,
-          verdict: { status: "error", error: "Boom" },
+          verdict: { status: "error", error: { kind: "skill_raised", message: "Boom" } },
         }),
       );
       const reloaded = await tx((trx) => store.getRun(trx, run.id));
@@ -540,6 +563,7 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "manual",
           inputs: {},
@@ -563,6 +587,7 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "manual",
           inputs: {},
@@ -589,6 +614,7 @@ describe("DrizzleSkillStore", () => {
       await expect(
         tx((trx) =>
           store.insertRun(trx, {
+            ...audit(),
             skillId: skill.id,
             trigger: "manual",
             inputs: null as any,
@@ -598,6 +624,7 @@ describe("DrizzleSkillStore", () => {
       await expect(
         tx((trx) =>
           store.insertRun(trx, {
+            ...audit(),
             skillId: skill.id,
             trigger: "manual",
             inputs: undefined as any,
@@ -610,11 +637,13 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "manual",
           inputs: {},
         }),
       );
+      await dispatch(run.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
@@ -638,7 +667,12 @@ describe("DrizzleSkillStore", () => {
     it("insertRun starts with resourceUsage=null (status='running')", async () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
-        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+        store.insertRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "manual",
+          inputs: {},
+        }),
       );
       expect(run.resourceUsage).toBeNull();
       expect(run.status).toBe("running");
@@ -647,8 +681,14 @@ describe("DrizzleSkillStore", () => {
     it("transitionToExecuted persists both wall-clock and peak-memory", async () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
-        store.insertRun(trx, { skillId: skill.id, trigger: "cron", inputs: {} }),
+        store.insertRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: {},
+        }),
       );
+      await dispatch(run.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
@@ -664,12 +704,21 @@ describe("DrizzleSkillStore", () => {
     it("transitionToExecuted tolerates peakMemoryBytes=null (wasm / timeout paths)", async () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
-        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+        store.insertRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "manual",
+          inputs: {},
+        }),
       );
+      await dispatch(run.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          outcome: { kind: "error", error: "wall_clock_exceeded" },
+          outcome: {
+            kind: "error",
+            error: { kind: "wall_clock_exceeded", message: "wall_clock_exceeded" },
+          },
           resourceUsage: { wallClockMs: 30_000, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -681,10 +730,16 @@ describe("DrizzleSkillStore", () => {
     it("rejects negative wallClockMs at the Zod boundary", async () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
-        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+        store.insertRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "manual",
+          inputs: {},
+        }),
       );
       // Negative wallClockMs passes TypeScript (z.number().int() is just `number`
       // at the type level) but Zod rejects at the store boundary.
+      await dispatch(run.id);
       await expect(
         tx((trx) =>
           store.transitionToExecuted(trx, {
@@ -703,6 +758,7 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill({ name: `t-${trigger}` });
       const run = await tx((trx) =>
         store.insertRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger,
           inputs: {},
@@ -849,6 +905,7 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill({ name: "with-key" });
       const result = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: { x: 1 },
@@ -866,13 +923,21 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill({ name: "with-key" });
       const { row } = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: { x: 1 },
           idempotencyKey: "skill-cron:abc:lookup",
         }),
       );
-      await tx((trx) => store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }));
+      await tx((trx) =>
+        store.insertRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "manual",
+          inputs: {},
+        }),
+      );
 
       const found = await tx((trx) => store.getRunByIdempotencyKey(trx, "skill-cron:abc:lookup"));
       expect(found?.id).toBe(row.id);
@@ -884,6 +949,7 @@ describe("DrizzleSkillStore", () => {
       const key = "skill-cron:abc:2026-06-01T09:00:00.000Z";
       const first = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: { x: 1 },
@@ -892,6 +958,7 @@ describe("DrizzleSkillStore", () => {
       );
       const second = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: { x: 1 },
@@ -909,12 +976,14 @@ describe("DrizzleSkillStore", () => {
       const key = "skill-tool:turn-1:0:0";
       const first = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "event",
           inputs: { x: 1 },
           idempotencyKey: key,
         }),
       );
+      await dispatch(first.row.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: first.row.id,
@@ -927,6 +996,7 @@ describe("DrizzleSkillStore", () => {
 
       const retry = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "manual",
           inputs: { x: 2 },
@@ -942,6 +1012,7 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const { row } = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: {},
@@ -949,6 +1020,7 @@ describe("DrizzleSkillStore", () => {
         }),
       );
       const finishedAt = new Date("2026-06-01T09:00:42Z");
+      await dispatch(row.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
@@ -973,12 +1045,14 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const { row } = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: {},
           idempotencyKey: "k-2",
         }),
       );
+      await dispatch(row.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
@@ -1002,12 +1076,14 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const { row } = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: {},
           idempotencyKey: "k-race",
         }),
       );
+      await dispatch(row.id);
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
@@ -1035,6 +1111,7 @@ describe("DrizzleSkillStore", () => {
       const skill = await seedSkill();
       const { row } = await tx((trx) =>
         store.startOrRecoverRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: {},
@@ -1056,8 +1133,14 @@ describe("DrizzleSkillStore", () => {
       async function executedRun(): Promise<string> {
         const skill = await seedSkill();
         const run = await tx((trx) =>
-          store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+          store.insertRun(trx, {
+            ...audit(),
+            skillId: skill.id,
+            trigger: "manual",
+            inputs: {},
+          }),
         );
+        await dispatch(run.id);
         await tx((trx) =>
           store.transitionToExecuted(trx, {
             id: run.id,
@@ -1076,13 +1159,21 @@ describe("DrizzleSkillStore", () => {
       it("a started row cannot carry the executed payload", async () => {
         const skill = await seedSkill();
         const run = await tx((trx) =>
-          store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+          store.insertRun(trx, {
+            ...audit(),
+            skillId: skill.id,
+            trigger: "manual",
+            inputs: {},
+          }),
         );
         await expect(
           db.update(skillRuns).set({ finishedAt: new Date() }).where(eq(skillRuns.id, run.id)),
         ).rejects.toMatchObject(rejectedBy("chk_skill_runs_executed_payload"));
         await expect(
-          db.update(skillRuns).set({ error: "boom" }).where(eq(skillRuns.id, run.id)),
+          db
+            .update(skillRuns)
+            .set({ error: "boom", errorKind: "skill_raised" })
+            .where(eq(skillRuns.id, run.id)),
         ).rejects.toMatchObject(rejectedBy("chk_skill_runs_executed_payload"));
       });
 
@@ -1107,9 +1198,83 @@ describe("DrizzleSkillStore", () => {
         await expect(
           db
             .update(skillRuns)
-            .set({ status: "error", recoveryPoint: "finished", error: "boom" })
+            .set({
+              status: "error",
+              recoveryPoint: "finished",
+              error: "boom",
+              errorKind: "skill_raised",
+            })
             .where(eq(skillRuns.id, id)),
         ).rejects.toMatchObject(rejectedBy("chk_skill_runs_outcome"));
+      });
+
+      it("an output_invalid verdict keeps the output", async () => {
+        const id = await executedRun();
+        await db
+          .update(skillRuns)
+          .set({
+            status: "error",
+            recoveryPoint: "finished",
+            error: "bad",
+            errorKind: "output_invalid",
+          })
+          .where(eq(skillRuns.id, id));
+        const row = await tx((trx) => store.getRun(trx, id));
+        expect(row).toMatchObject({
+          output: { echo: 1 },
+          error: "bad",
+          errorKind: "output_invalid",
+        });
+      });
+
+      it("an executed row keeps no output beside an error", async () => {
+        const executedOnly = await executedRun();
+        await expect(
+          db
+            .update(skillRuns)
+            .set({ error: "bad", errorKind: "output_invalid" })
+            .where(eq(skillRuns.id, executedOnly)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_outcome"));
+      });
+
+      it("an error has its kind, and nothing else does", async () => {
+        const id = await executedRun();
+        await expect(
+          db.update(skillRuns).set({ output: null, error: "boom" }).where(eq(skillRuns.id, id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_error_kind_with_error"));
+        await expect(
+          db.update(skillRuns).set({ errorKind: "skill_raised" }).where(eq(skillRuns.id, id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_error_kind_with_error"));
+      });
+
+      it("deadline_at arrives with dispatched, and a dispatched row has no executed payload", async () => {
+        const skill = await seedSkill();
+        const run = await tx((trx) =>
+          store.insertRun(trx, { ...audit(), skillId: skill.id, trigger: "manual", inputs: {} }),
+        );
+        await expect(
+          db.update(skillRuns).set({ deadlineAt: DEADLINE }).where(eq(skillRuns.id, run.id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_deadline_at"));
+        await expect(
+          db.update(skillRuns).set({ recoveryPoint: "dispatched" }).where(eq(skillRuns.id, run.id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_deadline_at"));
+        await dispatch(run.id);
+        await expect(
+          db.update(skillRuns).set({ finishedAt: new Date() }).where(eq(skillRuns.id, run.id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_executed_payload"));
+      });
+
+      it("the audit columns are set together", async () => {
+        const skill = await seedSkill();
+        const run = await tx((trx) =>
+          store.insertRun(trx, { ...audit(), skillId: skill.id, trigger: "manual", inputs: {} }),
+        );
+        await expect(
+          db.update(skillRuns).set({ gitSha: null }).where(eq(skillRuns.id, run.id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_audit_together"));
+        await expect(
+          db.update(skillRuns).set({ runAsProfileId: null }).where(eq(skillRuns.id, run.id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_audit_together"));
       });
 
       it("a success verdict carries no error", async () => {
@@ -1117,7 +1282,12 @@ describe("DrizzleSkillStore", () => {
         await expect(
           db
             .update(skillRuns)
-            .set({ status: "success", recoveryPoint: "finished", error: "boom" })
+            .set({
+              status: "success",
+              recoveryPoint: "finished",
+              error: "boom",
+              errorKind: "skill_raised",
+            })
             .where(eq(skillRuns.id, id)),
         ).rejects.toMatchObject(rejectedBy("chk_skill_runs_outcome"));
       });
@@ -1130,20 +1300,53 @@ describe("DrizzleSkillStore", () => {
       // don't. Verifies the constraint definition matches the intent.
       const skill = await seedSkill();
       const a = await tx((trx) =>
-        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+        store.insertRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "manual",
+          inputs: {},
+        }),
       );
       const b = await tx((trx) =>
-        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+        store.insertRun(trx, {
+          ...audit(),
+          skillId: skill.id,
+          trigger: "manual",
+          inputs: {},
+        }),
       );
       expect(a.id).not.toBe(b.id);
       expect(a.idempotencyKey).toBeNull();
       expect(b.idempotencyKey).toBeNull();
     });
 
+    it("records the run's sha and run-as on insert, and runs it live", async () => {
+      const skill = await seedSkill();
+      const runAs = await seedIdentity("other");
+      const run = await tx((trx) =>
+        store.insertRun(trx, {
+          skillId: skill.id,
+          trigger: "manual",
+          inputs: {},
+          gitSha: SHA_NEW,
+          runAs,
+        }),
+      );
+      expect(run).toMatchObject({
+        gitSha: SHA_NEW,
+        runAsUserId: runAs.userId,
+        runAsProfileId: runAs.profileId,
+        shadow: false,
+        deadlineAt: null,
+        errorKind: null,
+      });
+    });
+
     it("explicit idempotencyKey on insertRun stamps the column", async () => {
       const skill = await seedSkill();
       const row = await tx((trx) =>
         store.insertRun(trx, {
+          ...audit(),
           skillId: skill.id,
           trigger: "cron",
           inputs: {},
@@ -1152,6 +1355,300 @@ describe("DrizzleSkillStore", () => {
       );
       expect(row.idempotencyKey).toBe("explicit-key");
       expect(row.recoveryPoint).toBe("started");
+    });
+  });
+
+  describe("dispatch, pre-dispatch failure and the sweep", () => {
+    const CUTOFFS = {
+      createdBefore: new Date("2026-06-01T09:15:00Z"),
+      deadlineBefore: new Date("2026-06-01T09:30:00Z"),
+    };
+    const USAGE = { wallClockMs: 5, peakMemoryBytes: null };
+
+    async function startedRun(createdAt: string): Promise<string> {
+      const skill = await seedSkill({ name: `s-${createdAt.replace(/\W/g, "")}` });
+      const run = await tx((trx) =>
+        store.insertRun(trx, { ...audit(), skillId: skill.id, trigger: "cron", inputs: {} }),
+      );
+      await db
+        .update(skillRuns)
+        .set({ createdAt: new Date(createdAt) })
+        .where(eq(skillRuns.id, run.id));
+      return run.id;
+    }
+
+    async function dispatchedRun(createdAt: string, deadlineAt: string): Promise<string> {
+      const id = await startedRun(createdAt);
+      await tx((trx) =>
+        store.transitionToDispatched(trx, { id, deadlineAt: new Date(deadlineAt) }),
+      );
+      return id;
+    }
+
+    async function sweep(id: string, stuckAt: "started" | "dispatched") {
+      return tx((trx) =>
+        store.sweepRun(trx, {
+          run: { id, stuckAt, createdAt: new Date("2026-06-01T09:00:00Z") },
+          cutoffs: CUTOFFS,
+          message: "swept",
+          resourceUsage: USAGE,
+          finishedAt: new Date("2026-06-01T09:30:00Z"),
+        }),
+      );
+    }
+
+    it("transitionToDispatched writes deadline_at and moves started to dispatched", async () => {
+      const id = await startedRun("2026-06-01T09:00:00Z");
+      const deadlineAt = new Date("2026-06-01T09:01:30Z");
+      expect(await tx((trx) => store.transitionToDispatched(trx, { id, deadlineAt }))).toEqual({
+        kind: "dispatched",
+      });
+      const row = await tx((trx) => store.getRun(trx, id));
+      expect(row).toMatchObject({ recoveryPoint: "dispatched", status: "running", deadlineAt });
+    });
+
+    it("transitionToDispatched returns swept with the row the sweeper finished", async () => {
+      const id = await startedRun("2026-06-01T09:00:00Z");
+      expect(await sweep(id, "started")).toEqual({ kind: "swept" });
+      const dispatched = await tx((trx) =>
+        store.transitionToDispatched(trx, { id, deadlineAt: DEADLINE }),
+      );
+      assertKind(dispatched, "swept");
+      expect(dispatched.row).toMatchObject({ recoveryPoint: "finished", errorKind: "host_lost" });
+    });
+
+    it("a transition meeting a row swept from the other state throws", async () => {
+      const lostAfterDispatch = await dispatchedRun("2026-06-01T09:00:00Z", "2026-06-01T09:02:00Z");
+      await sweep(lostAfterDispatch, "dispatched");
+      await expect(
+        tx((trx) =>
+          store.failBeforeDispatch(trx, {
+            id: lostAfterDispatch,
+            error: { kind: "runtime_unavailable", message: "pool gone" },
+            resourceUsage: USAGE,
+            finishedAt: new Date(),
+          }),
+        ),
+      ).rejects.toThrow(/not one the sweeper finished as host_lost/);
+
+      const lostBeforeDispatch = await startedRun("2026-06-01T09:00:01Z");
+      await sweep(lostBeforeDispatch, "started");
+      await expect(
+        tx((trx) =>
+          store.transitionToExecuted(trx, {
+            id: lostBeforeDispatch,
+            outcome: { kind: "output", output: null },
+            resourceUsage: USAGE,
+            finishedAt: new Date(),
+          }),
+        ),
+      ).rejects.toThrow(/not one the sweeper finished as result_lost/);
+    });
+
+    it("transitionToDispatched throws on a row it already dispatched", async () => {
+      const id = await startedRun("2026-06-01T09:00:00Z");
+      await dispatch(id);
+      await expect(
+        tx((trx) => store.transitionToDispatched(trx, { id, deadlineAt: DEADLINE })),
+      ).rejects.toThrow(/row is at 'dispatched'/);
+    });
+
+    it("transitionToExecuted throws on a row never dispatched", async () => {
+      const id = await startedRun("2026-06-01T09:00:00Z");
+      await expect(
+        tx((trx) =>
+          store.transitionToExecuted(trx, {
+            id,
+            outcome: { kind: "output", output: null },
+            resourceUsage: USAGE,
+            finishedAt: new Date(),
+          }),
+        ),
+      ).rejects.toThrow(/row is at 'started'/);
+    });
+
+    it("transitionToExecuted records a worker error with its kind", async () => {
+      const id = await startedRun("2026-06-01T09:00:00Z");
+      await dispatch(id);
+      const outcome = {
+        kind: "error",
+        error: { kind: "load_failed", message: "SyntaxError" },
+      } as const;
+      expect(
+        await tx((trx) =>
+          store.transitionToExecuted(trx, {
+            id,
+            outcome,
+            resourceUsage: USAGE,
+            finishedAt: new Date(),
+          }),
+        ),
+      ).toEqual({ kind: "transitioned" });
+      const row = await tx((trx) => store.getRun(trx, id));
+      expect(row).toMatchObject({
+        recoveryPoint: "executed",
+        status: "running",
+        output: null,
+        error: "SyntaxError",
+        errorKind: "load_failed",
+      });
+    });
+
+    it("a late transitionToExecuted returns swept and writes nothing", async () => {
+      const id = await dispatchedRun("2026-06-01T09:00:00Z", "2026-06-01T09:02:00Z");
+      expect(await sweep(id, "dispatched")).toEqual({ kind: "swept" });
+      const late = await tx((trx) =>
+        store.transitionToExecuted(trx, {
+          id,
+          outcome: { kind: "output", output: { late: true } },
+          resourceUsage: { wallClockMs: 99, peakMemoryBytes: 1 },
+          finishedAt: new Date(),
+        }),
+      );
+      assertKind(late, "swept");
+      expect(late.row).toMatchObject({
+        recoveryPoint: "finished",
+        status: "error",
+        errorKind: "result_lost",
+        output: null,
+        resourceUsage: USAGE,
+      });
+    });
+
+    it("failBeforeDispatch moves started to executed with its pausing kind", async () => {
+      const id = await startedRun("2026-06-01T09:00:00Z");
+      const finishedAt = new Date("2026-06-01T09:00:04Z");
+      expect(
+        await tx((trx) =>
+          store.failBeforeDispatch(trx, {
+            id,
+            error: { kind: "dependency_unavailable", message: "populate failed" },
+            resourceUsage: USAGE,
+            finishedAt,
+          }),
+        ),
+      ).toEqual({ kind: "transitioned" });
+      const row = await tx((trx) => store.getRun(trx, id));
+      expect(row).toMatchObject({
+        recoveryPoint: "executed",
+        status: "running",
+        error: "populate failed",
+        errorKind: "dependency_unavailable",
+        deadlineAt: null,
+        finishedAt,
+      });
+    });
+
+    it("failBeforeDispatch returns swept on a swept row and throws on a dispatched one", async () => {
+      const fail = (id: string) =>
+        tx((trx) =>
+          store.failBeforeDispatch(trx, {
+            id,
+            error: { kind: "runtime_unavailable", message: "pool gone" },
+            resourceUsage: USAGE,
+            finishedAt: new Date(),
+          }),
+        );
+      const swept = await startedRun("2026-06-01T09:00:00Z");
+      await sweep(swept, "started");
+      expect(await fail(swept)).toMatchObject({ kind: "swept", row: { errorKind: "host_lost" } });
+
+      const dispatched = await startedRun("2026-06-01T09:00:01Z");
+      await dispatch(dispatched);
+      await expect(fail(dispatched)).rejects.toThrow(/row is at 'dispatched'/);
+    });
+
+    it("listStuckRuns finds started rows past the bound and dispatched rows past their deadline", async () => {
+      const oldStarted = await startedRun("2026-06-01T09:00:00Z");
+      await startedRun("2026-06-01T09:20:00Z");
+      const lateDispatched = await dispatchedRun("2026-06-01T09:01:00Z", "2026-06-01T09:10:00Z");
+      await dispatchedRun("2026-06-01T09:02:00Z", "2026-06-01T09:40:00Z");
+      const executed = await dispatchedRun("2026-06-01T09:03:00Z", "2026-06-01T09:05:00Z");
+      await tx((trx) =>
+        store.transitionToExecuted(trx, {
+          id: executed,
+          outcome: { kind: "output", output: null },
+          resourceUsage: USAGE,
+          finishedAt: new Date(),
+        }),
+      );
+
+      const stuck = await tx((trx) => store.listStuckRuns(trx, { cutoffs: CUTOFFS, limit: 10 }));
+      expect(stuck).toEqual([
+        { id: oldStarted, stuckAt: "started", createdAt: new Date("2026-06-01T09:00:00Z") },
+        { id: lateDispatched, stuckAt: "dispatched", createdAt: new Date("2026-06-01T09:01:00Z") },
+      ]);
+      expect(
+        await tx((trx) => store.listStuckRuns(trx, { cutoffs: CUTOFFS, limit: 1 })),
+      ).toHaveLength(1);
+    });
+
+    it("sweepRun finishes a started row host_lost and a dispatched one result_lost", async () => {
+      const started = await startedRun("2026-06-01T09:00:00Z");
+      const dispatched = await dispatchedRun("2026-06-01T09:00:01Z", "2026-06-01T09:10:00Z");
+      expect(await sweep(started, "started")).toEqual({ kind: "swept" });
+      expect(await sweep(dispatched, "dispatched")).toEqual({ kind: "swept" });
+      const finished = {
+        recoveryPoint: "finished",
+        status: "error",
+        output: null,
+        error: "swept",
+        resourceUsage: USAGE,
+        finishedAt: new Date("2026-06-01T09:30:00Z"),
+      };
+      expect(await tx((trx) => store.getRun(trx, started))).toMatchObject({
+        ...finished,
+        errorKind: "host_lost",
+        deadlineAt: null,
+      });
+      expect(await tx((trx) => store.getRun(trx, dispatched))).toMatchObject({
+        ...finished,
+        errorKind: "result_lost",
+        deadlineAt: new Date("2026-06-01T09:10:00Z"),
+      });
+    });
+
+    it("sweepRun leaves a row that moved on, or is not past its bound", async () => {
+      const dispatchedSince = await startedRun("2026-06-01T09:00:00Z");
+      await dispatch(dispatchedSince);
+      expect(await sweep(dispatchedSince, "started")).toEqual({ kind: "moved_on" });
+
+      const fresh = await startedRun("2026-06-01T09:20:00Z");
+      expect(await sweep(fresh, "started")).toEqual({ kind: "moved_on" });
+
+      const inTime = await dispatchedRun("2026-06-01T09:00:02Z", "2026-06-01T09:40:00Z");
+      expect(await sweep(inTime, "dispatched")).toEqual({ kind: "moved_on" });
+      expect(await tx((trx) => store.getRun(trx, inTime))).toMatchObject({
+        recoveryPoint: "dispatched",
+      });
+    });
+
+    it("an output_invalid verdict round-trips its output through transitionToFinished", async () => {
+      const id = await startedRun("2026-06-01T09:00:00Z");
+      await dispatch(id);
+      await tx((trx) =>
+        store.transitionToExecuted(trx, {
+          id,
+          outcome: { kind: "output", output: { n: "x" } },
+          resourceUsage: USAGE,
+          finishedAt: new Date(),
+        }),
+      );
+      await tx((trx) =>
+        store.transitionToFinished(trx, {
+          id,
+          verdict: {
+            status: "error",
+            error: { kind: "output_invalid", message: "n must be a number", output: { n: "x" } },
+          },
+        }),
+      );
+      expect(await tx((trx) => store.getRun(trx, id))).toMatchObject({
+        status: "error",
+        errorKind: "output_invalid",
+        error: "n must be a number",
+        output: { n: "x" },
+      });
     });
   });
 

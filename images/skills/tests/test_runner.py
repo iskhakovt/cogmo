@@ -12,7 +12,11 @@ from typing import Any
 
 import pytest
 
-from cogmo_skills_runtime.runner import CtxError, _Bridge, _main
+from cogmo_ctx import CtxError
+from cogmo_skills_runtime import runner
+from cogmo_skills_runtime.runner import _Bridge, _main
+
+RUN = {"id": "run-1", "key": "key-1"}
 
 
 async def _drive(
@@ -26,7 +30,7 @@ async def _drive(
     stdin = io.BytesIO(stdin_text.encode("utf-8"))
     stdout = io.StringIO()
     stderr = io.StringIO()
-    await _main(body, inputs, task_id, stdin=stdin, stdout=stdout, stderr=stderr)
+    await _main(body, inputs, task_id, RUN, stdin=stdin, stdout=stdout, stderr=stderr)
     out = stdout.getvalue().strip().splitlines()
     # Last line is the task_result; earlier lines are ctx_calls (none in
     # these tests since we don't await ctx).
@@ -80,6 +84,7 @@ class TestErrors:
             task_id="t-syntax",
         )
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "SyntaxError" in result["error"]
 
     @pytest.mark.asyncio
@@ -90,9 +95,24 @@ class TestErrors:
             task_id="t-raise",
         )
         assert result["ok"] is False
+        assert result["errorKind"] == "skill_raised"
         assert "RuntimeError" in result["error"]
         assert "skill failed" in result["error"]
-        assert "traceback" in result
+
+    @pytest.mark.asyncio
+    async def test_skill_raises_writes_its_stack_to_stderr(self) -> None:
+        stderr = io.StringIO()
+        await _main(
+            "async def run(inputs, ctx):\n    raise RuntimeError('skill failed')\n",
+            {},
+            "t-stack",
+            RUN,
+            stdin=io.BytesIO(b""),
+            stdout=io.StringIO(),
+            stderr=stderr,
+        )
+        assert "Traceback (most recent call last)" in stderr.getvalue()
+        assert "RuntimeError: skill failed" in stderr.getvalue()
 
     @pytest.mark.asyncio
     async def test_missing_run_function(self) -> None:
@@ -102,6 +122,7 @@ class TestErrors:
             task_id="t-no-run",
         )
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "async def run" in result["error"]
 
     @pytest.mark.asyncio
@@ -112,7 +133,243 @@ class TestErrors:
             task_id="t-sync",
         )
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "async def run" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_body_raising_at_import_fails_to_load(self) -> None:
+        result = await _drive(
+            body="import not_a_module\n\nasync def run(inputs, ctx):\n    return None\n",
+            inputs={},
+            task_id="t-import",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
+        assert "ModuleNotFoundError" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_memory_error_is_memory_exceeded(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    raise MemoryError()\n",
+            inputs={},
+            task_id="t-oom",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "memory_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_uncaught_ctx_error_is_skill_raised(self) -> None:
+        result = await _drive(
+            body=(
+                "from cogmo_ctx import CtxError\n"
+                "async def run(inputs, ctx):\n    raise CtxError('missing_effect', 'needs reads_memory')\n"
+            ),
+            inputs={},
+            task_id="t-ctx",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "skill_raised"
+        assert result["error"] == "missing_effect: needs reads_memory"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("retryable", "kind"), [(False, "skill_failed"), (True, "skill_retryable")])
+    async def test_skill_error_is_its_expected_kind(self, retryable: bool, kind: str) -> None:
+        result = await _drive(
+            body=(
+                "from cogmo_ctx import SkillError\n"
+                "async def run(inputs, ctx):\n"
+                f"    raise SkillError('not_found', 'no such feed', retryable={retryable})\n"
+            ),
+            inputs={},
+            task_id="t-skill-error",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == kind
+        assert result["error"] == "not_found: no such feed"
+
+    @pytest.mark.asyncio
+    async def test_inputs_the_input_model_refuses_are_input_invalid(self) -> None:
+        result = await _drive(
+            body=(
+                "from pydantic import BaseModel\n"
+                "class Input(BaseModel):\n"
+                "    n: int\n"
+                "async def run(inputs, ctx):\n"
+                "    return inputs.n\n"
+            ),
+            inputs={"n": "many"},
+            task_id="t-input-invalid",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "input_invalid"
+        assert result["error"].startswith("n: Input should be a valid integer")
+
+    @pytest.mark.asyncio
+    async def test_an_output_the_model_refuses_keeps_what_run_returned_when_json_carries_it(self) -> None:
+        body = (
+            "from pydantic import BaseModel\n"
+            "class Output(BaseModel):\n"
+            "    doubled: int\n"
+            "async def run(inputs, ctx):\n"
+            "    return inputs['value']\n"
+        )
+        kept = await _drive(body=body, inputs={"value": {"receipt": "r-1"}}, task_id="t-kept")
+        assert (kept["errorKind"], kept["error"], kept["output"]) == (
+            "output_invalid",
+            "doubled: Field required",
+            {"receipt": "r-1"},
+        )
+        not_json = await _drive(body=body, inputs={"value": {"doubled": float("nan")}}, task_id="t-nan")
+        assert not_json["errorKind"] == "output_invalid"
+        assert "output" not in not_json
+
+    @pytest.mark.asyncio
+    async def test_the_output_model_dumps_what_run_returns(self) -> None:
+        result = await _drive(
+            body=(
+                "from pydantic import BaseModel\n"
+                "class Input(BaseModel):\n"
+                "    n: int = 2\n"
+                "class Output(BaseModel):\n"
+                "    doubled: int\n"
+                "async def run(inputs, ctx):\n"
+                "    return Output(doubled=inputs.n * 2)\n"
+            ),
+            inputs={},
+            task_id="t-models",
+        )
+        assert result["ok"] is True
+        assert result["output"] == {"doubled": 4}
+
+    @pytest.mark.asyncio
+    async def test_a_skill_error_subclass_is_reported_as_a_skill_error(self) -> None:
+        result = await _drive(
+            body=(
+                "from cogmo_ctx import SkillError\n"
+                "class FeedGone(SkillError):\n"
+                "    pass\n"
+                "async def run(inputs, ctx):\n"
+                "    raise FeedGone('gone', 'feed removed')\n"
+            ),
+            inputs={},
+            task_id="t-skill-error-sub",
+        )
+        assert result["errorKind"] == "skill_failed"
+
+    @pytest.mark.asyncio
+    async def test_ctx_run_returns_the_task_run(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return ctx.run()\n",
+            inputs={},
+            task_id="t-run",
+        )
+        assert result["output"] == RUN
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("float('nan')", "Out of range float values are not JSON compliant"),
+            ("float('inf')", "Out of range float values are not JSON compliant"),
+            ("{1, 2}", "Object of type set is not JSON serializable"),
+        ],
+    )
+    async def test_output_json_cannot_carry_is_output_invalid(self, value: str, message: str) -> None:
+        result = await _drive(
+            body=f"async def run(inputs, ctx):\n    return {{'v': {value}}}\n",
+            inputs={},
+            task_id="t-nonjson",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert message in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_integer_the_host_would_round_is_output_invalid(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {'id': 2**53, 'ok': 2**53 - 1}\n",
+            inputs={},
+            task_id="t-bigint",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert "integer 9007199254740992 is past 2**53" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_keys_json_writes_alike_are_output_invalid(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {1: 'a', '1': 'b'}\n",
+            inputs={},
+            task_id="t-keys",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert "two keys of one dict are written alike" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_memory_error_while_encoding_is_memory_exceeded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def exhausted(output: object) -> str:
+            raise MemoryError()
+
+        monkeypatch.setattr(runner, "_encode_output", exhausted)
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {'big': True}\n",
+            inputs={},
+            task_id="t-oom-encode",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "memory_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_memory_error_at_import_is_memory_exceeded(self) -> None:
+        result = await _drive(
+            body="raise MemoryError()\nasync def run(inputs, ctx):\n    return None\n",
+            inputs={},
+            task_id="t-oom-import",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "memory_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_output_past_the_frame_cap_is_output_invalid(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return 'x' * (17 * 1024 * 1024)\n",
+            inputs={},
+            task_id="t-huge",
+        )
+        assert result["ok"] is False
+        assert result["errorKind"] == "output_invalid"
+        assert "the cap is" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_refused_output_that_fits_only_without_its_message_keeps_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Room for the 19-byte output alone, not beside its 25-byte message.
+        monkeypatch.setattr(runner, "_MAX_FRAME_BYTES", runner._RESULT_FRAME_OVERHEAD_BYTES + 30)
+        result = await _drive(
+            body=(
+                "from pydantic import BaseModel\n"
+                "class Output(BaseModel):\n"
+                "    doubled: int\n"
+                "async def run(inputs, ctx):\n"
+                "    return {'receipt': 'r-1'}\n"
+            ),
+            inputs={},
+            task_id="t-no-room",
+        )
+        assert (result["errorKind"], result["error"]) == ("output_invalid", "doubled: Field required")
+        assert "output" not in result
+
+    @pytest.mark.asyncio
+    async def test_output_is_carried_as_json_carries_it(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return {'t': (1, 2), 3: 'int key'}\n",
+            inputs={},
+            task_id="t-json",
+        )
+        assert result["ok"] is True
+        assert result["output"] == {"t": [1, 2], "3": "int key"}
 
 
 class TestRusage:
@@ -208,7 +465,7 @@ class TestAfterResult:
         )
         seen: list[str] = []
         stdout = io.StringIO()
-        await _main(body, {"seen": seen}, "t-after", stdin=io.BytesIO(b""), stdout=stdout, stderr=io.StringIO())
+        await _main(body, {"seen": seen}, "t-after", RUN, stdin=io.BytesIO(b""), stdout=stdout, stderr=io.StringIO())
         await asyncio.sleep(0.05)
 
         frames = [json.loads(line) for line in stdout.getvalue().splitlines()]

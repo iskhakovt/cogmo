@@ -5,12 +5,24 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type MessagePort, parentPort, workerData } from "node:worker_threads";
 import * as nodeZlib from "node:zlib";
+import { errAsync, okAsync, Result, ResultAsync } from "neverthrow";
 import type { PyodideInterface } from "pyodide";
-import { match } from "ts-pattern";
-import { CtxResultSchema, TaskInvokeSchema, type TaskResult } from "../protocol.js";
+import { match, P } from "ts-pattern";
+import { z } from "zod";
+import COGMO_CTX_PY from "../../../../../images/skills/src/cogmo_ctx/__init__.py";
+import COGMO_CTX_CONTRACT_PY from "../../../../../images/skills/src/cogmo_ctx/_contract.py";
+import COGMO_CTX_RUN_PY from "../../../../../images/skills/src/cogmo_ctx/_run.py";
+import {
+  CtxResultSchema,
+  TaskInvokeSchema,
+  type TaskResult,
+  type TaskRun,
+  type WorkerErrorKind,
+} from "../protocol.js";
 import { type ChildInit, ChildInitSchema } from "./child-protocol.js";
-import CTX_PY from "./py/ctx.py";
 import INSTALL_DEPS_PY from "./py/install_deps.py";
+import OUTPUT_PY from "./py/output.py";
+import TASK_PY from "./py/task.py";
 
 /**
  * A wasm child's Pyodide worker thread (design/skills.md → Wasm-tier
@@ -179,10 +191,11 @@ function deleteNetworkGlobals(): void {
 }
 
 /**
- * A ctx call's answer as it reaches Python. `Ctx._call` in `py/ctx.py` returns
- * the value or raises `CtxError(kind, message)`, the class the container tier raises: a
- * plain value crosses into Pyodide intact, where a rejected promise arrives
- * as a `JsException` carrying only the error's name and message.
+ * A ctx call's answer as it reaches Python. `_CogmoBridge.call` in
+ * `py/task.py` returns the value or raises `cogmo_ctx.CtxError(kind,
+ * message)`: a plain value crosses into Pyodide intact, where a rejected
+ * promise arrives as a `JsException` carrying only the error's name and
+ * message.
  */
 type BridgeReply = { ok: true; value: unknown } | { ok: false; kind: string; message: string };
 
@@ -226,60 +239,231 @@ function toPlain(py: PyodideInterface, value: unknown): unknown {
   return value.toJs({ dict_converter: Object.fromEntries });
 }
 
-async function runTask(
+/** A failed stage of a task: the run error kind it reports, and why. */
+type StageFailure =
+  | { errorKind: Exclude<WorkerErrorKind, "output_invalid">; error: string }
+  | {
+      errorKind: "output_invalid";
+      error: string;
+      /** What the skill returned, kept when JSON carries it. */
+      output?: unknown;
+    };
+
+/** Run one stage of a task, reporting a throw as `errorKind`. */
+function stage<T>(
+  errorKind: (e: unknown) => WorkerErrorKind,
+  run: () => T | Promise<T>,
+): ResultAsync<T, StageFailure> {
+  return ResultAsync.fromPromise(Promise.resolve().then(run), (e) => ({
+    errorKind: errorKind(e),
+    error: e instanceof Error ? e.message : String(e),
+  }));
+}
+
+/**
+ * How a stage running skill code failed: a `MemoryError` is the memory cap
+ * (`capWasmMemory`), at whichever stage it struck; anything else is `kind`.
+ */
+function skillStageKind(
+  py: PyodideInterface,
+  kind: WorkerErrorKind,
+): (e: unknown) => WorkerErrorKind {
+  return (e) =>
+    e instanceof py.ffi.PythonError && e.type === "MemoryError" ? "memory_exceeded" : kind;
+}
+
+/** Where `cogmo_ctx` lives in Pyodide's filesystem, first on `sys.path`. */
+const COGMO_CTX_ROOT = "/cogmo/lib";
+
+/**
+ * Write `cogmo_ctx` into Pyodide's in-memory filesystem, ahead of the
+ * skill's installed wheels on `sys.path`, and import it, so the skill's
+ * `from cogmo_ctx import …` resolves to the module the worker built its
+ * `ctx` from.
+ */
+function installCogmoCtx(py: PyodideInterface): void {
+  py.FS.mkdirTree(`${COGMO_CTX_ROOT}/cogmo_ctx`);
+  for (const [file, source] of [
+    ["__init__.py", COGMO_CTX_PY],
+    ["_contract.py", COGMO_CTX_CONTRACT_PY],
+    ["_run.py", COGMO_CTX_RUN_PY],
+  ]) {
+    py.FS.writeFile(`${COGMO_CTX_ROOT}/cogmo_ctx/${file}`, source);
+  }
+  const sys = py.pyimport("sys");
+  try {
+    sys.path.insert(0, COGMO_CTX_ROOT);
+  } finally {
+    sys.destroy();
+  }
+  py.pyimport("cogmo_ctx").destroy();
+}
+
+/** What `_cogmo_call_run` (`cogmo_ctx._run.call_run`) reports for a failure it holds as a value. */
+const RunFailureReportSchema = z.tuple([
+  z.enum(["input_invalid", "output_invalid", "skill_failed", "skill_retryable"]),
+  z.string(),
+]);
+
+/**
+ * The failure the run held as a value (a refused `Input` or `Output`, a
+ * `SkillError`), read from the global the run stage set, or null when it
+ * held none. The global shares the skill's namespace, so anything but the
+ * kinds `_cogmo_call_run` reports is the skill's own doing: `skill_raised`.
+ */
+function runFailureOf(py: PyodideInterface): StageFailure | null {
+  const reported: unknown = py.globals.get("__cogmo_failure");
+  if (reported === undefined) return null;
+  const parsed = RunFailureReportSchema.safeParse(toPlain(py, reported));
+  if (!parsed.success) {
+    return { errorKind: "skill_raised", error: "the skill replaced the run's failure report" };
+  }
+  return match(parsed.data)
+    .returnType<StageFailure>()
+    .with(["output_invalid", P.string], ([errorKind, error]) => {
+      const kept = keptOutputOf(py);
+      return kept === undefined ? { errorKind, error } : { errorKind, error, output: kept };
+    })
+    .with(
+      [P.union("input_invalid", "skill_failed", "skill_retryable"), P.string],
+      ([errorKind, error]) => ({
+        errorKind,
+        error,
+      }),
+    )
+    .exhaustive();
+}
+
+/**
+ * The output an `Output` model refused, which `_cogmo_call_run` leaves in
+ * `__cogmo_result`, encoded as the output stage encodes one; undefined when
+ * JSON would not carry it or memory ran out, which keeps nothing rather than
+ * fails the task.
+ */
+function keptOutputOf(py: PyodideInterface): unknown {
+  return Result.fromThrowable(
+    (): unknown => {
+      const encoded: unknown = py.runPython("_cogmo_encode_output(__cogmo_result)");
+      return typeof encoded === "string" ? (JSON.parse(encoded) ?? undefined) : undefined;
+    },
+    () => undefined,
+  )().unwrapOr(undefined);
+}
+
+/**
+ * Load `cogmo_ctx` and the skill body into module-level globals, run the
+ * skill, and encode what it returned. One task runs per child, so
+ * module-level globals are safe. The glue between them is inline because it
+ * names the bridge module registered here, and because a top-level `await`
+ * isn't valid Python in a module, so it can't live in `py/`.
+ */
+function runTask(
   py: PyodideInterface,
   body: string,
-  invoke: { id: string; inputs: unknown },
-): Promise<TaskResult> {
+  invoke: { id: string; run: TaskRun; inputs: unknown },
+): ResultAsync<unknown, StageFailure> {
   // Every call names the task: the host serves a ctx call only for the task
   // it belongs to. Python passes its args dict as a proxy, converted here.
   py.registerJsModule("__cogmo_bridge__", {
     bridge: {
       call: (method: string, args: unknown) => callHost(invoke.id, method, toPlain(py, args)),
     },
+    run: { id: invoke.run.id, key: invoke.run.key },
   });
-
-  // Materialize ctx SDK + skill body into module-level globals. One task
-  // runs per child, so module-level globals are safe. The glue between them
-  // is inline because it names the bridge module registered above.
-  await py.runPythonAsync(CTX_PY);
-  await py.runPythonAsync(
-    "from __cogmo_bridge__ import bridge as __cogmo_bridge\n_ctx = _build_ctx(__cogmo_bridge)\n",
-  );
-  await py.runPythonAsync(body);
-
-  const inputsPy = py.toPy(invoke.inputs);
-  py.globals.set("__cogmo_inputs", inputsPy);
-  // A top-level `await` isn't valid Python in a module, so it can't live in `py/`.
-  const resultPy: unknown = await py.runPythonAsync("await run(__cogmo_inputs, _ctx)");
-  // Proxies are not released: the child exits after its one task.
-  const output = toPlain(py, resultPy);
-  return { type: "task_result", id: invoke.id, ok: true, output };
+  return stage(
+    () => "runtime_unavailable",
+    async () => {
+      installCogmoCtx(py);
+      await py.runPythonAsync(TASK_PY);
+      await py.runPythonAsync(OUTPUT_PY);
+      // `CtxError` is also a global, for skills that name it without importing it.
+      await py.runPythonAsync(
+        [
+          "import cogmo_ctx as _cogmo_ctx",
+          "from cogmo_ctx import CtxError",
+          "from __cogmo_bridge__ import bridge as __cogmo_js_bridge, run as __cogmo_js_run",
+          "_ctx = _cogmo_ctx.Ctx(",
+          "    _CogmoBridge(__cogmo_js_bridge), {'id': __cogmo_js_run.id, 'key': __cogmo_js_run.key}",
+          ")",
+        ].join("\n"),
+      );
+    },
+  )
+    .andThen(() =>
+      stage(skillStageKind(py, "load_failed"), async () => {
+        await py.runPythonAsync(body);
+        // Callable, not a coroutine function: a `run` wrapped by a plain
+        // decorator still returns the awaitable the next stage awaits.
+        if (!py.runPython("callable(globals().get('run'))")) {
+          throw new Error("skill must define `async def run(inputs, ctx)`");
+        }
+      }),
+    )
+    .andThen(() =>
+      stage(
+        () => "runtime_unavailable",
+        () => py.globals.set("__cogmo_inputs", py.toPy(invoke.inputs)),
+      ),
+    )
+    .andThen(() =>
+      stage(skillStageKind(py, "skill_raised"), async () => {
+        await py.runPythonAsync(
+          "__cogmo_failure, __cogmo_result = await _cogmo_call_run(globals(), run, __cogmo_inputs, _ctx)",
+        );
+        return runFailureOf(py);
+      }),
+    )
+    .andThen((failure) =>
+      failure === null ? okAsync(undefined) : errAsync<undefined, StageFailure>(failure),
+    )
+    .andThen(() =>
+      // Encoded in Python, as the container tier does: `NaN`, a `set`, a JS
+      // proxy or an integer the host would round is refused here rather than
+      // coerced on its way to the host (`py/output.py`).
+      stage(skillStageKind(py, "output_invalid"), (): unknown =>
+        py.runPython("_cogmo_encode_output(__cogmo_result)"),
+      ),
+    )
+    .andThen((encoded) =>
+      // The encoder shares the skill's globals, so what it returns is parsed
+      // as the skill's: anything but a JSON string is the skill's output
+      // failing, not the worker.
+      typeof encoded === "string"
+        ? stage(
+            () => "output_invalid",
+            (): unknown => JSON.parse(encoded),
+          )
+        : errAsync<unknown, StageFailure>({
+            errorKind: "output_invalid",
+            error: "the output encoder returned no string",
+          }),
+    );
 }
 
 async function handleTaskInvoke(py: PyodideInterface, body: string, raw: unknown): Promise<void> {
   const parsed = TaskInvokeSchema.safeParse(raw);
   if (!parsed.success) return;
   const invoke = parsed.data;
-  const result: TaskResult = await runTask(py, body, invoke).catch((e: unknown) => ({
-    type: "task_result",
-    id: invoke.id,
-    ok: false,
-    error: e instanceof Error ? e.message : String(e),
-  }));
-  try {
-    port.postMessage(result);
-  } catch (e) {
-    // An output holding a function or another proxy cannot cross to the
-    // child's thread; the task fails rather than leave the host waiting.
-    if (!(e instanceof DOMException && e.name === "DataCloneError")) throw e;
-    port.postMessage({
-      type: "task_result",
-      id: invoke.id,
-      ok: false,
-      error: `task output is not serializable: ${e.message}`,
-    } satisfies TaskResult);
-  }
+  const result = await runTask(py, body, invoke).match(
+    (output): TaskResult => ({ type: "task_result", id: invoke.id, ok: true, output }),
+    (failure): TaskResult =>
+      match(failure)
+        .returnType<TaskResult>()
+        .with({ errorKind: "output_invalid" }, ({ errorKind, error, output }) =>
+          output === undefined
+            ? { type: "task_result", id: invoke.id, ok: false, errorKind, error }
+            : { type: "task_result", id: invoke.id, ok: false, errorKind, error, output },
+        )
+        .with({ errorKind: P.not("output_invalid") }, ({ errorKind, error }) => ({
+          type: "task_result",
+          id: invoke.id,
+          ok: false,
+          errorKind,
+          error,
+        }))
+        .exhaustive(),
+  );
+  port.postMessage(result);
 }
 
 async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {

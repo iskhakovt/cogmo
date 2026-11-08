@@ -93,7 +93,7 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 
 ## Mutation Testing `[confirmed]`
 
-`pnpm test:mutation` runs [StrykerJS](https://stryker-mutator.io/) against the `unit` project and writes `apps/server/reports/mutation/mutation.html`. It is a manual tool for security and state-machine modules: CI doesn't run it, no score is enforced, and a whole-backend run isn't practical. `stryker.config.mjs` lists the default modules. `--mutate <path>` picks others, and a glob must exclude tests itself (`--mutate 'src/util/*.ts,!src/**/*.test.ts'`). `unit-pyodide` stays out, so `src/skills/runner.ts` and `src/skills/worker-wasm/host.ts` lose their main test files.
+`pnpm test:mutation` runs [StrykerJS](https://stryker-mutator.io/) against the `unit` project and writes `apps/server/reports/mutation/mutation.html`. It is a manual tool for security and state-machine modules: CI doesn't run it, no score is enforced, and a whole-backend run isn't practical. `stryker.config.mjs` lists the default modules. `--mutate <path>` picks others, and a glob must exclude tests itself (`--mutate 'src/sandbox/proxy/*.ts,!src/**/*.test.ts'`). A module most of the backend imports, such as `src/util/`, brings most of the unit tier into Stryker's first run, which then outlasts its `--dryRunTimeoutMinutes`. `unit-pyodide` stays out, so `src/skills/runner.ts` and `src/skills/worker-wasm/host.ts` lose their main test files.
 
 - **Read each survivor before writing a test for it.** Code tested mainly in the integration tier survives, and some mutants change no behaviour.
 - **Re-check timeouts from a run on a busy machine.** A timeout counts as a kill.

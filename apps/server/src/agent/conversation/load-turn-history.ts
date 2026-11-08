@@ -1,20 +1,35 @@
 import * as R from "remeda";
 import type { Transaction, Transactor } from "../../db/index.js";
+import type { TransportStore } from "../../transport/store/index.js";
+import { withRejectedOriginals } from "../attachments/render-stored-content.js";
 import { formatSummaryMessage } from "../context.js";
 import type { TranscriptStore } from "../store/index.js";
-import type { StoredMessage } from "../stored-content.js";
+import { refOriginals, type StoredMessage } from "../stored-content.js";
+import type { TranscriptHead } from "../transcript-head.js";
 import { type TurnContext, withTurnContext } from "../turn-context.js";
 
 export interface LoadTurnHistoryDeps {
   runInTx: Transactor;
   agentStore: TranscriptStore;
+  transportStore: Pick<TransportStore, "listRejectedAttachmentOriginals">;
 }
 
 export interface TurnHistory {
-  /** Stored content: attachments are refs, which the renderer resolves. */
+  /**
+   * Stored content: attachments are refs, which the renderer resolves, except
+   * one whose original a provider rejected, which is its placeholder.
+   */
   messages: StoredMessage[];
   messageIds: (string | null)[];
   turnContexts: (TurnContext | null)[];
+  /**
+   * Each row's transcript head, positionally aligned with `messages`: null
+   * for the summary entry, user rows and rows written before heads. Optional
+   * because a `load-turn-transcript` memo written before heads lacks it, and
+   * an absent field skips the across-turn check (design/prompt-caching.md →
+   * Head check → Replay safety).
+   */
+  heads?: (TranscriptHead | null)[];
   turn: { id: string; createdAt: string } | null;
 }
 
@@ -32,15 +47,19 @@ export class TurnRowMissingError extends Error {
  * messages that arrived after, each turn-starting message led by the turn
  * context it was sent with.
  *
+ * A ref whose original a provider rejected loads as the rejection
+ * placeholder (design/transport/attachments.md → Rejected attachments).
+ *
  * This is the compacted view, and it is deliberately not what `listMessages`
  * returns. The Observer and the web history read take the raw transcript, so
  * fact extraction still sees every turn; only the LLM-facing path collapses the
  * prefix and carries the turn contexts.
  *
- * `messageIds` and `turnContexts` are positionally aligned with `messages` —
- * `messageIds[i]` is the `messages` row backing `messages[i]`, or `null` for
- * the synthetic summary entry, and `turnContexts[i]` the structured inputs of
- * the block leading it, or `null` for a message without one. Callers that need
+ * `messageIds`, `turnContexts` and `heads` are positionally aligned with
+ * `messages` — `messageIds[i]` is the `messages` row backing `messages[i]`, or
+ * `null` for the synthetic summary entry, `turnContexts[i]` the structured
+ * inputs of the block leading it, or `null` for a message without one, and
+ * `heads[i]` the row's transcript head. Callers that need
  * to map a compaction split point back to a durable cutoff (to persist a
  * summary of their own) walk `messageIds`; see `summarizedSpan`.
  *
@@ -71,18 +90,28 @@ export async function loadTurnHistory(
       ).map((c) => [c.messageId, c] as const),
     );
 
-    const messages = rows.map(({ id, role, content }): StoredMessage => {
+    const rejected = new Set(
+      await deps.transportStore.listRejectedAttachmentOriginals(
+        tx,
+        R.unique(rows.flatMap(({ content }) => refOriginals(content))),
+      ),
+    );
+
+    const messages = rows.map(({ id, role, content: rowContent }): StoredMessage => {
+      const content = withRejectedOriginals(rowContent, rejected);
       const context = stored.get(id);
       return context ? withTurnContext({ role, content }, context.rendered) : { role, content };
     });
     const messageIds = rows.map((row): string | null => row.id);
     const turnContexts = rows.map((row) => stored.get(row.id)?.context ?? null);
+    const heads = rows.map((row) => row.transcriptHead);
 
-    if (!summary) return { messages, messageIds, turnContexts, turn };
+    if (!summary) return { messages, messageIds, turnContexts, heads, turn };
     return {
       messages: [formatSummaryMessage(summary.summary), ...messages],
       messageIds: [null, ...messageIds],
       turnContexts: [null, ...turnContexts],
+      heads: [null, ...heads],
       turn,
     };
   });

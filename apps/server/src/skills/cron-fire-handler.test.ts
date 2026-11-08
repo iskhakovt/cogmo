@@ -59,6 +59,7 @@ function skillRow(overrides: Partial<SkillRow> = {}): SkillRow {
 
 const RUN_AS: SkillRunAs = {
   userId: RUN_AS_USER,
+  profileId: RUN_AS_PROFILE,
   service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
 };
 
@@ -163,7 +164,9 @@ describe("createSkillCronFireHandler", () => {
     // runner.invoke writes the failure into skill_runs; the handler reflects
     // it back as runStatus='error' so the cron continues firing tomorrow.
     const runner = mock<SkillRunner>();
-    runner.invoke.mockResolvedValue(ok({ runId: "run-err", status: "error", error: "boom" }));
+    runner.invoke.mockResolvedValue(
+      ok({ runId: "run-err", status: "error", errorKind: "skill_raised", error: "boom" }),
+    );
     const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();

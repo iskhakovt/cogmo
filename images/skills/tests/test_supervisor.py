@@ -2,26 +2,32 @@
 
 The task-dispatch loop is covered end to end by `test_task_isolation.py`,
 which runs the supervisor as a subprocess; these tests pin the building
-blocks: pidfd-based wait, SIGKILL+reap, venv activation, and the task
-process entry point.
+blocks: pidfd-based wait, SIGKILL+reap, the `/proc` scan, venv activation,
+and the task process entry point.
 """
 
+import builtins
 import gc
 import json
 import os
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
+from typing import Any
+from unittest.mock import mock_open
 
 import pytest
 
 from cogmo_skills_runtime import supervisor
 from cogmo_skills_runtime.supervisor import (
     _activate_skill_venv,
+    _descendants,
     _kill_and_reap,
     _run_one_task_in_child,
     _skill_venv_path,
     _wait_with_timeout,
 )
+
+RUN = {"id": "run-1", "key": "key-1"}
 
 # `os.pidfd_open` requires Linux kernel 5.3+ AND a Python build that
 # enabled HAVE_PIDFD_OPEN at configure time. The runtime image
@@ -96,11 +102,44 @@ class TestKillAndReap:
         _kill_and_reap(pid)
 
 
+def _stat_of_a_process_gone_at_open() -> Any:
+    raise FileNotFoundError
+
+
+def _stat_of_a_process_gone_at_read() -> Any:
+    handle = mock_open()()
+    handle.read.side_effect = ProcessLookupError
+    return handle
+
+
+class TestDescendants:
+    @pytest.mark.parametrize(
+        "open_stat", [_stat_of_a_process_gone_at_open, _stat_of_a_process_gone_at_read], ids=["at-open", "at-read"]
+    )
+    def test_a_process_exiting_mid_scan_does_not_end_the_scan(
+        self, monkeypatch: pytest.MonkeyPatch, open_stat: Callable[[], Any]
+    ) -> None:
+        pid = _fork_sleeper(60.0)
+        real_listdir, real_open = os.listdir, builtins.open
+
+        def fake_open(path: str, *args: Any, **kwargs: Any) -> Any:
+            return open_stat() if path == "/proc/0/stat" else real_open(path, *args, **kwargs)
+
+        try:
+            with monkeypatch.context() as m:
+                m.setattr(os, "listdir", lambda path: ["0", *real_listdir(path)])
+                m.setattr(builtins, "open", fake_open)
+                assert pid in _descendants(os.getpid())
+        finally:
+            _kill_and_reap(pid)
+
+
 class TestRunOneTaskInChild:
     def test_writes_task_result_for_simple_skill(self, capsys: pytest.CaptureFixture[str]) -> None:
         body = "async def run(inputs, ctx):\n    return {'echo': inputs.get('x', 0) + 1}\n"
         task = {
             "type": "task_invoke",
+            "run": RUN,
             "id": "t-echo",
             "skill": "echo",
             "inputs": {"x": 41},
@@ -119,6 +158,7 @@ class TestRunOneTaskInChild:
     def test_writes_task_result_for_skill_with_syntax_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         task = {
             "type": "task_invoke",
+            "run": RUN,
             "id": "t-bad",
             "skill": "bad",
             "inputs": {},
@@ -130,11 +170,13 @@ class TestRunOneTaskInChild:
         assert result["type"] == "task_result"
         assert result["id"] == "t-bad"
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "SyntaxError" in result["error"]
 
     def test_writes_task_result_when_skill_raises(self, capsys: pytest.CaptureFixture[str]) -> None:
         task = {
             "type": "task_invoke",
+            "run": RUN,
             "id": "t-raise",
             "skill": "raise",
             "inputs": {},
@@ -144,12 +186,14 @@ class TestRunOneTaskInChild:
         captured = capsys.readouterr()
         result = json.loads(captured.out.strip())
         assert result["ok"] is False
+        assert result["errorKind"] == "skill_raised"
         assert "ValueError" in result["error"]
         assert "boom" in result["error"]
 
     def test_rejects_skill_without_async_run(self, capsys: pytest.CaptureFixture[str]) -> None:
         task = {
             "type": "task_invoke",
+            "run": RUN,
             "id": "t-no-run",
             "skill": "missing",
             "inputs": {},
@@ -159,7 +203,53 @@ class TestRunOneTaskInChild:
         captured = capsys.readouterr()
         result = json.loads(captured.out.strip())
         assert result["ok"] is False
+        assert result["errorKind"] == "load_failed"
         assert "async def run" in result["error"]
+
+    def test_hands_the_task_run_to_ctx_run(self, capsys: pytest.CaptureFixture[str]) -> None:
+        task = {
+            "type": "task_invoke",
+            "run": {"id": "run-7", "key": "skill-tool:abc"},
+            "id": "t-run",
+            "skill": "run",
+            "inputs": {},
+            "body": "async def run(inputs, ctx):\n    return ctx.run()\n",
+        }
+        _run_one_task_in_child(task)
+        result = json.loads(capsys.readouterr().out.strip())
+        assert result["output"] == {"id": "run-7", "key": "skill-tool:abc"}
+
+    @pytest.mark.parametrize("run", [None, {"id": "run-7"}, {"id": "", "key": "k"}, "run-7"])
+    def test_fails_a_task_with_no_run_as_runtime_unavailable(
+        self, run: object, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        task = {
+            "type": "task_invoke",
+            "id": "t-no-run-info",
+            "skill": "echo",
+            "inputs": {},
+            "body": "async def run(inputs, ctx):\n    return 1\n",
+            **({} if run is None else {"run": run}),
+        }
+        _run_one_task_in_child(task)
+        result = json.loads(capsys.readouterr().out.strip())
+        assert result["ok"] is False
+        assert result["errorKind"] == "runtime_unavailable"
+        assert result["error"] == "task_invoke carries no run id and key"
+
+    def test_reports_a_skill_that_exits_as_skill_raised(self, capsys: pytest.CaptureFixture[str]) -> None:
+        task = {
+            "type": "task_invoke",
+            "run": RUN,
+            "id": "t-exit",
+            "skill": "exit",
+            "inputs": {},
+            "body": "import sys\nasync def run(inputs, ctx):\n    sys.exit(3)\n",
+        }
+        _run_one_task_in_child(task)
+        result = json.loads(capsys.readouterr().out.strip())
+        assert result["errorKind"] == "skill_raised"
+        assert result["error"] == "supervisor_child_aborted: SystemExit: 3"
 
 
 class TestActivateSkillVenv:
@@ -294,6 +384,7 @@ class TestActivateSkillVenv:
         )
         task = {
             "type": "task_invoke",
+            "run": RUN,
             "id": "t-venv",
             "skill": "venv-import",
             "inputs": {},
@@ -305,6 +396,24 @@ class TestActivateSkillVenv:
         result = json.loads(captured.out.strip())
         assert result["ok"] is True, result
         assert result["output"] == {"answer": 42}
+
+    def test_run_one_task_in_child_reports_a_missing_venv_as_dependency_unavailable(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        task = {
+            "type": "task_invoke",
+            "run": RUN,
+            "id": "t-no-venv",
+            "skill": "venv-missing",
+            "inputs": {},
+            "body": "async def run(inputs, ctx):\n    return None\n",
+            "lockfileHash": self._HASH,
+        }
+        _run_one_task_in_child(task)
+        result = json.loads(capsys.readouterr().out.strip())
+        assert result["ok"] is False
+        assert result["errorKind"] == "dependency_unavailable"
+        assert "has no site-packages" in result["error"]
 
 
 class TestSupervisorImportSafety:

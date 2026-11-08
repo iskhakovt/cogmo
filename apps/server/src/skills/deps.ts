@@ -213,6 +213,8 @@ export function makeSandboxLockfileCompiler(
           image: opts.image,
           resourceLimits: limits,
           expiresAt,
+          // The compile resolves against the package index.
+          network: "bridge",
           ...(opts.depsCacheVolumeName && {
             depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
             env: { UV_CACHE_DIR: `${DEPS_CACHE_VOLUME_TARGET}/.uv-cache` },

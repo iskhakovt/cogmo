@@ -70,7 +70,7 @@ function buildHarness(): ReaperHarness {
 }
 
 describe("reapSkillVenvs", () => {
-  it("threads `depsCacheVolume` onto the sandbox create spec and pipes reachable hashes via stdin", async () => {
+  it("creates a session with no network, threads `depsCacheVolume` onto it and pipes reachable hashes via stdin", async () => {
     const h = buildHarness();
     const promise = reapSkillVenvs({
       sandbox: h.sandbox,
@@ -86,6 +86,7 @@ describe("reapSkillVenvs", () => {
       expect.objectContaining({
         image: "cogmo-skills:test",
         depsCacheVolume: { volumeName: "deps-vol-x" },
+        network: "none",
       }),
     );
     // Hashes streamed on stdin so the script can `grep -qxF` against

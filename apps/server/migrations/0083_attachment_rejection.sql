@@ -1,0 +1,3 @@
+CREATE TYPE "public"."attachment_rejection" AS ENUM('bad_request', 'too_large');--> statement-breakpoint
+ALTER TABLE "attachment_originals" ADD COLUMN "rejection" "attachment_rejection";--> statement-breakpoint
+ALTER TABLE "attachment_originals" ADD CONSTRAINT "chk_attachment_originals_rejection" CHECK (("attachment_originals"."state" = 'rejected') = ("attachment_originals"."rejection" IS NOT NULL));

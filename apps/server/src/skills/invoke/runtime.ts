@@ -1,7 +1,7 @@
 import type { Result } from "neverthrow";
 import type { SandboxClient } from "../../sandbox/index.js";
 import type { DefaultCtxHandler } from "../ctx-handler.js";
-import type { LockfileSnapshot } from "../deps.js";
+import type { DispatchGate, TaskRun } from "../protocol.js";
 import type { SkillSourceCacheEntry } from "../source-cache.js";
 import type { SkillRow, SkillTier } from "../store/index.js";
 import type { SkillManifest } from "../types.js";
@@ -13,6 +13,7 @@ import {
   type RunOnWorkerResult,
   runOnWorker,
 } from "../worker-wasm/host.js";
+import type { SkillPackageSource } from "../worker-wasm/skill-packages.js";
 import type { WasmPackages, WasmPackagesError } from "../worker-wasm/wasm.js";
 
 /**
@@ -86,12 +87,12 @@ export interface RuntimeConfig {
   /** Where wasm children's process-group records live while they run. */
   wasmChildrenDir: string;
   /**
-   * What a wasm child installs for a lockfile: the built-ins the package
-   * cache holds and the lockfile's read-only wheel directory, fetched and
-   * verified by the host when missing (`ensureWasmPackages`).
+   * What a wasm child installs for a skill: the built-ins the package cache
+   * holds and the lockfile's read-only wheel directory, fetched and verified
+   * by the host when missing (`resolveSkillWasmPackages`).
    */
   resolveWasmPackages(
-    lockfile: LockfileSnapshot | undefined,
+    source: SkillPackageSource,
     signal?: AbortSignal,
   ): Promise<Result<WasmPackages, WasmPackagesError>>;
   /** Container image for one-shot container runs. */
@@ -100,24 +101,37 @@ export interface RuntimeConfig {
   depsCacheVolumeName: string | undefined;
 }
 
+/** One run's task, as a runtime takes it. */
+export interface RuntimeTask {
+  skill: SkillRow;
+  cached: SkillSourceCacheEntry;
+  inputs: unknown;
+  ctxHandler: DefaultCtxHandler;
+  taskId: string;
+  run: TaskRun;
+  /** Asked immediately before `task_invoke` is sent. */
+  dispatch: DispatchGate;
+  /** The wall clock the runtime enforces, the one `deadline_at` counts from. */
+  wallClockS: number;
+}
+
 /** Run the task on the runtime {@link planRuntime} chose. */
 export async function dispatchToRuntime(
   config: RuntimeConfig,
   runtime: SkillRuntime,
-  skill: SkillRow,
-  cached: SkillSourceCacheEntry,
-  inputs: unknown,
-  ctxHandler: DefaultCtxHandler,
-  taskId: string,
+  run: RuntimeTask,
 ): Promise<RunOnWorkerResult | InvokeResult> {
-  const wallClockS = cached.manifest.resources?.wall_clock_s;
+  const { skill, cached } = run;
+  const { wallClockS } = run;
   const task = {
-    taskId,
+    taskId: run.taskId,
+    run: run.run,
     skillName: skill.name,
     body: cached.body,
-    inputs,
-    ...(wallClockS !== undefined && { wallClockS }),
-    ctxHandler,
+    inputs: run.inputs,
+    wallClockS,
+    ctxHandler: run.ctxHandler,
+    dispatch: run.dispatch,
   };
   if (runtime.kind === "wasm") {
     return runOnWorker({

@@ -9,6 +9,7 @@ import { renderForkSpan } from "../attachments/render-fork-span.js";
 import {
   compactMessages,
   extractSummaryText,
+  rewroteWithoutSummary,
   shouldSkipCounting,
   summarizationRequest,
 } from "../context.js";
@@ -17,6 +18,11 @@ import type { StepRunner } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { StoredMessage } from "../stored-content.js";
 import { resolveOrFail, type TurnModel } from "./resolve-turn-model.js";
+
+/** The id of the durable step that makes the turn's `count`th token count, from 1. */
+export function countTokensStepId(count: number): string {
+  return `count-tokens-${count}`;
+}
 
 export interface CompactTurnDeps {
   runInTx: Transactor;
@@ -54,6 +60,13 @@ export interface CompactedTurn {
   messages: Message[];
   /** The cutoff of the summary this turn stored, which later turns' history starts after. */
   storedCutoff: string | null;
+  /**
+   * Whether this turn's compaction rewrote the view without a stored summary:
+   * Strategy 3 truncated it, or Strategy 2 summarized it and stored nothing.
+   * The next turn can't rebuild such a view from rows, so the turn's heads are
+   * `compacted` (design/prompt-caching.md → Head check).
+   */
+  rewroteView: boolean;
 }
 
 /**
@@ -146,7 +159,11 @@ export async function compactTurn(
         })
       : null;
 
-  return { messages: compactResult.messages, storedCutoff };
+  return {
+    messages: compactResult.messages,
+    storedCutoff,
+    rewroteView: rewroteWithoutSummary(compactResult.event, storedCutoff),
+  };
 }
 
 /**
@@ -164,7 +181,7 @@ function countTokensSteps(
   let countCall = 0;
   return (params) => {
     countCall += 1;
-    return stepRun(`count-tokens-${countCall}`, () => provider.countTokens({ ...params, model }));
+    return stepRun(countTokensStepId(countCall), () => provider.countTokens({ ...params, model }));
   };
 }
 

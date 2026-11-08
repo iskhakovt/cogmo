@@ -17,6 +17,7 @@ import { err, ok } from "neverthrow";
 import { afterAll, assert, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
+import { sendingGate } from "../../test/factories.js";
 import type { CtxHandler } from "../dispatcher.js";
 import { loadBundledPackages } from "../pyodide-compat.js";
 import {
@@ -102,6 +103,9 @@ function task(
     pyodideDistDir: pyodideDistDir(),
     childrenDir,
     memoryMb: 128,
+    dispatch: sendingGate(),
+    wallClockS: 30,
+    run: { id: params.taskId, key: `key-${params.taskId}` },
     ...params,
   };
 }
@@ -165,7 +169,7 @@ async def run(inputs, ctx):
 
   it("raises a refused ctx call in the skill as CtxError with its kind and message", async () => {
     const handler: CtxHandler = {
-      handle: vi.fn(async () =>
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
         err({ kind: "not_in_allowlist", message: "secret 'x' is not declared" }),
       ),
     };
@@ -193,9 +197,95 @@ async def run(inputs, ctx):
     });
   });
 
+  it("raises the cogmo_ctx CtxError, the class the skill's global names too", async () => {
+    const handler: CtxHandler = {
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
+        err({ kind: "not_in_allowlist", message: "no" }),
+      ),
+    };
+    const result = await runOnWorker(
+      task({
+        taskId: "task-imported",
+        skillName: "imported",
+        body: `
+import cogmo_ctx
+async def run(inputs, ctx):
+    try:
+        await ctx.secrets.get("x")
+    except cogmo_ctx.CtxError as e:
+        return {"kind": e.kind, "global": CtxError is cogmo_ctx.CtxError}
+`,
+        inputs: {},
+        ctxHandler: handler,
+      }),
+    );
+    assert(result.ok);
+    expect(result.output).toEqual({ kind: "not_in_allowlist", global: true });
+  });
+
+  it.each([
+    ["False", "skill_failed"],
+    ["True", "skill_retryable"],
+  ])("reports a SkillError with retryable=%s as %s", async (retryable, errorKind) => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-skill-error",
+        skillName: "skill-error",
+        body: `
+from cogmo_ctx import SkillError
+async def run(inputs, ctx):
+    raise SkillError("not_found", "no such feed", retryable=${retryable})
+`,
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    expect(result).toMatchObject({ ok: false, errorKind, error: "not_found: no such feed" });
+  });
+
+  it("reports a skill that forges another kind through the failure report as skill_raised", async () => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-forged",
+        skillName: "forged",
+        body: `
+async def _cogmo_call_run(namespace, run, inputs, ctx):
+    return ("runtime_unavailable", "no skill code ran"), None
+
+async def run(inputs, ctx):
+    return {}
+`,
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      errorKind: "skill_raised",
+      error: "the skill replaced the run's failure report",
+    });
+  });
+
+  it("hands the task's run to ctx.run()", async () => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-run",
+        run: { id: "run-9", key: "skill-tool:call-9" },
+        skillName: "run",
+        body: "async def run(inputs, ctx):\n    return ctx.run()\n",
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    assert(result.ok);
+    expect(result.output).toEqual({ id: "run-9", key: "skill-tool:call-9" });
+  });
+
   it("fails the task naming the CtxError a skill leaves uncaught", async () => {
     const handler: CtxHandler = {
-      handle: vi.fn(async () => err({ kind: "missing_effect", message: "needs reads_memory" })),
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
+        err({ kind: "missing_effect", message: "needs reads_memory" }),
+      ),
     };
     const result = await runOnWorker(
       task({
@@ -210,6 +300,7 @@ async def run(inputs, ctx):
       }),
     );
     assert(!result.ok);
+    expect(result.errorKind).toBe("skill_raised");
     expect(result.error).toContain("CtxError: missing_effect: needs reads_memory");
   });
 
@@ -246,6 +337,7 @@ async def run(inputs, ctx):
     );
 
     assert(!result.ok);
+    expect(result.errorKind).toBe("skill_raised");
     expect(result.error).toContain("kaboom");
   });
 
@@ -352,8 +444,46 @@ async def run(inputs, ctx):
       }),
     );
     assert(!result.ok);
-    expect(typeof result.error).toBe("string");
-    expect(result.error?.length ?? 0).toBeGreaterThan(0);
+    expect(result.errorKind).toBe("load_failed");
+    expect(result.error.length).toBeGreaterThan(0);
+  });
+
+  it("a body that raises on import, or defines no run, fails to load", async () => {
+    const raising = await runOnWorker(
+      task({
+        taskId: "task-import",
+        skillName: "import-error",
+        body: "import not_a_module\n",
+        inputs: {},
+        ctxHandler: noopHandler(),
+      }),
+    );
+    expect(raising).toMatchObject({ ok: false, errorKind: "load_failed" });
+    const missing = await runOnWorker(
+      task({
+        taskId: "task-norun",
+        skillName: "no-run",
+        body: "x = 1\n",
+        inputs: {},
+        ctxHandler: noopHandler(),
+      }),
+    );
+    expect(missing).toEqual({
+      ok: false,
+      errorKind: "load_failed",
+      error: "skill must define `async def run(inputs, ctx)`",
+    });
+    // A sync `run` loads, and fails when its result is awaited.
+    const sync = await runOnWorker(
+      task({
+        taskId: "task-sync",
+        skillName: "sync-run",
+        body: "def run(inputs, ctx):\n    return 1\n",
+        inputs: {},
+        ctxHandler: noopHandler(),
+      }),
+    );
+    expect(sync).toMatchObject({ ok: false, errorKind: "skill_raised" });
   });
 
   it("captures a custom Python exception class name", async () => {
@@ -373,6 +503,7 @@ async def run(inputs, ctx):
       }),
     );
     assert(!result.ok);
+    expect(result.errorKind).toBe("skill_raised");
     expect(result.error).toContain("MyCustomError");
     expect(result.error).toContain("specific failure");
   });
@@ -671,6 +802,13 @@ async def run(inputs, ctx):
     expect(result.output).toEqual({ memoryError: true, after: 1024 });
   });
 
+  it("memory: a MemoryError the skill leaves uncaught is memory_exceeded", async () => {
+    const result = await boundaryRun(
+      "async def run(inputs, ctx):\n    return len(bytearray(256 * 1024 * 1024))\n",
+    );
+    expect(result).toMatchObject({ ok: false, errorKind: "memory_exceeded" });
+  });
+
   it("cpu: a tight loop ends as wall_clock_exceeded", { timeout: 15_000 }, async () => {
     const result = await boundaryRun(
       "async def run(inputs, ctx):\n    while True:\n        pass\n",
@@ -678,7 +816,11 @@ async def run(inputs, ctx):
         wallClockS: 1,
       },
     );
-    expect(result).toEqual({ ok: false, error: "wall_clock_exceeded" });
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "wall_clock_exceeded",
+      error: "wall_clock_exceeded",
+    });
   });
 
   it("cpu: a result after the interrupt is wall_clock_exceeded, even one that caught it", {
@@ -695,7 +837,11 @@ async def run(inputs, ctx):
 `,
       { wallClockS: 1 },
     );
-    expect(result).toEqual({ ok: false, error: "wall_clock_exceeded" });
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "wall_clock_exceeded",
+      error: "wall_clock_exceeded",
+    });
   });
 
   it("records the child's process group while it runs, and deletes the record after", async () => {
@@ -752,12 +898,102 @@ async def run(inputs, ctx):
     expect(result.output).toEqual({ x: 3, version: expect.any(String) });
   });
 
+  it("applies the skill's Input and Output models in the child", async () => {
+    const body = `
+from pydantic import BaseModel
+
+class Input(BaseModel):
+    n: int = 2
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return Output(doubled=inputs.n * 2)
+`;
+    const packages = { builtins: ["pydantic"], wheelDir: null };
+    expect(await boundaryRun(body, { packages })).toMatchObject({
+      ok: true,
+      output: { doubled: 4 },
+    });
+    expect(await boundaryRun(body, { packages, inputs: { n: "many" } })).toMatchObject({
+      ok: false,
+      errorKind: "input_invalid",
+      error: expect.stringMatching(/^n: Input should be a valid integer/),
+    });
+  });
+
+  it("keeps the output an Output model refuses, when JSON carries it", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return {"receipt": "r-1"}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Field required",
+      output: { receipt: "r-1" },
+    });
+  });
+
+  it("keeps nothing, and stays output_invalid, when the skill's own encoder writes no JSON", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+def _cogmo_encode_output(value):
+    return "not json"
+
+async def run(inputs, ctx):
+    return {"receipt": "r-1"}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Field required",
+    });
+  });
+
+  it("keeps nothing of an output an Output model refuses when JSON cannot carry it", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return {"doubled": float("nan")}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Input should be a finite number",
+    });
+  });
+
   it("fails the boot when a built-in is missing from the cache, rather than fetch it", async () => {
     const result = await boundaryRun("async def run(inputs, ctx):\n    return None\n", {
       packages: { builtins: ["numpy"], wheelDir: null },
     });
     expect(result).toEqual({
       ok: false,
+      errorKind: "runtime_unavailable",
       error: expect.stringMatching(/^worker init failed: .*numpy/),
     });
   });
@@ -844,20 +1080,87 @@ async def run(inputs, ctx):
     },
   );
 
-  it("fails the task, not the child, on an output JSON cannot carry", async () => {
-    const result = await boundaryRun('async def run(inputs, ctx):\n    return {"n": 2**60}\n');
+  it.each([
+    ["NaN", 'float("nan")', /Out of range float values are not JSON compliant/],
+    ["a set", "{1, 2}", /Object of type set is not JSON serializable/],
+    ["a function", "lambda: 1", /Object of type function is not JSON serializable/],
+  ])("fails the task as output_invalid, not the child, on %s", async (_, value, error) => {
+    const result = await boundaryRun(`async def run(inputs, ctx):\n    return {"v": ${value}}\n`);
     expect(result).toEqual({
       ok: false,
-      error: expect.stringMatching(/^task output is not JSON-serializable: .*BigInt/),
+      errorKind: "output_invalid",
+      error: expect.stringMatching(error),
     });
   });
 
-  it("fails the task, not the child, on an output structured clone cannot carry", async () => {
-    const result = await boundaryRun('async def run(inputs, ctx):\n    return {"f": lambda: 1}\n');
+  it("carries an output as JSON carries it, as the container tier does", async () => {
+    const result = await boundaryRun(
+      'async def run(inputs, ctx):\n    return {"t": (1, 2), 3: "int key", "safe": 2**53 - 1}\n',
+    );
+    expect(result).toEqual({
+      ok: true,
+      output: { t: [1, 2], "3": "int key", safe: Number.MAX_SAFE_INTEGER },
+    });
+  });
+
+  it("fails the task as output_invalid on an integer the host would round", async () => {
+    const result = await boundaryRun(
+      'async def run(inputs, ctx):\n    return {"id": [1790000000000000001]}\n',
+    );
     expect(result).toEqual({
       ok: false,
-      error: expect.stringMatching(/^task output is not serializable: .*could not be cloned/),
+      errorKind: "output_invalid",
+      error: expect.stringMatching(/integer 1790000000000000001 is past 2\*\*53/),
     });
+  });
+
+  it("fails the task as output_invalid on keys JSON would write alike", async () => {
+    const result = await boundaryRun(
+      'async def run(inputs, ctx):\n    return {1: "a", "1": "b"}\n',
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: expect.stringMatching(/two keys of one dict are written alike/),
+    });
+  });
+
+  it("runs a run wrapped by a plain decorator that returns its awaitable", async () => {
+    const result = await boundaryRun(`
+def wrap(f):
+    return lambda inputs, ctx: f(inputs, ctx)
+
+@wrap
+async def run(inputs, ctx):
+    return {"wrapped": True}
+`);
+    expect(result).toEqual({ ok: true, output: { wrapped: true } });
+  });
+
+  it("reports a MemoryError while encoding the output as memory_exceeded", async () => {
+    // Small in memory, past the 128 MiB cap as JSON.
+    const result = await boundaryRun(
+      'async def run(inputs, ctx):\n    return ["x" * 1024] * 200_000\n',
+    );
+    expect(result).toMatchObject({ ok: false, errorKind: "memory_exceeded" });
+  });
+
+  it("fails the task as output_invalid, not the worker, when the skill shadows the encoder", async () => {
+    const result = await boundaryRun(`
+def _cogmo_encode_output(value):
+    return "{not json"
+
+async def run(inputs, ctx):
+    return {"ok": True}
+`);
+    expect(result).toMatchObject({ ok: false, errorKind: "output_invalid" });
+  });
+
+  it("reports a MemoryError at import as memory_exceeded", async () => {
+    const result = await boundaryRun(
+      "_big = bytearray(256 * 1024 * 1024)\nasync def run(inputs, ctx):\n    return None\n",
+    );
+    expect(result).toMatchObject({ ok: false, errorKind: "memory_exceeded" });
   });
 
   it("fails the ctx call, not the child, on arguments JSON cannot carry", async () => {

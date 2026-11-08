@@ -28,7 +28,7 @@ ARG UV_VERSION
 ARG UV_DIGEST
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv
 
-FROM mirror.gcr.io/library/python:3.14.10-slim@sha256:3cabfd7d7aaf394e6040e79fa1eec6ca1c52b74ed9188650472695d9a9326999 AS builder
+FROM mirror.gcr.io/library/python:3.14.10-slim@sha256:af8a5aa14780025dbfbcfbc81bd8a91ebd87711dd5b0f48ed71090949dd7cb1d AS builder
 
 COPY --from=uv /uv /uvx /bin/
 
@@ -65,10 +65,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
  && echo /app/src > "$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/cogmo_skills_mutants.pth" \
  && install -d -o 1000 -g 1000 /app/mutants
 COPY tests /app/tests/
+COPY contract /app/contract/
 ENV PATH="/app/.venv/bin:${PATH}" HOME=/tmp PYTHONDONTWRITEBYTECODE=1
 USER 1000:1000
 
-FROM mirror.gcr.io/library/python:3.14.10-slim@sha256:3cabfd7d7aaf394e6040e79fa1eec6ca1c52b74ed9188650472695d9a9326999
+FROM mirror.gcr.io/library/python:3.14.10-slim@sha256:af8a5aa14780025dbfbcfbc81bd8a91ebd87711dd5b0f48ed71090949dd7cb1d
 
 ENV PYTHONUNBUFFERED=1
 
