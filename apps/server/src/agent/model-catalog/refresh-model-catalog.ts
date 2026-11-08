@@ -5,16 +5,22 @@
  * OpenRouter supplies the `openrouter/*` namespace, LiteLLM everything else. A
  * model either source learns about reaches the resolver at the next refresh,
  * with no release in between.
+ *
+ * LiteLLM's registry is required: when it fails, nothing is stored. OpenRouter's
+ * list is not: when it is off or fails, the catalog stores LiteLLM's entries
+ * alone, and `openrouter/*` ids resolve from the bundled snapshot until a later
+ * refresh brings the list back.
  */
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
-import type { LitellmCatalog, LiveCatalog } from "../../llm/litellm-data.js";
-import { type PrunedRegistry, pruneLitellmRegistry } from "../../llm/litellm-upstream.js";
 import {
   isOpenRouterKey,
-  pruneOpenRouterModels,
-  withOpenRouterNamespace,
-} from "../../llm/openrouter-models.js";
+  type LitellmCatalog,
+  type LitellmEntry,
+  type LiveCatalog,
+} from "../../llm/litellm-data.js";
+import { type PrunedRegistry, pruneLitellmRegistry } from "../../llm/litellm-upstream.js";
+import { pruneOpenRouterModels, withOpenRouterNamespace } from "../../llm/openrouter-models.js";
 import { describeError } from "../../util/describe-error.js";
 import type { ModelCatalogStore } from "./store/index.js";
 
@@ -44,7 +50,15 @@ export interface ModelCatalogRefreshed {
   /** The first ids, sorted, that the previous catalog lacked. */
   added: string[];
   addedCount: number;
+  openRouter: OpenRouterOutcome;
 }
+
+/** What became of OpenRouter's model list in a refresh that stored a catalog. */
+export type OpenRouterOutcome =
+  | { kind: "off" }
+  | { kind: "refreshed"; models: number }
+  /** The stored catalog holds no `openrouter/*` entries; the bundled snapshot answers for them. */
+  | { kind: "failed"; error: ModelCatalogRefreshError };
 
 export type ModelCatalogRefreshError =
   /** A source's fetch failed or returned no JSON; a later attempt may succeed. */
@@ -71,20 +85,8 @@ export async function refreshModelCatalog(
   );
   if (litellmFloor) return err({ kind: "rejected", message: litellmFloor });
 
-  let entries = litellm.value.entries;
-  if (openRouterRaw !== null) {
-    if (openRouterRaw.isErr()) return err(openRouterRaw.error);
-    const openRouter = pruneOpenRouterModels(openRouterRaw.value);
-    if (openRouter.isErr()) return err({ kind: "rejected", message: openRouter.error });
-    const openRouterFloor = belowFloor(
-      "usable OpenRouter models",
-      openRouter.value,
-      deps.bundled,
-      isOpenRouterKey,
-    );
-    if (openRouterFloor) return err({ kind: "rejected", message: openRouterFloor });
-    entries = withOpenRouterNamespace(entries, openRouter.value.entries);
-  }
+  const openRouter = openRouterRaw === null ? null : openRouterEntries(openRouterRaw, deps.bundled);
+  const entries = withOpenRouterNamespace(litellm.value.entries, openRouter?.unwrapOr({}) ?? {});
 
   const { previousIds, stored } = await deps.runInTx(async (tx) => ({
     previousIds: await deps.modelCatalogStore.latestModelIds(tx),
@@ -101,6 +103,26 @@ export async function refreshModelCatalog(
     fetchedAt: stored.createdAt.toISOString(),
     added: added.slice(0, ADDED_SAMPLE),
     addedCount: added.length,
+    openRouter:
+      openRouter === null
+        ? { kind: "off" }
+        : openRouter.match(
+            (models) => ({ kind: "refreshed", models: Object.keys(models).length }),
+            (error) => ({ kind: "failed", error }),
+          ),
+  });
+}
+
+/** OpenRouter's list pruned to the `openrouter/` namespace, held to its floor. */
+function openRouterEntries(
+  raw: Result<unknown, ModelCatalogRefreshError>,
+  bundled: LitellmCatalog,
+): Result<Record<string, LitellmEntry>, ModelCatalogRefreshError> {
+  return raw.andThen((value): Result<Record<string, LitellmEntry>, ModelCatalogRefreshError> => {
+    const pruned = pruneOpenRouterModels(value);
+    if (pruned.isErr()) return err({ kind: "rejected", message: pruned.error });
+    const floor = belowFloor("usable OpenRouter models", pruned.value, bundled, isOpenRouterKey);
+    return floor ? err({ kind: "rejected", message: floor }) : ok(pruned.value.entries);
   });
 }
 
@@ -129,7 +151,7 @@ async function fetchJson(
  * has stopped tracking upstream. The floor is half the bundled snapshot's
  * entries in the source's namespace, and at least one.
  */
-function belowFloor(
+export function belowFloor(
   what: string,
   pruned: PrunedRegistry,
   bundled: LitellmCatalog,

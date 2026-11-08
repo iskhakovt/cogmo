@@ -10,6 +10,7 @@
  */
 import { type Inngest, NonRetriableError } from "inngest";
 import type { Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { modelCatalogRefreshRequested } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { ModelCatalogRefreshError, ModelCatalogRefreshed } from "./refresh-model-catalog.js";
@@ -39,7 +40,17 @@ export function createModelCatalogRefresh(
           const { kind, message } = result.error;
           throw kind === "rejected" ? new NonRetriableError(message) : new Error(message);
         }
-        log.info(result.value, "model catalog refreshed");
+        match(result.value.openRouter)
+          .with({ kind: "failed" }, () =>
+            log.warn(
+              result.value,
+              "model catalog refreshed without OpenRouter's model list — openrouter/ ids resolve from the bundled snapshot until a later refresh",
+            ),
+          )
+          .with({ kind: "off" }, { kind: "refreshed" }, () =>
+            log.info(result.value, "model catalog refreshed"),
+          )
+          .exhaustive();
         return result.value;
       }),
   );

@@ -51,6 +51,17 @@ export const LitellmEntrySchema = z.object({
   maxOutputTokens: z.number().int().positive(),
 }) satisfies z.ZodType<LitellmEntry>;
 
+/**
+ * The key namespace OpenRouter's model list fills (`src/llm/openrouter-models.ts`).
+ * {@link candidateKeys} tries it for every `<org>/<model>` id.
+ */
+export const OPENROUTER_NAMESPACE = "openrouter/";
+
+/** Whether `key` sits in the namespace OpenRouter's model list supplies. */
+export function isOpenRouterKey(key: string): boolean {
+  return key.startsWith(OPENROUTER_NAMESPACE);
+}
+
 /** Model id → limits, keyed the way LiteLLM keys its registry. */
 export const LitellmCatalogSchema = z.record(z.string(), LitellmEntrySchema);
 
@@ -133,13 +144,13 @@ export function candidateKeys(modelId: string): string[] {
 
   // Strip a leading `openrouter/` if present, so `openrouter/x-ai/grok-4.3`
   // also tries `x-ai/grok-4.3`.
-  if (modelId.startsWith("openrouter/")) {
-    const stripped = modelId.slice("openrouter/".length);
+  if (isOpenRouterKey(modelId)) {
+    const stripped = modelId.slice(OPENROUTER_NAMESPACE.length);
     if (stripped) out.push(stripped);
   } else {
     // Otherwise, try with `openrouter/` prepended — the namespace OpenRouter's
     // model list fills with its limits for the same id.
-    out.push(`openrouter/${modelId}`);
+    out.push(`${OPENROUTER_NAMESPACE}${modelId}`);
   }
 
   // Cogmo uses OpenRouter's `x-ai/` (hyphen); LiteLLM (and the upstream
@@ -147,11 +158,11 @@ export function candidateKeys(modelId: string): string[] {
   const aliased = aliasOrgPrefix(modelId);
   if (aliased && aliased !== modelId) {
     out.push(aliased);
-    if (aliased.startsWith("openrouter/")) {
-      const stripped = aliased.slice("openrouter/".length);
+    if (isOpenRouterKey(aliased)) {
+      const stripped = aliased.slice(OPENROUTER_NAMESPACE.length);
       if (stripped) out.push(stripped);
     } else {
-      out.push(`openrouter/${aliased}`);
+      out.push(`${OPENROUTER_NAMESPACE}${aliased}`);
     }
   }
 

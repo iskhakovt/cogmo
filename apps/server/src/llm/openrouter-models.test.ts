@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  isOpenRouterKey,
-  pruneOpenRouterModels,
-  withOpenRouterNamespace,
-} from "./openrouter-models.js";
+import { pruneOpenRouterModels, withOpenRouterNamespace } from "./openrouter-models.js";
 
 const LIMITS = { contextWindow: 200_000, maxOutputTokens: 8_192 };
 
@@ -110,15 +106,5 @@ describe("withOpenRouterNamespace", () => {
       "claude-sonnet-4-6": LIMITS,
       "openrouter/x-ai/grok-9": LIMITS,
     });
-  });
-});
-
-describe("isOpenRouterKey", () => {
-  it.each([
-    ["openrouter/x-ai/grok-9", true],
-    ["x-ai/grok-9", false],
-    ["vertex_ai/openrouter/x", false],
-  ])("%s → %s", (key, expected) => {
-    expect(isOpenRouterKey(key)).toBe(expected);
   });
 });

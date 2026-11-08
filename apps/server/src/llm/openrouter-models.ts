@@ -11,16 +11,15 @@
  */
 import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
+import { match } from "ts-pattern";
 import { z } from "zod";
-import type { LitellmCatalog, LitellmEntry } from "./litellm-data.js";
+import {
+  isOpenRouterKey,
+  type LitellmCatalog,
+  type LitellmEntry,
+  OPENROUTER_NAMESPACE,
+} from "./litellm-data.js";
 import { budgetEntry, type PrunedRegistry } from "./litellm-upstream.js";
-
-const OPENROUTER_PREFIX = "openrouter/";
-
-/** Whether `key` sits in the namespace OpenRouter's list supplies. */
-export function isOpenRouterKey(key: string): boolean {
-  return key.startsWith(OPENROUTER_PREFIX);
-}
 
 const ListSchema = z.object({ data: z.array(z.unknown()) });
 
@@ -64,9 +63,15 @@ function pruneModel(value: unknown): PrunedModel {
   const { id, context_length, top_provider } = model.data;
   const contextWindow = Math.min(context_length, top_provider?.context_length ?? context_length);
   const budget = budgetEntry(contextWindow, top_provider?.max_completion_tokens ?? contextWindow);
-  return budget.kind === "kept"
-    ? { kind: "kept", key: `${OPENROUTER_PREFIX}${id}`, entry: budget.entry }
-    : budget;
+  return match(budget)
+    .returnType<PrunedModel>()
+    .with({ kind: "kept" }, ({ entry }) => ({
+      kind: "kept",
+      key: `${OPENROUTER_NAMESPACE}${id}`,
+      entry,
+    }))
+    .with({ kind: "unusable" }, (unusable) => unusable)
+    .exhaustive();
 }
 
 /**

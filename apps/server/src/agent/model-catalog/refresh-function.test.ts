@@ -16,6 +16,7 @@ const refreshed: ModelCatalogRefreshed = {
   fetchedAt: "2026-09-28T06:17:00.000Z",
   added: ["claude-sonnet-5-5"],
   addedCount: 1,
+  openRouter: { kind: "refreshed", models: 451 },
 };
 
 describe("createModelCatalogRefresh", () => {
@@ -58,5 +59,26 @@ describe("createModelCatalogRefresh", () => {
     const { error } = await new InngestTestEngine({ function: fn, events: [requested] }).execute();
 
     expect(error).toMatchObject({ name: "NonRetriableError" });
+  });
+
+  it("succeeds without retrying when only OpenRouter's list failed", async () => {
+    const degraded: ModelCatalogRefreshed = {
+      ...refreshed,
+      openRouter: {
+        kind: "failed",
+        error: { kind: "unavailable", message: "https://openrouter.ai/api/v1/models returned 503" },
+      },
+    };
+    const refresh = vi.fn(async () => ok(degraded));
+    const fn = createModelCatalogRefresh(refresh, inngest);
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [requested],
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual(degraded);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });

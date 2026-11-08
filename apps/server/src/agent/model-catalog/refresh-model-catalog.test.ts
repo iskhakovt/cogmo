@@ -192,56 +192,63 @@ describe("refreshModelCatalog", () => {
         "openrouter/x-ai/grok-9": { contextWindow: 200_000, maxOutputTokens: 16_000 },
       });
       expect(deps.installed).toEqual([{ entries: stored, fetchedAt: FETCHED_AT }]);
-      expect(result.models).toBe(5);
-      expect(result.added).toEqual(["openrouter/x-ai/grok-9"]);
+      expect(result).toMatchObject({
+        models: 5,
+        added: ["openrouter/x-ai/grok-9"],
+        openRouter: { kind: "refreshed", models: 1 },
+      });
     });
 
-    it("keeps LiteLLM's openrouter/ entries when the OpenRouter source is off", async () => {
+    it("leaves the openrouter/ namespace to the bundled snapshot when the source is off", async () => {
       const deps = makeDeps({
         response: Response.json(upstream([...Object.keys(BUNDLED), "openrouter/legacy/model"])),
       });
 
-      await refreshModelCatalog(deps);
+      const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
 
       expect(deps.fetch).toHaveBeenCalledTimes(1);
-      expect(deps.store.replace.mock.calls[0]?.[1]).toHaveProperty(["openrouter/legacy/model"]);
+      expect(deps.store.replace.mock.calls[0]?.[1]).toEqual(BUNDLED);
+      expect(result.openRouter).toEqual({ kind: "off" });
     });
 
     it.each([
       [
         "a non-2xx status",
         new Response("rate limited", { status: 429 }),
-        /openrouter\.test.* returned 429/,
+        { kind: "unavailable", message: "https://openrouter.test/api/v1/models returned 429" },
       ],
       [
         "a network failure",
         new Error("ECONNRESET"),
-        /fetching https:\/\/openrouter\.test.*ECONNRESET/,
+        {
+          kind: "unavailable",
+          message: expect.stringMatching(/^fetching https:\/\/openrouter\.test.*ECONNRESET/),
+        },
       ],
-    ])(
-      "reports %s as unavailable and keeps the stored catalog",
-      async (_label, openRouter, message) => {
-        const deps = makeDeps({ openRouter });
+      [
+        "a list that isn't a { data: [...] } object",
+        Response.json(upstream(["x-ai/grok-9"])),
+        { kind: "rejected", message: expect.stringMatching(/not a \{ data/) },
+      ],
+      [
+        "an empty list, even with no openrouter/ entries in the bundled snapshot",
+        Response.json(openRouterList([])),
+        { kind: "rejected", message: expect.stringMatching(/only 0 usable OpenRouter models/) },
+      ],
+    ])("stores LiteLLM's entries alone and reports %s", async (_label, openRouter, error) => {
+      const deps = makeDeps({
+        response: Response.json(upstream([...Object.keys(BUNDLED), "openrouter/legacy/model"])),
+        openRouter,
+      });
 
-        const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
+      const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
 
-        expect(error.kind).toBe("unavailable");
-        expect(error.message).toMatch(message);
-        expect(deps.store.replace).not.toHaveBeenCalled();
-        expect(deps.installed).toEqual([]);
-      },
-    );
-
-    it("rejects a list that isn't a { data: [...] } object", async () => {
-      const deps = makeDeps({ openRouter: Response.json(upstream(["x-ai/grok-9"])) });
-
-      const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
-
-      expect(error.kind).toBe("rejected");
-      expect(deps.store.replace).not.toHaveBeenCalled();
+      expect(deps.store.replace.mock.calls[0]?.[1]).toEqual(BUNDLED);
+      expect(deps.installed).toHaveLength(1);
+      expect(result.openRouter).toEqual({ kind: "failed", error });
     });
 
-    it("rejects a list with under half the bundled snapshot's openrouter/ entries", async () => {
+    it("holds a list to half the bundled snapshot's openrouter/ entries", async () => {
       const bundled: LitellmCatalog = {
         ...BUNDLED,
         ...Object.fromEntries(
@@ -250,23 +257,30 @@ describe("refreshModelCatalog", () => {
       };
       const deps = makeDeps({ bundled, openRouter: Response.json(openRouterList(["a/1"])) });
 
-      const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
+      const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
 
-      expect(error).toMatchObject({
-        kind: "rejected",
-        message:
-          "only 1 usable OpenRouter models, under the floor of 2 (half the bundled snapshot)",
+      expect(result.openRouter).toEqual({
+        kind: "failed",
+        error: {
+          kind: "rejected",
+          message:
+            "only 1 usable OpenRouter models, under the floor of 2 (half the bundled snapshot)",
+        },
       });
-      expect(deps.store.replace).not.toHaveBeenCalled();
-      expect(deps.installed).toEqual([]);
+      expect(deps.store.replace.mock.calls[0]?.[1]).toEqual(BUNDLED);
     });
 
-    it("rejects an empty list even when the bundled snapshot has no openrouter/ entries", async () => {
-      const deps = makeDeps({ openRouter: Response.json(openRouterList([])) });
+    it("stores nothing when LiteLLM's registry fails, whatever OpenRouter sends", async () => {
+      const deps = makeDeps({
+        response: new Response("unavailable", { status: 503 }),
+        openRouter: Response.json(openRouterList(["x-ai/grok-9"])),
+      });
 
       const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
 
-      expect(error).toMatchObject({ kind: "rejected", message: expect.stringMatching(/only 0 /) });
+      expect(error.kind).toBe("unavailable");
+      expect(deps.store.replace).not.toHaveBeenCalled();
+      expect(deps.installed).toEqual([]);
     });
 
     it("counts LiteLLM's floor outside the openrouter/ namespace", async () => {
