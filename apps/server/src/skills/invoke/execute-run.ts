@@ -162,18 +162,21 @@ function executedOutcomeOfTask(result: TaskOutcome): ExecutedOutcome {
   return match(result)
     .returnType<ExecutedOutcome>()
     .with({ ok: true }, ({ output }) => ({ kind: "output", output: output ?? null }))
-    .with({ ok: false }, ({ errorKind, error }) => ({
+    .with({ ok: false }, ({ errorKind, error, output }) => ({
       kind: "error",
-      error: taskError(errorKind, error),
+      error: taskError(errorKind, error, output),
     }))
     .exhaustive();
 }
 
-/** A runtime's error as a run error; a worker's `output_invalid` had no JSON to keep. */
-function taskError(kind: TaskErrorKind, message: string): SkillRunError {
+/**
+ * A runtime's error as a run error. An `output_invalid` keeps the output its
+ * worker kept: what an `Output` model refused, when JSON carried it.
+ */
+function taskError(kind: TaskErrorKind, message: string, output: unknown): SkillRunError {
   return match(kind)
     .returnType<SkillRunError>()
-    .with("output_invalid", (k) => ({ kind: k, message, output: null }))
+    .with("output_invalid", (k) => ({ kind: k, message, output: output ?? null }))
     .with(P.not("output_invalid"), (k) => ({ kind: k, message }))
     .exhaustive();
 }

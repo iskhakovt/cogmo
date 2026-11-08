@@ -6,7 +6,6 @@ import { classifyManifest } from "../classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
 import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
-import { checkRuntimePins } from "../runtime-packages.js";
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
@@ -216,10 +215,6 @@ async function prepareRegister(
     return err(rejectedResult(branchSha, lockfileResult.error));
   }
   const lockfile = lockfileResult.value;
-  if (lockfile !== null) {
-    const pins = checkRuntimePins(lockfile.contents);
-    if (pins.isErr()) return err(rejectedResult(branchSha, pins.error));
-  }
 
   if (manifest.tier === "wasm" && lockfile !== null) {
     const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents), {

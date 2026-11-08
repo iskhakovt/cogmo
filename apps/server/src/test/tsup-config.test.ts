@@ -96,7 +96,8 @@ describe("tsup build", () => {
     // `cogmo_ctx` from the skills image's source, `py/task.py` and
     // `py/install_deps.py`, inlined by the `.py` text loader.
     expect(sources[1]).toContain("class SkillError(Exception):");
-    expect(sources[1]).toContain("async def _cogmo_call_run(run, inputs, ctx):");
+    expect(sources[1]).toContain("async def call_run(");
+    expect(sources[1]).toContain("class _CogmoBridge:");
     expect(sources[1]).toContain("async def _install_wheels(mount, files):");
   });
 });

@@ -1,5 +1,6 @@
 import { err, ok, type Result } from "neverthrow";
 import { type LockfileCompiler, type LockfileSnapshot, readLockfileAtSha } from "../deps.js";
+import { checkRuntimePins } from "../runtime-packages.js";
 import type { SkillManifest } from "../types.js";
 
 /**
@@ -17,13 +18,14 @@ import type { SkillManifest } from "../types.js";
  *   - `err(message)` — manifest declares deps and one of: the
  *     committed lockfile is missing/empty, the resolver couldn't run
  *     ('transport_failed'), the resolver itself failed
- *     ('resolver_failed'), or the committed file is stale relative
- *     to a fresh resolve. The caller surfaces the message verbatim
+ *     ('resolver_failed'), the committed file is stale relative
+ *     to a fresh resolve, or it shadows the runtime's pydantic
+ *     ('runtime_package_conflict'). The caller surfaces the message verbatim
  *     as the register `errors[]` payload.
  *
- * When `compiler` is undefined OR `verifyFresh` is false,
- * verification degrades to presence + hash only — the committed
- * file is trusted as-is. `verifyFresh: false` is the rollback
+ * When `verifyFresh` is false, verification degrades to presence + hash
+ * only — the committed file is trusted as-is; when `compiler` is undefined,
+ * to that and the runtime pins. `verifyFresh: false` is the rollback
  * mode: the target lockfile was valid at deploy time, hashes are
  * still pinned, and a wheel yanked from PyPI since shouldn't block
  * the operator from rewinding to a known-good revision.
@@ -45,6 +47,11 @@ export async function readManifestLockfile(
     return err(
       `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes --no-header' and commit the result.`,
     );
+  }
+
+  if (opts.verifyFresh) {
+    const pins = checkRuntimePins(snapshot.value.contents);
+    if (pins.isErr()) return err(pins.error);
   }
 
   if (opts.verifyFresh && compiler) {

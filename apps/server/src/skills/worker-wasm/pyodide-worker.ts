@@ -5,12 +5,13 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type MessagePort, parentPort, workerData } from "node:worker_threads";
 import * as nodeZlib from "node:zlib";
-import { errAsync, okAsync, ResultAsync } from "neverthrow";
+import { errAsync, okAsync, Result, ResultAsync } from "neverthrow";
 import type { PyodideInterface } from "pyodide";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { z } from "zod";
 import COGMO_CTX_PY from "../../../../../images/skills/src/cogmo_ctx/__init__.py";
 import COGMO_CTX_CONTRACT_PY from "../../../../../images/skills/src/cogmo_ctx/_contract.py";
+import COGMO_CTX_RUN_PY from "../../../../../images/skills/src/cogmo_ctx/_run.py";
 import {
   CtxResultSchema,
   TaskInvokeSchema,
@@ -239,10 +240,14 @@ function toPlain(py: PyodideInterface, value: unknown): unknown {
 }
 
 /** A failed stage of a task: the run error kind it reports, and why. */
-interface StageFailure {
-  errorKind: WorkerErrorKind;
-  error: string;
-}
+type StageFailure =
+  | { errorKind: Exclude<WorkerErrorKind, "output_invalid">; error: string }
+  | {
+      errorKind: "output_invalid";
+      error: string;
+      /** What the skill returned, kept when JSON carries it. */
+      output?: unknown;
+    };
 
 /** Run one stage of a task, reporting a throw as `errorKind`. */
 function stage<T>(
@@ -278,8 +283,13 @@ const COGMO_CTX_ROOT = "/cogmo/lib";
  */
 function installCogmoCtx(py: PyodideInterface): void {
   py.FS.mkdirTree(`${COGMO_CTX_ROOT}/cogmo_ctx`);
-  py.FS.writeFile(`${COGMO_CTX_ROOT}/cogmo_ctx/__init__.py`, COGMO_CTX_PY);
-  py.FS.writeFile(`${COGMO_CTX_ROOT}/cogmo_ctx/_contract.py`, COGMO_CTX_CONTRACT_PY);
+  for (const [file, source] of [
+    ["__init__.py", COGMO_CTX_PY],
+    ["_contract.py", COGMO_CTX_CONTRACT_PY],
+    ["_run.py", COGMO_CTX_RUN_PY],
+  ]) {
+    py.FS.writeFile(`${COGMO_CTX_ROOT}/cogmo_ctx/${file}`, source);
+  }
   const sys = py.pyimport("sys");
   try {
     sys.path.insert(0, COGMO_CTX_ROOT);
@@ -289,24 +299,56 @@ function installCogmoCtx(py: PyodideInterface): void {
   py.pyimport("cogmo_ctx").destroy();
 }
 
-/** What `_cogmo_call_run` (`py/task.py`) reports for a `SkillError`. */
-const SkillErrorReportSchema = z.tuple([z.enum(["skill_failed", "skill_retryable"]), z.string()]);
+/** What `_cogmo_call_run` (`cogmo_ctx._run.call_run`) reports for a failure it holds as a value. */
+const RunFailureReportSchema = z.tuple([
+  z.enum(["input_invalid", "output_invalid", "skill_failed", "skill_retryable"]),
+  z.string(),
+]);
 
 /**
- * The `SkillError` the run raised, read from the global the run stage set,
- * or null when `run` returned. The global shares the skill's namespace, so
- * anything but the two kinds `_cogmo_call_run` reports is the skill's own
- * doing: `skill_raised`.
+ * The failure the run held as a value (a refused `Input` or `Output`, a
+ * `SkillError`), read from the global the run stage set, or null when it
+ * held none. The global shares the skill's namespace, so anything but the
+ * kinds `_cogmo_call_run` reports is the skill's own doing: `skill_raised`.
  */
-function skillErrorOf(py: PyodideInterface): StageFailure | null {
+function runFailureOf(py: PyodideInterface): StageFailure | null {
   const reported: unknown = py.globals.get("__cogmo_failure");
   if (reported === undefined) return null;
-  const parsed = SkillErrorReportSchema.safeParse(toPlain(py, reported));
+  const parsed = RunFailureReportSchema.safeParse(toPlain(py, reported));
   if (!parsed.success) {
-    return { errorKind: "skill_raised", error: "the skill replaced the SkillError report" };
+    return { errorKind: "skill_raised", error: "the skill replaced the run's failure report" };
   }
-  const [errorKind, error] = parsed.data;
-  return { errorKind, error };
+  return match(parsed.data)
+    .returnType<StageFailure>()
+    .with(["output_invalid", P.string], ([errorKind, error]) => {
+      const kept = keptOutputOf(py);
+      return kept === undefined ? { errorKind, error } : { errorKind, error, output: kept };
+    })
+    .with(
+      [P.union("input_invalid", "skill_failed", "skill_retryable"), P.string],
+      ([errorKind, error]) => ({
+        errorKind,
+        error,
+      }),
+    )
+    .exhaustive();
+}
+
+/**
+ * The output an `Output` model refused, which `_cogmo_call_run` leaves in
+ * `__cogmo_result`, encoded as the output stage encodes one; undefined when
+ * JSON would not carry it or memory ran out, which keeps nothing rather than
+ * fails the task.
+ */
+function keptOutputOf(py: PyodideInterface): unknown {
+  return Result.fromThrowable(
+    () => py.runPython("_cogmo_encode_output(__cogmo_result)"),
+    () => undefined,
+  )().match(
+    (encoded: unknown) =>
+      typeof encoded === "string" ? (JSON.parse(encoded) ?? undefined) : undefined,
+    () => undefined,
+  );
 }
 
 /**
@@ -367,13 +409,13 @@ function runTask(
     .andThen(() =>
       stage(skillStageKind(py, "skill_raised"), async () => {
         await py.runPythonAsync(
-          "__cogmo_failure, __cogmo_result = await _cogmo_call_run(run, __cogmo_inputs, _ctx)",
+          "__cogmo_failure, __cogmo_result = await _cogmo_call_run(globals(), run, __cogmo_inputs, _ctx)",
         );
-        return skillErrorOf(py);
+        return runFailureOf(py);
       }),
     )
-    .andThen((skillError) =>
-      skillError === null ? okAsync(undefined) : errAsync<undefined, StageFailure>(skillError),
+    .andThen((failure) =>
+      failure === null ? okAsync(undefined) : errAsync<undefined, StageFailure>(failure),
     )
     .andThen(() =>
       // Encoded in Python, as the container tier does: `NaN`, a `set`, a JS
@@ -405,13 +447,22 @@ async function handleTaskInvoke(py: PyodideInterface, body: string, raw: unknown
   const invoke = parsed.data;
   const result = await runTask(py, body, invoke).match(
     (output): TaskResult => ({ type: "task_result", id: invoke.id, ok: true, output }),
-    ({ errorKind, error }): TaskResult => ({
-      type: "task_result",
-      id: invoke.id,
-      ok: false,
-      errorKind,
-      error,
-    }),
+    (failure): TaskResult =>
+      match(failure)
+        .returnType<TaskResult>()
+        .with({ errorKind: "output_invalid" }, ({ errorKind, error, output }) =>
+          output === undefined
+            ? { type: "task_result", id: invoke.id, ok: false, errorKind, error }
+            : { type: "task_result", id: invoke.id, ok: false, errorKind, error, output },
+        )
+        .with({ errorKind: P.not("output_invalid") }, ({ errorKind, error }) => ({
+          type: "task_result",
+          id: invoke.id,
+          ok: false,
+          errorKind,
+          error,
+        }))
+        .exhaustive(),
   );
   port.postMessage(result);
 }

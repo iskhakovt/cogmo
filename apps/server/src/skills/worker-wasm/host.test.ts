@@ -243,13 +243,13 @@ async def run(inputs, ctx):
     expect(result).toMatchObject({ ok: false, errorKind, error: "not_found: no such feed" });
   });
 
-  it("reports a skill that forges another kind through the SkillError report as skill_raised", async () => {
+  it("reports a skill that forges another kind through the failure report as skill_raised", async () => {
     const result = await runOnWorker(
       task({
         taskId: "task-forged",
         skillName: "forged",
         body: `
-async def _cogmo_call_run(run, inputs, ctx):
+async def _cogmo_call_run(namespace, run, inputs, ctx):
     return ("runtime_unavailable", "no skill code ran"), None
 
 async def run(inputs, ctx):
@@ -262,7 +262,7 @@ async def run(inputs, ctx):
     expect(result).toMatchObject({
       ok: false,
       errorKind: "skill_raised",
-      error: "the skill replaced the SkillError report",
+      error: "the skill replaced the run's failure report",
     });
   });
 
@@ -896,6 +896,72 @@ async def run(inputs, ctx):
     );
     assert(result.ok, result.ok ? "" : result.error);
     expect(result.output).toEqual({ x: 3, version: expect.any(String) });
+  });
+
+  it("applies the skill's Input and Output models in the child", async () => {
+    const body = `
+from pydantic import BaseModel
+
+class Input(BaseModel):
+    n: int = 2
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return Output(doubled=inputs.n * 2)
+`;
+    const packages = { builtins: ["pydantic"], wheelDir: null };
+    expect(await boundaryRun(body, { packages })).toMatchObject({
+      ok: true,
+      output: { doubled: 4 },
+    });
+    expect(await boundaryRun(body, { packages, inputs: { n: "many" } })).toMatchObject({
+      ok: false,
+      errorKind: "input_invalid",
+      error: expect.stringMatching(/^n: Input should be a valid integer/),
+    });
+  });
+
+  it("keeps the output an Output model refuses, when JSON carries it", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return {"receipt": "r-1"}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Field required",
+      output: { receipt: "r-1" },
+    });
+  });
+
+  it("keeps nothing of an output an Output model refuses when JSON cannot carry it", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return {"doubled": float("nan")}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Input should be a finite number",
+    });
   });
 
   it("fails the boot when a built-in is missing from the cache, rather than fetch it", async () => {

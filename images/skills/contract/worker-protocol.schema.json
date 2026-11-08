@@ -119,8 +119,54 @@
             },
             "errorKind": {
               "type": "string",
+              "const": "output_invalid"
+            },
+            "error": {
+              "type": "string"
+            },
+            "rusage": {
+              "type": "object",
+              "properties": {
+                "peakMemoryBytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "additionalProperties": false
+            },
+            "output": {}
+          },
+          "required": [
+            "type",
+            "id",
+            "ok",
+            "errorKind",
+            "error",
+            "output"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "task_result"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "errorKind": {
+              "type": "string",
               "enum": [
                 "load_failed",
+                "input_invalid",
                 "skill_raised",
                 "skill_failed",
                 "skill_retryable",
