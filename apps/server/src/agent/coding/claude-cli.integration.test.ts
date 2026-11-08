@@ -248,6 +248,7 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
         image: DEVBASE_IMAGE,
         resourceLimits: RESOURCE_LIMITS,
         expiresAt: new Date(Date.now() + 5 * 60_000),
+        network: "bridge",
         env: {
           ANTHROPIC_BASE_URL: baseUrl,
           ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "sk-ant-fake",
@@ -344,6 +345,7 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
         image: DEVBASE_IMAGE,
         resourceLimits: RESOURCE_LIMITS,
         expiresAt: new Date(Date.now() + 5 * 60_000),
+        network: "bridge",
         env: {
           ANTHROPIC_BASE_URL: baseUrl,
           ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "sk-ant-fake",
