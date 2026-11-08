@@ -34,7 +34,7 @@ export type RequestHead = z.infer<typeof RequestHeadSchema>;
  *   were sent under, including one the turn stored.
  * - `status`: `compacted` when the turn's own compaction rewrote its view
  *   without a stored summary, else `diverged` when a request saw a
- *   server-reported mismatch, else `intact`.
+ *   server-reported mismatch or failed the in-turn check, else `intact`.
  */
 export const TranscriptHeadSchema = RequestHeadSchema.extend({
   base: z.string().regex(SHA256_HEX),
@@ -135,7 +135,51 @@ export interface LoopRequests {
   sent: ReadonlyArray<SentRequest>;
   /** Whether any response reported a transformation {@link isDivergingTransformation} accepts. */
   diverged: boolean;
+  /**
+   * The first iteration whose request, as this invocation rebuilt it, differs
+   * from the head its memo recorded: the in-turn check under `reopen`. Null
+   * when every rebuilt request matched or had no head to compare.
+   */
+  violatedAt: number | null;
 }
+
+/**
+ * What a turn does when a head check finds a request or history other than
+ * the one a head records: `reopen` marks the turn so an epoch opens, `throw`
+ * fails it with {@link PrefixViolationError}.
+ */
+export type PrefixViolationPolicy = "reopen" | "throw";
+
+/** A head check found an unexplained divergence under the `throw` policy. */
+export class PrefixViolationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PrefixViolationError";
+  }
+}
+
+/** The epoch reasons a stored head explains, in the epoch rule's precedence. */
+export type HeadExplanation = "configuration" | "summary" | "compaction" | "prefix_violation";
+
+/**
+ * The across-turn check's verdict on the latest headed assistant row of the
+ * current epoch (design/prompt-caching.md → Head check):
+ *
+ * - `skipped`: no snapshot, a memo without heads, or no headed row since the
+ *   epoch's opening row;
+ * - `matched`: the turn's rendered history still has the row's head;
+ * - `explained`: a different `base` (`configuration`), `historyStart`
+ *   (`summary`), or a `compacted` (`compaction`) or `diverged`
+ *   (`prefix_violation`) status;
+ * - `violated`: base, start and status match and the digest doesn't;
+ *   `firstDiverging` is the first assistant row whose stored head no longer
+ *   matches.
+ */
+export type HeadVerdict =
+  | { kind: "skipped" }
+  | { kind: "matched" }
+  | { kind: "explained"; reason: HeadExplanation }
+  | { kind: "violated"; firstDiverging: string };
 
 /** What a turn's row heads take from its view. */
 export interface HeadView {
@@ -159,7 +203,11 @@ export function rowHeads(
   view: HeadView,
 ): Array<TranscriptHead | null> {
   const hasher = new TranscriptHasher();
-  const status = view.compacted ? "compacted" : loop.diverged ? "diverged" : "intact";
+  const status = view.compacted
+    ? "compacted"
+    : loop.diverged || loop.violatedAt !== null
+      ? "diverged"
+      : "intact";
   return rows.map((row, i) => {
     if (row.role !== "assistant") return null;
     const position = loop.historyLength + i;

@@ -12,7 +12,7 @@ import { ProviderConfigError } from "../llm/resolver.js";
 import type { ChatParams, ChatStreamFrame, Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
-import { memoryRecallFailures } from "../metrics.js";
+import { memoryRecallFailures, promptPrefixViolations } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { assertInstanceOf, expectDefined } from "../test/assertions.js";
 import {
@@ -24,6 +24,7 @@ import {
   invokeInngestFn,
   invokeInngestOnFailure,
   MOCK_MESSAGE_CREATED_AT,
+  MOCK_SNAPSHOT_CREATED_AT,
   type MockStep,
   mockAgentStore,
   mockAttachmentStore,
@@ -40,6 +41,7 @@ import {
   mockVoiceBundle,
   mockVoiceResolver,
   scriptedStream,
+  TEST_PREFIX_VIOLATION,
   turnContextSent,
 } from "../test/factories.js";
 import { liveRegisterResult } from "../test/skills-fixtures.js";
@@ -48,6 +50,7 @@ import type { TransportStore } from "../transport/store/index.js";
 import { createAttachmentReader } from "./attachments/attachment-reader.js";
 import { toolResultClearing } from "./context.js";
 import type { InboundContent } from "./conversation/inbound-content.js";
+import { loadTurnHistory } from "./conversation/load-turn-history.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import { readFile } from "./file-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
@@ -56,9 +59,10 @@ import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { runStreamingAgentLoop, type StepRunner } from "./loop.js";
 import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
+import type { StoredTurnContext, SystemPromptSnapshot, TranscriptRow } from "./store/index.js";
 import type { StoredContent, StoredMessage } from "./stored-content.js";
 import { ToolRegistry, type ToolSpec } from "./tools.js";
-import { baseDigest } from "./transcript-head.js";
+import { baseDigest, PrefixViolationError, type TranscriptHead } from "./transcript-head.js";
 import { asNonRetriable, failureCause } from "./turn-step-runner.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -117,6 +121,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     images: mockImages(),
+    prefixViolation: TEST_PREFIX_VIOLATION,
     ...overrides,
   };
 }
@@ -4648,11 +4653,12 @@ describe("createHandleMessage", () => {
 
 describe("durable conversation summaries", () => {
   /** `n` alternating messages carrying the ids the loader aligns against. */
-  function rows(n: number): (StoredMessage & { id: string })[] {
+  function rows(n: number): TranscriptRow[] {
     return Array.from({ length: n }, (_, i) => ({
       id: `m${i + 1}`,
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
       content: `turn ${i + 1}`,
+      transcriptHead: null,
     }));
   }
 
@@ -5592,6 +5598,7 @@ describe("system prompt snapshot", () => {
             historyLength: 8,
             sent: [{ length: 8, digest: "f".repeat(64) }],
             diverged: false,
+            violatedAt: null,
           },
         }),
       );
@@ -5626,5 +5633,257 @@ describe("system prompt snapshot", () => {
       expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalled();
       expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m3", status: "intact" });
     });
+  });
+});
+
+describe("transcript head check", () => {
+  // A spy left by a failing test would leak into the rest of the file.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function run(deps: HandleMessageDeps, step: MockStep): Promise<void> {
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+  }
+
+  /** A provider whose every streamed request replies `text`. */
+  function replying(text: string) {
+    return mockResolver(
+      mockProvider({
+        chatStream: vi.fn(() =>
+          scriptedStream(
+            [{ type: "text_delta", text }],
+            doneFrame("end_turn", { inputTokens: 10, outputTokens: 5 }),
+          ),
+        ),
+      }),
+    );
+  }
+
+  const FIRST: TranscriptRow = { id: "m1", role: "user", content: "first", transcriptHead: null };
+  const TURN: TranscriptRow = { id: "msg-1", role: "user", content: "hello", transcriptHead: null };
+
+  interface FirstTurn {
+    /** Its reply as stored, with the head the turn wrote, as row `m2`. */
+    reply: TranscriptRow & { transcriptHead: TranscriptHead };
+    turnContext: StoredTurnContext;
+    epoch: SystemPromptSnapshot;
+  }
+
+  /** Turn A, the conversation's first, through the real loop: what it stored. */
+  async function firstTurn(): Promise<FirstTurn> {
+    const deps = mockDeps({
+      resolveProvider: replying("one"),
+      runStreamingAgentLoop,
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue([FIRST]),
+        findUserMessageByInbound: vi
+          .fn()
+          .mockResolvedValue({ id: "m1", createdAt: MOCK_MESSAGE_CREATED_AT }),
+      }),
+    });
+    await run(deps, mockStep());
+    const [, inserted] = expectDefined(
+      vi.mocked(deps.agentStore.insertMessages).mock.calls[0],
+      "reply insert",
+    );
+    const reply = expectDefined(inserted.messages[0], "reply row");
+    const [, turnContext] = expectDefined(
+      vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+      "turn context",
+    );
+    const [, opened] = expectDefined(
+      vi.mocked(deps.agentStore.insertOrRecoverSystemPromptSnapshot).mock.calls[0],
+      "first epoch",
+    );
+    return {
+      reply: {
+        id: "m2",
+        role: reply.role,
+        content: reply.content,
+        transcriptHead: expectDefined(reply.transcriptHead, "reply head"),
+      },
+      turnContext,
+      epoch: { id: "snapshot-1", createdAt: MOCK_SNAPSHOT_CREATED_AT, ...opened },
+    };
+  }
+
+  /** This turn, after turn A's rows and `between`, in turn A's epoch. */
+  function laterTurn(
+    a: FirstTurn,
+    between: ReadonlyArray<TranscriptRow>,
+    overrides: Partial<HandleMessageDeps>,
+  ): HandleMessageDeps {
+    return mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue([FIRST, a.reply, ...between, TURN]),
+        listTurnContexts: vi.fn().mockResolvedValue([a.turnContext]),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(a.epoch),
+      }),
+      ...overrides,
+    });
+  }
+
+  /** Turn A's reply with its stored content changed after its head was written. */
+  function editedReply(a: FirstTurn): FirstTurn {
+    return { ...a, reply: { ...a.reply, content: [{ type: "text", text: "edited" }] } };
+  }
+
+  function loopParams(deps: HandleMessageDeps) {
+    return expectDefined(vi.mocked(deps.runStreamingAgentLoop).mock.calls[0], "agent loop call")[0];
+  }
+
+  it("continues the epoch when the history still has the stored head", async () => {
+    const a = await firstTurn();
+    const deps = laterTurn(a, [], {});
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    expect(loopParams(deps).systemPrompt).toBe(a.epoch.rendered);
+  });
+
+  it("keeps the check clean on the turn after a rejected attachment", async () => {
+    // Turn B's row holds a photo its provider then refused; turn B failed
+    // without a reply, so its row follows turn A's head.
+    const a = await firstTurn();
+    const refused: TranscriptRow = {
+      id: "m3",
+      role: "user",
+      content: [
+        { type: "text", text: "Image 1: normalized/b.jpg", harness: "image_label" },
+        {
+          type: "image_ref",
+          path: "normalized/b.jpg",
+          mediaType: "image/jpeg",
+          width: 10,
+          height: 10,
+          bytes: 3,
+          original: { path: "inbound/b.jpg", mediaType: "image/jpeg" },
+        },
+      ],
+      transcriptHead: null,
+    };
+    const deps = laterTurn(a, [refused], {
+      transportStore: mockTransportStore({
+        listRejectedAttachmentOriginals: vi.fn().mockResolvedValue(["inbound/b.jpg"]),
+      }),
+    });
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    // The refused photo went out as its placeholder.
+    expect(JSON.stringify(loopParams(deps).messages[2]?.content)).toContain(
+      "The model provider refused this file",
+    );
+
+    // The same turn after turn A's stored reply changed fails under `throw`.
+    const edited = laterTurn(editedReply(a), [refused], {
+      transportStore: mockTransportStore({
+        listRejectedAttachmentOriginals: vi.fn().mockResolvedValue(["inbound/b.jpg"]),
+      }),
+    });
+    await expect(run(edited, mockStep())).rejects.toThrow(PrefixViolationError);
+  });
+
+  it("opens a prefix_violation epoch under reopen, counting and warning once", async () => {
+    const add = vi.spyOn(promptPrefixViolations, "add");
+    const turnLogger = mock<ReturnType<typeof logger.child>>();
+    vi.spyOn(logger, "child").mockReturnValue(turnLogger);
+    const deps = laterTurn(editedReply(await firstTurn()), [], { prefixViolation: "reopen" });
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", reason: "prefix_violation" }),
+    );
+    expect(add.mock.calls).toEqual([[1, { site: "turn" }]]);
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      { site: "turn", firstDivergingMessageId: "m2" },
+      expect.stringContaining("transcript head"),
+    );
+  });
+
+  it("counts nothing when the epoch's insert recovers an earlier attempt's row", async () => {
+    const add = vi.spyOn(promptPrefixViolations, "add");
+    const deps = laterTurn(editedReply(await firstTurn()), [], { prefixViolation: "reopen" });
+    vi.mocked(deps.agentStore.insertOrRecoverSystemPromptSnapshot).mockImplementation(
+      async (_tx, params) => ({
+        kind: "recovered",
+        row: { id: "snapshot-2", createdAt: MOCK_SNAPSHOT_CREATED_AT, ...params },
+      }),
+    );
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("opens a compaction epoch after a compacted head, counting nothing", async () => {
+    const add = vi.spyOn(promptPrefixViolations, "add");
+    const a = await firstTurn();
+    const compacted = {
+      ...a,
+      reply: {
+        ...a.reply,
+        transcriptHead: { ...a.reply.transcriptHead, status: "compacted" as const },
+      },
+    };
+    const deps = laterTurn(compacted, [], {});
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", reason: "compaction" }),
+    );
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("opens a configuration epoch on the chat turn after a stage turn", async () => {
+    const add = vi.spyOn(promptPrefixViolations, "add");
+    const a = await firstTurn();
+    const stage: TranscriptRow[] = [
+      { id: "m3", role: "user", content: "Draft a plan.", transcriptHead: null },
+      {
+        id: "m4",
+        role: "assistant",
+        content: [{ type: "text", text: "plan" }],
+        transcriptHead: {
+          ...a.reply.transcriptHead,
+          length: 4,
+          base: baseDigest("STAGE PROMPT", []),
+        },
+      },
+    ];
+    const deps = laterTurn(a, stage, {});
+
+    await run(deps, mockStep());
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", reason: "configuration" }),
+    );
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("skips the check for a transcript memoized before heads", async () => {
+    // Under `throw`, the edited reply would fail a check with heads.
+    const deps = laterTurn(editedReply(await firstTurn()), [], {});
+    const loaded = await loadTurnHistory(deps, {
+      conversationId: "conv-1",
+      turnInboundId: "inbound-1",
+    });
+
+    await run(deps, directStep({ "load-turn-transcript": R.omit(loaded, ["heads"]) }, null));
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
   });
 });

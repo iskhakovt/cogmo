@@ -149,6 +149,9 @@ export function createAgentFunctions(
     skillRunner,
     mcpRegistry,
     userTimezone: env.USER_TIMEZONE,
+    // An unexplained divergence opens an epoch and is counted; tests throw
+    // (design/prompt-caching.md → Head check).
+    prefixViolation: "reopen",
   };
 
   const handleMessage = createHandleMessage({

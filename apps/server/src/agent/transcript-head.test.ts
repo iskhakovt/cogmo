@@ -261,6 +261,7 @@ describe("rowHeads", () => {
       historyLength: 1,
       sent: lengths.map((length) => hasher.head(BASE, transcript.slice(0, length))),
       diverged: false,
+      violatedAt: null,
       ...overrides,
     };
   }

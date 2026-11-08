@@ -14,7 +14,7 @@ import type { AgentLoopResult, StreamingLoopOutcome } from "../agent/loop.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
-import { baseDigest } from "../agent/transcript-head.js";
+import { baseDigest, type PrefixViolationPolicy } from "../agent/transcript-head.js";
 import type { CliIo } from "../cli/run.js";
 import type { Transactor } from "../db/transactor.js";
 import type { Durable, EventPublisher } from "../inngest/durable.js";
@@ -64,6 +64,9 @@ export const MOCK_MESSAGE_CREATED_AT = new Date("2026-09-25T08:14:00.000Z");
 /** When `mockAgentStore`'s snapshot insert says the epoch opened. */
 export const MOCK_SNAPSHOT_CREATED_AT = new Date("2026-09-25T08:14:01.000Z");
 
+/** The head checks' policy in unit tests: an unexplained divergence fails the test. */
+export const TEST_PREFIX_VIOLATION = "throw" satisfies PrefixViolationPolicy;
+
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
   return {
     createUser: vi.fn().mockResolvedValue({ id: "user-1" }),
@@ -94,7 +97,9 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     findLastAssistantMessageByInbound: vi.fn().mockResolvedValue(undefined),
     isCursorAnswered: vi.fn().mockResolvedValue(false),
     isCursorRebatched: vi.fn().mockResolvedValue(false),
-    listMessages: vi.fn().mockResolvedValue([{ id: "msg-1", role: "user", content: "hello" }]),
+    listMessages: vi
+      .fn()
+      .mockResolvedValue([{ id: "msg-1", role: "user", content: "hello", transcriptHead: null }]),
     getLatestSummary: vi.fn().mockResolvedValue(undefined),
     // Echoes the insert, as a first attempt does.
     insertOrRecoverTurnContext: vi.fn().mockImplementation(async (_tx, params) => params),
@@ -102,9 +107,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(undefined),
     // Echoes the insert as a first attempt stores it.
     insertOrRecoverSystemPromptSnapshot: vi.fn().mockImplementation(async (_tx, params) => ({
-      id: "snapshot-1",
-      createdAt: MOCK_SNAPSHOT_CREATED_AT,
-      ...params,
+      kind: "new",
+      row: { id: "snapshot-1", createdAt: MOCK_SNAPSHOT_CREATED_AT, ...params },
     })),
     insertOrRecoverSummary: vi.fn().mockResolvedValue({
       kind: "new",
@@ -836,7 +840,13 @@ export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResul
     model: "mock-model",
     iterations: 1,
     streamed: { text: "", toolUseIds: [] },
-    requests: { base: baseDigest("", []), historyLength: 0, sent: [], diverged: false },
+    requests: {
+      base: baseDigest("", []),
+      historyLength: 0,
+      sent: [],
+      diverged: false,
+      violatedAt: null,
+    },
     ...overrides,
   };
 }

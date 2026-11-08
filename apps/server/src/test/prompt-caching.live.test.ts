@@ -39,6 +39,7 @@ import {
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined, expectFinished } from "./assertions.js";
+import { TEST_PREFIX_VIOLATION } from "./factories.js";
 import { createWireRecorder, type WireRequestInit, type WireResponse } from "./wire-recorder.js";
 
 // An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
@@ -229,6 +230,7 @@ async function converse(params: {
       onEvent: async () => {},
       cache: turnCacheIntent(nonce, "chat"),
       site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
       ...(params.clearToolResults && { clearToolResults: params.clearToolResults }),
       turnLogger: logger,
     }).then(expectFinished);

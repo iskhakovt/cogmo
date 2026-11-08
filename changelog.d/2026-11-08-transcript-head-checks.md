@@ -1,0 +1,6 @@
+Append-only step 5b: every turn checks its transcript against the heads earlier requests recorded, so a history edit opens an epoch instead of silently invalidating the cache.
+
+- **Across turns.** Before compaction, the turn re-renders the history it loaded under its epoch and compares it with the latest stored head after the epoch's opening row. A matching head continues the epoch. A head another explanation covers — a different prompt or tools, a summary, the previous turn's compaction, its divergence — opens an epoch under that reason (`configuration`, `summary`, `compaction`, `prefix_violation`) and counts nothing. An unexplained mismatch opens a `prefix_violation` epoch, counts `cogmo.prompt.prefix_violations{site: "turn"}` and warns, naming the first assistant row whose stored head no longer matches.
+- **In a turn.** Every invocation compares each iteration's memoized request head with the request it rebuilds; a difference stores the turn's heads as `diverged` and counts `site: "iteration"` (`"stage"` for stage turns).
+- **Policy.** Production reopens an epoch; unit tests run under `throw`, which raises `PrefixViolationError` at the first divergence. Stage turns run the in-turn check only.
+- A memo from before this deploy carries no heads, and its check is skipped.

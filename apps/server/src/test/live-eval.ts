@@ -51,6 +51,7 @@ import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { expectFinished } from "./assertions.js";
 import { type EvalFailure, type EvalMetric, summariseRates } from "./eval-checks.js";
+import { TEST_PREFIX_VIOLATION } from "./factories.js";
 
 export type { EvalFailure, EvalMetric } from "./eval-checks.js";
 export { isFailure } from "./eval-checks.js";
@@ -292,6 +293,7 @@ export async function runEvalTurn(params: {
     onEvent: async () => {},
     cache: { key: params.cacheKey, retention: "short" },
     site: "iteration",
+    prefixViolation: TEST_PREFIX_VIOLATION,
     turnLogger: logger,
   }).then(expectFinished);
   return { systemPrompt, userMessage, result };

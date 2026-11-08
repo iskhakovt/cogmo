@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { Message } from "../../llm/types.js";
-import { agentIterations } from "../../metrics.js";
+import { logger } from "../../logger.js";
+import { agentIterations, promptPrefixViolations } from "../../metrics.js";
 import { expectDefined } from "../../test/assertions.js";
 import { FAKE_TX } from "../../test/factories.js";
 import { fakeDurable } from "../../test/fake-durable.js";
@@ -28,7 +29,13 @@ const RESULT: AgentLoopResult = {
   iterations: 2,
   streamed: { text: "reply", toolUseIds: [] },
   degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
-  requests: { base: baseDigest("system", []), historyLength: 1, sent: [], diverged: false },
+  requests: {
+    base: baseDigest("system", []),
+    historyLength: 1,
+    sent: [],
+    diverged: false,
+    violatedAt: null,
+  },
 };
 
 const ARGS: PersistTurnArgs = {
@@ -43,6 +50,7 @@ const ARGS: PersistTurnArgs = {
   priorCooldown: ELAPSED_COOLDOWN,
   result: RESULT,
   view: { historyStart: "m1", compacted: false },
+  turnLogger: logger,
 };
 
 interface Setup {
@@ -233,6 +241,7 @@ describe("persistTurn", () => {
           historyLength: 1,
           sent: [hasher.head(BASE, [HISTORY]), hasher.head(BASE, [HISTORY, CALL, OUTPUT])],
           diverged: false,
+          violatedAt: null,
           ...overrides,
         },
       };
@@ -286,6 +295,52 @@ describe("persistTurn", () => {
       await persistTurn(step, deps, { ...ARGS, result: toolTurn({ diverged: true }) });
 
       expect(insertedRows(agentStore).at(-1)?.transcriptHead?.status).toBe("diverged");
+    });
+
+    it("marks the heads diverged and counts the violation once when a replay rebuilt a request", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const { step, deps, agentStore } = setup({});
+
+      await persistTurn(step, deps, { ...ARGS, result: toolTurn({ violatedAt: 2 }) });
+
+      expect(insertedRows(agentStore).map((row) => row.transcriptHead?.status)).toEqual([
+        "diverged",
+        undefined,
+        "diverged",
+      ]);
+      expect(add.mock.calls).toEqual([[1, { site: "iteration" }]]);
+    });
+
+    it("counts an in-turn violation of a superseded turn, and not again on its own earlier write", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const superseded = setup({ rebatched: true });
+
+      await persistTurn(superseded.step, superseded.deps, {
+        ...ARGS,
+        result: toolTurn({ violatedAt: 1 }),
+      });
+      expect(add).toHaveBeenCalledTimes(1);
+
+      add.mockClear();
+      const rerun = setup({ existingReply: { id: "asst-final", sameContent: true } });
+      await persistTurn(rerun.step, rerun.deps, { ...ARGS, result: toolTurn({ violatedAt: 1 }) });
+      expect(add).not.toHaveBeenCalled();
+    });
+
+    it("counts nothing for a turn whose requests all matched, or on a memoized persist", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const clean = setup({});
+      await persistTurn(clean.step, clean.deps, { ...ARGS, result: toolTurn() });
+
+      const replayed = setup({
+        memo: { "persist-new-messages": { kind: "persisted", messageId: "asst-new" } },
+      });
+      await persistTurn(replayed.step, replayed.deps, {
+        ...ARGS,
+        result: toolTurn({ violatedAt: 1 }),
+      });
+
+      expect(add).not.toHaveBeenCalled();
     });
 
     it("writes no head after a request whose memo predates heads", async () => {

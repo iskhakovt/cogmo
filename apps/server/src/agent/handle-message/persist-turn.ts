@@ -1,3 +1,4 @@
+import type { Logger } from "pino";
 import * as R from "remeda";
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -8,12 +9,12 @@ import {
   calculateElapsedCooldown,
   conversationDegraded,
 } from "../../inngest/events.js";
-import { agentIterations } from "../../metrics.js";
+import { agentIterations, promptPrefixViolations } from "../../metrics.js";
 import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
 import { toStoredContent, toStoredMessage } from "../stored-content.js";
-import { type HeadView, rowHeads } from "../transcript-head.js";
+import { type HeadView, type LoopRequests, rowHeads } from "../transcript-head.js";
 
 export interface PersistTurnDeps {
   runInTx: Transactor;
@@ -40,6 +41,7 @@ export interface PersistTurnArgs {
   result: AgentLoopResult;
   /** The view the turn's requests sent, which its assistant rows' transcript heads record. */
   view: HeadView;
+  turnLogger: Logger;
 }
 
 /**
@@ -79,7 +81,9 @@ type PersistWrite =
  * written. A different one is another run of the same batch: `superseded`.
  * Otherwise it is `superseded` when a later turn row covers the cursor, and
  * inserts when none does, each assistant row with its transcript head
- * ({@link rowHeads}).
+ * ({@link rowHeads}). A loop whose in-turn head check failed counts
+ * `cogmo.prompt.prefix_violations{site: "iteration"}` once, with
+ * `cogmo.agent.iterations`.
  *
  * Steps, in order: `persist-new-messages`, `emit-cooldown-cleared` (when
  * `persisted` and the turn probed an elapsed cooldown),
@@ -157,15 +161,18 @@ export async function persistTurn(
     // the result records the turn twice. For a histogram read to spot
     // runaway iteration counts, repeated copies of one value are worse than
     // a missing one, and that retry window is the only source of them.
+    // The in-turn violation is counted by the same attempts, for the same reason.
     return match(write)
       .returnType<PersistOutcome>()
       .with({ kind: "inserted" }, ({ messageId }) => {
         agentIterations.record(result.iterations, { model: result.model });
+        reportInTurnViolation(result.requests, "iteration", args.turnLogger);
         return { kind: "persisted", messageId };
       })
       .with({ kind: "own_earlier_write" }, ({ messageId }) => ({ kind: "persisted", messageId }))
       .with({ kind: "superseded" }, () => {
         agentIterations.record(result.iterations, { model: result.model });
+        reportInTurnViolation(result.requests, "iteration", args.turnLogger);
         return { kind: "superseded" };
       })
       .exhaustive();
@@ -230,4 +237,22 @@ async function emitTurnEvents(
       }),
     );
   }
+}
+
+/**
+ * Count and log the loop's in-turn head check failure, if it had one: the
+ * first iteration whose rebuilt request differed from its memoized head. The
+ * persist step that calls it fires once, so the count does too.
+ */
+export function reportInTurnViolation(
+  requests: LoopRequests,
+  site: "iteration" | "stage",
+  log: Logger,
+): void {
+  if (requests.violatedAt === null) return;
+  promptPrefixViolations.add(1, { site });
+  log.warn(
+    { site, iteration: requests.violatedAt },
+    "a replay rebuilt a request other than the one its iteration sent; heads stored as diverged",
+  );
 }

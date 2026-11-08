@@ -72,6 +72,30 @@ describe("loadTurnHistory", () => {
     expect(agentStore.listMessages).not.toHaveBeenCalled();
   });
 
+  it("returns each row's transcript head aligned with its message, none for the summary", async () => {
+    const head = {
+      length: 2,
+      digest: "b".repeat(64),
+      base: "a".repeat(64),
+      historyStart: "m4",
+      status: "intact",
+    } as const;
+    const agentStore = mockAgentStore({
+      getLatestSummary: vi.fn().mockResolvedValue(summaryRow()),
+      getHistoryAfter: vi.fn().mockResolvedValue([
+        { id: "m4", role: "user", content: "and then", transcriptHead: null },
+        { id: "m5", role: "assistant", content: "right", transcriptHead: head },
+      ]),
+    });
+
+    const result = await loadTurnHistory(
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
+      { conversationId: "conv-1", turnInboundId: null },
+    );
+
+    expect(result.heads).toEqual([null, null, head]);
+  });
+
   it("returns the summary alone when nothing has arrived since the cutoff", async () => {
     const agentStore = mockAgentStore({
       getLatestSummary: vi.fn().mockResolvedValue(summaryRow()),

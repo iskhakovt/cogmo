@@ -89,6 +89,20 @@ export interface NewMessageRow extends StoredMessage {
   transcriptHead?: TranscriptHead;
 }
 
+/** A transcript row as the history reads return it, with its transcript head (null on user rows and rows written before heads). */
+export interface TranscriptRow extends StoredMessage {
+  id: string;
+  transcriptHead: TranscriptHead | null;
+}
+
+/** The columns of a {@link TranscriptRow}. */
+const TRANSCRIPT_ROW = {
+  id: messages.id,
+  role: messages.role,
+  content: messages.content,
+  transcriptHead: messages.transcriptHead,
+};
+
 /**
  * An attachment a history message carried: an image or a document by name,
  * or the placeholder arrival stored in place of one it couldn't keep.
@@ -234,10 +248,7 @@ export interface TranscriptStore {
    * durable summaries on top of this for the LLM-facing path, while the
    * Observer and the web history read take it as-is.
    */
-  listMessages(
-    tx: Transaction,
-    conversationId: string,
-  ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
+  listMessages(tx: Transaction, conversationId: string): Promise<ReadonlyArray<TranscriptRow>>;
 
   /**
    * The user rows newer than `afterMessageId` (any row when `null`) with
@@ -305,11 +316,12 @@ export interface TranscriptStore {
    * Store the snapshot a turn opens, or return the one already stored for that
    * turn. `(conversationId, openedBy)` is the opening step's idempotency key: a
    * retry that re-runs a committed insert gets the first attempt's row back.
+   * `kind` reports which arm ran, so what the opening counts is counted once.
    */
   insertOrRecoverSystemPromptSnapshot(
     tx: Transaction,
     params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
-  ): Promise<SystemPromptSnapshot>;
+  ): Promise<{ kind: "new" | "recovered"; row: SystemPromptSnapshot }>;
 
   /**
    * Append a summary, or recover the existing row when this
@@ -342,7 +354,7 @@ export interface TranscriptStore {
     tx: Transaction,
     conversationId: string,
     afterMessageId: string,
-  ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
+  ): Promise<ReadonlyArray<TranscriptRow>>;
 
   /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
@@ -551,9 +563,9 @@ export class DrizzleTranscriptStore implements TranscriptStore {
   async listMessages(
     tx: Transaction,
     conversationId: string,
-  ): Promise<ReadonlyArray<StoredMessage & { id: string }>> {
+  ): Promise<ReadonlyArray<TranscriptRow>> {
     return tx
-      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .select(TRANSCRIPT_ROW)
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
       .orderBy(asc(messages.id));
@@ -658,18 +670,21 @@ export class DrizzleTranscriptStore implements TranscriptStore {
   async insertOrRecoverSystemPromptSnapshot(
     tx: Transaction,
     params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
-  ): Promise<SystemPromptSnapshot> {
+  ): Promise<{ kind: "new" | "recovered"; row: SystemPromptSnapshot }> {
     // Keyed insert: see `.agents/rules/inngest.md`.
-    return single(
-      await tx
-        .insert(systemPromptSnapshots)
-        .values(params)
-        .onConflictDoUpdate({
-          target: [systemPromptSnapshots.conversationId, systemPromptSnapshots.openedBy],
-          set: { openedBy: params.openedBy },
-        })
-        .returning(),
-    );
+    const rows = await tx
+      .insert(systemPromptSnapshots)
+      .values(params)
+      .onConflictDoUpdate({
+        target: [systemPromptSnapshots.conversationId, systemPromptSnapshots.openedBy],
+        set: { openedBy: params.openedBy },
+      })
+      .returning({
+        ...getTableColumns(systemPromptSnapshots),
+        inserted: sql<boolean>`(xmax = 0)`,
+      });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
   }
 
   async listUserRowsAfter(
@@ -742,9 +757,9 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     conversationId: string,
     afterMessageId: string,
-  ): Promise<ReadonlyArray<StoredMessage & { id: string }>> {
+  ): Promise<ReadonlyArray<TranscriptRow>> {
     return tx
-      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .select(TRANSCRIPT_ROW)
       .from(messages)
       .where(and(eq(messages.conversationId, conversationId), gt(messages.id, afterMessageId)))
       .orderBy(asc(messages.id));

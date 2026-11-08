@@ -18,6 +18,7 @@ interface Instruments {
   coreMemoryEdits: Counter;
   attachmentPlaceholders: Counter;
   promptServerMismatches: Counter;
+  promptPrefixViolations: Counter;
 }
 
 let cached: Instruments | null = null;
@@ -52,6 +53,10 @@ function instruments(): Instruments {
     promptServerMismatches: meter.createCounter("cogmo.prompt.server_mismatches", {
       description: "Input transformations a provider reported on a request",
       unit: "{transformation}",
+    }),
+    promptPrefixViolations: meter.createCounter("cogmo.prompt.prefix_violations", {
+      description: "Requests or histories a transcript head check found changed, unexplained",
+      unit: "{violation}",
     }),
   };
   return cached;
@@ -148,6 +153,20 @@ export const attachmentPlaceholders = {
 export const promptServerMismatches = {
   add(value: number, attrs?: MetricAttributes): void {
     instruments().promptServerMismatches.add(value, attrs);
+  },
+};
+
+/**
+ * Unexplained prefix violations, labeled by `site`: `turn` when a turn's
+ * history no longer has the transcript head its latest assistant row stored,
+ * counted by `open-system-prompt-epoch`; `iteration` or `stage` when a replay
+ * rebuilt a request other than the one its `llm-iter<N>` memo recorded,
+ * counted by the persist step. Each step counts once, whatever its replays.
+ * Design: design/prompt-caching.md → Head check.
+ */
+export const promptPrefixViolations = {
+  add(value: number, attrs?: MetricAttributes): void {
+    instruments().promptPrefixViolations.add(value, attrs);
   },
 };
 
