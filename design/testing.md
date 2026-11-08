@@ -100,6 +100,12 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 - **Mutants aren't type-checked.** `@stryker-mutator/typescript-checker` needs TypeScript's JS API, which TS 7 doesn't export, so a mutant that wouldn't compile still runs and can survive.
 - **Keep `ignoreStatic` off.** Stryker suggests it because static mutants re-run every related test, but an entry in a module-level deny list is a static mutant.
 
+`pnpm test:mutation:skills` runs [mutmut](https://mutmut.readthedocs.io/) over the skills runtime (`images/skills/`) and writes `images/skills/mutation-report.txt`: the survivors' diffs, then the mutants counted as killed by a timeout, a signal, an interrupted run or a failed collection, and any that failed to run. It takes about 40 minutes at its default of four mutants at a time (`MUTATION_JOBS`) and needs Docker (Engine 26 or later, for the volume subpath mount it re-runs mutants with), since every mutant runs in a container: the supervisor SIGKILLs what its `/proc` scan finds, and a mutant of that scan can reach every process the user owns.
+
+- **The black-box suite runs against every mutant mutmut didn't kill.** mutmut tests a mutant only against the tests it saw call the function in-process, and `test_task_isolation.py` runs the supervisor as a subprocess, so it leaves most of the supervisor untested. The script re-runs each against the whole suite, one container per mutant, with the packages resolved to the mutated copy (the `mutation` stage in `images/skills/Dockerfile`).
+- **Mutants run as a non-root user.** As root, the test that a task can't open the supervisor's fds through `/proc` skips, and its mutants survive.
+- **A run killed outright leaves its volume, containers and image:** `docker volume ls --filter label=cogmo.mutation`, `docker ps --all --filter label=cogmo.mutation`, `docker image ls cogmo-skills-mutation`.
+
 ## Skill-Authoring Integration `[confirmed]`
 
 `src/test/skill-authoring.integration.test.ts` drives chat -> `delegate_coding` -> auto-register -> skill invoke against `DaytonaMock`, llmock and a git remote. It proves that a user asking for a skill in chat gets a tool the agent calls on the next turn.

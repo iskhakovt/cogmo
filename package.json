@@ -27,6 +27,7 @@
     "test:e2e": "pnpm --filter cogmo test:e2e",
     "test:live": "pnpm --filter cogmo test:live",
     "test:mutation": "pnpm --filter cogmo test:mutation",
+    "test:mutation:skills": "images/skills/scripts/mutation.sh",
     "test:all": "pnpm --filter cogmo test:all",
     "test:watch": "pnpm --filter cogmo test:watch",
     "db:generate": "pnpm --filter cogmo db:generate",
@@ -34,7 +35,7 @@
     "knip": "knip"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.3",
+    "@biomejs/biome": "^2.6.4",
     "husky": "^9.1.7",
     "knip": "6.43.0"
   }
