@@ -153,6 +153,7 @@ describe("allocateWorktree output inside a task container (real Docker, runc)", 
       image: GIT_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 120_000),
+      network: "bridge",
     });
 
     try {

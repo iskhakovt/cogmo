@@ -107,7 +107,13 @@ describe("createIpcTransport", () => {
 
   it("sends host messages to the child, and drops them after close", () => {
     const h = harness();
-    const invoke: TaskInvoke = { type: "task_invoke", id: "t1", skill: "s", inputs: {} };
+    const invoke: TaskInvoke = {
+      type: "task_invoke",
+      id: "t1",
+      run: { id: "run-1", key: "key-1" },
+      skill: "s",
+      inputs: {},
+    };
     h.transport.send(invoke);
     h.transport.close();
     h.transport.send(invoke);

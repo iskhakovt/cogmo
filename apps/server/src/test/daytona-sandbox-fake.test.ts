@@ -102,6 +102,7 @@ function makeSpec(overrides: Partial<SessionSpec> = {}): SessionSpec {
     image: "ghcr.io/iskhakovt/cogmo-devbase:test",
     resourceLimits: RESOURCE_LIMITS,
     expiresAt: new Date(Date.now() + 60_000),
+    network: "bridge",
     ...overrides,
   };
 }

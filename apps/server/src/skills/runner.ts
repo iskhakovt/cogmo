@@ -1,10 +1,12 @@
-import { err, ok, type Result } from "neverthrow";
+import { err, type Result, ResultAsync } from "neverthrow";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { describeError } from "../util/describe-error.js";
+import { importRoots } from "./ast-classifier.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
 import type { DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
@@ -39,6 +41,7 @@ import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
 import { createWasmProbe, pyodideDistDir } from "./worker-wasm/host.js";
+import { resolveSkillWasmPackages, type SkillPackageSource } from "./worker-wasm/skill-packages.js";
 import type {
   FillBuiltins,
   WasmPackages,
@@ -320,12 +323,18 @@ export class SkillRunnerImpl implements SkillRunner {
       return fillBuiltinCache({ fetchImpl, bundled: bundled.value }, { names, ...cacheOpts });
     };
     const resolveWasmPackages = (
-      lockfile: LockfileSnapshot | undefined,
+      source: SkillPackageSource,
       signal?: AbortSignal,
     ): Promise<Result<WasmPackages, WasmPackagesError>> =>
-      lockfile === undefined
-        ? Promise.resolve(ok({ builtins: [], wheelDir: null }))
-        : resolvePackages(lockfile, signal);
+      resolveSkillWasmPackages(
+        {
+          resolveLockfile: resolvePackages,
+          fillBuiltins: (names, fillSignal) =>
+            fillBuiltins(names, { packageCacheDir, ...(fillSignal && { signal: fillSignal }) }),
+          importRoots: (body) => ResultAsync.fromPromise(importRoots(body), describeError),
+        },
+        { ...source, ...(signal && { signal }) },
+      );
     this.#warmPool = new LazyWarmPool({
       image: containerImage,
       depsCacheVolumeName,
