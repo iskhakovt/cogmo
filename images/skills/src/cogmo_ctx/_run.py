@@ -49,6 +49,18 @@ def _describe(error: Exception) -> str:
     return "; ".join(segments)
 
 
+def _scalars(value: object) -> list[object]:
+    """The scalars inside a set's members and their JSON: tuples, frozensets and lists flattened."""
+    pending, found = [value], []
+    while pending:
+        item = pending.pop()
+        if isinstance(item, tuple | list | set | frozenset):
+            pending.extend(item)
+        else:
+            found.append(item)
+    return found
+
+
 def _lossy(python: object, dumped: object) -> str | None:
     """What the model's JSON changed of its Python dump, or None.
 
@@ -64,14 +76,16 @@ def _lossy(python: object, dumped: object) -> str | None:
         if isinstance(before, dict) and isinstance(after, dict):
             if len(after) < len(before):
                 return "two keys of one dict are written alike as JSON strings, so one would be lost"
-            # A serializer that writes other keys leaves nothing to pair.
+            # A serializer that writes more keys leaves nothing to pair.
             if len(after) == len(before):
                 pending.extend(zip(before.values(), after.values(), strict=True))
         elif isinstance(before, list | tuple) and isinstance(after, list) and len(before) == len(after):
             pending.extend(zip(before, after, strict=True))
         elif isinstance(before, set | frozenset) and isinstance(after, list):
-            # Unordered, so compared as a whole: a non-finite float in, a `null` out.
-            if any(isinstance(x, float) and not math.isfinite(x) for x in before) and None in after:
+            # Unordered, so compared as a whole: a non-finite float in, a `null` its JSON added out.
+            scalars, written = _scalars(before), _scalars(after)
+            non_finite = any(isinstance(x, float) and not math.isfinite(x) for x in scalars)
+            if non_finite and written.count(None) > scalars.count(None):
                 return "a set holds a number that is not finite, which JSON writes as null"
     return None
 

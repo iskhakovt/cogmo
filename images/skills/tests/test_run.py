@@ -198,6 +198,32 @@ async def test_a_non_finite_number_inside_a_list_or_set_is_output_invalid() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_set_is_refused_for_a_null_its_json_adds_and_no_other() -> None:
+    from pydantic import ConfigDict
+
+    class Pairs(BaseModel):
+        points: set[tuple[float, float]]
+
+    class Kept(BaseModel):
+        model_config = ConfigDict(ser_json_inf_nan="strings")
+        values: set[float | None]
+
+    async def nested(inputs: object, ctx: Ctx) -> object:
+        return {"points": {(1.0, float("nan"))}}
+
+    async def genuine_none(inputs: object, ctx: Ctx) -> object:
+        return {"values": {None, float("nan")}}
+
+    assert (await call_run({"Output": Pairs}, nested, {}, CTX))[0] == (
+        "output_invalid",
+        "a set holds a number that is not finite, which JSON writes as null",
+    )
+    failure, output = await call_run({"Output": Kept}, genuine_none, {}, CTX)
+    assert failure is None
+    assert isinstance(output, dict) and sorted(output["values"], key=str) == ["NaN", None]
+
+
+@pytest.mark.asyncio
 async def test_a_json_only_serializer_that_writes_more_keys_is_not_refused() -> None:
     from pydantic import model_serializer
 
