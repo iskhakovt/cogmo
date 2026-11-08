@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Generated from apps/server/src/skills/ctx-contract.ts by `pnpm --filter cogmo codegen:ctx`. Do not edit.",
+  "$comment": "Generated from apps/server/src/skills by `pnpm --filter cogmo codegen:ctx`. Do not edit.",
   "$defs": {
     "task_invoke": {
       "type": "object",

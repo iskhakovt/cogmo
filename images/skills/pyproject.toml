@@ -3,8 +3,8 @@
 # host (`src/skills/worker-sysbox/worker.ts`); workers spawn this via
 # `python3 -I -u -m cogmo_skills_runtime`.
 #
-# Production has zero runtime deps (stdlib only). Dev group covers
-# ruff/pyrefly/pytest and jsonschema for the local + CI workflow. uv-managed lockfile
+# Production depends on pydantic alone, which skills share. Dev group
+# covers ruff/pyrefly/pytest and jsonschema for the local + CI workflow. uv-managed lockfile
 # is the source of truth for what the image installs.
 
 [project]
@@ -13,7 +13,11 @@ version = "0"
 description = "Container-tier skills runtime — fork-supervisor and one-shot skill runner"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    # The version Pyodide builds in, so both tiers run one pydantic
+    # (design/skills.md → Contracts).
+    "pydantic==2.12.5",
+]
 
 [dependency-groups]
 dev = [

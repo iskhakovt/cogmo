@@ -1,0 +1,12 @@
+{
+  "$comment": "Generated from apps/server/src/skills by `pnpm --filter cogmo codegen:ctx`. Do not edit.",
+  "pins": {
+    "pydantic": "2.12.5",
+    "pydantic-core": "2.41.5"
+  },
+  "floors": {
+    "annotated-types": "0.6.0",
+    "typing-extensions": "4.14.1",
+    "typing-inspection": "0.4.2"
+  }
+}

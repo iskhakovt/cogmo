@@ -3,9 +3,9 @@ import { match } from "ts-pattern";
 
 /**
  * What a wasm child installs before it signals `ready`
- * (design/skills.md → Wasm-tier boundary, layer 4). Both come from the skill's
- * `requirements.lock`; the host resolves and fetches them, the child never
- * reaches the network.
+ * (design/skills.md → Wasm-tier boundary, layer 4): the skill's
+ * `requirements.lock`, plus Pyodide's pydantic when the body imports it. The
+ * host resolves and fetches them; the child never reaches the network.
  */
 export interface WasmPackages {
   /**

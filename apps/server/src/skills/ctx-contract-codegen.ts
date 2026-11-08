@@ -9,20 +9,23 @@ import {
   TaskInvokeSchema,
   TaskResultSchema,
 } from "./protocol.js";
+import { RUNTIME_FLOORS, RUNTIME_PACKAGES } from "./runtime-packages.js";
 
 /**
- * The files generated from the ctx contract and the worker protocol's Zod
- * schemas (design/skills.md → Contracts), relative to the repo root.
+ * The files generated from the ctx contract, the worker protocol's Zod
+ * schemas and the runtime's pydantic pins (design/skills.md → Contracts),
+ * relative to the repo root.
  * `pnpm --filter cogmo codegen:ctx` writes them, and a unit test fails when
  * the checked-in copies differ.
  */
 export const GENERATED_CONTRACT_FILES = {
   schema: "images/skills/contract/worker-protocol.schema.json",
   python: "images/skills/src/cogmo_ctx/_contract.py",
+  runtimePackages: "images/skills/contract/runtime-packages.json",
 } as const;
 
 const GENERATED_BY =
-  "Generated from apps/server/src/skills/ctx-contract.ts by `pnpm --filter cogmo codegen:ctx`. Do not edit.";
+  "Generated from apps/server/src/skills by `pnpm --filter cogmo codegen:ctx`. Do not edit.";
 
 type JsonSchema = Record<string, unknown>;
 
@@ -200,4 +203,13 @@ export function renderPythonContract(): string {
     results: R.mapValues(CTX_CONTRACT, ({ result }) => result),
     errorKinds: CtxErrorKindSchema.options,
   });
+}
+
+/**
+ * The runtime's pydantic pins and the floors of its other requirements, for
+ * the skills image's pytest to check against the pydantic it installs.
+ */
+export function renderRuntimePackages(): string {
+  const document = { $comment: GENERATED_BY, pins: RUNTIME_PACKAGES, floors: RUNTIME_FLOORS };
+  return `${JSON.stringify(document, null, 2)}\n`;
 }

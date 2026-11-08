@@ -1,4 +1,4 @@
-# Generated from apps/server/src/skills/ctx-contract.ts by `pnpm --filter cogmo codegen:ctx`. Do not edit.
+# Generated from apps/server/src/skills by `pnpm --filter cogmo codegen:ctx`. Do not edit.
 """The ctx surface's result types, refusal kinds and bridge, from Cogmo's contract."""
 
 from collections.abc import Mapping
