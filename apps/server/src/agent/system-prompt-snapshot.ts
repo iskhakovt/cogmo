@@ -143,7 +143,8 @@ function headReason(head: HeadVerdict): SystemPromptEpochReason | null {
  * order. No snapshot is the conversation's first turn; a different digest, or
  * a head under another `base`, is `configuration`; a history start other than
  * the snapshot's (the loaded one or the one after a summary this turn stored)
- * or the head's is `summary`; a `compacted` head is `compaction`; an advanced
+ * or the head's is `summary`; a view this turn's compaction rewrote without
+ * storing a summary, or a `compacted` head, is `compaction`; an advanced
  * attachment cutoff is `attachments`; a `diverged` head or a violated one is
  * `prefix_violation`. A turn opening with none of these is a bug in the
  * decision that opened it.
@@ -154,6 +155,8 @@ export function epochReason(
     configDigest: string;
     loadedStart: string;
     epochStart: string;
+    /** Whether the turn's compaction rewrote its view without storing a summary. */
+    compacted: boolean;
     cutoff: FixedCutoff;
     head: HeadVerdict;
   },
@@ -163,7 +166,7 @@ export function epochReason(
     configuration: snapshot?.configDigest !== turn.configDigest,
     summary:
       snapshot?.historyStart !== turn.loadedStart || snapshot?.historyStart !== turn.epochStart,
-    compaction: false,
+    compaction: turn.compacted,
     attachments: match(turn.cutoff)
       .with({ kind: "advanced" }, () => true)
       .with({ kind: "kept" }, () => false)
@@ -221,8 +224,7 @@ export function coreMemoryChangesSince(
 /**
  * The changes no entry in `announced` covers: an announcement covers a block
  * when it showed the block's current version or a later one. Pass what the
- * turn's request still shows, so an announcement compaction dropped is made
- * again.
+ * turn's request shows.
  */
 export function unannounced(
   changes: ReadonlyArray<CoreMemoryChange>,

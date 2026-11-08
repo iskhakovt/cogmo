@@ -5509,7 +5509,12 @@ describe("system prompt snapshot", () => {
 
   describe("compaction", () => {
     /** Eight messages, the turn's row m7, and compaction reaching Strategy 2. */
-    function summarizingDeps(configDigest: string, stopReason: StopReason = "end_turn") {
+    function summarizingDeps(
+      configDigest: string,
+      stopReason: StopReason = "end_turn",
+      summary = "the earlier discussion",
+      tokens = 800_000,
+    ) {
       const rows: (Message & { id: string })[] = Array.from({ length: 8 }, (_, i) =>
         i % 2 === 0
           ? { id: `m${i + 1}`, role: "user", content: `turn ${i + 1}` }
@@ -5522,9 +5527,9 @@ describe("system prompt snapshot", () => {
       return mockDeps({
         resolveProvider: mockResolver(
           mockProvider({
-            countTokens: vi.fn().mockResolvedValue(800_000),
+            countTokens: vi.fn().mockResolvedValue(tokens),
             chat: vi.fn().mockResolvedValue({
-              content: [{ type: "text", text: "the earlier discussion" }],
+              content: [{ type: "text", text: summary }],
               stopReason,
               model: "mock-model",
               usage: { inputTokens: 10, outputTokens: 5 },
@@ -5559,7 +5564,7 @@ describe("system prompt snapshot", () => {
       expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
     });
 
-    it("announces again a change whose announcement an unstored summary took out of view", async () => {
+    it("shows a change in the epoch it opens when its unstored summary took the announcement out of view", async () => {
       // m1's context announced `identity`; this turn's summary, cut at its
       // output cap and not stored, replaces m1, so the request no longer shows it.
       const configDigest = await defaultDigest();
@@ -5568,24 +5573,47 @@ describe("system prompt snapshot", () => {
 
       await run(deps);
 
-      expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+      // The snapshot the turn opens shows core memory as it is.
+      expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ reason: "compaction" }),
+      );
       const [, stored] = expectDefined(
         vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
         "stored turn context",
       );
-      expect(stored.rendered).toContain("<core_memory_updates");
-      expect(stored.rendered).toContain("Home: Lisbon");
+      expect(stored.rendered).not.toContain("<core_memory_updates");
     });
 
-    it("keeps the epoch when compaction stored no summary", async () => {
-      const deps = summarizingDeps(await defaultDigest(), "max_tokens");
+    it.each([
+      {
+        name: "unstored summary",
+        stopReason: "max_tokens" as const,
+        text: "the earlier discussion",
+        tokens: 800_000,
+      },
+      // No summary text, and a count past the truncation threshold.
+      { name: "truncation", stopReason: "end_turn" as const, text: "", tokens: 990_000 },
+    ])(
+      "opens a compaction epoch at a turn whose $name rewrote its view",
+      async ({ stopReason, text, tokens }) => {
+        const deps = summarizingDeps(await defaultDigest(), stopReason, text, tokens);
 
-      await run(deps);
+        await run(deps);
 
-      expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
-      expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-      expect(loopParams(deps).systemPrompt).toBe("EPOCH PROMPT");
-    });
+        expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+        expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ openedBy: "m7", historyStart: "m1", reason: "compaction" }),
+        );
+        // The turns kept before m7 replay without the thinking bound to the
+        // prefix the rewrite changed; m8, after it, keeps its own.
+        const { messages, systemPrompt } = loopParams(deps);
+        expect(systemPrompt).not.toBe("EPOCH PROMPT");
+        expect(JSON.stringify(messages.slice(0, -2))).not.toContain('"thinking"');
+        expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
+      },
+    );
 
     /** A loop whose one request carried a head, and whose reply is the turn's one row. */
     function headedLoop() {

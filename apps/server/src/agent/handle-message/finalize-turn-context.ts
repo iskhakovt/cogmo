@@ -38,6 +38,8 @@ export interface FinalizeTurnContextArgs {
   continuing: EpochSnapshot | null;
   /** The cutoff of the summary compaction stored, if it stored one. */
   storedCutoff: string | null;
+  /** Whether compaction rewrote the view without storing a summary. */
+  rewroteView: boolean;
   loadedSystemPrompt: LoadedSystemPrompt;
   /** The across-turn head check's verdict on the loaded history. */
   head: HeadVerdict;
@@ -76,12 +78,13 @@ export async function finalizeTurnContext(
   const turnPosition = findTurnContext(args.messages, args.provisionalTurnContext);
   if (turnPosition === -1) throw new Error("compaction dropped the turn's own message");
 
-  // A summary this turn stored moves the history's start, so the turn opens
-  // an epoch on the prefix compaction already rewrote. An opening turn
-  // strips every thinking block before its own message.
+  // A summary this turn stored moves the history's start, and a view
+  // compaction rewrote without one is no longer the rows' render, so either
+  // way the turn opens an epoch on the prefix compaction already rewrote. An
+  // opening turn strips every thinking block before its own message.
   const epochStart = historyStart(turnHistory.messageIds, args.storedCutoff);
   const epoch =
-    continuing !== null && continuing.historyStart === epochStart
+    continuing !== null && continuing.historyStart === epochStart && !args.rewroteView
       ? continuing
       : await step.run("open-system-prompt-epoch", async () => {
           const opened = await openSystemPromptEpoch(deps, {
@@ -93,6 +96,7 @@ export async function finalizeTurnContext(
               configDigest: args.loadedSystemPrompt.configDigest,
               loadedStart: historyStart(turnHistory.messageIds, null),
               epochStart,
+              compacted: args.rewroteView,
               cutoff: args.view.cutoff,
               head: args.head,
             }),
@@ -105,10 +109,9 @@ export async function finalizeTurnContext(
     ? stripThinkingBefore(args.messages, turnPosition)
     : args.messages;
 
-  // Deduplicated after compaction: before it, a memory or an announcement
-  // whose only earlier copy compaction then removes would be dropped. An
-  // opening turn's snapshot shows core memory as it is, so it announces
-  // nothing.
+  // Deduplicated after compaction: before it, a memory whose only earlier
+  // copy compaction then removes would be dropped. An opening turn's snapshot
+  // shows core memory as it is, so it announces nothing.
   const earlierInView = historyMessages.toSpliced(turnPosition, 1);
   const sentHistory = {
     messages: args.view.messages,
