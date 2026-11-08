@@ -125,6 +125,28 @@ async def test_an_output_json_mode_would_change_is_output_invalid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_keys_pydantic_writes_alike_or_cannot_write_are_output_invalid() -> None:
+    class Keyed(BaseModel):
+        counts: dict[Any, int]
+
+    def returning(counts: object):
+        async def run(inputs: object, ctx: Ctx) -> object:
+            return {"counts": counts}
+
+        return run
+
+    assert (await call_run({"Output": Keyed}, returning({b"x": 1, "x": 2}), {}, CTX))[0] == (
+        "output_invalid",
+        "two keys of one dict are written alike as JSON strings, so one would be lost",
+    )
+    assert (await call_run({"Output": Keyed}, returning({frozenset([1]): 1}), {}, CTX))[0] == (
+        "output_invalid",
+        "`frozenset` not valid as object key",
+    )
+    assert await call_run({"Output": Keyed}, returning({b"x": 1}), {}, CTX) == (None, {"counts": {"x": 1}})
+
+
+@pytest.mark.asyncio
 async def test_a_refusal_names_twenty_fields_and_counts_the_rest() -> None:
     class Many(BaseModel):
         items: list[int]

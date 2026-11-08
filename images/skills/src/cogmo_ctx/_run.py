@@ -4,7 +4,6 @@ The container runner and the wasm worker share this file, so a skill's contract 
 tiers (design/skills.md → Contracts).
 """
 
-import json
 import math
 import sys
 from collections.abc import Awaitable, Callable, Mapping
@@ -49,29 +48,23 @@ def _describe(error: Exception) -> str:
     return "; ".join(segments)
 
 
-def _json_key(key: object) -> str:
-    """The string JSON writes `key` as, closely enough to tell two keys apart."""
-    if isinstance(key, str):
-        return key
-    try:
-        return json.dumps(key)
-    except TypeError:
-        return str(key)
-
-
 def _lossy(value: object) -> str | None:
     """What JSON mode would change in a validated output, or None.
 
     pydantic writes a non-finite float as `null`, and two keys of one dict that JSON writes alike (`1` and
     `"1"`) as one; both would reach the host changed.
     """
+    from pydantic_core import to_jsonable_python
+
     pending = [value]
     while pending:
         item = pending.pop()
         if isinstance(item, float) and not math.isfinite(item):
             return f"{item} is not a finite number, which JSON writes as null"
         if isinstance(item, dict):
-            if len({_json_key(key) for key in item}) < len(item):
+            # pydantic's own key conversion, which the JSON dump applies: `b"x"`, `1` and `True` become
+            # `"x"`, `"1"` and `"true"`.
+            if len(to_jsonable_python(item)) < len(item):
                 return "two keys of one dict are written alike as JSON strings, so one would be lost"
             pending.extend(item.values())
         elif isinstance(item, list | tuple | set | frozenset):
@@ -108,12 +101,12 @@ async def call_run(
         if output_model is not None:
             try:
                 validated = output_model.model_validate(output)
-                lossy = _lossy(validated.model_dump(mode="python"))
                 dumped = validated.model_dump(mode="json")
-            # A `ValidationError`, a `PydanticSerializationError`, or the `UnicodeDecodeError` a `bytes` field
-            # that is not UTF-8 raises in JSON mode: each is a `ValueError`.
-            except ValueError as e:
+            # `ValueError`: a `ValidationError`, a `PydanticSerializationError`, or the `UnicodeDecodeError` of a
+            # `bytes` field that is not UTF-8. `TypeError`: a dict key JSON cannot hold.
+            except (ValueError, TypeError) as e:
                 return ("output_invalid", _describe(e)), output
+            lossy = _lossy(validated.model_dump(mode="python"))
             if lossy is not None:
                 return ("output_invalid", lossy), output
             output = dumped
