@@ -11,8 +11,8 @@
  *
  * Cron-fired invocations pass an empty inputs object — the skill's inputs
  * schema must therefore have no `required` fields (or have defaults) for a
- * cron-scheduled skill. A manifest that requires inputs and is also
- * scheduled is a deploy-time foot-gun that surfaces here as a
+ * cron-scheduled skill. A skill whose inputs schema requires fields and is
+ * also scheduled is a deploy-time foot-gun that surfaces here as a
  * `skipped: invalid_inputs` result instead of an Inngest retry storm.
  */
 

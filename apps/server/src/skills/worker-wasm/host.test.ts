@@ -1251,6 +1251,12 @@ async def run(inputs, ctx):
     expect(imported._unsafeUnwrap()).toEqual({ inputs: null, outputs: null });
   });
 
+  it("names CtxError for a skill that uses it unimported, as a run does", async () => {
+    const imported = await importSchemas("class Retry(CtxError):\n    pass\n", { builtins: [] });
+
+    expect(imported._unsafeUnwrap()).toEqual({ inputs: null, outputs: null });
+  });
+
   it("refuses a skill that does not import", async () => {
     const imported = await importSchemas("1 / 0\n", { builtins: [] });
 

@@ -54,7 +54,7 @@ export async function rollbackSkill(
   if (schemas === null) {
     return rejectedResult(
       targetSha,
-      "schemas_unknown: no deploy of the target sha recorded its schemas and its SKILL.md declares no inputs; register it instead",
+      "schemas_unknown: no deploy of the target sha recorded its schemas, and its SKILL.md declares no inputs",
     );
   }
   const schemaErrors = deps.sourceCache.prevalidate(schemas);

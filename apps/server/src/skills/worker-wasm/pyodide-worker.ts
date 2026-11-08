@@ -530,7 +530,13 @@ function describeImportFailure(py: PyodideInterface, what: string, memoryMb: num
 async function importSchemas(init: Extract<ChildInit, { mode: "schema" }>): Promise<void> {
   const py = await bootSkillChild(init);
   installCogmoCtx(py);
-  await py.runPythonAsync("from cogmo_ctx._run import contract_schemas as _cogmo_contract_schemas");
+  // `CtxError` is a global, as a run makes it, for skills that name it without importing it.
+  await py.runPythonAsync(
+    [
+      "from cogmo_ctx import CtxError",
+      "from cogmo_ctx._run import contract_schemas as _cogmo_contract_schemas",
+    ].join("\n"),
+  );
   const reply = await ResultAsync.fromPromise(
     py.runPythonAsync(init.body),
     describeImportFailure(py, "skill.py did not load", init.memoryMb),

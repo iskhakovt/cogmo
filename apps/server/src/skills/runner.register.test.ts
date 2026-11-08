@@ -2453,7 +2453,7 @@ tier: wasm
 
       assertStatus(rolled, "rejected");
       expect(rolled.errors).toEqual([
-        "schemas_unknown: no deploy of the target sha recorded its schemas and its SKILL.md declares no inputs; register it instead",
+        "schemas_unknown: no deploy of the target sha recorded its schemas, and its SKILL.md declares no inputs",
       ]);
     });
   });
