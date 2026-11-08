@@ -40,6 +40,7 @@ Read `design/` for the full picture. Key docs:
 | [web-ui.md](design/web-ui.md) | Browser cockpit — in-process UI server, oRPC admin API, SSE chat, auth, Ledger design system |
 | [integrations.md](design/integrations.md) | Channel adapters, skill library, permission tiers, plugin extensibility |
 | [integrations/mcp.md](design/integrations/mcp.md) | MCP client — server config, lifecycle, sandboxing, schema pinning, profile filtering |
+| [connectors.md](design/connectors.md) | Out-of-process connectors over gRPC — dial-in sessions, idempotent jobs, coding on a connector, the Paseo connector |
 | [providers.md](design/providers.md) | Multi-provider LLM routing, `llm_providers` table, profile FK, provider dispatch |
 | [image-generation.md](design/image-generation.md) | Image gen via Vercel AI SDK, fal.ai provider, outbound delivery, why AI SDK for images but not text LLMs |
 | [sandbox.md](design/sandbox.md) | Container sandbox — sysbox-default runtime, Docker API proxy, lineage tracking, reaper |

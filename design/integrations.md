@@ -144,3 +144,5 @@ JSON Schema is the universal contract format. Zod is a convenience, not a requir
 1. **Now:** In-process `ToolSpec` with `Service` interface, Zod input validation, direct function calls. Capability interface from day 1 — same contract that WASM plugins will use later.
 2. **Phase 2:** MCP client for third-party tools (subprocess isolation, proven pattern, growing ecosystem)
 3. **Phase 3+:** Evaluate WASM + capability bus for open-source plugin ecosystem. MCP and WASM can coexist — MCP for power-user integrations that need full OS access, WASM for sandboxed community plugins. `Service` becomes host-imported WASM functions.
+
+These cover tools a model calls. Work that cogmo's own state machines drive — a coding task's execution, later a channel — goes to out-of-process connectors over gRPC: [connectors.md](connectors.md) `[proposed]`.

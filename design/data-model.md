@@ -59,6 +59,7 @@ Design sketches — added via Drizzle migrations when their phase begins.
 | `mcp_servers` | 2 | MCP server configs (transport, config blob, enabled, approval). See [integrations/mcp.md](integrations/mcp.md). |
 | `mcp_server_tools` | 2 | Per-tool schema hash + approval state. Cascades from `mcp_servers`. |
 | `skills` | 3 | Skill library metadata. Code on filesystem, descriptions for retrieval. |
+| `connectors` | — | Registered connectors: name, kind, token hash. Also `coding_repos.connector_id` and `coding_tasks.connector_id`. See [connectors.md](connectors.md). |
 
 ## Hindsight Tables (Managed Externally) `[confirmed]`
 
