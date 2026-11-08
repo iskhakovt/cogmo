@@ -2,21 +2,25 @@
 
 The task-dispatch loop is covered end to end by `test_task_isolation.py`,
 which runs the supervisor as a subprocess; these tests pin the building
-blocks: pidfd-based wait, SIGKILL+reap, venv activation, and the task
-process entry point.
+blocks: pidfd-based wait, SIGKILL+reap, the `/proc` scan, venv activation,
+and the task process entry point.
 """
 
+import builtins
 import gc
 import json
 import os
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
+from typing import Any
+from unittest.mock import mock_open
 
 import pytest
 
 from cogmo_skills_runtime import supervisor
 from cogmo_skills_runtime.supervisor import (
     _activate_skill_venv,
+    _descendants,
     _kill_and_reap,
     _run_one_task_in_child,
     _skill_venv_path,
@@ -96,6 +100,38 @@ class TestKillAndReap:
         # zombie. Should not raise even though the process is gone.
         time.sleep(0.05)
         _kill_and_reap(pid)
+
+
+def _stat_of_a_process_gone_at_open() -> Any:
+    raise FileNotFoundError
+
+
+def _stat_of_a_process_gone_at_read() -> Any:
+    handle = mock_open()()
+    handle.read.side_effect = ProcessLookupError
+    return handle
+
+
+class TestDescendants:
+    @pytest.mark.parametrize(
+        "open_stat", [_stat_of_a_process_gone_at_open, _stat_of_a_process_gone_at_read], ids=["at-open", "at-read"]
+    )
+    def test_a_process_exiting_mid_scan_does_not_end_the_scan(
+        self, monkeypatch: pytest.MonkeyPatch, open_stat: Callable[[], Any]
+    ) -> None:
+        pid = _fork_sleeper(60.0)
+        real_listdir, real_open = os.listdir, builtins.open
+
+        def fake_open(path: str, *args: Any, **kwargs: Any) -> Any:
+            return open_stat() if path == "/proc/0/stat" else real_open(path, *args, **kwargs)
+
+        try:
+            with monkeypatch.context() as m:
+                m.setattr(os, "listdir", lambda path: ["0", *real_listdir(path)])
+                m.setattr(builtins, "open", fake_open)
+                assert pid in _descendants(os.getpid())
+        finally:
+            _kill_and_reap(pid)
 
 
 class TestRunOneTaskInChild:

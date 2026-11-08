@@ -10,7 +10,7 @@
   # by setting the revision to `nixos-unstable`'s current head
   # (https://channels.nixos.org/nixos-unstable/git-revision) and running
   # `nix flake lock`; `nix flake update` alone re-locks the same revision.
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/f4a03c008967841f2a0b3cb7c436fc6fc31671f6";
 
   outputs =
     { self, nixpkgs }:

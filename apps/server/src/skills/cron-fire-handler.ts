@@ -9,10 +9,10 @@
  * ticker's event-bus dedup misses, the function-level cap keeps two fires
  * for the same skill from racing inside the runner pool.
  *
- * Cron-fired invocations pass an empty inputs object — `manifest.inputs`
- * must therefore have no `required` fields (or have defaults) for a
- * cron-scheduled skill. A manifest that requires inputs and is also
- * scheduled is a deploy-time foot-gun that surfaces here as a
+ * Cron-fired invocations pass an empty inputs object — the skill's inputs
+ * schema must therefore have no `required` fields (or have defaults) for a
+ * cron-scheduled skill. A skill whose inputs schema requires fields and is
+ * also scheduled is a deploy-time foot-gun that surfaces here as a
  * `skipped: invalid_inputs` result instead of an Inngest retry storm.
  */
 

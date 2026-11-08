@@ -1,4 +1,5 @@
-// Bake definition for the three Cogmo-owned container images.
+// Bake definition for the three Cogmo-owned container images, plus two local
+// test images, `cogmo-e2e` and `skills-mutation`.
 //
 //   - cogmo          — the runtime app image (root Dockerfile)
 //   - cogmo-devbase  — task base image for coding-delegation
@@ -46,10 +47,10 @@ variable "UV_DIGEST" {
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
 variable "PNPM_VERSION" {
-  default = "12.16.1"
+  default = "12.17.0"
 }
 variable "PNPM_DIGEST" {
-  default = "sha256:33081d3d2c96ba582d316cfd630f0f43961d9c60ff919b50edd1835a1462976b"
+  default = "sha256:172468925f0ca368313c09867081a43e298eaeb13dee8f7e4356bfad45dd8b15"
 }
 variable "NPM_VERSION" {
   default = "12.2.1"
@@ -60,7 +61,7 @@ variable "NPM_VERSION" {
 // `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
 // so following it puts the sandbox CLI ahead of the stable rollout.
 variable "CLAUDE_CODE_VERSION" {
-  default = "2.1.309"
+  default = "2.1.311"
 }
 
 // Default group builds every image — used by publish.yml on release.
@@ -160,15 +161,29 @@ target "devbase" {
   cache-to   = ["type=gha,scope=devbase-amd64,mode=max"]
 }
 
-target "skills" {
-  inherits   = ["_common", "skills-meta"]
+// Build inputs for the skills image, shared by the release target and the
+// local mutation one, as `_cogmo-build` is for cogmo.
+target "_skills-build" {
   context    = "./images/skills"
   dockerfile = "Dockerfile"
   args = {
     UV_VERSION = "${UV_VERSION}"
     UV_DIGEST  = "${UV_DIGEST}"
   }
+}
+
+target "skills" {
+  inherits   = ["_common", "_skills-build", "skills-meta"]
   platforms  = ["linux/amd64"]
   cache-from = ["type=gha,scope=skills-amd64"]
   cache-to   = ["type=gha,scope=skills-amd64,mode=max"]
+}
+
+// The skills runtime's mutation testing, run by hand through
+// `pnpm test:mutation:skills` (design/testing.md → Mutation Testing), which
+// sets its tag: one native platform, no GHA cache, never pushed.
+target "skills-mutation" {
+  inherits  = ["_skills-build"]
+  target    = "mutation"
+  platforms = [BAKE_LOCAL_PLATFORM]
 }

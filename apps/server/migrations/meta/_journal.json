@@ -596,6 +596,13 @@
       "when": 1794100941510,
       "tag": "0084_transcript_head_epoch_reason",
       "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1794145346851,
+      "tag": "0085_skill_deploy_schemas",
+      "breakpoints": true
     }
   ]
 }

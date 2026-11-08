@@ -24,7 +24,12 @@ import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
-import type { WasmPackagesError } from "./worker-wasm/wasm.js";
+import type { SkillInputs } from "./types.js";
+import type {
+  SchemaImportError,
+  WasmPackagesError,
+  WasmSchemaImporter,
+} from "./worker-wasm/wasm.js";
 
 const execFileP = promisify(execFile);
 
@@ -723,34 +728,45 @@ outputs:
         expect(await getMainSha(repo.bare)).toBeNull();
       });
 
-      it("goes live when the packages cannot be fetched: the run fetches them again", async () => {
-        const result = await registerResolvingTo({
-          kind: "network_failed",
-          spec: "idna==3.10",
-          message: "pypi lookup: ECONNRESET",
-        });
-        assertStatus(result, "live");
-        const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
-        expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
-      });
+      // The schema import loads what a run loads, so a register that cannot
+      // fetch the packages cannot read the skill's schemas: a retry may clear it.
+      it.each([
+        {
+          name: "the packages cannot be fetched",
+          error: {
+            kind: "network_failed",
+            spec: "idna==3.10",
+            message: "pypi lookup: ECONNRESET",
+          },
+        },
+        {
+          name: "a built-in fails Pyodide's pinned sha256, a verdict on the cache, not the lockfile",
+          error: {
+            kind: "builtin_integrity",
+            fileName: "httpx-0.28.1-py3-none-any.whl",
+            message: "the download hashes to sha256:aa",
+          },
+        },
+        {
+          name: "Pyodide's own lockfile cannot be read",
+          error: { kind: "bundled_unreadable", message: "pyodide-lock.json: ENOENT" },
+        },
+      ] satisfies { name: string; error: WasmPackagesError }[])(
+        "rejects for a retry when $name, and commits nothing",
+        async ({ error }) => {
+          const result = await registerResolvingTo(error);
 
-      it("goes live when a built-in fails Pyodide's pinned sha256: a verdict on the cache, not the lockfile", async () => {
-        const result = await registerResolvingTo({
-          kind: "builtin_integrity",
-          fileName: "httpx-0.28.1-py3-none-any.whl",
-          message:
-            "the download from https://cdn.jsdelivr.net/pyodide/v314.0.7/full/httpx-0.28.1-py3-none-any.whl hashes to sha256:aa",
-        });
-        assertStatus(result, "live");
-      });
-
-      it("goes live when Pyodide's own lockfile cannot be read", async () => {
-        const result = await registerResolvingTo({
-          kind: "bundled_unreadable",
-          message: "pyodide-lock.json: ENOENT",
-        });
-        assertStatus(result, "live");
-      });
+          assertStatus(result, "rejected");
+          expect(result.errors).toEqual([
+            expect.stringMatching(
+              new RegExp(
+                `^schema_import_unavailable: the skill's packages were not fetched \\(${error.kind}: .*\\); retry the register$`,
+              ),
+            ),
+          ]);
+          expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+        },
+      );
     });
 
     it("an abort during the PyPI lookups rejects with its reason and commits nothing", async () => {
@@ -2129,6 +2145,316 @@ inputs:
       expect(skill?.inputs).toMatchObject({
         properties: { x: { type: "integer" } },
       });
+    });
+  });
+
+  describe("schemas from the skill's models", () => {
+    /** A wasm skill whose frontmatter declares no schemas: its models carry them. */
+    const MODEL_MANIFEST = `---
+name: weather
+description: a wasm skill whose models describe its schemas
+tier: wasm
+---
+`;
+    const CITY_INPUTS: SkillInputs = {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+      title: "Input",
+    };
+    const TEMP_OUTPUTS = {
+      type: "object",
+      properties: { tempC: { type: "number" } },
+      title: "Output",
+    };
+
+    /** A runner whose schema importer answers `answers` in turn, then the last again. */
+    async function runnerImporting(
+      ...answers: Awaited<ReturnType<WasmSchemaImporter["importSchemas"]>>[]
+    ) {
+      const offline = offlineWasm(repo.bare);
+      const schemaImporter = mock<WasmSchemaImporter>();
+      for (const answer of answers) schemaImporter.importSchemas.mockResolvedValueOnce(answer);
+      schemaImporter.importSchemas.mockResolvedValue(expectDefined(answers.at(-1), "an answer"));
+      const runner = await makeRunner({
+        ...offline,
+        wasm: { ...offline.wasm, schemaImporter },
+      });
+      return { runner, schemaImporter };
+    }
+
+    async function pushWeather(branch: string, manifest: string): Promise<string> {
+      return pushFeatureBranch({ work: repo.work, branch, manifest, body: ECHO_BODY });
+    }
+
+    it("puts the imported schemas live, records them on the deploy, and validates invokes against them", async () => {
+      const { runner, schemaImporter } = await runnerImporting(
+        ok({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS }),
+      );
+      await pushWeather("skill/weather", MODEL_MANIFEST);
+
+      const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+      assertStatus(result, "live");
+      const skill = await tx((trx) => store.getSkillByName(trx, "weather"));
+      expect(skill?.inputs).toEqual(CITY_INPUTS);
+      expect(skill?.outputs).toEqual(TEMP_OUTPUTS);
+      const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+      expect(deploy?.schemas).toEqual({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS });
+      expect((await runner.listToolDefs())[0]?.inputs).toEqual(CITY_INPUTS);
+      const rejected = await runner.invoke({
+        name: "weather",
+        inputs: { days: 3 },
+        runAs: await seededRunAs(),
+      });
+      expect(rejected._unsafeUnwrapErr()).toMatchObject({ kind: "invalid_inputs" });
+      // The import runs the body under a run's memory cap and its wall clock
+      // after the child's start.
+      expect(schemaImporter.importSchemas).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: ECHO_BODY,
+          packages: { builtins: [], wheelDir: null },
+          memoryMb: 128,
+          timeoutMs: 60_000 + 30_000,
+        }),
+      );
+    });
+
+    it("imports the skill in a real child: a body that does not import is rejected", async () => {
+      // The runner's own importer: a real wasm child, offline, with no packages.
+      const { schemaImporter: _stub, ...wasm } = offlineWasm(repo.bare).wasm;
+      const runner = await makeRunner({ wasm });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-broken",
+        manifest: ECHO_MANIFEST,
+        body: `1 / 0\n${ECHO_BODY}`,
+      });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+
+      const broken = await runner.register({ branch: "skill/echo-broken", origin: OWNER });
+      const live = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(broken, "rejected");
+      expect(broken.errors).toEqual([
+        expect.stringMatching(
+          /^schema_import_failed: skill\.py did not load: [\s\S]*ZeroDivisionError/,
+        ),
+      ]);
+      // A body with no models keeps its frontmatter's schemas.
+      assertStatus(live, "live");
+      expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.inputs).toMatchObject({
+        required: ["x"],
+      });
+    });
+
+    it("takes the frontmatter's inputs for a skill with no Input model, and the Output model's outputs", async () => {
+      const { runner } = await runnerImporting(ok({ inputs: null, outputs: TEMP_OUTPUTS }));
+      const manifest = MODEL_MANIFEST.replace(
+        "tier: wasm\n",
+        "tier: wasm\ninputs:\n  type: object\n  properties:\n    x:\n      type: integer\n",
+      );
+      await pushWeather("skill/weather", manifest);
+
+      const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+      assertStatus(result, "live");
+      const skill = await tx((trx) => store.getSkillByName(trx, "weather"));
+      expect(skill?.inputs).toEqual({ type: "object", properties: { x: { type: "integer" } } });
+      expect(skill?.outputs).toEqual(TEMP_OUTPUTS);
+    });
+
+    it("rejects a schema both a model and the frontmatter declare, and inputs neither does", async () => {
+      const { runner } = await runnerImporting(
+        ok({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS }),
+        ok({ inputs: null, outputs: null }),
+      );
+      await pushWeather(
+        "skill/weather-twice",
+        ECHO_MANIFEST.replace("name: echo", "name: weather"),
+      );
+
+      const twice = await runner.register({ branch: "skill/weather-twice", origin: OWNER });
+
+      assertStatus(twice, "rejected");
+      expect(twice.errors).toEqual([
+        "inputs_declared_twice: skill.py defines an Input model; remove inputs from SKILL.md",
+        "outputs_declared_twice: skill.py defines an Output model; remove outputs from SKILL.md",
+      ]);
+      await pushWeather("skill/weather-none", MODEL_MANIFEST);
+      const none = await runner.register({ branch: "skill/weather-none", origin: OWNER });
+      assertStatus(none, "rejected");
+      expect(none.errors).toEqual([
+        "missing_inputs: define an Input model in skill.py or inputs in SKILL.md",
+      ]);
+      expect(await tx((trx) => store.getSkillByName(trx, "weather"))).toBeUndefined();
+    });
+
+    it.each([
+      {
+        answer: { kind: "refused", message: "skill.py did not load: ZeroDivisionError" },
+        error: "schema_import_failed: skill.py did not load: ZeroDivisionError",
+      },
+      {
+        answer: { kind: "unavailable", message: "worker init failed: boom" },
+        error: "schema_import_unavailable: worker init failed: boom; retry the register",
+      },
+    ] satisfies { answer: SchemaImportError; error: string }[])(
+      "rejects an import that is $answer.kind, and commits nothing",
+      async ({ answer, error }) => {
+        const { runner } = await runnerImporting(err(answer));
+        await pushWeather("skill/weather", MODEL_MANIFEST);
+        const mainBefore = await getMainSha(repo.bare);
+
+        const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+        assertStatus(result, "rejected");
+        expect(result.errors).toEqual([error]);
+        expect(await tx((trx) => store.getSkillByName(trx, "weather"))).toBeUndefined();
+        expect(await getMainSha(repo.bare)).toBe(mainBefore);
+      },
+    );
+
+    it("rejects an imported schema ajv cannot compile before main moves", async () => {
+      const { runner } = await runnerImporting(
+        ok({ inputs: { type: "object", properties: { city: { type: "place" } } }, outputs: null }),
+      );
+      await pushWeather("skill/weather", MODEL_MANIFEST);
+      const mainBefore = await getMainSha(repo.bare);
+
+      const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([expect.stringMatching(/^invalid_inputs_schema: /)]);
+      expect(await getMainSha(repo.bare)).toBe(mainBefore);
+    });
+
+    it("keeps a container skill on its frontmatter, importing nothing", async () => {
+      const { runner, schemaImporter } = await runnerImporting(
+        ok({ inputs: CITY_INPUTS, outputs: null }),
+      );
+      await pushWeather("skill/weather", MODEL_MANIFEST.replace("tier: wasm", "tier: container"));
+
+      const result = await runner.register({ branch: "skill/weather", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "missing_inputs: SKILL.md declares no inputs, which a container-tier skill needs",
+      ]);
+      expect(schemaImporter.importSchemas).not.toHaveBeenCalled();
+    });
+
+    it("approve puts live the schemas register recorded, importing nothing", async () => {
+      const { runner, schemaImporter } = await runnerImporting(
+        ok({ inputs: CITY_INPUTS, outputs: null }),
+      );
+      await pushWeather(
+        "skill/weather",
+        MODEL_MANIFEST.replace("tier: wasm\n", "tier: wasm\neffects:\n  - sends_message\n"),
+      );
+      const pending = await runner.register({ branch: "skill/weather", origin: OWNER });
+      assertStatus(pending, "pending_approval");
+      schemaImporter.importSchemas.mockClear();
+
+      const approved = await runner.approveDeploy({ pendingId: pending.deployId, origin: OWNER });
+
+      assertStatus(approved, "live");
+      expect((await tx((trx) => store.getSkillByName(trx, "weather")))?.inputs).toEqual(
+        CITY_INPUTS,
+      );
+      expect(schemaImporter.importSchemas).not.toHaveBeenCalled();
+    });
+
+    it("approve of a pending deploy that recorded no schemas puts its frontmatter's live", async () => {
+      const { runner } = await runnerImporting(ok({ inputs: null, outputs: null }));
+      await pushWeather(
+        "skill/weather",
+        ECHO_MANIFEST.replace("name: echo", "name: weather").replace(
+          "tier: wasm\n",
+          "tier: wasm\neffects:\n  - sends_message\n",
+        ),
+      );
+      const pending = await runner.register({ branch: "skill/weather", origin: OWNER });
+      assertStatus(pending, "pending_approval");
+      // A row from before the column.
+      await db.execute(sql`UPDATE skill_deploys SET schemas = NULL WHERE id = ${pending.deployId}`);
+
+      const approved = await runner.approveDeploy({ pendingId: pending.deployId, origin: OWNER });
+
+      assertStatus(approved, "live");
+      expect((await tx((trx) => store.getSkillByName(trx, "weather")))?.inputs).toMatchObject({
+        properties: { x: { type: "integer" } },
+      });
+    });
+
+    it("rollback restores the schemas the target went live with, importing nothing", async () => {
+      const { runner, schemaImporter } = await runnerImporting(
+        ok({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS }),
+        ok({ inputs: { type: "object", properties: { zip: { type: "string" } } }, outputs: null }),
+      );
+      const v1 = await pushWeather("skill/weather-v1", MODEL_MANIFEST);
+      assertStatus(await runner.register({ branch: "skill/weather-v1", origin: OWNER }), "live");
+      await pushWeather("skill/weather-v2", MODEL_MANIFEST.replace("whose", "v2, whose"));
+      assertStatus(await runner.register({ branch: "skill/weather-v2", origin: OWNER }), "live");
+      schemaImporter.importSchemas.mockClear();
+
+      const rolled = await runner.rollback({ name: "weather", toGitSha: v1, origin: OWNER });
+
+      assertStatus(rolled, "live");
+      const skill = await tx((trx) => store.getSkillByName(trx, "weather"));
+      expect(skill).toMatchObject({ gitSha: v1, inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS });
+      const deploy = await tx((trx) => store.getDeployById(trx, rolled.deployId));
+      expect(deploy?.schemas).toEqual({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS });
+      expect(schemaImporter.importSchemas).not.toHaveBeenCalled();
+    });
+
+    it("rollback to a deploy that recorded no schemas puts its frontmatter's live", async () => {
+      const { runner } = await runnerImporting(
+        ok({ inputs: null, outputs: null }),
+        ok({ inputs: CITY_INPUTS, outputs: null }),
+      );
+      const v1 = await pushWeather(
+        "skill/weather-v1",
+        ECHO_MANIFEST.replace("name: echo", "name: weather"),
+      );
+      assertStatus(await runner.register({ branch: "skill/weather-v1", origin: OWNER }), "live");
+      await db.execute(sql`UPDATE skill_deploys SET schemas = NULL WHERE git_sha = ${v1}`);
+      await pushWeather("skill/weather-v2", MODEL_MANIFEST);
+      assertStatus(await runner.register({ branch: "skill/weather-v2", origin: OWNER }), "live");
+
+      const rolled = await runner.rollback({ name: "weather", toGitSha: v1, origin: OWNER });
+
+      assertStatus(rolled, "live");
+      expect((await tx((trx) => store.getSkillByName(trx, "weather")))?.inputs).toMatchObject({
+        properties: { x: { type: "integer" } },
+      });
+    });
+
+    it("rejects a rollback to a sha that never went live and declares no inputs", async () => {
+      const { runner } = await runnerImporting(ok({ inputs: CITY_INPUTS, outputs: null }));
+      await pushWeather("skill/weather-v1", MODEL_MANIFEST);
+      assertStatus(await runner.register({ branch: "skill/weather-v1", origin: OWNER }), "live");
+      // Committed on main's line but never registered.
+      const unregistered = await pushWeather(
+        "skill/weather-draft",
+        MODEL_MANIFEST.replace("whose", "draft, whose"),
+      );
+
+      const rolled = await runner.rollback({
+        name: "weather",
+        toGitSha: unregistered,
+        origin: OWNER,
+      });
+
+      assertStatus(rolled, "rejected");
+      expect(rolled.errors).toEqual([
+        "schemas_unknown: no deploy of the target sha recorded its schemas, and its SKILL.md declares no inputs",
+      ]);
     });
   });
 

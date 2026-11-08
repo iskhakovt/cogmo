@@ -5,10 +5,11 @@ import type { SkillsCapabilities } from "../capabilities.js";
 import type { LockfileCompiler, LockfileSnapshot } from "../deps.js";
 import type { SkillSourceCache } from "../source-cache.js";
 import type { SkillRunIdentity, SkillStore } from "../store/index.js";
+import type { SkillManifest } from "../types.js";
 import type {
   FillBuiltins,
-  WasmPackages,
-  WasmPackagesError,
+  ImportedSchemas,
+  SkillSchemaImportError,
   WasmProbe,
 } from "../worker-wasm/wasm.js";
 
@@ -35,8 +36,9 @@ export interface DeployDeps {
   /**
    * The wasm tier's host side at register: the probe that load-tests native
    * built-ins under the boundary's flags, the fill of the cache it loads
-   * from, and the resolver that fetches and publishes a lockfile's packages
-   * so the first run pays no download.
+   * from, and the schema import, which fetches and publishes the skill's
+   * packages, so the first run pays no download, and reads its models' JSON
+   * Schemas in a child.
    */
   wasm: {
     /** What register's PyPI lookups and downloads go through. */
@@ -44,10 +46,14 @@ export interface DeployDeps {
     probe: WasmProbe;
     fillBuiltins: FillBuiltins;
     packageCacheDir: string;
-    resolvePackages(
-      lockfile: LockfileSnapshot,
+    importSchemas(
+      source: {
+        body: string;
+        lockfile: LockfileSnapshot | null;
+        resources: SkillManifest["resources"];
+      },
       signal?: AbortSignal,
-    ): Promise<Result<WasmPackages, WasmPackagesError>>;
+    ): Promise<Result<ImportedSchemas, SkillSchemaImportError>>;
   };
 }
 

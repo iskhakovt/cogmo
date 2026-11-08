@@ -12,6 +12,7 @@ teardown around that.
 """
 
 import json
+import math
 import os
 import queue
 import subprocess
@@ -168,15 +169,18 @@ async def run(inputs, ctx):
 """
 
 # Leaves a grandchild in a new session with stdin/stdout/stderr closed, so
-# no pipe EOF or hangup ends it; only the supervisor's sweep can.
+# no pipe EOF or hangup ends it; only the supervisor's sweep can. A `comm`
+# input becomes its process name (15 = PR_SET_NAME).
 _DETACHED_GRANDCHILD = """
-import os, time
+import ctypes, os, time
 
 async def run(inputs, ctx):
     r, w = os.pipe()
     if os.fork() == 0:
         os.setsid()
         if os.fork() == 0:
+            if inputs["comm"] is not None:
+                ctypes.CDLL(None).prctl(15, inputs["comm"].encode(), 0, 0, 0)
             for fd in (0, 1, 2):
                 os.close(fd)
             os.write(w, str(os.getpid()).encode())
@@ -184,7 +188,9 @@ async def run(inputs, ctx):
             time.sleep(300)
         os._exit(0)
     os.close(w)
-    return {"pid": int(os.read(r, 32))}
+    pid = int(os.read(r, 32))
+    with open(f"/proc/{pid}/comm") as f:
+        return {"pid": pid, "comm": f.read().strip()}
 """
 
 # Leaves a detached process behind that reads whatever reaches its stdin
@@ -249,6 +255,31 @@ async def run(inputs, ctx):
     return {"opened": opened}
 """
 
+_READ_OWN_FDS = """
+import os
+
+async def run(inputs, ctx):
+    fds = {}
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            fds[name] = os.readlink(f"/proc/self/fd/{name}")
+        except FileNotFoundError:
+            pass  # the fd of the scan itself
+    return fds
+"""
+
+# Two ctx_calls in one write, bypassing the runner so they reach the relay
+# in a single read.
+_TWO_CTX_CALLS = """
+import json, sys
+
+async def run(inputs, ctx):
+    first = {"type": "ctx_call", "id": "ctx-1", "method": "now", "args": {"n": 1}}
+    second = {"type": "ctx_call", "id": "ctx-2", "method": "now", "args": {"n": 2}}
+    sys.stdout.write(json.dumps(first) + "\\n" + json.dumps(second) + "\\n")
+    sys.stdout.flush()
+"""
+
 
 class TestTaskIsolation:
     def test_the_relay_forwards_nothing_after_the_task_result(self, sup: _Supervisor) -> None:
@@ -257,9 +288,13 @@ class TestTaskIsolation:
         assert [f.get("type") for f in frames] == ["supervisor_ready", "task_result", "task_exited"]
         assert frames[1]["id"] == "t-late"
 
-    def test_a_detached_grandchild_is_killed_before_task_exited(self, sup: _Supervisor) -> None:
-        result = sup.run_task("t-detach", _DETACHED_GRANDCHILD, {})
+    # `x) R 1 1 1` reads as ppid 1 to a `/proc/<pid>/stat` parser that stops
+    # at the first `)`, which would hide the process from the sweep.
+    @pytest.mark.parametrize("comm", [None, "x) R 1 1 1"], ids=["plain", "name-spoofing-its-ppid"])
+    def test_a_detached_grandchild_is_killed_before_task_exited(self, sup: _Supervisor, comm: str | None) -> None:
+        result = sup.run_task("t-detach", _DETACHED_GRANDCHILD, {"comm": comm})
         assert result["ok"] is True, result
+        assert comm is None or result["output"]["comm"] == comm
         assert sup.await_exit("t-detach") == {"type": "task_exited", "id": "t-detach"}
         assert not _alive(result["output"]["pid"])
 
@@ -277,6 +312,18 @@ class TestTaskIsolation:
         assert after["output"] == {"echo": {"secret": "for-t-next-only"}}
         assert not _alive(leftover)
         assert not leak.exists() or b"for-t-next-only" not in leak.read_bytes()
+
+    def test_the_task_inherits_no_fd_beyond_its_stdio(self, sup: _Supervisor) -> None:
+        result = sup.run_task("t-fds", _READ_OWN_FDS, {})
+        assert result["ok"] is True, result
+        fds = result["output"]
+        assert fds["0"].startswith("pipe:") and fds["1"].startswith("pipe:"), fds
+        # All the runner's event loop opens: an epoll fd and a socketpair.
+        assert sorted(target.split(":")[0] for fd, target in fds.items() if int(fd) > 2) == [
+            "anon_inode",
+            "socket",
+            "socket",
+        ]
 
     def test_the_task_runs_with_no_new_privs(self, sup: _Supervisor) -> None:
         body = "import ctypes\nasync def run(inputs, ctx):\n    return ctypes.CDLL(None).prctl(39, 0, 0, 0, 0)\n"
@@ -428,17 +475,17 @@ class TestSupervisorProtocol:
         }
         assert frames[-1] == {"type": "task_exited", "id": "t-old"}
 
-    def test_exits_without_task_exited_when_the_sweep_cannot_empty_the_subtree(
-        self, tmp_path: Path, protocol: ProtocolCheck
+    def test_exits_without_task_exited_when_a_process_outlives_the_sweep_deadline(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str], protocol: ProtocolCheck
     ) -> None:
-        sup = _Supervisor(
-            cwd=tmp_path, protocol=protocol, patch="supervisor._sweep_descendants = lambda deadline_s: False"
-        )
+        # The stubbed pid is above PID_MAX_LIMIT, so it signals nothing and never goes away.
+        patch = "supervisor._descendants = lambda root: [2**22 + 1]\nsupervisor.SWEEP_DEADLINE_S = 0.1"
+        sup = _Supervisor(cwd=tmp_path, protocol=protocol, patch=patch)
         try:
-            result = sup.run_task("t-stuck", _ECHO, {})
-            assert result["ok"] is True
+            assert sup.run_task("t-stuck", _ECHO, {})["ok"] is True
             assert sup.frames_until_exit() == []
             assert sup.proc.wait(timeout=5) == 1
+            assert "survived the sweep" in capfd.readouterr().err
         finally:
             sup.close()
 
@@ -523,6 +570,82 @@ class TestSupervisorProtocol:
             "error": "wall_clock_exceeded",
         }
         assert sup.await_exit("t-slow") is not None
+
+    @pytest.mark.parametrize(
+        "wall_clock",
+        [
+            {},
+            {"wallClockS": 0},
+            {"wallClockS": -1},
+            {"wallClockS": "5"},
+            {"wallClockS": True},
+            {"wallClockS": math.nan},
+        ],
+        ids=["absent", "0", "-1", "str", "bool", "nan"],
+    )
+    def test_an_invalid_wall_clock_falls_back_to_the_default(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str], protocol: ProtocolCheck, wall_clock: dict[str, object]
+    ) -> None:
+        sup = _Supervisor(cwd=tmp_path, protocol=protocol, patch="supervisor.DEFAULT_WALL_CLOCK_S = 0.5")
+        try:
+            body = "import asyncio\nasync def run(inputs, ctx):\n    await asyncio.sleep(30)\n"
+            # Every case but the absent one is out of contract on purpose.
+            frame = {"type": "task_invoke", "run": RUN, "id": "t-wall", "skill": "wall", "inputs": {}, "body": body}
+            frame |= wall_clock
+            sup.send(frame, conforming=not wall_clock)
+            results = [f for f in sup.frames_until_exit() if f.get("type") == "task_result"]
+            assert [r.get("error") for r in results] == ["wall_clock_exceeded"], results
+            assert "wall-clock 0.5s exceeded" in capfd.readouterr().err
+        finally:
+            sup.close()
+
+    # Each is past the longest wait epoll takes. A frame's `1e400` parses to
+    # `inf`, sent here as `Infinity`.
+    @pytest.mark.parametrize("wall_clock_s", [3_000_000, 10**400, math.inf], ids=["finite", "huge-int", "inf"])
+    def test_runs_a_task_whose_wall_clock_is_past_any_wait(self, sup: _Supervisor, wall_clock_s: float) -> None:
+        body = "async def run(inputs, ctx):\n    return 1\n"
+        frame = {"type": "task_invoke", "run": RUN, "id": "t-long", "skill": "long", "inputs": {}, "body": body}
+        sup.send(frame | {"wallClockS": wall_clock_s}, conforming=wall_clock_s != math.inf)
+        frames = sup.frames_until_exit()
+        results = [(f.get("ok"), f.get("output")) for f in frames if f.get("type") == "task_result"]
+        assert results == [(True, 1)], frames
+        assert frames[-1] == {"type": "task_exited", "id": "t-long"}
+
+    def test_caps_the_wall_clock_at_the_ceiling(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str], protocol: ProtocolCheck
+    ) -> None:
+        sup = _Supervisor(cwd=tmp_path, protocol=protocol, patch="supervisor.MAX_WALL_CLOCK_S = 0.5")
+        try:
+            body = "import asyncio\nasync def run(inputs, ctx):\n    await asyncio.sleep(30)\n"
+            sup.send_task("t-capped", body, {}, wall_clock_s=60)
+            results = [f for f in sup.frames_until_exit() if f.get("type") == "task_result"]
+            assert [r.get("error") for r in results] == ["wall_clock_exceeded"], results
+            assert "wall-clock 0.5s exceeded" in capfd.readouterr().err
+        finally:
+            sup.close()
+
+    def test_ignores_a_non_object_frame_from_the_task(self, sup: _Supervisor) -> None:
+        # One write, so the relay reads the frame after it in the same read.
+        body = (
+            "import json, sys\n"
+            "async def run(inputs, ctx):\n"
+            "    call = {'type': 'ctx_call', 'id': 'ctx-1', 'method': 'now', 'args': {}}\n"
+            "    sys.stdout.write('[]\\n' + json.dumps(call) + '\\n')\n"
+            "    sys.stdout.flush()\n"
+            "    return 'done'\n"
+        )
+        sup.send_task("t-array", body, {})
+        frames = sup.frames_until_exit()
+        assert [f["id"] for f in frames if f.get("type") == "ctx_call"] == ["ctx-1"], frames
+        assert [f.get("output") for f in frames if f.get("type") == "task_result"] == ["done"], frames
+
+    def test_forwards_every_frame_of_a_single_write_with_its_args(self, sup: _Supervisor) -> None:
+        sup.send_task("t-batch", _TWO_CTX_CALLS, {})
+        calls = [f for f in sup.frames_until_exit() if f.get("type") == "ctx_call"]
+        assert calls == [
+            {"type": "ctx_call", "taskId": "t-batch", "id": "ctx-1", "method": "now", "args": {"n": 1}},
+            {"type": "ctx_call", "taskId": "t-batch", "id": "ctx-2", "method": "now", "args": {"n": 2}},
+        ]
 
     @pytest.mark.parametrize(
         ("body", "error_kind", "error"),

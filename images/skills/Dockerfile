@@ -18,6 +18,9 @@
 # `cogmo_skills_runtime` itself has zero third-party python deps; only
 # the per-skill venvs populated by `uv venv` + `uv pip sync` against a
 # manifest's `requirements.lock` introduce wheels into the runtime.
+#
+# The `mutation` stage between them is a local test image for
+# `pnpm test:mutation:skills`; the release build never reaches it.
 
 # uv toolchain as a stage — version + digest from docker-bake.hcl, shared
 # with cogmo-devbase. ARG-in-FROM needs global scope.
@@ -50,6 +53,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY src /app/src/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable
+
+# design/testing.md → Mutation Testing. The packages resolve to `/app/src`,
+# which scripts/mutation.sh overlays with mutmut's mutated copy to re-run a
+# mutant, so the `python -I` subprocesses the suite starts run it too.
+FROM builder AS mutation
+ENV UV_NO_DEV=0
+RUN --mount=type=cache,target=/root/.cache/uv \
+    rm -rf .venv \
+ && uv sync --locked --group mutation --no-install-project \
+ && echo /app/src > "$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/cogmo_skills_mutants.pth" \
+ && install -d -o 1000 -g 1000 /app/mutants
+COPY tests /app/tests/
+COPY contract /app/contract/
+ENV PATH="/app/.venv/bin:${PATH}" HOME=/tmp PYTHONDONTWRITEBYTECODE=1
+USER 1000:1000
 
 FROM mirror.gcr.io/library/python:3.14.10-slim@sha256:af8a5aa14780025dbfbcfbc81bd8a91ebd87711dd5b0f48ed71090949dd7cb1d
 

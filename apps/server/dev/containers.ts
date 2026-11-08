@@ -152,7 +152,7 @@ export function inngestKeyed(opts: { eventKey: string; signingKey: string }) {
  * Gitea's own registry, off the Docker Hub rate-limit budget.
  */
 export function gitea() {
-  return new GenericContainer("docker.gitea.com/gitea:28.2.0")
+  return new GenericContainer("docker.gitea.com/gitea:28.3.0")
     .withExposedPorts(3000)
     .withEnvironment({ GITEA__security__INSTALL_LOCK: "true" })
     .withWaitStrategy(Wait.forHttp("/api/v1/version", 3000))
@@ -232,7 +232,7 @@ export function hindsight(
   // the Control Plane web UI (which Cogmo never talks to). Pinned within
   // `cogmo.hindsightCompat`: a floating `latest` drifts past the range and
   // trips the boot version check.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.1.0")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.2.0")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
@@ -302,7 +302,7 @@ export function hindsightSlim(
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
   // changes its LLM request format. Re-record the `hindsight/` cassette when a
   // bump changes those requests.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.1.0-slim")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.2.0-slim")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)

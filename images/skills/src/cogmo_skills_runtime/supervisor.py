@@ -70,6 +70,10 @@ from cogmo_skills_runtime.runner import _main as _run_main
 PROTOCOL_VERSION = 6
 
 DEFAULT_WALL_CLOCK_S = 60
+# Ceiling on a task's wall clock: far above any budget a manifest declares,
+# and with `RELAY_GRACE_S` on top still inside the longest wait epoll takes,
+# a C int of milliseconds (about 24.9 days).
+MAX_WALL_CLOCK_S = 7 * 24 * 3600
 SIGKILL_GRACE_S = 2.0
 # Supervisor backstop past the relay's own wall clock, for a relay that
 # stopped responding (e.g. SIGSTOPped by the task it serves).
@@ -573,8 +577,11 @@ def _relay(status_w: int) -> int:
     frame, task = invoke
     task_id = str(task["id"])
     wall_clock_s = task.get("wallClockS")
-    if not isinstance(wall_clock_s, int | float) or isinstance(wall_clock_s, bool) or wall_clock_s <= 0:
+    # `not 0 < x` refuses NaN, which fails every comparison; `min` caps
+    # infinity and integers too large for a float.
+    if not isinstance(wall_clock_s, int | float) or isinstance(wall_clock_s, bool) or not 0 < wall_clock_s:
         wall_clock_s = DEFAULT_WALL_CLOCK_S
+    wall_clock_s = min(wall_clock_s, MAX_WALL_CLOCK_S)
     _write_all(status_w, json.dumps({"id": task_id, "wallClockS": wall_clock_s}).encode())
     os.close(status_w)
     try:

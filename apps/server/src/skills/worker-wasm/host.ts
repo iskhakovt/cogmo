@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { err, ok, okAsync, type Result, ResultAsync } from "neverthrow";
 import * as R from "remeda";
 import { match, P } from "ts-pattern";
-import type { z } from "zod";
+import { z } from "zod";
 import { logger } from "../../logger.js";
 import {
   type CtxHandler,
@@ -25,13 +25,21 @@ import {
   type TaskRun,
   withheldOutcome,
 } from "../protocol.js";
+import { SkillInputsSchema, SkillIoSchema } from "../types.js";
 import { timeoutSignal } from "../wall-clock.js";
 import type { StartFailure, WorkerFrame } from "../worker-state.js";
-import { type ChildInit, ProbeReplySchema } from "./child-protocol.js";
+import { type ChildInit, ProbeReplySchema, SchemaReplySchema } from "./child-protocol.js";
 import { INTERRUPT_MESSAGE } from "./interrupt-message.js";
 import { killChildGroup, recordChildGroup, removeChildGroupRecord } from "./process-groups.js";
 import { createIpcTransport, type IpcChannel } from "./transport.js";
-import type { WasmPackages, WasmProbe, WasmProbeError } from "./wasm.js";
+import type {
+  ImportedSchemas,
+  SchemaImportError,
+  WasmPackages,
+  WasmProbe,
+  WasmProbeError,
+  WasmSchemaImporter,
+} from "./wasm.js";
 
 /**
  * The wasm host (design/skills.md → Wasm-tier boundary). Each task runs in a
@@ -157,6 +165,23 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
  * @public Exported for `host.test.ts`, which forks a child and drops its IPC channel.
  */
 export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<WasmChild, string>> {
+  const launch = await skillChildLaunch("run", params);
+  if (launch.isErr()) return err(launch.error);
+  return forkWasmChild({ ...launch.value, childrenDir: params.childrenDir });
+}
+
+/**
+ * How a child that loads a skill starts: under the boundary's flags with read
+ * access to the Pyodide distribution, the package cache, the wheel directory
+ * and the child bundle only.
+ */
+async function skillChildLaunch(
+  mode: "run" | "schema",
+  params: Pick<
+    RunOnWorkerParams,
+    "pyodideDistDir" | "packageCacheDir" | "packages" | "memoryMb" | "body"
+  >,
+): Promise<Result<{ entry: string; execArgv: string[]; init: ChildInit }, string>> {
   const built = await wasmChildEntry();
   if (built.isErr()) return err(built.error);
   const entry = built.value;
@@ -173,7 +198,7 @@ export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Wa
   ]);
   if (resolved.isErr()) return err(resolved.error);
   const [distDir, entryDir, packageCacheDir, wheelDir] = resolved.value;
-  return forkWasmChild({
+  return ok({
     entry,
     execArgv: boundaryExecArgv([
       distDir,
@@ -182,7 +207,7 @@ export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Wa
       ...(wheelDir === null ? [] : [wheelDir]),
     ]),
     init: {
-      mode: "run",
+      mode,
       pyodideDistDir: distDir,
       packageCacheDir,
       builtins: [...params.packages.builtins],
@@ -190,7 +215,6 @@ export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Wa
       memoryMb: params.memoryMb,
       body: params.body,
     },
-    childrenDir: params.childrenDir,
   });
 }
 
@@ -342,6 +366,14 @@ export interface WasmProbeOptions {
 }
 
 /**
+ * A schema import's budget: a child's start and package load, then the
+ * skill's module code under its run's wall clock.
+ */
+export function wasmSchemaImportTimeoutMs(wallClockS: number): number {
+  return DEFAULT_READY_TIMEOUT_MS + wallClockS * 1000;
+}
+
+/**
  * The {@link WasmProbe} over wasm children. A probe child runs under the
  * same flags as a task's, reads the package cache the host filled and
  * verified, runs no skill code, and is time-boxed by its signal and a
@@ -361,6 +393,7 @@ export function createWasmProbe(opts: WasmProbeOptions): WasmProbe {
       if (grants.isErr()) return err(unavailable(grants.error));
       const [, , cacheDir] = grants.value;
       const reply = await runUtilityChild(opts, {
+        entry: entry.value,
         init: {
           mode: "probe",
           pyodideDistDir: opts.pyodideDistDir,
@@ -388,13 +421,80 @@ export function createWasmProbe(opts: WasmProbeOptions): WasmProbe {
 }
 
 /**
- * Fork a child that runs no skill code, take its one reply, and kill it.
- * Errs when the child cannot start, exits first, replies with something else,
- * or outlives `timeoutMs` or `signal`.
+ * The {@link WasmSchemaImporter} over wasm children. A schema child starts as
+ * a task's does, under the boundary's flags, the memory cap and the skill's
+ * packages, imports the skill and replies with its models' JSON Schemas; the
+ * host parses `inputs` as an object schema and `outputs` as a JSON object.
+ */
+export function createWasmSchemaImporter(opts: WasmProbeOptions): WasmSchemaImporter {
+  return {
+    async importSchemas(params) {
+      const unavailable = (message: string): SchemaImportError => ({
+        kind: "unavailable",
+        message,
+      });
+      const launch = await skillChildLaunch("schema", {
+        ...params,
+        pyodideDistDir: opts.pyodideDistDir,
+      });
+      if (launch.isErr()) return err(unavailable(launch.error));
+      const reply = await runUtilityChild(opts, {
+        entry: launch.value.entry,
+        init: launch.value.init,
+        execArgv: launch.value.execArgv,
+        timeoutMs: params.timeoutMs,
+        signal: params.signal,
+        schema: SchemaReplySchema,
+      });
+      return reply
+        .mapErr((reason) => unavailable(`schema import failed: ${reason}`))
+        .andThen((r) =>
+          match(r)
+            .returnType<Result<ImportedSchemas, SchemaImportError>>()
+            .with({ type: "schemas" }, ({ inputs, outputs }) => importedSchemas(inputs, outputs))
+            .with({ type: "schema_failed" }, ({ error }) =>
+              err({ kind: "refused", message: error }),
+            )
+            .with({ type: "fatal" }, ({ error }) =>
+              err(unavailable(`worker init failed: ${error}`)),
+            )
+            .exhaustive(),
+        );
+    },
+  };
+}
+
+/**
+ * The child's schemas, parsed: `inputs` must be an object schema. `outputs`
+ * crossed JSON IPC as an object, so it is one, and a failed parse is a bug.
+ */
+function importedSchemas(
+  inputs: Record<string, unknown> | null,
+  outputs: Record<string, unknown> | null,
+): Result<ImportedSchemas, SchemaImportError> {
+  const parsedInputs = inputs === null ? null : SkillInputsSchema.safeParse(inputs);
+  if (parsedInputs !== null && !parsedInputs.success) {
+    return err({
+      kind: "refused",
+      message: `Input's JSON Schema does not describe an object: ${z.prettifyError(parsedInputs.error)}`,
+    });
+  }
+  return ok({
+    inputs: parsedInputs?.data ?? null,
+    outputs: outputs === null ? null : SkillIoSchema.parse(outputs),
+  });
+}
+
+/**
+ * Fork a child, take its one reply, and kill it. Errs when the child cannot
+ * start, exits first, replies with something else, or outlives `timeoutMs` or
+ * `signal`.
  */
 async function runUtilityChild<T>(
   opts: WasmProbeOptions,
   run: {
+    /** The child bundle (`wasmChildEntry`). */
+    entry: string;
     init: ChildInit;
     execArgv: readonly string[];
     timeoutMs: number;
@@ -402,10 +502,8 @@ async function runUtilityChild<T>(
     schema: z.ZodType<T>;
   },
 ): Promise<Result<T, string>> {
-  const entry = await wasmChildEntry();
-  if (entry.isErr()) return err(entry.error);
   const forked = await forkWasmChild({
-    entry: entry.value,
+    entry: run.entry,
     execArgv: run.execArgv,
     init: run.init,
     childrenDir: opts.childrenDir,
