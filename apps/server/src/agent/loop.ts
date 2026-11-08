@@ -20,7 +20,6 @@ import type {
   Usage,
 } from "../llm/types.js";
 import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
-import { promptServerMismatches } from "../metrics.js";
 import { canonicalJson, sha256 } from "../util/canonical-json.js";
 import { validateHistory } from "./history-invariants.js";
 import {
@@ -37,6 +36,7 @@ import {
   summarizeToolHistory,
   truncationNotice,
 } from "./repair.js";
+import { countServerMismatches } from "./server-mismatches.js";
 import type { Service } from "./service.js";
 import { fromToolStepResult, toToolStepResult } from "./tool-step-result.js";
 import {
@@ -1646,14 +1646,4 @@ function reportedTransformations(
     .with({ kind: "drained" }, ({ transformations }) => transformations ?? [])
     .with({ kind: "degrade" }, () => [])
     .exhaustive();
-}
-
-/** Count each transformation the provider reported on one request. */
-function countServerMismatches(
-  transformations: ReadonlyArray<InputTransformation>,
-  site: StreamingAgentLoopParams["site"],
-): void {
-  for (const { type, reason } of transformations) {
-    promptServerMismatches.add(1, { type, reason, site });
-  }
 }

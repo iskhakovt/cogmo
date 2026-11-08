@@ -11,7 +11,9 @@ import {
 } from "../context.js";
 import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
 import type { PromptSource } from "../prompt.js";
+import { countServerMismatches } from "../server-mismatches.js";
 import type { AgentStore } from "../store/index.js";
+import { stripThinkingBefore } from "../system-prompt-snapshot.js";
 import { loadConversationContext } from "./load-conversation-context.js";
 import { type LoadTurnHistoryDeps, loadTurnHistory, summarizedSpan } from "./load-turn-history.js";
 
@@ -141,10 +143,11 @@ export async function compactConversation(
     { runInTx: deps.runInTx, agentStore: deps.agentStore },
     { userId, coreMemoryScope, profile },
   );
-  // Tool definitions are omitted: resolving the per-turn catalog means
-  // composing MCP and skill tools, and the summarizer uses the system prompt
-  // only to recognise what is already stated elsewhere. A missing `# Tools`
-  // section can make it preserve a little more, never less.
+  // Tool definitions are omitted, from the prompt and the request: resolving
+  // the per-turn catalog means composing MCP and skill tools, and the
+  // summarizer uses the system prompt only to recognise what is already
+  // stated elsewhere. A missing `# Tools` section can make it preserve a
+  // little more, never less.
   const system = await deps.promptSource.assemble({
     profile,
     rules: context.rules,
@@ -155,26 +158,25 @@ export async function compactConversation(
   const { provider, limits: rowLimits } = await deps.resolveProvider(model);
   const limits = resolveLimits(model, rowLimits);
 
-  // The summarizer reads the prefix as the conversation's turns send it,
-  // every tool result verbatim, under the epoch's attachment cutoff.
+  // The summarizer reads the prefix under the epoch's attachment cutoff, its
+  // tool results cleared only past the summarization model's budget. Outside
+  // a turn there is no frozen tool table for the thinking blocks to stay
+  // bound to, so every one is stripped.
   const epoch = await deps.runInTx((tx) =>
     deps.agentStore.getLatestSystemPromptSnapshot(tx, conversationId),
   );
-  const prefix = await renderForkSpan(deps.attachmentReader, {
+  const rendered = await renderForkSpan(deps.attachmentReader, {
     messages: messages.slice(0, splitIdx),
     messageIds: messageIds.slice(0, splitIdx),
     cutoff: epoch?.attachmentCutoff ?? null,
     limits: provider.attachmentLimits(limits.contextWindow),
   });
+  const prefix = stripThinkingBefore(rendered, rendered.length);
 
   const response = await provider.chat(
-    summarizationRequest({
-      model,
-      system,
-      messages: prefix,
-      maxOutputTokens: limits.maxOutputTokens,
-    }),
+    summarizationRequest({ model, limits, system, tools: [], messages: prefix }),
   );
+  countServerMismatches(response.inputTransformations ?? [], "fork");
   const summary = extractSummaryText(response.content);
   if (summary.trim().length === 0) return { status: "skipped", reason: "empty_summary" };
   // Storing a summary cut off at its output cap would freeze a half-written

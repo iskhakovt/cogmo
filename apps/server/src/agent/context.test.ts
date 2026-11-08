@@ -1552,6 +1552,15 @@ describe("prefix veto", () => {
 });
 
 describe("summarizationRequest", () => {
+  /** A summarization model whose budget is 126,000 input tokens. */
+  const LIMITS = { contextWindow: 200_000, maxOutputTokens: 64_000 };
+
+  const READ_FILE: ToolDefinition = {
+    name: "read_file",
+    description: "Read a file",
+    parameters: { type: "object" },
+  };
+
   it("repairs an orphan tool_use at the prefix tail", () => {
     // A split can land right after an assistant `tool_use` that history never
     // answered — a shape `validateHistory` exists for. Compaction runs upstream
@@ -1559,9 +1568,10 @@ describe("summarizationRequest", () => {
     // would otherwise be built from raw history, and Anthropic rejects it.
     const params = summarizationRequest({
       model: "m",
+      limits: LIMITS,
       system: "s",
+      tools: [],
       messages: [msg("user", "do it"), toolCallMsg("t1", "read_file")],
-      maxOutputTokens: 8192,
     });
 
     // The synthesized answer sits between the orphan call and the instruction.
@@ -1595,40 +1605,60 @@ describe("summarizationRequest", () => {
   it("appends the instruction as the final user message", () => {
     const params = summarizationRequest({
       model: "m",
+      limits: LIMITS,
       system: "s",
+      tools: [],
       messages: [msg("user", "hello"), msg("assistant", "hi")],
-      maxOutputTokens: 8192,
     });
 
     expect(params.messages.at(-1)).toEqual({ role: "user", content: SUMMARIZATION_PROMPT });
     expect(params.messages).toHaveLength(3);
   });
 
-  it("carries the turn's Strategy 1 intent, and none without one", () => {
-    const messages = [msg("user", "hello"), msg("assistant", "hi")];
+  it("sends the turn's system prompt and tools, with tool calls disabled", () => {
+    const params = summarizationRequest({
+      model: "m",
+      limits: LIMITS,
+      system: "the turn's prompt",
+      tools: [READ_FILE],
+      messages: [msg("user", "hello"), msg("assistant", "hi")],
+    });
 
-    expect(
-      summarizationRequest({
-        model: "m",
-        system: "s",
-        messages,
-        maxOutputTokens: 8192,
-        clearToolResults: CLEARING,
-      }).clearToolResults,
-    ).toEqual(CLEARING);
-    expect(
-      summarizationRequest({ model: "m", system: "s", messages, maxOutputTokens: 8192 }),
-    ).not.toHaveProperty("clearToolResults");
+    expect(params).toMatchObject({
+      system: "the turn's prompt",
+      tools: [READ_FILE],
+      toolChoice: "none",
+    });
+  });
+
+  it("clears tool results only past the summarization model's budget, as Strategy 1 keeps and frees", () => {
+    const params = summarizationRequest({
+      model: "m",
+      limits: LIMITS,
+      system: "s",
+      tools: [],
+      messages: [msg("user", "hello"), msg("assistant", "hi")],
+    });
+
+    // 200,000 − 64,000 − the 10,000 safety buffer.
+    expect(params.clearToolResults).toEqual({
+      triggerTokens: 126_000,
+      keep: 5,
+      clearAtLeastTokens: 12_600,
+    });
   });
 
   it("caps output at the model's own ceiling when it is below the default", () => {
-    expect(
-      summarizationRequest({ model: "m", system: "s", messages: [], maxOutputTokens: 4096 })
-        .maxTokens,
-    ).toBe(4096);
-    expect(
-      summarizationRequest({ model: "m", system: "s", messages: [], maxOutputTokens: 64_000 })
-        .maxTokens,
-    ).toBe(16_000);
+    const capped = (maxOutputTokens: number) =>
+      summarizationRequest({
+        model: "m",
+        limits: { contextWindow: 200_000, maxOutputTokens },
+        system: "s",
+        tools: [],
+        messages: [],
+      }).maxTokens;
+
+    expect(capped(4096)).toBe(4096);
+    expect(capped(64_000)).toBe(16_000);
   });
 });
