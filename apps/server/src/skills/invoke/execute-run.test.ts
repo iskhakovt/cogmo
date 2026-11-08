@@ -91,7 +91,7 @@ describe("executeRun", () => {
         ctxHttp: undefined,
       },
       {
-        run: { id: "run-1", createdAt: new Date() },
+        run: { id: "run-1", key: "skill-tool:call-1", createdAt: new Date() },
         skill: mock<SkillRow>({ name: "echo", tier: "wasm" }),
         cached: cachedEntry(),
         inputs: {},
@@ -121,6 +121,11 @@ describe("executeRun", () => {
     expect(vi.mocked(dispatchToRuntime).mock.calls[0]?.[1]).toEqual({ kind: "wasm", packages });
     // The runtime enforces the wall clock the deadline counts from.
     expect(vi.mocked(dispatchToRuntime).mock.calls[0]?.[2].wallClockS).toBe(30);
+    // The task carries the run and the invocation's key, which `ctx.run()` returns.
+    expect(vi.mocked(dispatchToRuntime).mock.calls[0]?.[2].run).toEqual({
+      id: "run-1",
+      key: "skill-tool:call-1",
+    });
     const dispatched = store.transitionToDispatched.mock.calls[0]?.[1];
     // The wasm tier's 30 s wall clock plus the 60 s grace.
     expect(dispatched?.deadlineAt.getTime()).toBeGreaterThanOrEqual(before + 90_000);

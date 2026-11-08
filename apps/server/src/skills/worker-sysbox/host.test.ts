@@ -58,7 +58,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     exec: vi.fn(),
     execStreaming: vi.fn(async (cmd) => {
       calls.push(`exec:${cmd[0]}:${cmd[1]}`);
-      stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 4 })}\n`);
+      stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 5 })}\n`);
       return exec;
     }),
   };
@@ -134,6 +134,7 @@ describe("runOnSysboxContainer", () => {
 
     const result = await runOnSysboxContainer({
       taskId: "task-happy",
+      run: { id: "run-1", key: "key-1" },
       skillName: "echo",
       body: "async def run(inputs, ctx):\n    return {'x': 7}\n",
       inputs: {},
@@ -160,6 +161,7 @@ describe("runOnSysboxContainer", () => {
 
     await runOnSysboxContainer({
       taskId: "task-res",
+      run: { id: "run-1", key: "key-1" },
       skillName: "heavy",
       body: "async def run(inputs, ctx):\n    return None\n",
       inputs: {},
@@ -196,6 +198,7 @@ describe("runOnSysboxContainer", () => {
 
     await runOnSysboxContainer({
       taskId: "task-iso",
+      run: { id: "run-1", key: "key-1" },
       skillName: "iso",
       body: "async def run(inputs, ctx):\n    return None\n",
       inputs: {},
@@ -220,6 +223,7 @@ describe("runOnSysboxContainer", () => {
 
     await runOnSysboxContainer({
       taskId: "task-ttl",
+      run: { id: "run-1", key: "key-1" },
       skillName: "any",
       body: "async def run(inputs, ctx):\n    return None\n",
       inputs: {},
@@ -260,6 +264,7 @@ describe("runOnSysboxContainer", () => {
 
     const result = await runOnSysboxContainer({
       taskId: "task-fail",
+      run: { id: "run-1", key: "key-1" },
       skillName: "any",
       body: "async def run(inputs, ctx):\n    return None\n",
       inputs: {},
@@ -285,6 +290,7 @@ describe("runOnSysboxContainer", () => {
 
     const result = await runOnSysboxContainer({
       taskId: "task-no-create",
+      run: { id: "run-1", key: "key-1" },
       skillName: "any",
       body: "async def run(inputs, ctx):\n    return None\n",
       inputs: {},
@@ -313,6 +319,7 @@ describe("runOnSysboxContainer", () => {
 
     const result = await runOnSysboxContainer({
       taskId: "task-dead-lease",
+      run: { id: "run-1", key: "key-1" },
       skillName: "echo",
       body: "async def run(inputs, ctx):\n    return None\n",
       inputs: {},
@@ -341,6 +348,7 @@ describe("runOnSysboxContainer", () => {
     await expect(
       runOnSysboxContainer({
         taskId: "task-gate-throws",
+        run: { id: "run-1", key: "key-1" },
         skillName: "echo",
         body: "async def run(inputs, ctx):\n    return {'x': 7}\n",
         inputs: {},
@@ -364,6 +372,7 @@ describe("runOnSysboxContainer", () => {
     // Despite dispose failing, the original result is preserved.
     const result = await runOnSysboxContainer({
       taskId: "task-bad-dispose",
+      run: { id: "run-1", key: "key-1" },
       skillName: "any",
       body: "async def run(inputs, ctx):\n    return None\n",
       inputs: {},

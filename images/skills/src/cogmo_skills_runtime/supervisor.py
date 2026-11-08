@@ -59,6 +59,7 @@ import traceback
 from collections.abc import Mapping
 from typing import Any
 
+from cogmo_ctx import RunInfo
 from cogmo_skills_runtime.abi import python_abi_tag
 from cogmo_skills_runtime.runner import _main as _run_main
 
@@ -66,7 +67,7 @@ from cogmo_skills_runtime.runner import _main as _run_main
 # a supervisor announcing any other version (`SUPERVISOR_PROTOCOL_VERSION`
 # in `src/skills/protocol.ts`), so it also marks what else the host runs
 # in this image.
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 DEFAULT_WALL_CLOCK_S = 60
 SIGKILL_GRACE_S = 2.0
@@ -350,6 +351,10 @@ def _run_one_task_in_child(task: Mapping[str, object]) -> None:
     body = str(task.get("body", ""))
     inputs = task.get("inputs")
     task_id = str(task["id"])
+    run = _run_info(task.get("run"))
+    if run is None:
+        _write_task_failure(task_id, "runtime_unavailable", "task_invoke carries no run id and key")
+        return
     lockfile_hash = task.get("lockfileHash")
     if isinstance(lockfile_hash, str) and lockfile_hash:
         try:
@@ -358,12 +363,22 @@ def _run_one_task_in_child(task: Mapping[str, object]) -> None:
             _write_task_failure(task_id, "dependency_unavailable", f"skill_venv: {e}")
             return
     try:
-        asyncio.run(_run_main(body, inputs, task_id))
+        asyncio.run(_run_main(body, inputs, task_id, run))
     except BaseException as e:
         # The runner's own try/except covers normal Python exceptions;
         # this catches BaseException (KeyboardInterrupt, SystemExit) and
         # surfaces a synthetic task_result so the host doesn't hang.
         _write_task_failure(task_id, "skill_raised", f"supervisor_child_aborted: {type(e).__name__}: {e}")
+
+
+def _run_info(value: object) -> RunInfo | None:
+    """The task's `run`, `{ id, key }`, which `ctx.run()` returns; None when malformed."""
+    if not isinstance(value, dict):
+        return None
+    run_id, key = value.get("id"), value.get("key")
+    if not isinstance(run_id, str) or not isinstance(key, str) or not run_id or not key:
+        return None
+    return {"id": run_id, "key": key}
 
 
 def _write_task_failure(task_id: str, error_kind: str, error: str) -> None:

@@ -20,6 +20,7 @@ import {
   SUPERVISOR_PROTOCOL_VERSION,
   type TaskInvoke,
   type TaskOutcome,
+  type TaskRun,
   withheldOutcome,
 } from "../protocol.js";
 import { timeoutSignal } from "../wall-clock.js";
@@ -143,6 +144,7 @@ function taskFailureOutcome(
 
 export interface InvokeParams {
   taskId: string;
+  run: TaskRun;
   /** Skill name — informational only; surfaced in logs and labels. */
   skillName: string;
   /** Source of `skill.py`. */
@@ -442,6 +444,7 @@ export class SysboxSkillWorker {
     const invoke: TaskInvoke = {
       type: "task_invoke",
       id: params.taskId,
+      run: params.run,
       skill: params.skillName,
       inputs: params.inputs,
       body: params.body,

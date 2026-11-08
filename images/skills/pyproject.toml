@@ -35,7 +35,7 @@ package = true
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.py" }]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cogmo_skills_runtime"]
+packages = ["src/cogmo_skills_runtime", "src/cogmo_ctx"]
 
 [tool.ruff]
 include = ["pyproject.toml", "src/**/*.py", "tests/**/*.py"]

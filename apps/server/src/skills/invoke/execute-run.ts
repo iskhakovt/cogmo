@@ -55,7 +55,7 @@ export type ExecuteRunResult =
 export async function executeRun(
   deps: ExecuteRunDeps,
   args: {
-    run: { id: string; createdAt: Date };
+    run: { id: string; key: string; createdAt: Date };
     skill: SkillRow;
     cached: SkillSourceCacheEntry;
     inputs: unknown;
@@ -102,6 +102,7 @@ export async function executeRun(
     inputs: args.inputs,
     ctxHandler,
     taskId: run.id,
+    run: { id: run.id, key: run.key },
     dispatch,
     wallClockS,
   });

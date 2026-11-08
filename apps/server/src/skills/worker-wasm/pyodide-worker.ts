@@ -5,19 +5,22 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type MessagePort, parentPort, workerData } from "node:worker_threads";
 import * as nodeZlib from "node:zlib";
-import { errAsync, ResultAsync } from "neverthrow";
+import { errAsync, okAsync, ResultAsync } from "neverthrow";
 import type { PyodideInterface } from "pyodide";
 import { match } from "ts-pattern";
+import { z } from "zod";
+import COGMO_CTX_PY from "../../../../../images/skills/src/cogmo_ctx/__init__.py";
 import {
   CtxResultSchema,
   TaskInvokeSchema,
   type TaskResult,
+  type TaskRun,
   type WorkerErrorKind,
 } from "../protocol.js";
 import { type ChildInit, ChildInitSchema } from "./child-protocol.js";
-import CTX_PY from "./py/ctx.py";
 import INSTALL_DEPS_PY from "./py/install_deps.py";
 import OUTPUT_PY from "./py/output.py";
+import TASK_PY from "./py/task.py";
 
 /**
  * A wasm child's Pyodide worker thread (design/skills.md → Wasm-tier
@@ -186,10 +189,11 @@ function deleteNetworkGlobals(): void {
 }
 
 /**
- * A ctx call's answer as it reaches Python. `Ctx._call` in `py/ctx.py` returns
- * the value or raises `CtxError(kind, message)`, the class the container tier raises: a
- * plain value crosses into Pyodide intact, where a rejected promise arrives
- * as a `JsException` carrying only the error's name and message.
+ * A ctx call's answer as it reaches Python. `_CogmoBridge.call` in
+ * `py/task.py` returns the value or raises `cogmo_ctx.CtxError(kind,
+ * message)`: a plain value crosses into Pyodide intact, where a rejected
+ * promise arrives as a `JsException` carrying only the error's name and
+ * message.
  */
 type BridgeReply = { ok: true; value: unknown } | { ok: false; kind: string; message: string };
 
@@ -262,8 +266,49 @@ function skillStageKind(
     e instanceof py.ffi.PythonError && e.type === "MemoryError" ? "memory_exceeded" : kind;
 }
 
+/** Where `cogmo_ctx` lives in Pyodide's filesystem, first on `sys.path`. */
+const COGMO_CTX_ROOT = "/cogmo/lib";
+
 /**
- * Load the ctx SDK and the skill body into module-level globals, run the
+ * Write `cogmo_ctx` into Pyodide's in-memory filesystem, ahead of the
+ * skill's installed wheels on `sys.path`, and import it, so the skill's
+ * `from cogmo_ctx import …` resolves to the module the worker built its
+ * `ctx` from.
+ */
+function installCogmoCtx(py: PyodideInterface): void {
+  py.FS.mkdirTree(`${COGMO_CTX_ROOT}/cogmo_ctx`);
+  py.FS.writeFile(`${COGMO_CTX_ROOT}/cogmo_ctx/__init__.py`, COGMO_CTX_PY);
+  const sys = py.pyimport("sys");
+  try {
+    sys.path.insert(0, COGMO_CTX_ROOT);
+  } finally {
+    sys.destroy();
+  }
+  py.pyimport("cogmo_ctx").destroy();
+}
+
+/** What `_cogmo_call_run` (`py/task.py`) reports for a `SkillError`. */
+const SkillErrorReportSchema = z.tuple([z.enum(["skill_failed", "skill_retryable"]), z.string()]);
+
+/**
+ * The `SkillError` the run raised, read from the global the run stage set,
+ * or null when `run` returned. The global shares the skill's namespace, so
+ * anything but the two kinds `_cogmo_call_run` reports is the skill's own
+ * doing: `skill_raised`.
+ */
+function skillErrorOf(py: PyodideInterface): StageFailure | null {
+  const reported: unknown = py.globals.get("__cogmo_failure");
+  if (reported === undefined) return null;
+  const parsed = SkillErrorReportSchema.safeParse(toPlain(py, reported));
+  if (!parsed.success) {
+    return { errorKind: "skill_raised", error: "the skill replaced the SkillError report" };
+  }
+  const [errorKind, error] = parsed.data;
+  return { errorKind, error };
+}
+
+/**
+ * Load `cogmo_ctx` and the skill body into module-level globals, run the
  * skill, and encode what it returned. One task runs per child, so
  * module-level globals are safe. The glue between them is inline because it
  * names the bridge module registered here, and because a top-level `await`
@@ -272,7 +317,7 @@ function skillStageKind(
 function runTask(
   py: PyodideInterface,
   body: string,
-  invoke: { id: string; inputs: unknown },
+  invoke: { id: string; run: TaskRun; inputs: unknown },
 ): ResultAsync<unknown, StageFailure> {
   // Every call names the task: the host serves a ctx call only for the task
   // it belongs to. Python passes its args dict as a proxy, converted here.
@@ -280,14 +325,24 @@ function runTask(
     bridge: {
       call: (method: string, args: unknown) => callHost(invoke.id, method, toPlain(py, args)),
     },
+    run: { id: invoke.run.id, key: invoke.run.key },
   });
   return stage(
     () => "runtime_unavailable",
     async () => {
-      await py.runPythonAsync(CTX_PY);
+      installCogmoCtx(py);
+      await py.runPythonAsync(TASK_PY);
       await py.runPythonAsync(OUTPUT_PY);
+      // `CtxError` is also a global, for skills that name it without importing it.
       await py.runPythonAsync(
-        "from __cogmo_bridge__ import bridge as __cogmo_bridge\n_ctx = _build_ctx(__cogmo_bridge)\n",
+        [
+          "import cogmo_ctx as _cogmo_ctx",
+          "from cogmo_ctx import CtxError",
+          "from __cogmo_bridge__ import bridge as __cogmo_js_bridge, run as __cogmo_js_run",
+          "_ctx = _cogmo_ctx.Ctx(",
+          "    _CogmoBridge(__cogmo_js_bridge), {'id': __cogmo_js_run.id, 'key': __cogmo_js_run.key}",
+          ")",
+        ].join("\n"),
       );
     },
   )
@@ -308,9 +363,15 @@ function runTask(
       ),
     )
     .andThen(() =>
-      stage(skillStageKind(py, "skill_raised"), () =>
-        py.runPythonAsync("__cogmo_result = await run(__cogmo_inputs, _ctx)"),
-      ),
+      stage(skillStageKind(py, "skill_raised"), async () => {
+        await py.runPythonAsync(
+          "__cogmo_failure, __cogmo_result = await _cogmo_call_run(run, __cogmo_inputs, _ctx)",
+        );
+        return skillErrorOf(py);
+      }),
+    )
+    .andThen((skillError) =>
+      skillError === null ? okAsync(undefined) : errAsync<undefined, StageFailure>(skillError),
     )
     .andThen(() =>
       // Encoded in Python, as the container tier does: `NaN`, a `set`, a JS

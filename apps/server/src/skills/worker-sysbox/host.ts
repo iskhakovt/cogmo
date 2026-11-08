@@ -2,7 +2,7 @@ import { logger } from "../../logger.js";
 import type { ResourceLimits, SandboxClient } from "../../sandbox/index.js";
 import { describeError } from "../../util/describe-error.js";
 import type { CtxHandler } from "../dispatcher.js";
-import type { DispatchGate } from "../protocol.js";
+import type { DispatchGate, TaskRun } from "../protocol.js";
 import { type InvokeResult, SysboxSkillWorker } from "./worker.js";
 
 const log = logger.child({ component: "skills.worker.sysbox" });
@@ -45,6 +45,7 @@ const REAPER_BACKSTOP_S = 30;
 
 export interface RunOnSysboxContainerParams {
   taskId: string;
+  run: TaskRun;
   skillName: string;
   body: string;
   inputs: unknown;
@@ -142,6 +143,7 @@ export async function runOnSysboxContainer(
     }
     return await worker.invoke({
       taskId: params.taskId,
+      run: params.run,
       skillName: params.skillName,
       body: params.body,
       inputs: params.inputs,

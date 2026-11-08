@@ -22,6 +22,7 @@ import {
   type DispatchGate,
   fromTaskResult,
   type TaskOutcome,
+  type TaskRun,
   withheldOutcome,
 } from "../protocol.js";
 import { timeoutSignal } from "../wall-clock.js";
@@ -73,6 +74,7 @@ export function pyodideDistDir(): string {
 
 export interface RunOnWorkerParams {
   taskId: string;
+  run: TaskRun;
   /** Skill name — informational only; surfaced in logs. */
   skillName: string;
   /** Source of `skill.py`. */
@@ -117,7 +119,14 @@ export interface WasmChild {
 /** The parts of {@link RunOnWorkerParams} that drive a task on a running child. */
 type TaskParams = Pick<
   RunOnWorkerParams,
-  "taskId" | "skillName" | "inputs" | "wallClockS" | "readyTimeoutMs" | "ctxHandler" | "dispatch"
+  | "taskId"
+  | "run"
+  | "skillName"
+  | "inputs"
+  | "wallClockS"
+  | "readyTimeoutMs"
+  | "ctxHandler"
+  | "dispatch"
 >;
 
 /**
@@ -267,7 +276,13 @@ async function sendTask(
       { once: true, signal: finished.signal },
     );
     const { result } = await dispatcher.invoke(
-      { type: "task_invoke", id: params.taskId, skill: params.skillName, inputs: params.inputs },
+      {
+        type: "task_invoke",
+        id: params.taskId,
+        run: params.run,
+        skill: params.skillName,
+        inputs: params.inputs,
+      },
       {
         ctxHandler: params.ctxHandler,
         deadline: timeoutSignal(wallClockS * 1000 + TERMINATE_GRACE_MS),
