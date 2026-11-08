@@ -7,6 +7,7 @@ import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult, targetSourceRejection } from "./register-result.js";
+import { frontmatterSchemas } from "./schemas.js";
 
 /**
  * Put a pending deploy live: re-check it against main and its source, then
@@ -55,7 +56,15 @@ export async function approveDeploy(
     );
   }
 
-  const schemaErrors = deps.sourceCache.prevalidate(manifest);
+  // The schemas register checked; a pending row from before they were
+  // recorded had its frontmatter declare them, as register then required.
+  const schemas = deploy.schemas ?? frontmatterSchemas(manifest);
+  if (schemas === null) {
+    throw new Error(
+      `approveDeploy: deploy ${deploy.id} recorded no schemas and ${deploy.gitSha} declares no inputs`,
+    );
+  }
+  const schemaErrors = deps.sourceCache.prevalidate(schemas);
   if (schemaErrors.length > 0) {
     return {
       name: skill.name,
@@ -92,8 +101,8 @@ export async function approveDeploy(
       schedule,
       scheduleNextRunAt: deps.scheduleNextRunAt(schedule),
       lockfileHash: lockfile?.hash ?? null,
-      inputs: manifest.inputs,
-      outputs: manifest.outputs ?? null,
+      inputs: schemas.inputs,
+      outputs: schemas.outputs,
       runAs: deployRunAs(deps.defaultRunAs, opts.origin),
       applyFilesystem: async () => {
         await advanceMain(repoPath, deploy.gitSha, { kind: "fast_forward" });
@@ -106,7 +115,7 @@ export async function approveDeploy(
   if (result.kind === "live") {
     // Warm the source cache with the just-approved manifest so the next
     // listToolDefs / invoke read doesn't re-fetch from git.
-    deps.sourceCache.put(deploy.gitSha, { manifest, body }, lockfile);
+    deps.sourceCache.put(deploy.gitSha, { manifest, body }, schemas, lockfile);
     // Mirror the new main SHA to the configured remote — same rationale as
     // register's mirror call.
     await mirrorMainToRemote(deps, repoPath, deploy.gitSha);

@@ -1,7 +1,7 @@
 """How both tiers call a skill's `run`: under its `Input` and `Output` models, with a `SkillError` as a value.
 
 The container runner and the wasm worker share this file, so a skill's contract holds the same on both
-tiers (design/skills.md → Contracts).
+tiers, and register reads the models' JSON Schemas through it (design/skills.md → Contracts).
 """
 
 import json
@@ -26,6 +26,20 @@ def _model(namespace: Mapping[str, object], name: str) -> Any | None:
     if pydantic is None or not isinstance(candidate, type) or not issubclass(candidate, pydantic.BaseModel):
         return None
     return candidate
+
+
+def contract_schemas(namespace: Mapping[str, object]) -> str:
+    """The skill's `Input` and `Output` JSON Schemas as one JSON object, `null` for a model it does not define.
+
+    `inputs` is what `Input` validation accepts; `outputs` is what `Output`'s JSON writes, which is what the
+    host receives. A model pydantic cannot describe raises, as does a schema JSON cannot carry (a `NaN` default).
+    """
+    input_model, output_model = _model(namespace, "Input"), _model(namespace, "Output")
+    schemas = {
+        "inputs": None if input_model is None else input_model.model_json_schema(mode="validation"),
+        "outputs": None if output_model is None else output_model.model_json_schema(mode="serialization"),
+    }
+    return json.dumps(schemas, allow_nan=False)
 
 
 # How many refused fields a validation message names before it counts the rest.

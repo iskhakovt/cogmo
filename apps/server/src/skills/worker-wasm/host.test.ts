@@ -22,6 +22,7 @@ import type { CtxHandler } from "../dispatcher.js";
 import { loadBundledPackages } from "../pyodide-compat.js";
 import {
   createWasmProbe,
+  createWasmSchemaImporter,
   forkRunChild,
   pyodideDistDir,
   type RunOnWorkerParams,
@@ -1196,6 +1197,136 @@ describe("createWasmProbe", () => {
     assert(probed.isErr());
     assert(probed.error.kind === "rejected");
     expect(probed.error.failures.map((f) => f.name)).toEqual(["numpy", "not-a-package"]);
+  });
+});
+
+describe("createWasmSchemaImporter", () => {
+  const importer = createWasmSchemaImporter({
+    pyodideDistDir: pyodideDistDir(),
+    childrenDir: join(tmpdir(), "cogmo-wasm-children-schema"),
+  });
+
+  /** Import `body` with pydantic loaded, under 128 MiB and a 30 s budget. */
+  function importSchemas(body: string, opts: { builtins?: string[]; timeoutMs?: number } = {}) {
+    return importer.importSchemas({
+      body,
+      packages: { builtins: opts.builtins ?? ["pydantic"], wheelDir: null },
+      packageCacheDir: cacheDir,
+      memoryMb: 128,
+      timeoutMs: opts.timeoutMs ?? 30_000,
+    });
+  }
+
+  it("reads what Input validation accepts and what Output's JSON writes", async () => {
+    const imported = await importSchemas(`
+from pydantic import BaseModel, Field
+
+class Input(BaseModel):
+    city: str
+    days: int = 3
+
+class Output(BaseModel):
+    celsius: float = Field(serialization_alias="tempC")
+
+async def run(inputs, ctx):
+    raise AssertionError("an import calls no run")
+`);
+
+    const { inputs, outputs } = imported._unsafeUnwrap();
+    expect(inputs).toMatchObject({
+      type: "object",
+      required: ["city"],
+      properties: { days: { default: 3 } },
+    });
+    expect(Object.keys(expectDefined(outputs, "outputs").properties ?? {})).toEqual(["tempC"]);
+  });
+
+  it("finds no schemas in a skill with no models", async () => {
+    const imported = await importSchemas("async def run(inputs, ctx):\n    return None\n", {
+      builtins: [],
+    });
+
+    expect(imported._unsafeUnwrap()).toEqual({ inputs: null, outputs: null });
+  });
+
+  it("refuses a skill that does not import", async () => {
+    const imported = await importSchemas("1 / 0\n", { builtins: [] });
+
+    expect(imported._unsafeUnwrapErr()).toEqual({
+      kind: "refused",
+      message: expect.stringMatching(/^skill\.py did not load: [\s\S]*ZeroDivisionError/),
+    });
+  });
+
+  it("refuses an Input whose schema describes no object", async () => {
+    const imported = await importSchemas(`
+from pydantic import RootModel
+
+class Input(RootModel[list[int]]):
+    pass
+`);
+
+    expect(imported._unsafeUnwrapErr()).toEqual({
+      kind: "refused",
+      message: expect.stringMatching(/^Input's JSON Schema does not describe an object/),
+    });
+  });
+
+  it("refuses a model pydantic cannot describe", async () => {
+    const imported = await importSchemas(`
+from collections.abc import Callable
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    hook: Callable[[], int]
+`);
+
+    expect(imported._unsafeUnwrapErr()).toEqual({
+      kind: "refused",
+      message: expect.stringMatching(
+        /^its models' JSON Schemas could not be written: [\s\S]*PydanticInvalidForJsonSchema/,
+      ),
+    });
+  });
+
+  it("refuses module code past the memory cap", async () => {
+    const imported = await importSchemas("_big = bytearray(256 * 1024 * 1024)\n", { builtins: [] });
+
+    expect(imported._unsafeUnwrapErr()).toEqual({
+      kind: "refused",
+      message: "skill.py did not load: the 128 MiB memory cap was reached",
+    });
+  });
+
+  it("gives module code no network", async () => {
+    const imported = await importSchemas(`
+from pydantic import BaseModel
+
+try:
+    from pyodide.http import open_url
+    reached = open_url(${JSON.stringify(serverUrl)}).read()
+except Exception as e:
+    reached = type(e).__name__
+
+class Input(BaseModel):
+    reached: str = reached
+`);
+
+    const { inputs } = imported._unsafeUnwrap();
+    expect(inputs?.properties?.reached).toMatchObject({ default: expect.any(String) });
+    expect(inputs?.properties?.reached).not.toMatchObject({ default: "reached" });
+  });
+
+  it("kills module code that outlives its budget", async () => {
+    const imported = await importSchemas("while True:\n    pass\n", {
+      builtins: [],
+      timeoutMs: 5_000,
+    });
+
+    expect(imported._unsafeUnwrapErr()).toEqual({
+      kind: "unavailable",
+      message: expect.stringMatching(/^schema import failed: aborted: timed out after 5000ms/),
+    });
   });
 });
 

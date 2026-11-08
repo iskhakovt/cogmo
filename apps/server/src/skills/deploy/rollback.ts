@@ -8,6 +8,7 @@ import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult, targetSourceRejection } from "./register-result.js";
+import { frontmatterSchemas } from "./schemas.js";
 
 /**
  * Rewind a skill to an earlier sha of its own: re-check that sha's source,
@@ -44,7 +45,19 @@ export async function rollbackSkill(
     );
   }
 
-  const schemaErrors = deps.sourceCache.prevalidate(manifest);
+  // The schemas the target went live with, as its deploy recorded them; a
+  // deploy from before they were recorded had its frontmatter declare them.
+  const schemas =
+    (await deps.runInTx((tx) =>
+      deps.store.liveDeploySchemas(tx, { name: opts.name, gitSha: targetSha }),
+    )) ?? frontmatterSchemas(manifest);
+  if (schemas === null) {
+    return rejectedResult(
+      targetSha,
+      "schemas_unknown: no deploy of the target sha recorded its schemas and its SKILL.md declares no inputs; register it instead",
+    );
+  }
+  const schemaErrors = deps.sourceCache.prevalidate(schemas);
   if (schemaErrors.length > 0) {
     return {
       name: opts.name,
@@ -91,8 +104,8 @@ export async function rollbackSkill(
       schedule,
       scheduleNextRunAt: deps.scheduleNextRunAt(schedule),
       lockfileHash: lockfile?.hash ?? null,
-      inputs: manifest.inputs,
-      outputs: manifest.outputs ?? null,
+      inputs: schemas.inputs,
+      outputs: schemas.outputs,
       classifierLog,
       runAs: deployRunAs(deps.defaultRunAs, opts.origin),
       applyFilesystem: async () => {
@@ -112,7 +125,7 @@ export async function rollbackSkill(
   // Warm the source cache with the rolled-back manifest+body so the next
   // invoke or listToolDefs read doesn't re-fetch from git.
   if (result.kind === "live") {
-    deps.sourceCache.put(targetSha, { manifest, body }, lockfile);
+    deps.sourceCache.put(targetSha, { manifest, body }, schemas, lockfile);
     // Rollback rewinds main backwards, so the remote push needs `force`. We
     // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
     // moved remote main between our last fetch and this push, the lease

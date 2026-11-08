@@ -1,6 +1,7 @@
 import {
   and,
   asc,
+  desc,
   eq,
   getTableColumns,
   inArray,
@@ -20,6 +21,7 @@ import type {
   SkillInputs,
   SkillIo,
   SkillRunResourceUsage,
+  SkillSchemas,
 } from "../types.js";
 import {
   RUNNING_RUN,
@@ -126,6 +128,8 @@ export interface SkillDeployRow {
   status: SkillDeployStatus;
   approvedBy: string | null;
   classifierLog: ClassifierLog;
+  /** The schemas register checked; null only on rows from before they were recorded. */
+  schemas: SkillSchemas | null;
   createdAt: Date;
   resolvedAt: Date | null;
 }
@@ -212,6 +216,8 @@ export interface InsertDeployParams {
   riskTier: SkillRiskTier;
   status: SkillDeployStatus;
   classifierLog: ClassifierLog;
+  /** The schemas register checked, which approve and rollback put live. */
+  schemas: SkillSchemas;
   /** Set iff `status` is terminal (`chk_skill_deploys_resolved_at_iff_terminal`). */
   resolvedAt: Date | null;
 }
@@ -533,6 +539,14 @@ export interface SkillStore {
   getPendingDeploy(tx: Transaction, skillId: string): Promise<SkillDeployRow | undefined>;
   /** Returns the deploy row by id, or null. */
   getDeployById(tx: Transaction, id: string): Promise<SkillDeployRow | undefined>;
+  /**
+   * The schemas the skill's latest deploy of `gitSha` that went live (a `live`
+   * or `rolled_back` row) recorded, or null when none recorded any.
+   */
+  liveDeploySchemas(
+    tx: Transaction,
+    params: { name: string; gitSha: string },
+  ): Promise<SkillSchemas | null>;
   /** Every deploy awaiting approval, oldest first. Backs the listings' pending column. */
   listPendingDeploys(tx: Transaction): Promise<readonly SkillDeployRow[]>;
 
@@ -980,6 +994,7 @@ export class DrizzleSkillStore implements SkillStore {
         riskTier: params.riskTier,
         status: deployStatus,
         classifierLog: params.classifierLog,
+        schemas: { inputs: params.inputs, outputs: params.outputs },
         ...(goesLive && { resolvedAt: new Date() }),
       })
       .returning();
@@ -1173,6 +1188,7 @@ export class DrizzleSkillStore implements SkillStore {
         riskTier: params.classifierLog.risk_tier,
         status: "rolled_back",
         classifierLog: params.classifierLog,
+        schemas: { inputs: params.inputs, outputs: params.outputs },
         resolvedAt: new Date(),
       })
       .returning();
@@ -1196,6 +1212,7 @@ export class DrizzleSkillStore implements SkillStore {
           riskTier: params.riskTier,
           status: params.status,
           classifierLog: params.classifierLog,
+          schemas: params.schemas,
           resolvedAt: params.resolvedAt,
         })
         .returning(),
@@ -1214,6 +1231,27 @@ export class DrizzleSkillStore implements SkillStore {
   async getDeployById(tx: Transaction, id: string): Promise<SkillDeployRow | undefined> {
     const rows = await tx.select().from(skillDeploys).where(eq(skillDeploys.id, id)).limit(1);
     return rows[0];
+  }
+
+  async liveDeploySchemas(
+    tx: Transaction,
+    params: { name: string; gitSha: string },
+  ): Promise<SkillSchemas | null> {
+    const rows = await tx
+      .select({ schemas: skillDeploys.schemas })
+      .from(skillDeploys)
+      .innerJoin(skills, eq(skills.id, skillDeploys.skillId))
+      .where(
+        and(
+          eq(skills.name, params.name),
+          eq(skillDeploys.gitSha, params.gitSha),
+          inArray(skillDeploys.status, ["live", "rolled_back"]),
+          isNotNull(skillDeploys.schemas),
+        ),
+      )
+      .orderBy(desc(skillDeploys.createdAt), desc(skillDeploys.id))
+      .limit(1);
+    return rows[0]?.schemas ?? null;
   }
 
   async listPendingDeploys(tx: Transaction): Promise<readonly SkillDeployRow[]> {

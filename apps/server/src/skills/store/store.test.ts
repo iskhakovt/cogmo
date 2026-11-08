@@ -6,7 +6,7 @@ import type { Database, Transaction, Transactor } from "../../db/index.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { channels, userIdentities } from "../../transport/store/schema.js";
-import type { ClassifierLog, SkillInputs } from "../types.js";
+import type { ClassifierLog, SkillInputs, SkillSchemas } from "../types.js";
 import {
   DrizzleSkillStore,
   type ExecuteRegisterParams,
@@ -112,6 +112,8 @@ const STUB_LOG: ClassifierLog = {
   declared_network: null,
 };
 
+const STUB_SCHEMAS: SkillSchemas = { inputs: { type: "object" }, outputs: null };
+
 function makeSkillParams(overrides: Partial<InsertSkillParams> = {}): InsertSkillParams {
   return {
     name: "echo",
@@ -205,6 +207,43 @@ describe("DrizzleSkillStore", () => {
       ]);
     });
 
+    it("liveDeploySchemas reads the latest deploy of the sha that went live and recorded schemas", async () => {
+      const row = await seedSkill({ name: "echo", gitSha: SHA });
+      const schemasOf = (title: string): SkillSchemas => ({
+        inputs: { type: "object", title },
+        outputs: null,
+      });
+      const insert = (status: SkillDeployStatus, schemas: SkillSchemas, gitSha = SHA) =>
+        tx((trx) =>
+          store.insertDeploy(trx, {
+            skillId: row.id,
+            gitSha,
+            priorGitSha: null,
+            riskTier: "auto",
+            status,
+            classifierLog: STUB_LOG,
+            schemas,
+            resolvedAt: status === "pending_approval" ? null : new Date(),
+          }),
+        );
+      const read = (name: string, gitSha = SHA) =>
+        tx((trx) => store.liveDeploySchemas(trx, { name, gitSha }));
+
+      await insert("denied", schemasOf("denied"));
+      await insert("pending_approval", schemasOf("pending"));
+      expect(await read("echo")).toBeNull();
+
+      await insert("live", schemasOf("live"));
+      const rolledBack = await insert("rolled_back", schemasOf("rolled back"));
+      await insert("live", schemasOf("other sha"), "b".repeat(40));
+      expect(await read("echo")).toEqual(schemasOf("rolled back"));
+      expect(await read("other-skill")).toBeNull();
+
+      // A row from before the column records none.
+      await db.execute(sql`UPDATE skill_deploys SET schemas = NULL WHERE id = ${rolledBack.id}`);
+      expect(await read("echo")).toEqual(schemasOf("live"));
+    });
+
     it("hasLiveDeployForSkill is true only when a (skillId, gitSha, status='live') row exists", async () => {
       const row = await seedSkill({ name: "echo", gitSha: SHA });
       // No deploys yet → false.
@@ -221,6 +260,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "approve",
           status: "denied",
           classifierLog: STUB_LOG,
+          schemas: STUB_SCHEMAS,
           resolvedAt: new Date(),
         }),
       );
@@ -237,6 +277,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "auto",
           status: "live",
           classifierLog: STUB_LOG,
+          schemas: STUB_SCHEMAS,
           resolvedAt: new Date(),
         }),
       );
@@ -313,6 +354,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "approve",
           status: "pending_approval",
           classifierLog: STUB_LOG,
+          schemas: STUB_SCHEMAS,
           resolvedAt: null,
         }),
       );
@@ -337,6 +379,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "auto",
           status: "live",
           classifierLog: STUB_LOG,
+          schemas: STUB_SCHEMAS,
           resolvedAt: new Date(),
         }),
       );
@@ -355,6 +398,7 @@ describe("DrizzleSkillStore", () => {
         riskTier: "approve",
         status,
         classifierLog: STUB_LOG,
+        schemas: STUB_SCHEMAS,
         resolvedAt,
       };
     }
@@ -437,6 +481,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "auto",
           status: "live",
           classifierLog: STUB_LOG,
+          schemas: STUB_SCHEMAS,
           resolvedAt: new Date(),
         }),
       );
@@ -454,6 +499,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "approve",
           status: "pending_approval",
           classifierLog: STUB_LOG,
+          schemas: STUB_SCHEMAS,
           resolvedAt: null,
         }),
       );

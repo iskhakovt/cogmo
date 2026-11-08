@@ -29,9 +29,11 @@ import TASK_PY from "./py/task.py";
  * boundary). It inherits the child's permission flags and runs with an empty
  * `env`. In `run` mode it boots Pyodide under the memory cap with minimal
  * `jsglobals`, loads the skill's packages from local files only, deletes the
- * network APIs, signals `ready` and runs one task. In `probe` mode it loads
- * and imports packages from the cache under the same flags and runs no skill
- * code. Neither mode reaches the network: the host fills the cache.
+ * network APIs, signals `ready` and runs one task. In `schema` mode it boots
+ * the same way, imports the skill and replies with its models' JSON Schemas.
+ * In `probe` mode it loads and imports packages from the cache under the same
+ * flags and runs no skill code. No mode reaches the network: the host fills
+ * the cache.
  *
  * The child bundle embeds `py/*.py` as text (`child-bundle.ts`).
  */
@@ -466,7 +468,13 @@ async function handleTaskInvoke(py: PyodideInterface, body: string, raw: unknown
   port.postMessage(result);
 }
 
-async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {
+/**
+ * Boot Pyodide for a skill under the memory cap, load its packages from local
+ * files only, and delete the network APIs before any skill code runs.
+ */
+async function bootSkillChild(
+  init: Extract<ChildInit, { mode: "run" | "schema" }>,
+): Promise<PyodideInterface> {
   capWasmMemory(init.memoryMb);
   const py = await bootPyodide({
     pyodideDistDir: init.pyodideDistDir,
@@ -483,6 +491,11 @@ async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {
   const builtins = await loadPackages(py, init.builtins);
   if (builtins !== null) throw new Error(`built-in packages did not load: ${builtins}`);
   deleteNetworkGlobals();
+  return py;
+}
+
+async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {
+  const py = await bootSkillChild(init);
 
   port.on("message", (raw: unknown) => {
     const type = typeof raw === "object" && raw !== null && "type" in raw ? raw.type : undefined;
@@ -493,6 +506,53 @@ async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {
       .otherwise(() => {});
   });
   port.postMessage({ type: "ready" });
+}
+
+/** What `cogmo_ctx._run.contract_schemas` returns, as JSON. */
+const ContractSchemasSchema = z.object({
+  inputs: z.record(z.string(), z.unknown()).nullable(),
+  outputs: z.record(z.string(), z.unknown()).nullable(),
+});
+
+/** Why a stage of the schema import failed: the memory cap, or `what` and the error. */
+function describeImportFailure(py: PyodideInterface, what: string, memoryMb: number) {
+  return (e: unknown): string =>
+    e instanceof py.ffi.PythonError && e.type === "MemoryError"
+      ? `${what}: the ${memoryMb} MiB memory cap was reached`
+      : `${what}: ${e instanceof Error ? e.message : String(e)}`;
+}
+
+/**
+ * Import the skill and reply with its models' JSON Schemas
+ * (`cogmo_ctx._run.contract_schemas`). The import runs the skill's module
+ * code, under the run's boundary and with no network; nothing calls `run`.
+ */
+async function importSchemas(init: Extract<ChildInit, { mode: "schema" }>): Promise<void> {
+  const py = await bootSkillChild(init);
+  installCogmoCtx(py);
+  await py.runPythonAsync("from cogmo_ctx._run import contract_schemas as _cogmo_contract_schemas");
+  const reply = await ResultAsync.fromPromise(
+    py.runPythonAsync(init.body),
+    describeImportFailure(py, "skill.py did not load", init.memoryMb),
+  )
+    .andThen(() =>
+      Result.fromThrowable(
+        (): unknown => py.runPython("_cogmo_contract_schemas(globals())"),
+        describeImportFailure(py, "its models' JSON Schemas could not be written", init.memoryMb),
+      )(),
+    )
+    .andThen((encoded) =>
+      // The encoder shares the skill's globals, so what it returns is parsed as the skill's.
+      Result.fromThrowable(
+        () => ContractSchemasSchema.parse(typeof encoded === "string" ? JSON.parse(encoded) : null),
+        () => "the schema encoder returned no JSON object of inputs and outputs",
+      )(),
+    )
+    .match(
+      ({ inputs, outputs }) => ({ type: "schemas", inputs, outputs }) as const,
+      (error) => ({ type: "schema_failed", error }) as const,
+    );
+  port.postMessage(reply);
 }
 
 async function probe(init: Extract<ChildInit, { mode: "probe" }>): Promise<void> {
@@ -527,7 +587,11 @@ async function probeOne(py: PyodideInterface, name: string): Promise<string | nu
 shimProcessBinding();
 const parsedInit = ChildInitSchema.safeParse(data.init);
 const started = parsedInit.success
-  ? match(parsedInit.data).with({ mode: "run" }, run).with({ mode: "probe" }, probe).exhaustive()
+  ? match(parsedInit.data)
+      .with({ mode: "run" }, run)
+      .with({ mode: "schema" }, importSchemas)
+      .with({ mode: "probe" }, probe)
+      .exhaustive()
   : Promise.reject(new Error(`malformed init: ${parsedInit.error.message}`));
 started.catch((e: unknown) => {
   port.postMessage({ type: "fatal", error: e instanceof Error ? e.message : String(e) });

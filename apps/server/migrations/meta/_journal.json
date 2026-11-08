@@ -582,6 +582,13 @@
       "when": 1793933603707,
       "tag": "0082_skill_run_schema",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1794143443563,
+      "tag": "0083_skill_deploy_schemas",
+      "breakpoints": true
     }
   ]
 }
