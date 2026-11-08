@@ -242,6 +242,42 @@ async def test_a_json_only_serializer_that_writes_more_keys_is_not_refused() -> 
 
 
 @pytest.mark.asyncio
+async def test_a_set_of_frozen_models_is_not_refused() -> None:
+    from pydantic import ConfigDict
+
+    class Point(BaseModel):
+        model_config = ConfigDict(frozen=True)
+        x: int
+
+    class Points(BaseModel):
+        points: set[Point]
+
+    async def run(inputs: object, ctx: Ctx) -> object:
+        return {"points": {Point(x=1)}}
+
+    assert await call_run({"Output": Points}, run, {}, CTX) == (None, {"points": [{"x": 1}]})
+
+
+@pytest.mark.asyncio
+async def test_a_json_only_serializer_that_omits_a_field_is_not_refused() -> None:
+    from pydantic import model_serializer
+
+    class Redacted(BaseModel):
+        n: int
+        private: str
+
+        @model_serializer(mode="wrap")
+        def without_private(self, handler: Any, info: Any) -> dict[str, object]:
+            data = handler(self)
+            return {k: v for k, v in data.items() if k != "private"} if info.mode == "json" else data
+
+    async def run(inputs: object, ctx: Ctx) -> object:
+        return {"n": 1, "private": "secret"}
+
+    assert await call_run({"Output": Redacted}, run, {}, CTX) == (None, {"n": 1})
+
+
+@pytest.mark.asyncio
 async def test_a_type_error_an_output_validator_raises_propagates() -> None:
     from pydantic import field_validator
 

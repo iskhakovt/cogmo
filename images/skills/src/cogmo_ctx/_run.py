@@ -61,12 +61,25 @@ def _scalars(value: object) -> list[object]:
     return found
 
 
+def _keys_collide(mapping: dict[object, object]) -> bool:
+    """Whether two keys of `mapping` are written as one JSON key (`1` and `"1"`), by pydantic's conversion.
+
+    Keys the default conversion cannot write (bytes under the model's own base64) tell nothing: no collision.
+    """
+    from pydantic_core import to_jsonable_python
+
+    try:
+        return len(to_jsonable_python(dict.fromkeys(mapping))) < len(mapping)
+    except TypeError, ValueError:
+        return False
+
+
 def _lossy(python: object, dumped: object) -> str | None:
     """What the model's JSON changed of its Python dump, or None.
 
-    Walked side by side, so the model's own serialization settings stand: a dict that lost keys (two keys
-    JSON writes alike, `1` and `"1"`), or a non-finite float written as `null`. Both would reach the host
-    changed.
+    Walked side by side, so the model's own serialization settings stand: a dict two of whose keys JSON
+    writes alike (`1` and `"1"`), or a non-finite float written as `null`. Both would reach the host
+    changed. A serializer that writes other keys than the Python dump holds leaves those values unpaired.
     """
     pending: list[tuple[object, object]] = [(python, dumped)]
     while pending:
@@ -74,9 +87,8 @@ def _lossy(python: object, dumped: object) -> str | None:
         if isinstance(before, float) and not math.isfinite(before) and after is None:
             return f"{before} is not a finite number, which JSON writes as null"
         if isinstance(before, dict) and isinstance(after, dict):
-            if len(after) < len(before):
+            if _keys_collide(before):
                 return "two keys of one dict are written alike as JSON strings, so one would be lost"
-            # A serializer that writes more keys leaves nothing to pair.
             if len(after) == len(before):
                 pending.extend(zip(before.values(), after.values(), strict=True))
         elif isinstance(before, list | tuple) and isinstance(after, list) and len(before) == len(after):
@@ -127,11 +139,16 @@ async def call_run(
                 # The model's own JSON, read back: its serialization settings (`ser_json_inf_nan`,
                 # `ser_json_bytes`) decide what the host receives.
                 dumped = json.loads(validated.model_dump_json())
-                lossy = _lossy(validated.model_dump(mode="python"), dumped)
             # A `PydanticSerializationError`, a `ValueError`: a value or a dict key JSON cannot hold, or a `bytes`
             # field that is not UTF-8.
             except ValueError as e:
                 return ("output_invalid", _describe(e)), output
+            try:
+                python = validated.model_dump(mode="python")
+            # A shape the Python dump cannot hold (a set of frozen models) has nothing to compare: its JSON stands.
+            except TypeError, ValueError:
+                python = None
+            lossy = None if python is None else _lossy(python, dumped)
             if lossy is not None:
                 return ("output_invalid", lossy), output
             output = dumped
