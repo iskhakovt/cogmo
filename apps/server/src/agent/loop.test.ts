@@ -1,6 +1,6 @@
 import { ok } from "neverthrow";
 import type { Logger } from "pino";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { anthropicAttachmentLimits } from "../llm/attachment-limits.js";
@@ -5000,6 +5000,11 @@ describe("tool rejections", () => {
 describe("transcript heads", () => {
   const SYSTEM = "sys";
 
+  // A spy left by a failing test would leak into the rest of the file.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   function echoTools(): ToolRegistry {
     const tools = new ToolRegistry();
     tools.register(
@@ -5209,7 +5214,6 @@ describe("transcript heads", () => {
 
       expect(add).not.toHaveBeenCalled();
       expect(replayed.requests).toEqual(live.requests);
-      add.mockRestore();
     },
   );
 
@@ -5225,7 +5229,6 @@ describe("transcript heads", () => {
 
     expect(add).toHaveBeenCalledTimes(1);
     expect(result.requests.diverged).toBe(false);
-    add.mockRestore();
   });
 
   it("counts the transformations the in-step replay of a broken stream reports", async () => {
@@ -5257,7 +5260,6 @@ describe("transcript heads", () => {
     expect(result.text).toBe("recovered");
     expect(add).toHaveBeenCalledTimes(1);
     expect(result.requests.diverged).toBe(true);
-    add.mockRestore();
   });
 
   it("replays an iteration memoized before heads, recording its request without one", async () => {

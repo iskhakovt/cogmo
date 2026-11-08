@@ -425,7 +425,7 @@ describe("DrizzleTranscriptStore", () => {
               ...stamp,
             }),
           ),
-        ).rejects.toThrow();
+        ).rejects.toThrow(/status/);
         expect(await heads(conversationId)).toEqual([]);
       });
 
@@ -444,7 +444,7 @@ describe("DrizzleTranscriptStore", () => {
           sql`UPDATE messages SET transcript_head = '{"junk":true}'::jsonb WHERE conversation_id = ${conversationId}`,
         );
 
-        await expect(heads(conversationId)).rejects.toThrow();
+        await expect(heads(conversationId)).rejects.toThrow(/junk|Unrecognized/);
       });
 
       it("refuses a head on a user row", async () => {

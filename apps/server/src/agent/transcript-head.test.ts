@@ -329,8 +329,18 @@ describe("rowHeads", () => {
       VIEW,
     );
 
+    const earlierHeadless = rowHeads(
+      sentOver(transcript, [], {
+        sent: [{ length: 1, digest: null }, hasher.head(BASE, transcript.slice(0, 3))],
+      }),
+      rows,
+      VIEW,
+    );
+
     expect(allHeadless).toEqual([null, null, null]);
     expect(laterHeadless.map((h) => h?.length ?? null)).toEqual([2, null, null]);
+    // A head-less request leaves the rows after it without one, headed requests included.
+    expect(earlierHeadless).toEqual([null, null, null]);
   });
 
   it("gives no head when the loop sent no request", () => {
