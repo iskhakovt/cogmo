@@ -93,8 +93,13 @@ describe("DrizzleTranscriptStore", () => {
 
       const list = await tx((trx) => store.listMessages(trx, conversationId));
       expect(list).toEqual([
-        { id: first.id, role: "user", content: "Hello" },
-        { id: second.id, role: "assistant", content: [{ type: "text", text: "Hi" }] },
+        { id: first.id, role: "user", content: "Hello", transcriptHead: null },
+        {
+          id: second.id,
+          role: "assistant",
+          content: [{ type: "text", text: "Hi" }],
+          transcriptHead: null,
+        },
       ]);
     });
 
@@ -409,6 +414,38 @@ describe("DrizzleTranscriptStore", () => {
         );
 
         expect(await heads(conversationId)).toEqual([null, null, HEAD]);
+      });
+
+      it("returns each row's head from both history reads", async () => {
+        const { conversationId, stamp } = await seedConversation(tx);
+        const first = await tx((trx) =>
+          store.insertMessage(trx, {
+            conversationId,
+            role: "user",
+            content: "hello",
+            lastInboundMessageId: INBOUND,
+            firstInboundMessageId: null,
+            ...stamp,
+          }),
+        );
+        await tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [
+              { role: "user", content: "again" },
+              { role: "assistant", content: "reply", transcriptHead: HEAD },
+            ],
+            lastInboundMessageId: INBOUND,
+            lastMessageOutputTokens: 7,
+            ...stamp,
+          }),
+        );
+
+        const listed = await tx((trx) => store.listMessages(trx, conversationId));
+        const after = await tx((trx) => store.getHistoryAfter(trx, conversationId, first.id));
+
+        expect(listed.map((row) => row.transcriptHead)).toEqual([null, null, HEAD]);
+        expect(after.map((row) => row.transcriptHead)).toEqual([null, HEAD]);
       });
 
       it("refuses a malformed head on write", async () => {
@@ -1605,10 +1642,11 @@ describe("system prompt snapshots", () => {
     const { conversationId, stamp } = await seedConversation(tx);
     const opener = await userRow(conversationId, stamp);
 
-    const row = await tx((trx) =>
+    const { kind, row } = await tx((trx) =>
       store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "first")),
     );
 
+    expect(kind).toBe("new");
     expect(row).toMatchObject(snapshot(conversationId, opener, "first"));
     expect(row.createdAt).toBeInstanceOf(Date);
     await expect(
@@ -1627,7 +1665,8 @@ describe("system prompt snapshots", () => {
       store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "retry")),
     );
 
-    expect(retry).toEqual(first);
+    expect(first.kind).toBe("new");
+    expect(retry).toEqual({ kind: "recovered", row: first.row });
     const rows = await db.select().from(systemPromptSnapshots);
     expect(rows).toHaveLength(1);
   });

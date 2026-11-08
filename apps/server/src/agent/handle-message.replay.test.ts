@@ -55,6 +55,7 @@ import {
   mockVoiceResolver,
   scriptedStream,
   spyOnInngestSend,
+  TEST_PREFIX_VIOLATION,
   turnContextSent,
 } from "../test/factories.js";
 import { createWireRecorder } from "../test/wire-recorder.js";
@@ -127,6 +128,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     images: mockImages(),
+    prefixViolation: TEST_PREFIX_VIOLATION,
     ...overrides,
   };
 }

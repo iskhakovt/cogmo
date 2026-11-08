@@ -20,6 +20,7 @@ import type { DebounceConfig } from "./debounce.js";
 import { admitTurn } from "./handle-message/admit-turn.js";
 import { assembleTurnContext } from "./handle-message/assemble-turn-context.js";
 import { buildChatTurnService } from "./handle-message/chat-turn-service.js";
+import { checkTurnHead } from "./handle-message/check-turn-head.js";
 import { compactTurn } from "./handle-message/compact-turn.js";
 import { deliverReply } from "./handle-message/deliver-reply.js";
 import { finalizeTurnContext } from "./handle-message/finalize-turn-context.js";
@@ -42,6 +43,7 @@ import type { AgentStore } from "./store/index.js";
 import type { StoredContent } from "./stored-content.js";
 import { historyStart } from "./system-prompt-snapshot.js";
 import type { ToolRegistry } from "./tools.js";
+import type { PrefixViolationPolicy } from "./transcript-head.js";
 import { createTurnStepRunner } from "./turn-step-runner.js";
 
 export interface HandleMessageDeps {
@@ -134,6 +136,12 @@ export interface HandleMessageDeps {
    * is of such a type.
    */
   pipelineGateChannelTypes?: ReadonlySet<string>;
+  /**
+   * What the transcript head checks do on an unexplained divergence
+   * (design/prompt-caching.md → Head check): production reopens an epoch,
+   * unit tests throw.
+   */
+  prefixViolation: PrefixViolationPolicy;
 }
 
 /**
@@ -141,9 +149,9 @@ export interface HandleMessageDeps {
  *
  * Receives inbound/ready events (debounce router has decided it's time to
  * process) and runs the turn's phases in order: admission, the user message,
- * the transcript, the frozen turn inputs, context assembly and compaction, the
- * agent loop, persistence, delivery, and the post-turn events. Each phase
- * plans its own steps; their ids, order and memoized shapes are the
+ * the transcript, the frozen turn inputs, the head check, context assembly and
+ * compaction, the agent loop, persistence, delivery, and the post-turn events.
+ * Each phase plans its own steps; their ids, order and memoized shapes are the
  * durability map in design/crash-recovery.md.
  */
 export function createHandleMessage(deps: HandleMessageDeps) {
@@ -249,6 +257,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         substitutedMessages,
       });
 
+      const head = checkTurnHead({
+        transcript,
+        view,
+        snapshot: loadedSystemPrompt.snapshot,
+        toolDefs: frozen.toolDefs,
+        policy: deps.prefixViolation,
+      });
+
       const context = await assembleTurnContext(stepRun, service, {
         userId,
         autoRecallMode: profile?.autoRecall ?? "heuristic",
@@ -256,6 +272,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         transcript,
         view,
         loadedSystemPrompt,
+        head,
         voiceMode: frozen.voiceMode,
         coreMemoryScope,
         timezone: deps.userTimezone,
@@ -287,12 +304,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         continuing: context.continuing,
         storedCutoff: compacted.storedCutoff,
         loadedSystemPrompt,
+        head,
         systemPromptArgs: frozen.systemPromptArgs,
         recalledMemories: context.recalledMemories,
         handledAt: context.handledAt,
         voiceMode: frozen.voiceMode,
         coreMemoryScope,
         timezone: deps.userTimezone,
+        turnLogger,
       });
 
       const lastAnsweredMessageId = lastAssistant?.id ?? null;
@@ -311,6 +330,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             cursor: maxInboundId,
             afterMessageId: lastAnsweredMessageId,
           }),
+        prefixViolation: deps.prefixViolation,
         turnLogger,
       });
       if (looped.kind === "superseded") {
@@ -344,6 +364,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           historyStart: historyStart(transcript.history.messageIds, compacted.storedCutoff),
           compacted: compacted.rewroteView,
         },
+        turnLogger,
       });
 
       return match(persisted)

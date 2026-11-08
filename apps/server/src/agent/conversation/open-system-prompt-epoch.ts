@@ -10,7 +10,7 @@ import {
  * Render the system prompt and store it as the epoch `openedBy` opens. The
  * render and the insert share a transaction, so the row's `created_at` is when
  * the core memory it shows was read, which later turns count changes from.
- * A retry after the insert committed returns the stored row.
+ * A retry after the insert committed returns the stored row as `recovered`.
  */
 export async function openSystemPromptEpoch(
   deps: SystemPromptDeps,
@@ -21,19 +21,18 @@ export async function openSystemPromptEpoch(
     attachmentCutoff: string | null;
     reason: SystemPromptEpochReason;
   },
-): Promise<EpochSnapshot> {
+): Promise<{ kind: "new" | "recovered"; epoch: EpochSnapshot }> {
   return deps.runInTx(async (tx) => {
     const { rendered, configDigest } = await renderSystemPrompt(tx, deps, args);
-    return epochOf(
-      await deps.agentStore.insertOrRecoverSystemPromptSnapshot(tx, {
-        conversationId: args.conversationId,
-        openedBy: args.openedBy,
-        historyStart: args.historyStart,
-        rendered,
-        configDigest,
-        attachmentCutoff: args.attachmentCutoff,
-        reason: args.reason,
-      }),
-    );
+    const { kind, row } = await deps.agentStore.insertOrRecoverSystemPromptSnapshot(tx, {
+      conversationId: args.conversationId,
+      openedBy: args.openedBy,
+      historyStart: args.historyStart,
+      rendered,
+      configDigest,
+      attachmentCutoff: args.attachmentCutoff,
+      reason: args.reason,
+    });
+    return { kind, epoch: epochOf(row) };
   });
 }

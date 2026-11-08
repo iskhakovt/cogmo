@@ -342,9 +342,10 @@ export async function runObserver(
   // The complete transcript, deliberately not the compacted turn view — fact
   // extraction sees every message even on a conversation that has been
   // summarized. The row ids come along unused; `listMessages` is the only
-  // full-history read.
+  // full-history read. Transcript heads stay out of the memo.
   const history = await step.run("load-history", async () => {
-    return deps.runInTx((tx) => agentStore.listMessages(tx, conversationId));
+    const rows = await deps.runInTx((tx) => agentStore.listMessages(tx, conversationId));
+    return rows.map(({ transcriptHead: _, ...row }) => row);
   });
 
   if (history.length < MIN_MESSAGES_FOR_EXTRACTION) {

@@ -1,5 +1,8 @@
+import type { Logger } from "pino";
+import { match, P } from "ts-pattern";
 import type { Durable } from "../../inngest/durable.js";
 import type { Message } from "../../llm/types.js";
+import { promptPrefixViolations } from "../../metrics.js";
 import type { LoadedSystemPrompt } from "../conversation/load-system-prompt.js";
 import { openSystemPromptEpoch } from "../conversation/open-system-prompt-epoch.js";
 import type { SystemPromptDeps } from "../conversation/render-system-prompt.js";
@@ -12,6 +15,7 @@ import {
   stripThinkingBefore,
   unannounced,
 } from "../system-prompt-snapshot.js";
+import type { HeadVerdict } from "../transcript-head.js";
 import {
   announcedInView,
   findTurnContext,
@@ -35,12 +39,15 @@ export interface FinalizeTurnContextArgs {
   /** The cutoff of the summary compaction stored, if it stored one. */
   storedCutoff: string | null;
   loadedSystemPrompt: LoadedSystemPrompt;
+  /** The across-turn head check's verdict on the loaded history. */
+  head: HeadVerdict;
   systemPromptArgs: TurnSystemPromptArgs;
   recalledMemories: ReadonlyArray<string>;
   handledAt: Date;
   voiceMode: boolean;
   coreMemoryScope: CoreMemoryScope;
   timezone: string;
+  turnLogger: Logger;
 }
 
 export interface FinalizedTurnContext {
@@ -52,7 +59,9 @@ export interface FinalizedTurnContext {
 
 /**
  * Settle the epoch the turn sends and its stored turn context, over the
- * compacted view.
+ * compacted view. An epoch opened on a violated head check counts
+ * `cogmo.prompt.prefix_violations{site: "turn"}` and warns, once: only the
+ * attempt whose insert stored the snapshot does.
  *
  * Steps, in order: `open-system-prompt-epoch` (unless the turn continues its
  * epoch), `render-turn-context`.
@@ -74,8 +83,8 @@ export async function finalizeTurnContext(
   const epoch =
     continuing !== null && continuing.historyStart === epochStart
       ? continuing
-      : await step.run("open-system-prompt-epoch", () =>
-          openSystemPromptEpoch(deps, {
+      : await step.run("open-system-prompt-epoch", async () => {
+          const opened = await openSystemPromptEpoch(deps, {
             ...args.systemPromptArgs,
             openedBy: turn.id,
             historyStart: epochStart,
@@ -85,9 +94,12 @@ export async function finalizeTurnContext(
               loadedStart: historyStart(turnHistory.messageIds, null),
               epochStart,
               cutoff: args.view.cutoff,
+              head: args.head,
             }),
-          }),
-        );
+          });
+          reportViolation(opened.kind, args.head, args.turnLogger);
+          return opened.epoch;
+        });
   const opensEpoch = epoch.openedBy === turn.id;
   const historyMessages = opensEpoch
     ? stripThinkingBefore(args.messages, turnPosition)
@@ -132,4 +144,26 @@ export async function finalizeTurnContext(
     systemPrompt: epoch.rendered,
     messages: replaceTurnContext(historyMessages, turnPosition, renderedTurnContext),
   };
+}
+
+/**
+ * Count and log a violated head check when this attempt stored the epoch; a
+ * recovered snapshot was reported by the attempt that stored it, and any other
+ * verdict reports nothing.
+ */
+function reportViolation(opened: "new" | "recovered", head: HeadVerdict, turnLogger: Logger): void {
+  match({ opened, head })
+    .with({ opened: "new", head: { kind: "violated" } }, ({ head: { firstDiverging } }) => {
+      promptPrefixViolations.add(1, { site: "turn" });
+      turnLogger.warn(
+        { site: "turn", firstDivergingMessageId: firstDiverging },
+        "the turn's history no longer has a stored transcript head; opened an epoch",
+      );
+    })
+    .with(
+      { opened: "recovered" },
+      { head: { kind: P.union("skipped", "matched", "explained") } },
+      () => undefined,
+    )
+    .exhaustive();
 }

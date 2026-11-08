@@ -64,6 +64,7 @@ import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
 import { offeredBuiltIns } from "../core-memory-tools.js";
 import { freezeLimits, limitsPolicy } from "../handle-message/resolve-turn-model.js";
 import type { ImageToolsLoader } from "../image-tools-loader.js";
+import { reportInTurnViolation } from "../in-turn-violation.js";
 import type {
   AgentLoopResult,
   StepRunner,
@@ -79,7 +80,7 @@ import { toStoredMessage } from "../stored-content.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
 import { historyStart, stripThinkingBefore } from "../system-prompt-snapshot.js";
 import type { ToolRegistry } from "../tools.js";
-import { type HeadView, rowHeads } from "../transcript-head.js";
+import { type HeadView, type PrefixViolationPolicy, rowHeads } from "../transcript-head.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import {
   findTurnContext,
@@ -116,6 +117,12 @@ export interface AgenticStageDeps {
   skillRunner?: SkillRunner;
   mcpRegistry?: McpRegistry;
   userTimezone: string;
+  /**
+   * What the in-turn head check does on an unexplained divergence
+   * (design/prompt-caching.md → Head check). A stage skips the across-turn
+   * check: it sends its own system prompt and tools.
+   */
+  prefixViolation: PrefixViolationPolicy;
 }
 
 export interface AgenticStageArgs {
@@ -213,10 +220,11 @@ export async function runAgenticStage(
   );
 
   // Finds the stage's prompt row by its inbound (design/crash-recovery.md →
-  // Where the turn's row comes from).
+  // Where the turn's row comes from). A stage skips the across-turn check, so
+  // its memo leaves the transcript heads out.
   const turnHistory = await steps.run("load-turn-transcript", async () => {
     try {
-      return await loadTurnHistory(
+      const { heads: _, ...history } = await loadTurnHistory(
         {
           runInTx: deps.runInTx,
           agentStore: deps.agentStore,
@@ -224,6 +232,7 @@ export async function runAgenticStage(
         },
         { conversationId, turnInboundId: inboundId },
       );
+      return history;
     } catch (err) {
       if (err instanceof TurnRowMissingError) throw asNonRetriable(err);
       throw err;
@@ -539,6 +548,7 @@ export async function runAgenticStage(
       turnKey: inboundId,
       cache: turnCacheIntent(conversationId, "stage"),
       site: "stage",
+      prefixViolation: deps.prefixViolation,
       clearToolResults,
       turnLogger: log,
     });
@@ -585,25 +595,18 @@ export async function runAgenticStage(
   }
 
   await steps.run("persist-new-messages", async () => {
-    // A turn that degraded on its first iteration kept nothing to write.
-    if (result.newMessages.length === 0) return { id: null };
-    // Hashed in the step body, so a replay of the persisted stage hashes nothing.
-    const heads = rowHeads(result.requests, result.newMessages, headView);
-    const { id } = await deps.runInTx((tx) =>
-      deps.agentStore.insertMessages(tx, {
-        conversationId,
-        messages: R.zip(result.newMessages, heads).map(([message, transcriptHead]) => ({
-          ...toStoredMessage(message),
-          ...(transcriptHead !== null && { transcriptHead }),
-        })),
-        profileId: ctx.profileId,
-        model: ctx.model,
-        lastInboundMessageId: inboundId,
-        lastMessageInputTokens: result.usage.inputTokens,
-        lastMessageOutputTokens: result.usage.outputTokens,
-      }),
-    );
-    return { id };
+    const persisted = await persistStageMessages(deps, {
+      conversationId,
+      inboundId,
+      profileId: ctx.profileId,
+      model: ctx.model,
+      result,
+      headView,
+    });
+    // After the write, so a transaction that keeps failing counts nothing,
+    // and only when it wrote the stage's rows and their heads.
+    if (persisted.id !== null) reportInTurnViolation(result.requests, "stage", log);
+    return persisted;
   });
 
   // The target check sits inside the step so the step exists on every replay.
@@ -648,4 +651,40 @@ export async function runAgenticStage(
     return { kind: "failed", failure: { reason: "artifact_invalid", detail: extracted.detail } };
   }
   return { kind: "completed", artifact: extracted.artifact };
+}
+
+/**
+ * The stage's new messages, each assistant row with its transcript head. A
+ * turn that degraded on its first iteration kept nothing to write.
+ */
+async function persistStageMessages(
+  deps: Pick<AgenticStageDeps, "runInTx" | "agentStore">,
+  args: {
+    conversationId: string;
+    inboundId: string;
+    profileId: string;
+    model: string;
+    result: AgentLoopResult;
+    headView: HeadView;
+  },
+): Promise<{ id: string | null }> {
+  const { result } = args;
+  if (result.newMessages.length === 0) return { id: null };
+  // Hashed in the step body, so a replay of the persisted stage hashes nothing.
+  const heads = rowHeads(result.requests, result.newMessages, args.headView);
+  const { id } = await deps.runInTx((tx) =>
+    deps.agentStore.insertMessages(tx, {
+      conversationId: args.conversationId,
+      messages: R.zip(result.newMessages, heads).map(([message, transcriptHead]) => ({
+        ...toStoredMessage(message),
+        ...(transcriptHead !== null && { transcriptHead }),
+      })),
+      profileId: args.profileId,
+      model: args.model,
+      lastInboundMessageId: args.inboundId,
+      lastMessageInputTokens: result.usage.inputTokens,
+      lastMessageOutputTokens: result.usage.outputTokens,
+    }),
+  );
+  return { id };
 }
