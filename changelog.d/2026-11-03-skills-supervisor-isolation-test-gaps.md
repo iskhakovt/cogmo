@@ -1,0 +1,1 @@
+The skills runtime suite covers the supervisor's sweep (a process spoofing its parent through its name, a process exiting mid-scan, a missed deadline), the fds a task inherits, the wall-clock fallback, and the relay's handling of non-object and batched frames.
