@@ -76,6 +76,7 @@ describe("TaskInvokeSchema", () => {
     ["no run", {}],
     ["a run with no key", { run: { id: "run-1" } }],
     ["a run with an empty key", { run: { id: "run-1", key: "" } }],
+    ["a run with an empty id", { run: { id: "", key: "key-1" } }],
   ])("rejects a task_invoke with %s", (_label, run) => {
     expect(() =>
       TaskInvokeSchema.parse({ type: "task_invoke", id: "t", skill: "s", inputs: {}, ...run }),
