@@ -159,7 +159,7 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
         content: name !== undefined && i === lastUser ? `[${name}] ${content}` : content,
       };
     }),
-    // Hindsight embeds a fact as `what | When: … | Involving: … | why`; keying
+    // Hindsight embeds a fact as `what | When: … | Where: … | Involving: … | why`; keying
     // on the text before the first " | " keeps the key to the fact itself.
     // aimock joins a request's texts with a space, so a multi-text request
     // keys on everything up to the first fact's " | ". An image turn's recall
