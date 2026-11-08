@@ -192,6 +192,7 @@ const BASE_SPEC: SessionSpec = {
   image: "python:3.14-slim",
   resourceLimits: { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 },
   expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1h from now
+  network: "bridge",
 };
 
 async function makeClient(): Promise<DaytonaSandboxClient> {
@@ -245,6 +246,33 @@ describe("DaytonaSandboxClient", () => {
       await client.create(BASE_SPEC);
       const call = daytonaCalls.create.mock.calls[0]?.[0] as { volumes?: unknown };
       expect("volumes" in call).toBe(false);
+    });
+
+    it("refuses a none session before any SDK call: a Tier 1 or 2 organisation overrides networkBlockAll", async () => {
+      const client = await makeClient();
+      await expect(client.create({ ...BASE_SPEC, network: "none" })).rejects.toThrow(
+        /SessionSpec.network "none" is unsupported/,
+      );
+      expect(daytonaCalls.create).not.toHaveBeenCalled();
+    });
+
+    it("leaves the network to the organisation's policy for a bridge session, on both paths", async () => {
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      daytonaCalls.create
+        .mockRejectedValueOnce(new DaytonaNotFoundError("snapshot not found"))
+        .mockResolvedValueOnce(fakeSandbox({ id: "sb-bridge", state: SandboxState.STARTED }));
+      const client = await makeClient();
+      await client.ensureImagePresent(PYTHON_IMAGE);
+
+      await client.create({ ...BASE_SPEC, image: PYTHON_IMAGE });
+
+      expect(daytonaCalls.create).toHaveBeenCalledTimes(2);
+      for (const [params] of daytonaCalls.create.mock.calls) {
+        expect(params).not.toHaveProperty("networkBlockAll");
+      }
     });
 
     it("rounds memory_bytes up to GiB (Daytona's unit) and cpus up to integer", async () => {

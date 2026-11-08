@@ -136,7 +136,8 @@ export async function invokeSkill(
         throw new Error(`invoke: run ${runId} was inserted under a key that already had a row`);
       }
       const executed = await executeRun(deps, {
-        run: { id: runId, createdAt },
+        // The invocation's logical key, which `ctx.run()` hands the skill.
+        run: { id: runId, key: idempotencyKey ?? runId, createdAt },
         skill,
         cached,
         inputs: opts.inputs,
@@ -158,8 +159,9 @@ export async function invokeSkill(
 }
 
 /**
- * The runtime a run executes on: the wasm packages the lockfile needs,
- * resolved by the host, or the started warm pool. A lockfile whose packages
+ * The runtime a run executes on: the wasm packages the skill needs (its
+ * lockfile's, and the runtime's pydantic when it imports it), resolved by
+ * the host, or the started warm pool. A lockfile whose packages
  * are unavailable rejects the invocation; a pool that can't start throws.
  */
 async function prepareRuntime(
@@ -170,7 +172,7 @@ async function prepareRuntime(
   return match(plan)
     .returnType<Promise<Result<SkillRuntime, SkillInvokeRejection>>>()
     .with({ kind: "wasm" }, async () =>
-      (await deps.runtime.resolveWasmPackages(cached.lockfile))
+      (await deps.runtime.resolveWasmPackages({ lockfile: cached.lockfile, body: cached.body }))
         .map((packages): SkillRuntime => ({ kind: "wasm", packages }))
         .mapErr((error): SkillInvokeRejection => {
           log.warn(

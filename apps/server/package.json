@@ -28,6 +28,7 @@
     "test:live": "vitest run --project live",
     "test:all": "vitest run",
     "test:watch": "vitest --project unit --project unit-pyodide",
+    "codegen:ctx": "tsx scripts/codegen-ctx-contract.ts",
     "tokei": "tsx scripts/tokei.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file-if-exists=../../.env --env-file-if-exists=.dev/env scripts/migrate.ts"

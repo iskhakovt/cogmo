@@ -74,6 +74,7 @@ const WALL_CLOCK_S = 30;
 function run(t: StandIn, wallClockS = WALL_CLOCK_S): Promise<RunOnWorkerResult> {
   return runOnChild(t.child, {
     taskId: "task-1",
+    run: { id: "run-1", key: "key-1" },
     skillName: "skill",
     inputs: {},
     wallClockS,
@@ -214,6 +215,7 @@ describe("runOnChild", () => {
     const dispatch = vi.fn<DispatchGate>(async () => ({ kind: "withhold" }));
     const result = runOnChild(t.child, {
       taskId: "task-1",
+      run: { id: "run-1", key: "key-1" },
       skillName: "skill",
       inputs: {},
       wallClockS: WALL_CLOCK_S,
@@ -306,6 +308,7 @@ describe("runOnChild", () => {
         { ipc: proc, interrupt: () => {}, kill: () => proc.kill("SIGKILL"), exited },
         {
           taskId: "task-1",
+          run: { id: "run-1", key: "key-1" },
           skillName: "skill",
           inputs: {},
           wallClockS: WALL_CLOCK_S,
@@ -349,6 +352,7 @@ describe("the child bundle built from source", () => {
   function workerParams(): RunOnWorkerParams {
     return {
       taskId: "task-1",
+      run: { id: "run-1", key: "key-1" },
       skillName: "skill",
       body: "",
       inputs: {},

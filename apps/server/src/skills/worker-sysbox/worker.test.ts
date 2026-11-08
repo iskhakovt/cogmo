@@ -20,7 +20,7 @@ import {
 } from "../protocol.js";
 import { type InvokeParams, SysboxSkillWorker } from "./worker.js";
 
-const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 4 });
+const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 6 });
 
 /** sha256-shaped, as `task_invoke.lockfileHash` requires. */
 const LOCKFILE_HASH = "ab".repeat(32);
@@ -115,6 +115,7 @@ const noopCtx: CtxHandler = { handle: async () => ok(null) };
 function invokeParams(taskId: string): InvokeParams {
   return {
     taskId,
+    run: { id: taskId, key: `key-${taskId}` },
     skillName: "test",
     body: 'async def run(inputs, ctx):\n    return {"ok": 1}\n',
     inputs: {},
@@ -297,7 +298,7 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 })}\n`);
 
       await expect(create(bundle)).rejects.toThrow(
-        /supervisor speaks protocol v2; this Cogmo requires v4 — use the skills image matching this Cogmo version/,
+        /supervisor speaks protocol v2; this Cogmo requires v6 — use the skills image matching this Cogmo version/,
       );
       expect(bundle.execDisposeCalls.count).toBe(1);
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
@@ -310,7 +311,7 @@ describe("SysboxSkillWorker", () => {
         silentSupervisor(bundle);
         const created = create(bundle);
         const outcome = expect(created).rejects.toThrow(
-          /did not announce protocol v4 within 30s; a skills image without the handshake never does/,
+          /did not announce protocol v6 within 30s; a skills image without the handshake never does/,
         );
         await vi.advanceTimersByTimeAsync(30_000);
         await outcome;
@@ -625,8 +626,9 @@ describe("SysboxSkillWorker", () => {
       expect(r.workerReusable).toBe(true);
       // Populate exec ran (sh + supervisor python3, in some order).
       expect(bundle.calls).toContain("exec:sh");
-      // Task invoke carried the venv path.
+      // Task invoke carried the venv path and the task's run.
       expect(taskInvokes[0]?.lockfileHash).toBe(LOCKFILE_HASH);
+      expect(taskInvokes[0]?.run).toEqual({ id: "t-deps", key: "key-t-deps" });
     });
 
     it("with deps: populate_failed retires the worker, no task is invoked", async () => {

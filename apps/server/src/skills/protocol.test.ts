@@ -2,16 +2,20 @@ import { describe, expect, it } from "vitest";
 import {
   CtxCallSchema,
   CtxResultSchema,
+  fromTaskResult,
   TaskInvokeSchema,
   TaskResultSchema,
   WorkerMessageSchema,
 } from "./protocol.js";
+
+const RUN = { id: "run-1", key: "skill-tool:call-1" };
 
 describe("TaskInvokeSchema", () => {
   it("accepts a canonical task_invoke", () => {
     expect(
       TaskInvokeSchema.parse({
         type: "task_invoke",
+        run: RUN,
         id: "task-1",
         skill: "echo",
         inputs: { x: 1 },
@@ -22,6 +26,7 @@ describe("TaskInvokeSchema", () => {
   it("accepts arbitrary unknown inputs", () => {
     const r = TaskInvokeSchema.parse({
       type: "task_invoke",
+      run: RUN,
       id: "t",
       skill: "s",
       inputs: null,
@@ -48,6 +53,7 @@ describe("TaskInvokeSchema", () => {
     expect(() =>
       TaskInvokeSchema.parse({
         type: "task_invoke",
+        run: RUN,
         id: "",
         skill: "s",
         inputs: {},
@@ -59,10 +65,22 @@ describe("TaskInvokeSchema", () => {
     expect(() =>
       TaskInvokeSchema.parse({
         type: "task_invoke",
+        run: RUN,
         id: 42,
         skill: "s",
         inputs: {},
       }),
+    ).toThrow();
+  });
+
+  it.each([
+    ["no run", {}],
+    ["a run with no key", { run: { id: "run-1" } }],
+    ["a run with an empty key", { run: { id: "run-1", key: "" } }],
+    ["a run with an empty id", { run: { id: "", key: "key-1" } }],
+  ])("rejects a task_invoke with %s", (_label, run) => {
+    expect(() =>
+      TaskInvokeSchema.parse({ type: "task_invoke", id: "t", skill: "s", inputs: {}, ...run }),
     ).toThrow();
   });
 
@@ -73,6 +91,7 @@ describe("TaskInvokeSchema", () => {
   it("accepts an absent lockfileHash (skill has no declared dependencies)", () => {
     const r = TaskInvokeSchema.parse({
       type: "task_invoke",
+      run: RUN,
       id: "t",
       skill: "s",
       inputs: {},
@@ -84,6 +103,7 @@ describe("TaskInvokeSchema", () => {
     const sha256 = "a".repeat(64);
     const r = TaskInvokeSchema.parse({
       type: "task_invoke",
+      run: RUN,
       id: "t",
       skill: "s",
       inputs: {},
@@ -97,6 +117,7 @@ describe("TaskInvokeSchema", () => {
       expect(() =>
         TaskInvokeSchema.parse({
           type: "task_invoke",
+          run: RUN,
           id: "t",
           skill: "s",
           inputs: {},
@@ -138,6 +159,35 @@ describe("TaskResultSchema (discriminated)", () => {
     expect(() =>
       TaskResultSchema.parse({ type: "task_result", id: "t", ok: false, error: "boom" }),
     ).toThrow();
+  });
+
+  it.each(["input_invalid", "output_invalid", "skill_failed", "skill_retryable"])(
+    "ok:false accepts the %s a worker reports for a failure the run holds as a value",
+    (errorKind) => {
+      expect(
+        TaskResultSchema.parse({ type: "task_result", id: "t", ok: false, errorKind, error: "x" }),
+      ).toMatchObject({ errorKind });
+    },
+  );
+
+  it("keeps the output of an output_invalid, and of no other kind", () => {
+    const frame = {
+      type: "task_result",
+      id: "t",
+      ok: false,
+      error: "x",
+      output: { n: 1 },
+    } as const;
+    expect(
+      fromTaskResult(TaskResultSchema.parse({ ...frame, errorKind: "output_invalid" })),
+    ).toEqual({ ok: false, errorKind: "output_invalid", error: "x", output: { n: 1 } });
+    expect(fromTaskResult(TaskResultSchema.parse({ ...frame, errorKind: "skill_raised" }))).toEqual(
+      {
+        ok: false,
+        errorKind: "skill_raised",
+        error: "x",
+      },
+    );
   });
 
   it("ok:false rejects a kind no worker reports", () => {
