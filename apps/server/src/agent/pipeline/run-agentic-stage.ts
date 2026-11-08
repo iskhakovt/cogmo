@@ -214,7 +214,11 @@ export async function runAgenticStage(
   const turnHistory = await steps.run("load-turn-transcript", async () => {
     try {
       return await loadTurnHistory(
-        { runInTx: deps.runInTx, agentStore: deps.agentStore },
+        {
+          runInTx: deps.runInTx,
+          agentStore: deps.agentStore,
+          transportStore: deps.transportStore,
+        },
         { conversationId, turnInboundId: inboundId },
       );
     } catch (err) {

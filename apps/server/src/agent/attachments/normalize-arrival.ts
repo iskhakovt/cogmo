@@ -5,7 +5,7 @@
  * same bytes on every later request.
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import type { AttachmentBudget } from "../../llm/attachment-limits.js";
 import { isTextLikeDocumentMediaType } from "../../llm/content.js";
@@ -212,15 +212,10 @@ async function arriveAttachment(
     // A size-only block: a file too large to download.
     return placeholder("too_large", kind, attachment);
   }
-  if (kind === "image" && attachment.path !== undefined) {
+  if (attachment.path !== undefined) {
     // A re-batched original reuses its record without reading the bytes again.
-    const { path } = attachment;
-    const record = await deps.runInTx((tx) =>
-      deps.transportStore.findFinishedAttachmentOriginal(tx, path),
-    );
-    if (record !== null) {
-      return imageBlocks(route, load, attachment, path, recorded(record));
-    }
+    const blocks = await recordedBlocks(deps, route, load, kind, attachment, attachment.path);
+    if (blocks !== null) return blocks;
   }
 
   const original = await readOriginal(deps, attachment, inlineStem);
@@ -228,11 +223,44 @@ async function arriveAttachment(
   if (original.bytes.length > MAX_INBOUND_FILE_BYTES) {
     return placeholder("too_large", kind, attachment);
   }
+  if (attachment.path === undefined && kind === "document") {
+    // An inline document's record is keyed by the upload that just stored
+    // it; an inline image's comes back from its decode claim.
+    const blocks = await recordedBlocks(deps, route, load, kind, attachment, original.path);
+    if (blocks !== null) return blocks;
+  }
 
   return match(kind)
     .with("image", () => arriveImage(deps, route, load, attachment, original))
     .with("document", () => arriveDocument(deps, route, load, attachment, original))
     .exhaustive();
+}
+
+/**
+ * The blocks an original's finished record decides: the rejection
+ * placeholder for any original a provider refused, and an image's reused
+ * result. Null when it has no record to use.
+ */
+async function recordedBlocks(
+  deps: NormalizeArrivalDeps,
+  route: ArrivalRoute,
+  load: TurnLoad,
+  kind: AttachmentKind,
+  attachment: InboundAttachment,
+  path: string,
+): Promise<StoredContentBlock[] | null> {
+  const record = await deps.runInTx((tx) =>
+    deps.transportStore.findFinishedAttachmentOriginal(tx, path),
+  );
+  if (record === null) return null;
+  return (
+    match([kind, record] as const)
+      .with(["image", P._], () => imageBlocks(route, load, attachment, path, recorded(record)))
+      .with(["document", { state: "rejected" }], () => placeholder("rejected", kind, attachment))
+      // Only an image is decoded, so a document has no result to reuse.
+      .with(["document", { state: "ready" }], () => null)
+      .exhaustive()
+  );
 }
 
 async function arriveDocument(

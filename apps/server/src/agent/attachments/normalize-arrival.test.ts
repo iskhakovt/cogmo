@@ -257,6 +257,53 @@ describe("normalizeArrival", () => {
     });
   });
 
+  it("stores a rejected PDF as the rejection placeholder without reading it", async () => {
+    const { store } = originalsStore({ "inbound/r.pdf": { state: "rejected" } });
+    const { deps: d } = deps({ transportStore: store });
+    const content = await normalizeArrival(d, async () => route, [
+      {
+        id: "inbound-1",
+        content: [
+          { type: "document", path: "inbound/r.pdf", mediaType: "application/pdf", name: "r.pdf" },
+        ],
+      },
+    ]);
+    expect(d.attachments.read).not.toHaveBeenCalled();
+    expect(content).toEqual([
+      {
+        type: "text",
+        text: "[Document: r.pdf. The model provider refused this file; ask for it another way.]",
+        harness: "attachment_placeholder",
+      },
+    ]);
+  });
+
+  it("finds an inline original's rejection by the key its upload returns", async () => {
+    const { store } = originalsStore({ "inbound/inbound-7-0.pdf": { state: "rejected" } });
+    const { deps: d } = deps({ transportStore: store });
+    d.attachments.put = vi.fn(async () => "inbound/inbound-7-0.pdf");
+    const content = await normalizeArrival(d, async () => route, [
+      {
+        id: "inbound-7",
+        content: [
+          {
+            type: "document",
+            source: "base64",
+            data: Buffer.from("%PDF-1.7 body", "latin1").toString("base64"),
+            mediaType: "application/pdf",
+          },
+        ],
+      },
+    ]);
+    expect(content).toEqual([
+      {
+        type: "text",
+        text: "[Document: document. The model provider refused this file; ask for it another way.]",
+        harness: "attachment_placeholder",
+      },
+    ]);
+  });
+
   it("stores a missing original as a placeholder", async () => {
     const { deps: d } = deps();
     d.attachments.read = vi.fn(async () => err({ kind: "missing" as const }));

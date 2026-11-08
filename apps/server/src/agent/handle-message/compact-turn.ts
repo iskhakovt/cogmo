@@ -18,6 +18,11 @@ import type { AgentStore } from "../store/index.js";
 import type { StoredMessage } from "../stored-content.js";
 import { resolveOrFail, type TurnModel } from "./resolve-turn-model.js";
 
+/** The id of the durable step that makes the turn's `count`th token count, from 1. */
+export function countTokensStepId(count: number): string {
+  return `count-tokens-${count}`;
+}
+
 export interface CompactTurnDeps {
   runInTx: Transactor;
   attachmentReader: AttachmentReader;
@@ -164,7 +169,7 @@ function countTokensSteps(
   let countCall = 0;
   return (params) => {
     countCall += 1;
-    return stepRun(`count-tokens-${countCall}`, () => provider.countTokens({ ...params, model }));
+    return stepRun(countTokensStepId(countCall), () => provider.countTokens({ ...params, model }));
   };
 }
 

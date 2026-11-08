@@ -12,6 +12,7 @@ import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { NormalizedImageResult } from "../attachment-original.js";
 import { DrizzleTransportStore } from "./index.js";
 import {
+  type AttachmentRejection,
   attachmentOriginals,
   channelSessions,
   inboundMessages as inboundMessagesTable,
@@ -1721,8 +1722,8 @@ describe("DrizzleTransportStore", () => {
 
     it("returns a rejected record as existing", async () => {
       await db.execute(
-        sql`INSERT INTO attachment_originals (original_path, state, decode_attempts)
-          VALUES ('inbound/a.pdf', 'rejected', 0)`,
+        sql`INSERT INTO attachment_originals (original_path, state, decode_attempts, rejection)
+          VALUES ('inbound/a.pdf', 'rejected', 0, 'bad_request')`,
       );
 
       expect(await claim("inbound/a.pdf")).toEqual({
@@ -1769,26 +1770,121 @@ describe("DrizzleTransportStore", () => {
       expect(await claim("inbound/a.jpg")).toEqual({ kind: "claimed", attempt: 1 });
     });
 
+    /** The state and rejection of the records for `paths`, read past the store. */
+    function rejections(paths: ReadonlyArray<string>) {
+      return tx((trx) =>
+        trx
+          .select({
+            originalPath: attachmentOriginals.originalPath,
+            state: attachmentOriginals.state,
+            rejection: attachmentOriginals.rejection,
+          })
+          .from(attachmentOriginals)
+          .where(inArray(attachmentOriginals.originalPath, [...paths]))
+          .orderBy(attachmentOriginals.originalPath),
+      );
+    }
+
+    function reject(paths: ReadonlyArray<string>, rejection: AttachmentRejection) {
+      return tx((trx) => store.rejectAttachmentOriginals(trx, paths, rejection));
+    }
+
+    it("rejects a new or ready original and leaves a decoding one decoding", async () => {
+      await claim("inbound/a.jpg");
+      await tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", IMAGE));
+      await claim("inbound/b.jpg");
+
+      const rejected = await reject(
+        ["inbound/a.jpg", "inbound/b.jpg", "inbound/c.pdf", "inbound/c.pdf"],
+        "too_large",
+      );
+
+      expect(rejected).toBe(2);
+      expect(await find(["inbound/a.jpg", "inbound/b.jpg", "inbound/c.pdf"])).toEqual([
+        { originalPath: "inbound/a.jpg", state: "rejected", result: null },
+        { originalPath: "inbound/b.jpg", state: "decoding", result: null },
+        { originalPath: "inbound/c.pdf", state: "rejected", result: null },
+      ]);
+      expect(await rejections(["inbound/a.jpg", "inbound/b.jpg", "inbound/c.pdf"])).toEqual([
+        { originalPath: "inbound/a.jpg", state: "rejected", rejection: "too_large" },
+        { originalPath: "inbound/b.jpg", state: "decoding", rejection: null },
+        { originalPath: "inbound/c.pdf", state: "rejected", rejection: "too_large" },
+      ]);
+      expect(await claim("inbound/c.pdf")).toEqual({
+        kind: "existing",
+        original: { state: "rejected" },
+      });
+    });
+
+    it("leaves a rejected original with its first rejection", async () => {
+      await reject(["inbound/c.pdf"], "bad_request");
+
+      expect(await reject(["inbound/c.pdf"], "too_large")).toBe(0);
+      expect(await rejections(["inbound/c.pdf"])).toEqual([
+        { originalPath: "inbound/c.pdf", state: "rejected", rejection: "bad_request" },
+      ]);
+      expect(await reject([], "bad_request")).toBe(0);
+    });
+
+    it("lists which originals were rejected", async () => {
+      await claim("inbound/a.jpg");
+      await tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", IMAGE));
+      await reject(["inbound/c.pdf"], "bad_request");
+
+      expect(
+        await tx((trx) =>
+          store.listRejectedAttachmentOriginals(trx, [
+            "inbound/a.jpg",
+            "inbound/c.pdf",
+            "inbound/none.pdf",
+          ]),
+        ),
+      ).toEqual(["inbound/c.pdf"]);
+      expect(await tx((trx) => store.listRejectedAttachmentOriginals(trx, []))).toEqual([]);
+    });
+
     it.each([
-      ["a ready record with no result", "ready", null, "chk_attachment_originals_ready_result"],
+      [
+        "a ready record with no result",
+        "ready",
+        null,
+        null,
+        "chk_attachment_originals_ready_result",
+      ],
       [
         "a decoding record with a result",
         "decoding",
         CRASHED,
+        null,
         "chk_attachment_originals_decoding_result",
       ],
       [
         "a rejected record with a result",
         "rejected",
         CRASHED,
+        "bad_request",
         "chk_attachment_originals_rejected_result",
       ],
-    ] as const)("rejects %s", async (_, state, result, constraint) => {
+      [
+        "a rejected record with no rejection",
+        "rejected",
+        null,
+        null,
+        "chk_attachment_originals_rejection",
+      ],
+      [
+        "a ready record with a rejection",
+        "ready",
+        CRASHED,
+        "too_large",
+        "chk_attachment_originals_rejection",
+      ],
+    ] as const)("rejects %s", async (_, state, result, rejection, constraint) => {
       const json = result === null ? null : JSON.stringify(result);
       await expect(
         db.execute(
-          sql`INSERT INTO attachment_originals (original_path, state, result, decode_attempts)
-            VALUES ('inbound/a.jpg', ${state}, ${json}::jsonb, 1)`,
+          sql`INSERT INTO attachment_originals (original_path, state, result, decode_attempts, rejection)
+            VALUES ('inbound/a.jpg', ${state}, ${json}::jsonb, 1, ${rejection}::attachment_rejection)`,
         ),
       ).rejects.toMatchObject({ cause: { message: expect.stringContaining(constraint) } });
     });

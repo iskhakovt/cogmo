@@ -227,6 +227,15 @@ export interface TranscriptStore {
     conversationId: string,
   ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
 
+  /**
+   * The user rows newer than `afterMessageId` (any row when `null`) with
+   * their cursors, ordered by id: the batches no reply has answered yet.
+   */
+  listUserRowsAfter(
+    tx: Transaction,
+    params: { conversationId: string; afterMessageId: string | null },
+  ): Promise<ReadonlyArray<TurnMessage>>;
+
   /** The rows of the conversation's turns with these cursors, ordered by id: what the Observer renders. */
   listTurnMessages(
     tx: Transaction,
@@ -648,6 +657,29 @@ export class DrizzleTranscriptStore implements TranscriptStore {
         })
         .returning(),
     );
+  }
+
+  async listUserRowsAfter(
+    tx: Transaction,
+    params: { conversationId: string; afterMessageId: string | null },
+  ): Promise<ReadonlyArray<TurnMessage>> {
+    const { conversationId, afterMessageId } = params;
+    return tx
+      .select({
+        id: messages.id,
+        role: messages.role,
+        content: messages.content,
+        cursor: messages.lastInboundMessageId,
+      })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.role, "user"),
+          afterMessageId === null ? undefined : gt(messages.id, afterMessageId),
+        ),
+      )
+      .orderBy(asc(messages.id));
   }
 
   async listTurnMessages(
