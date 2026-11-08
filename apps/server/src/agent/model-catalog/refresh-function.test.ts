@@ -4,12 +4,18 @@
  */
 import { InngestTestEngine } from "@inngest/test";
 import { err, ok } from "neverthrow";
+import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
 import { createModelCatalogRefresh, MODEL_CATALOG_REFRESH_CRON } from "./refresh-function.js";
 import type { ModelCatalogRefreshed } from "./refresh-model-catalog.js";
 
 const requested = { name: "model-catalog/refresh.requested", data: {} } as const;
+
+function mockLog() {
+  return mock<Pick<Logger, "info" | "warn">>();
+}
 
 const refreshed: ModelCatalogRefreshed = {
   models: 3_180,
@@ -21,7 +27,7 @@ const refreshed: ModelCatalogRefreshed = {
 
 describe("createModelCatalogRefresh", () => {
   it("runs on its cron and on an operator's request", () => {
-    const fn = createModelCatalogRefresh(async () => ok(refreshed), inngest);
+    const fn = createModelCatalogRefresh(async () => ok(refreshed), inngest, mockLog());
     expect(fn.opts.triggers).toEqual([
       { cron: MODEL_CATALOG_REFRESH_CRON },
       expect.objectContaining({ event: "model-catalog/refresh.requested" }),
@@ -30,18 +36,22 @@ describe("createModelCatalogRefresh", () => {
 
   it("runs the refresh once and returns its summary", async () => {
     const refresh = vi.fn(async () => ok(refreshed));
-    const fn = createModelCatalogRefresh(refresh, inngest);
+    const log = mockLog();
+    const fn = createModelCatalogRefresh(refresh, inngest, log);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [requested] }).execute();
 
     expect(result).toEqual(refreshed);
     expect(refresh).toHaveBeenCalledTimes(1);
+    expect(log.info).toHaveBeenCalledWith(refreshed, "model catalog refreshed");
+    expect(log.warn).not.toHaveBeenCalled();
   });
 
   it("fails retriably when upstream is unavailable", async () => {
     const fn = createModelCatalogRefresh(
       async () => err({ kind: "unavailable", message: "https://registry.test returned 502" }),
       inngest,
+      mockLog(),
     );
 
     const { error } = await new InngestTestEngine({ function: fn, events: [requested] }).execute();
@@ -54,6 +64,7 @@ describe("createModelCatalogRefresh", () => {
     const fn = createModelCatalogRefresh(
       async () => err({ kind: "rejected", message: "the LiteLLM registry is not a JSON object" }),
       inngest,
+      mockLog(),
     );
 
     const { error } = await new InngestTestEngine({ function: fn, events: [requested] }).execute();
@@ -61,7 +72,7 @@ describe("createModelCatalogRefresh", () => {
     expect(error).toMatchObject({ name: "NonRetriableError" });
   });
 
-  it("succeeds without retrying when only OpenRouter's list failed", async () => {
+  it("warns, and succeeds without retrying, when only OpenRouter's list failed", async () => {
     const degraded: ModelCatalogRefreshed = {
       ...refreshed,
       openRouter: {
@@ -71,7 +82,8 @@ describe("createModelCatalogRefresh", () => {
       },
     };
     const refresh = vi.fn(async () => ok(degraded));
-    const fn = createModelCatalogRefresh(refresh, inngest);
+    const log = mockLog();
+    const fn = createModelCatalogRefresh(refresh, inngest, log);
 
     const { result, error } = await new InngestTestEngine({
       function: fn,
@@ -81,5 +93,10 @@ describe("createModelCatalogRefresh", () => {
     expect(error).toBeUndefined();
     expect(result).toEqual(degraded);
     expect(refresh).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      degraded,
+      expect.stringMatching(/without OpenRouter's model list/),
+    );
+    expect(log.info).not.toHaveBeenCalled();
   });
 });

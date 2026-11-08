@@ -16,6 +16,7 @@ import {
   createDbProviderResolver,
   type LlmProviderResolver,
 } from "../llm/resolver.js";
+import { logger } from "../logger.js";
 import type { DrizzleSecretsStore } from "../secrets/store/index.js";
 import type { BootstrapOptions, CoreDeps } from "./stages.js";
 
@@ -67,6 +68,7 @@ export function createModelCatalogFunctions(core: CoreDeps) {
               bundled: bundledSnapshot(),
             }),
           inngest,
+          logger.child({ component: "model-catalog.refresh" }),
         ),
       ];
 }

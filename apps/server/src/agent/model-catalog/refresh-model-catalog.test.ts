@@ -1,6 +1,6 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { z } from "zod";
 import type { LitellmCatalog, LiveCatalog } from "../../llm/litellm-data.js";
 import { fakeRunInTx } from "../../test/factories.js";
 import { type RefreshModelCatalogDeps, refreshModelCatalog } from "./refresh-model-catalog.js";
@@ -39,7 +39,7 @@ function makeDeps(
     response?: Response | Error;
     openRouter?: Response | Error | null;
     previousIds?: string[] | null;
-    previous?: LitellmCatalog | Error;
+    previous?: LitellmCatalog | "unreadable";
     url?: string;
     bundled?: LitellmCatalog;
   } = {},
@@ -49,11 +49,11 @@ function makeDeps(
 } {
   const store = mock<ModelCatalogStore>();
   store.latestModelIds.mockResolvedValue(opts.previousIds ?? null);
-  if (opts.previous instanceof Error) store.latest.mockRejectedValue(opts.previous);
-  else
-    store.latest.mockResolvedValue(
-      opts.previous ? { id: "old", entries: opts.previous, createdAt: FETCHED_AT } : null,
-    );
+  store.latest.mockResolvedValue(
+    opts.previous === "unreadable"
+      ? err({ kind: "unreadable", message: "entries: expected number" })
+      : ok(opts.previous ? { id: "old", entries: opts.previous, createdAt: FETCHED_AT } : null),
+  );
   store.replace.mockResolvedValue({ id: "new", createdAt: FETCHED_AT });
   const installed: LiveCatalog[] = [];
   const bundled = opts.bundled ?? BUNDLED;
@@ -301,7 +301,7 @@ describe("refreshModelCatalog", () => {
 
     it("carries nothing from a previous catalog that no longer parses", async () => {
       const deps = makeDeps({
-        previous: new z.ZodError([]),
+        previous: "unreadable",
         openRouter: new Response("unavailable", { status: 503 }),
       });
 

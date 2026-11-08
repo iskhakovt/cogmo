@@ -1,6 +1,5 @@
 import { count, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { z } from "zod";
 import type { Database, Transactor } from "../../../db/index.js";
 import type { LitellmCatalog } from "../../../llm/litellm-data.js";
 import { expectDefined } from "../../../test/assertions.js";
@@ -40,12 +39,12 @@ async function rowCount(): Promise<number> {
 
 describe("DrizzleModelCatalogStore", () => {
   it("has no catalog before the first replace", async () => {
-    expect(await tx((trx) => store.latest(trx))).toBeNull();
+    expect((await tx((trx) => store.latest(trx)))._unsafeUnwrap()).toBeNull();
   });
 
   it("returns what replace stored, with its id and fetch time", async () => {
     const stored = await tx((trx) => store.replace(trx, first));
-    const latest = expectDefined(await tx((trx) => store.latest(trx)), "latest");
+    const latest = expectDefined((await tx((trx) => store.latest(trx)))._unsafeUnwrap(), "latest");
     expect(latest).toEqual({ id: stored.id, entries: first, createdAt: stored.createdAt });
   });
 
@@ -53,7 +52,7 @@ describe("DrizzleModelCatalogStore", () => {
     await tx((trx) => store.replace(trx, first));
     const newer = await tx((trx) => store.replace(trx, second));
 
-    const latest = expectDefined(await tx((trx) => store.latest(trx)), "latest");
+    const latest = expectDefined((await tx((trx) => store.latest(trx)))._unsafeUnwrap(), "latest");
     expect(latest.id).toBe(newer.id);
     expect(latest.entries).toEqual(second);
     expect(await rowCount()).toBe(1);
@@ -64,7 +63,7 @@ describe("DrizzleModelCatalogStore", () => {
     const bad = { m: { contextWindow: 0, maxOutputTokens: 4_096 } };
     await expect(tx((trx) => store.replace(trx, bad))).rejects.toThrow();
 
-    const latest = expectDefined(await tx((trx) => store.latest(trx)), "latest");
+    const latest = expectDefined((await tx((trx) => store.latest(trx)))._unsafeUnwrap(), "latest");
     expect(latest.entries).toEqual(first);
   });
 
@@ -86,17 +85,19 @@ describe("DrizzleModelCatalogStore", () => {
       sql`INSERT INTO model_catalogs (entries) VALUES (${JSON.stringify({ m: { contextWindow: "big" } })}::jsonb)`,
     );
     await tx((trx) => store.replace(trx, first));
-    const latest = expectDefined(await tx((trx) => store.latest(trx)), "latest");
+    const latest = expectDefined((await tx((trx) => store.latest(trx)))._unsafeUnwrap(), "latest");
     expect(latest.entries).toEqual(first);
     expect(await rowCount()).toBe(1);
   });
 
-  it("fails the read when a stored row no longer parses, while its ids still list", async () => {
+  it("reports a stored row that no longer parses as unreadable, while its ids still list", async () => {
     // Bypasses the write-side parse: a row written under an older schema.
     await db.execute(
       sql`INSERT INTO model_catalogs (entries) VALUES (${JSON.stringify({ m: { contextWindow: "big" } })}::jsonb)`,
     );
-    await expect(tx((trx) => store.latest(trx))).rejects.toBeInstanceOf(z.ZodError);
+    expect((await tx((trx) => store.latest(trx)))._unsafeUnwrapErr()).toMatchObject({
+      kind: "unreadable",
+    });
     expect(await tx((trx) => store.latestModelIds(trx))).toEqual(["m"]);
   });
 });

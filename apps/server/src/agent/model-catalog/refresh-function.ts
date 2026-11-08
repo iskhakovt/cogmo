@@ -10,12 +10,10 @@
  */
 import { type Inngest, NonRetriableError } from "inngest";
 import type { Result } from "neverthrow";
+import type { Logger } from "pino";
 import { match } from "ts-pattern";
 import { modelCatalogRefreshRequested } from "../../inngest/events.js";
-import { logger } from "../../logger.js";
 import type { ModelCatalogRefreshError, ModelCatalogRefreshed } from "./refresh-model-catalog.js";
-
-const log = logger.child({ component: "model-catalog.refresh" });
 
 /** Minute 17 keeps it off the top of the hour, where the other crons cluster. */
 export const MODEL_CATALOG_REFRESH_CRON = "17 */6 * * *";
@@ -23,6 +21,7 @@ export const MODEL_CATALOG_REFRESH_CRON = "17 */6 * * *";
 export function createModelCatalogRefresh(
   refresh: () => Promise<Result<ModelCatalogRefreshed, ModelCatalogRefreshError>>,
   inngest: Inngest,
+  log: Pick<Logger, "info" | "warn">,
 ) {
   return inngest.createFunction(
     {

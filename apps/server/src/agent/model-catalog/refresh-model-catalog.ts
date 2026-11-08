@@ -9,12 +9,11 @@
  * LiteLLM's registry is required: when it fails, nothing is stored. OpenRouter's
  * list is not: when it fails, the refresh stores LiteLLM's entries with the
  * previous catalog's `openrouter/*` entries carried forward, so a failed list
- * leaves that namespace one refresh stale rather than empty. When it is off, the
- * catalog holds no `openrouter/*` entries.
+ * leaves that namespace as of the last list that arrived rather than empty.
+ * When it is off, the catalog holds no `openrouter/*` entries.
  */
 import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
-import { z } from "zod";
 import type { Transaction, Transactor } from "../../db/index.js";
 import {
   isOpenRouterKey,
@@ -28,7 +27,7 @@ import { describeError } from "../../util/describe-error.js";
 import type { ModelCatalogStore } from "./store/index.js";
 
 /** LiteLLM's registry is a few MB; this bounds a stalled connection. */
-export const FETCH_TIMEOUT_MS = 60_000;
+const FETCH_TIMEOUT_MS = 60_000;
 
 /** How many new ids the result names. The count covers the rest. */
 const ADDED_SAMPLE = 20;
@@ -128,20 +127,17 @@ export async function refreshModelCatalog(
 
 /**
  * The newest stored catalog's `openrouter/*` entries. A row an older
- * `LitellmCatalogSchema` wrote carries nothing; the bundled snapshot answers
- * for those ids until OpenRouter's list is back.
+ * `LitellmCatalogSchema` wrote carries nothing, and those ids resolve as with
+ * the source off until OpenRouter's list is back.
  */
 async function previousOpenRouterEntries(
   store: ModelCatalogStore,
   tx: Transaction,
 ): Promise<Record<string, LitellmEntry>> {
-  try {
-    const previous = await store.latest(tx);
-    return previous ? R.pickBy(previous.entries, (_entry, key) => isOpenRouterKey(key)) : {};
-  } catch (e) {
-    if (e instanceof z.ZodError) return {};
-    throw e;
-  }
+  const previous = await store.latest(tx);
+  return previous
+    .map((row) => (row ? R.pickBy(row.entries, (_entry, key) => isOpenRouterKey(key)) : {}))
+    .unwrapOr({});
 }
 
 /** OpenRouter's list pruned to the `openrouter/` namespace, held to its floor. */
