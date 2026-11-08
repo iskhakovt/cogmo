@@ -146,10 +146,10 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 
 **Connector rules**, which the contract suite (*Testing*) checks:
 
-1. **Accept, then start.** The connector persists a job, calls `AcceptJob`, and starts the job only once that call succeeds. It retries a call that fails in transit. When the hub refuses `AcceptJob` with `NOT_FOUND`, because the job has ended or is unknown, the connector drops the job unstarted. So a job without an acknowledged acceptance has not started.
+1. **Accept, then start.** The connector persists a job, calls `AcceptJob`, and starts the job only once that call succeeds. It retries a call that fails in transit. When the hub refuses `AcceptJob` with `NOT_FOUND`, because the job has ended or is unknown, the connector drops the job unstarted.
 2. **Reattach.** A `Job` whose `job_id` it holds is not new work. It re-sends `FinishJob` if the job has ended, and otherwise keeps reporting from where it was. It may forget a job once cogmo has acknowledged its `FinishJob`; an id it no longer holds is new work.
 3. **Conflict.** A `Job` for a task and phase it holds under another running `job_id` fails with `JOB_CONFLICT`.
-4. **Restarts.** It keeps accepted jobs across its own restarts and lists them in `held_job_ids`, and lists the tasks whose workspaces it holds in `held_task_ids`. An accepted job it cannot recover is left out, and cogmo reads it as lost.
+4. **Restarts.** It keeps persisted jobs across its own restarts and lists them in `held_job_ids`, and lists the tasks whose workspaces it holds in `held_task_ids`. An accepted job it cannot recover is left out, and cogmo reads it as lost.
 5. **Not awaited.** It stops a held job that `awaited_job_ids` omits, or whose `AcceptJob` or report comes back `NOT_FOUND`, and keeps that job's workspace until `release`.
 6. **Reports.** `seq` rises strictly from 1, and a retried report re-sends the same `seq`. The connector calls `FinishJob` only once every report for the job has been acknowledged, and passes the last `seq` it sent.
 7. **Cancel.** Cancelling is cooperative: it answers with `FinishJob(cancelled)`, or with the job's real outcome if that came first.
@@ -242,7 +242,7 @@ The connector enforces `token_budget` inside the turn. The hub also cancels a tu
 
 The session's held tasks are its `held_task_ids` plus the tasks it prepared since. The use case `release-ended-workspaces.ts` in `src/agent/coding/` reads their status, picks the salvage ref and dispatches through `ConnectorJobs`; the hub calls it on connect and on its timer, wired by boot. A held task with no row is released too. One that belongs to another connector is released once it is terminal, and until then only dropped from the held set. The salvage ref is `refs/cogmo-wip/<task-id>` unless the task reached `pr_open`.
 
-A release's result is logged, like the sandbox path's teardown result, and never becomes a `TaskFailure`. The hub updates the held set on every release result, whichever path dispatched it. A `removed_clean` or `salvaged_and_removed` outcome drops the task. A `kept` outcome or a failed release also drops the task from the held set, and the connector stops listing it (rule 8): the workspace is the operator's, as `wip_push_failed_kept` is on the sandbox path, and nothing retries it. A release that resolves with a hub error stays held and is dispatched again at the next connect.
+A release's result is logged, like the sandbox path's teardown result, and never becomes a `TaskFailure`. The hub updates the held set on every release result, whichever path dispatched it. A `removed_clean` or `salvaged_and_removed` outcome drops the task. A `kept` outcome or a failed release also drops the task from the held set, and the connector stops listing it (rule 8): the workspace is the operator's, as `wip_push_failed_kept` is on the sandbox path, and nothing retries it. A release that resolves with a hub error stays held and is dispatched again at the next connect or sweep.
 
 ## Coding on a connector `[proposed]`
 
