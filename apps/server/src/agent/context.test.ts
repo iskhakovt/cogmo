@@ -1640,11 +1640,11 @@ describe("summarizationRequest", () => {
       messages: [msg("user", "hello"), msg("assistant", "hi")],
     });
 
-    // 200,000 − 64,000 − the 10,000 safety buffer.
+    // 200,000 − the 16,000 output cap − the 10,000 safety buffer.
     expect(params.clearToolResults).toEqual({
-      triggerTokens: 126_000,
+      triggerTokens: 174_000,
       keep: 5,
-      clearAtLeastTokens: 12_600,
+      clearAtLeastTokens: 17_400,
     });
   });
 

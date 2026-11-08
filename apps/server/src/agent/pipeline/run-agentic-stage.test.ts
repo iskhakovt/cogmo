@@ -322,9 +322,14 @@ describe("runAgenticStage", () => {
 
       const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
       const fork = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
-      // The summarization model is the stage's: the intent triggers at its
-      // whole budget, where the stage's triggers at 60% of it.
-      const budget = computeBudget(resolveLimits(loopParams.model));
+      // The summarization model is the stage's: the intent triggers at the
+      // input its window leaves beside the fork's output cap, where the
+      // stage's triggers at 60% of the stage's budget.
+      const limits = resolveLimits(loopParams.model);
+      const budget = computeBudget({
+        ...limits,
+        maxOutputTokens: Math.min(16_000, limits.maxOutputTokens),
+      });
       expect(fork).toMatchObject({
         system: loopParams.systemPrompt,
         tools: loopParams.tools.definitions(),

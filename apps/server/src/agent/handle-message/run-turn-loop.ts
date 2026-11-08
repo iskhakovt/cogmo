@@ -195,11 +195,11 @@ async function withDegradedReply(
   // came from the step cache).
   const retraction = computeRetraction(result.streamed, result.newMessages, turnLogger);
   // One step owns the whole user-visible off-ramp: the synthesis LLM
-  // call plus the retract/apology pushes. The
-  // synthesis is billable and the pushes append to the user's live
-  // message, so both must fire exactly once across the persist /
-  // delivery / notify boundaries that follow — in the bare body
-  // they would re-fire on every subsequent re-invocation. The
+  // call plus the retract/apology pushes. The synthesis is billable
+  // and the pushes append to the user's live message, so both must
+  // fire exactly once across the persist / delivery / notify
+  // boundaries that follow — in the bare body they would re-fire on
+  // every subsequent re-invocation. The
   // step returns the apology text, so replays persist the same
   // words the user saw. Plain `step.run`, not the `stepRun`
   // wrapper: synthesizeDegradedReply swallows provider failures

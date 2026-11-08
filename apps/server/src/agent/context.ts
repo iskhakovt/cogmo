@@ -133,7 +133,8 @@ const CLEAR_AT_LEAST = 0.1;
 /**
  * Strategy 1's edit intent for a turn with `budget` input tokens: once the
  * prompt passes 60% of the budget, clear every tool result but the last five,
- * provided they free a tenth of it. Every request of the turn carries it.
+ * provided they free a tenth of it. The turn's counts, iterations and
+ * degraded-reply synthesis carry it.
  */
 export function toolResultClearing(budget: number): ToolResultClearing {
   return {
@@ -144,9 +145,10 @@ export function toolResultClearing(budget: number): ToolResultClearing {
 }
 
 /**
- * Strategy 1's edit intent for a summarization fork on a model with `budget`
- * input tokens: it clears only once the prompt passes the budget, so a prefix
- * that fits is summarized from the full tool results. What it keeps and frees
+ * Strategy 1's edit intent for a summarization fork whose request leaves
+ * `budget` input tokens beside its output cap: it clears only once the prompt
+ * passes the budget, so a prefix that fits is summarized from the full tool
+ * results. What it keeps and frees
  * follows {@link toolResultClearing} (design/context-management.md →
  * Strategy 2 → Cleared results in the fork).
  */
@@ -184,7 +186,8 @@ Be specific — preserve names, paths, and values, not abstractions.`;
  * → Fork shape). It sends the `system` and `tools` the turn sends with
  * `toolChoice: "none"`, so the thinking blocks the prefix replays stay valid,
  * appends its instruction as a user message, and carries the summarization
- * model's own Strategy 1 intent, triggered at that model's budget.
+ * model's own Strategy 1 intent, triggered at the input its window leaves
+ * beside the request's output cap.
  *
  * The prefix is repaired first, through the same `validateHistory` the agent
  * loop applies to every request — so the summarizer reads the shape the model
@@ -220,14 +223,17 @@ export function summarizationRequest(params: {
     // silently — and folds them into a summary that is never re-derived.
     logger.warn({ repairCount: repairs.length, repairs }, "repaired summarization prefix");
   }
+  const maxTokens = Math.min(16_000, params.limits.maxOutputTokens);
   return {
     model: params.model,
     system: params.system,
     messages: [...repaired, { role: "user", content: SUMMARIZATION_PROMPT }],
     tools: [...params.tools],
     toolChoice: "none",
-    maxTokens: Math.min(16_000, params.limits.maxOutputTokens),
-    clearToolResults: summarizationClearing(computeBudget(params.limits)),
+    maxTokens,
+    clearToolResults: summarizationClearing(
+      computeBudget({ ...params.limits, maxOutputTokens: maxTokens }),
+    ),
   };
 }
 
