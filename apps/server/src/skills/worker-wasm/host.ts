@@ -464,7 +464,10 @@ export function createWasmSchemaImporter(opts: WasmProbeOptions): WasmSchemaImpo
   };
 }
 
-/** The child's schemas, parsed: `inputs` an object schema, `outputs` a JSON object. */
+/**
+ * The child's schemas, parsed: `inputs` must be an object schema. `outputs`
+ * crossed JSON IPC as an object, so it is one, and a failed parse is a bug.
+ */
 function importedSchemas(
   inputs: Record<string, unknown> | null,
   outputs: Record<string, unknown> | null,
@@ -476,14 +479,10 @@ function importedSchemas(
       message: `Input's JSON Schema does not describe an object: ${z.prettifyError(parsedInputs.error)}`,
     });
   }
-  const parsedOutputs = outputs === null ? null : SkillIoSchema.safeParse(outputs);
-  if (parsedOutputs !== null && !parsedOutputs.success) {
-    return err({
-      kind: "refused",
-      message: `Output's JSON Schema is not a JSON object: ${z.prettifyError(parsedOutputs.error)}`,
-    });
-  }
-  return ok({ inputs: parsedInputs?.data ?? null, outputs: parsedOutputs?.data ?? null });
+  return ok({
+    inputs: parsedInputs?.data ?? null,
+    outputs: outputs === null ? null : SkillIoSchema.parse(outputs),
+  });
 }
 
 /**
