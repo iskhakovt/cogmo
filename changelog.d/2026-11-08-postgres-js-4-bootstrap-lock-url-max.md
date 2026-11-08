@@ -1,0 +1,1 @@
+**The bootstrap lock accepts a pool size from `DATABASE_URL` or `PGMAX`.** The database driver is postgres-js 4, which opens as many connections as a `?max=` or `PGMAX` value's number, rounded up. `cogmo serve`, `cogmo seed`, `cogmo setup` and `pnpm db:migrate` start with such a pool, and refuse one under two connections or a `max` that isn't a number, which opens none.

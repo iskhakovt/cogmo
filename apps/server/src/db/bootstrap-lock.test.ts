@@ -15,36 +15,30 @@ function withPgmax(value: string): ReturnType<typeof postgres> {
 }
 
 describe("bootstrapLock", () => {
-  it("refuses a pool of one connection", async () => {
-    const sql = postgres(URL, { max: 1 });
-    expect(() => bootstrapLock(sql)).toThrow("at least 2");
+  it.each([
+    ["max: 1", () => postgres(URL, { max: 1 }), "max=1 opens 1;"],
+    ["?max=1", () => postgres(`${URL}?max=1`), "max=1 opens 1;"],
+    ["PGMAX=1", () => withPgmax("1"), "max=1 opens 1;"],
+    ["?max=0.5", () => postgres(`${URL}?max=0.5`), "max=0.5 opens 1;"],
+    ["?max=0", () => postgres(`${URL}?max=0`), "max=0 opens 0;"],
+    ["?max=abc", () => postgres(`${URL}?max=abc`), "max=abc opens 0;"],
+    ["an empty ?max=", () => postgres(`${URL}?max=`), "max= opens 0;"],
+  ])("refuses a pool sized by %s", async (_, client, message) => {
+    const sql = client();
+    expect(() => bootstrapLock(sql)).toThrow(`at least 2, but ${message}`);
     await sql.end();
   });
-
-  // postgres-js sizes its pool with `Array(options.max)`: a string or missing
-  // `max` builds one connection, whatever number the string holds.
-  it.each([
-    ["?max=5", () => postgres(`${URL}?max=5`)],
-    ["?max=1", () => postgres(`${URL}?max=1`)],
-    ["?max=abc", () => postgres(`${URL}?max=abc`)],
-    ["PGMAX=5", () => withPgmax("5")],
-    ["PGMAX=1", () => withPgmax("1")],
-    [
-      "an explicit max: undefined",
-      () => postgres(URL, { max: undefined } as unknown as Parameters<typeof postgres>[1]),
-    ],
-  ])(
-    "refuses a pool sized by %s, which postgres-js opens with one connection",
-    async (_, client) => {
-      const sql = client();
-      expect(() => bootstrapLock(sql)).toThrow(/one connection. Set `max` in code/);
-      await sql.end();
-    },
-  );
 
   it.each([
     ["max: 2", () => postgres(URL, { max: 2 })],
     ["the default pool", () => postgres(URL)],
+    ["?max=5", () => postgres(`${URL}?max=5`)],
+    ["PGMAX=5", () => withPgmax("5")],
+    ["?max=1.5, which opens 2", () => postgres(`${URL}?max=1.5`)],
+    [
+      "an explicit max: undefined, which takes the default",
+      () => postgres(URL, { max: undefined } as unknown as Parameters<typeof postgres>[1]),
+    ],
   ])("accepts %s", async (_, client) => {
     const sql = client();
     expect(bootstrapLock(sql)).toBeTypeOf("function");
