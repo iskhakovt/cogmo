@@ -54,7 +54,7 @@ COPY src /app/src/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable
 
-# design/testing.md → Mutation Testing. The package resolves to `/app/src`,
+# design/testing.md → Mutation Testing. The packages resolve to `/app/src`,
 # which scripts/mutation.sh overlays with mutmut's mutated copy to re-run a
 # mutant, so the `python -I` subprocesses the suite starts run it too.
 FROM builder AS mutation
