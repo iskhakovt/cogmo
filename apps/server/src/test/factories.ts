@@ -821,7 +821,10 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
   };
 }
 
-/** An agent-loop result: an empty one-iteration turn that streamed nothing, unless overridden. */
+/**
+ * An agent-loop result: an empty one-iteration turn that streamed nothing and
+ * recorded no request heads, unless overridden.
+ */
 export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResult {
   return {
     text: "",
@@ -831,6 +834,7 @@ export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResul
     model: "mock-model",
     iterations: 1,
     streamed: { text: "", toolUseIds: [] },
+    requests: { system: "", tools: [], historyLength: 0, sent: [], diverged: false },
     ...overrides,
   };
 }

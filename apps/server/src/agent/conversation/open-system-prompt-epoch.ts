@@ -1,3 +1,4 @@
+import type { SystemPromptEpochReason } from "../store/schema.js";
 import { type EpochSnapshot, epochOf } from "../system-prompt-snapshot.js";
 import {
   type RenderSystemPromptArgs,
@@ -18,6 +19,7 @@ export async function openSystemPromptEpoch(
     openedBy: string;
     historyStart: string;
     attachmentCutoff: string | null;
+    reason: SystemPromptEpochReason;
   },
 ): Promise<EpochSnapshot> {
   return deps.runInTx(async (tx) => {
@@ -30,6 +32,7 @@ export async function openSystemPromptEpoch(
         rendered,
         configDigest,
         attachmentCutoff: args.attachmentCutoff,
+        reason: args.reason,
       }),
     );
   });

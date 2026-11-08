@@ -22,6 +22,7 @@
  */
 
 import type { Logger } from "pino";
+import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
@@ -48,6 +49,7 @@ import type { CodingService } from "../coding/service.js";
 import {
   compactMessages,
   extractSummaryText,
+  rewroteWithoutSummary,
   shouldSkipCounting,
   summarizationRequest,
 } from "../context.js";
@@ -75,8 +77,9 @@ import type { Service } from "../service.js";
 import type { AgentStore } from "../store/index.js";
 import { toStoredMessage } from "../stored-content.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
-import { stripThinkingBefore } from "../system-prompt-snapshot.js";
+import { historyStart, stripThinkingBefore } from "../system-prompt-snapshot.js";
 import type { ToolRegistry } from "../tools.js";
+import { type HeadView, rowHeads, TranscriptHasher } from "../transcript-head.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import {
   findTurnContext,
@@ -448,6 +451,7 @@ export async function runAgenticStage(
 
   const splitIdx = compacted.event?.messagesSummarized ?? 0;
   const span = splitIdx > 0 ? summarizedSpan(turnHistory.messageIds, splitIdx) : null;
+  let storedCutoff: string | null = null;
   if (summaryText !== null && span !== null && !summaryTruncated) {
     const text = summaryText;
     // A cached summary is not worth failing the stage over: a permanently
@@ -466,10 +470,16 @@ export async function runAgenticStage(
         );
         return { id: row.id };
       });
+      storedCutoff = span.cutoff;
     } catch (err) {
       log.warn({ err }, "failed to persist stage conversation summary, continuing the stage");
     }
   }
+  // What the stage's assistant rows record of the view it loaded.
+  const headView: HeadView = {
+    historyStart: historyStart(turnHistory.messageIds, null),
+    compacted: rewroteWithoutSummary(compacted.event, storedCutoff),
+  };
 
   const turnPosition = findTurnContext(compacted.messages, provisionalTurnContext);
   if (turnPosition === -1) throw new Error("compaction dropped the stage's own message");
@@ -527,6 +537,7 @@ export async function runAgenticStage(
       stepRun: steps.stepRun,
       turnKey: inboundId,
       cache: turnCacheIntent(conversationId, "stage"),
+      site: "stage",
       clearToolResults,
       turnLogger: log,
     });
@@ -575,10 +586,15 @@ export async function runAgenticStage(
   await steps.run("persist-new-messages", async () => {
     // A turn that degraded on its first iteration kept nothing to write.
     if (result.newMessages.length === 0) return { id: null };
+    // Hashed in the step body, so a replay of the persisted stage hashes nothing.
+    const heads = rowHeads(new TranscriptHasher(), result.requests, result.newMessages, headView);
     const { id } = await deps.runInTx((tx) =>
       deps.agentStore.insertMessages(tx, {
         conversationId,
-        messages: result.newMessages.map(toStoredMessage),
+        messages: R.zip(result.newMessages, heads).map(([message, transcriptHead]) => ({
+          ...toStoredMessage(message),
+          ...(transcriptHead !== null && { transcriptHead }),
+        })),
         profileId: ctx.profileId,
         model: ctx.model,
         lastInboundMessageId: inboundId,

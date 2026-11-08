@@ -1,6 +1,8 @@
-import { index, integer, pgEnum, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, pgEnum, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../../db/helpers.js";
 import { StoredMessageContentSchema } from "../../stored-content.js";
+import { TranscriptHeadSchema } from "../../transcript-head.js";
 import { TurnContextSchema } from "../../turn-context.js";
 import { conversations } from "./conversations.js";
 import { profiles } from "./profiles.js";
@@ -45,11 +47,20 @@ export const messages = pgTable(
     // and used as a sentinel on non-assistant rows where output is N/A; the
     // fast path (`shouldSkipCounting`) treats -1 as "unknown → force count".
     outputTokens: integer("output_tokens").notNull(),
+    // Nullable: set on the assistant rows a turn writes, the head of the
+    // request that produced the row extended through it. NULL on user rows,
+    // on rows written before the column, and on rows whose request carried no
+    // head. See design/prompt-caching.md → Head check.
+    transcriptHead: jsonbZod("transcript_head", TranscriptHeadSchema),
     createdAt: ts(),
   },
   (t) => [
     index("idx_messages_conv_id").on(t.conversationId, t.id),
     index("idx_messages_profile_id").on(t.profileId),
+    check(
+      "chk_messages_transcript_head_assistant",
+      sql`${t.transcriptHead} IS NULL OR ${t.role} = 'assistant'`,
+    ),
   ],
 );
 
@@ -133,6 +144,21 @@ export const turnContexts = pgTable(
 );
 
 /**
+ * `system_prompt_snapshots.reason` — why the epoch opened, in the epoch rule's
+ * precedence: the first of these that applies is recorded (design/
+ * prompt-caching.md → Head check → Epoch rule).
+ */
+export const systemPromptEpochReason = pgEnum("system_prompt_epoch_reason", [
+  "first_turn",
+  "configuration",
+  "summary",
+  "compaction",
+  "attachments",
+  "prefix_violation",
+]);
+export type SystemPromptEpochReason = (typeof systemPromptEpochReason.enumValues)[number];
+
+/**
  * The system prompt a conversation's chat turns send for one epoch: rendered
  * when the epoch opens, sent unchanged until the next. Immutable; unique on
  * `opened_by`, the opening step's idempotency key. See
@@ -161,6 +187,7 @@ export const systemPromptSnapshots = pgTable(
      * nullable: NULL is no cutoff.
      */
     attachmentCutoff: uuid("attachment_cutoff").references(() => messages.id),
+    reason: systemPromptEpochReason("reason").notNull(),
     createdAt: ts(),
   },
   // `opened_by` alone identifies an epoch, since a message belongs to one

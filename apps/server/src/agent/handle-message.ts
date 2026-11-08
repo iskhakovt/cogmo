@@ -40,6 +40,7 @@ import type { PromptSource } from "./prompt.js";
 import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import type { StoredContent } from "./stored-content.js";
+import { historyStart } from "./system-prompt-snapshot.js";
 import type { ToolRegistry } from "./tools.js";
 import { createTurnStepRunner } from "./turn-step-runner.js";
 
@@ -338,6 +339,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         lastAnsweredMessageId,
         priorCooldown: conv.cooldownState,
         result,
+        view: {
+          historyStart: historyStart(transcript.history.messageIds, null),
+          compacted: compacted.rewroteView,
+        },
       });
 
       return match(persisted)

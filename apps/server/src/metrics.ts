@@ -17,6 +17,7 @@ interface Instruments {
   memoryRecallFailures: Counter;
   coreMemoryEdits: Counter;
   attachmentPlaceholders: Counter;
+  promptServerMismatches: Counter;
 }
 
 let cached: Instruments | null = null;
@@ -47,6 +48,10 @@ function instruments(): Instruments {
     attachmentPlaceholders: meter.createCounter("cogmo.attachments.placeholders", {
       description: "Attachments sent as a placeholder instead of their content",
       unit: "{attachment}",
+    }),
+    promptServerMismatches: meter.createCounter("cogmo.prompt.server_mismatches", {
+      description: "Input transformations a provider reported on a request",
+      unit: "{transformation}",
     }),
   };
   return cached;
@@ -129,6 +134,20 @@ export const coreMemoryEdits = {
 export const attachmentPlaceholders = {
   add(value: number, attrs?: MetricAttributes): void {
     instruments().attachmentPlaceholders.add(value, attrs);
+  },
+};
+
+/**
+ * Input transformations the provider reported on a request (Anthropic's
+ * `input_transformations`), labeled by `type`, `reason` and `site`
+ * (`iteration` for a chat turn's request, `stage` for a pipeline stage's).
+ * Counted inside the `llm-iter<N>` step body, so a replay adds nothing.
+ * Which ones mark the transcript head `diverged`: design/prompt-caching.md →
+ * Head check.
+ */
+export const promptServerMismatches = {
+  add(value: number, attrs?: MetricAttributes): void {
+    instruments().promptServerMismatches.add(value, attrs);
   },
 };
 

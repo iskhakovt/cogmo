@@ -97,6 +97,23 @@ export interface CompactResult {
   event?: CompactionEvent;
 }
 
+/**
+ * Whether a compaction rewrote the view in a way no stored summary
+ * reproduces: Strategy 3 truncated it, or Strategy 2 summarized it and
+ * `storedCutoff` is null because the summary wasn't stored (cut at its output
+ * cap, no span to cover, or the write failed). The next turn can't rebuild
+ * such a view from rows (design/prompt-caching.md → Head check).
+ */
+export function rewroteWithoutSummary(
+  event: CompactionEvent | undefined,
+  storedCutoff: string | null,
+): boolean {
+  const strategies = event?.strategies ?? [];
+  return (
+    strategies.includes("truncate") || (strategies.includes("summarize") && storedCutoff === null)
+  );
+}
+
 const CLEAR_THRESHOLD = 0.6;
 const SUMMARIZE_THRESHOLD = 0.8;
 const TRUNCATE_THRESHOLD = 0.95;

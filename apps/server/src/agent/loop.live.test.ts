@@ -137,6 +137,7 @@ describe.skipIf(API_KEY === undefined)("runStreamingAgentLoop prompt caching (li
         maxTokens: 8000,
         onEvent: async () => {},
         cache: { key: nonce, retention: "long" },
+        site: "iteration",
         turnLogger: logger,
       }).then(expectFinished);
 

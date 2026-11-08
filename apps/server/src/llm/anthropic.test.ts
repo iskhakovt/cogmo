@@ -908,6 +908,108 @@ describe("AnthropicProvider", () => {
     );
   });
 
+  describe("input transformations", () => {
+    const params = {
+      model: "claude-opus-5-5",
+      system: "sys",
+      messages: [{ role: "user" as const, content: "hi" }],
+    };
+    const DROPPED = {
+      type: "thinking_dropped",
+      reason: "prefix_binding_mismatch",
+      path: "messages.1.content.0",
+    };
+    const ALLOWED = {
+      type: "thinking_mismatch_allowed",
+      reason: "prefix_binding_mismatch",
+      path: "messages.3.content.0",
+    };
+
+    /** A one-block text stream; `start` and `delta` extend its message_start and message_delta. */
+    function stream(start: object, delta: object) {
+      return mockStream([
+        {
+          type: "message_start",
+          message: {
+            model: "claude-opus-5-5",
+            usage: { input_tokens: 10, output_tokens: 0 },
+            ...start,
+          },
+        },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+        { type: "content_block_stop", index: 0 },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 2 },
+          ...delta,
+        },
+        { type: "message_stop" },
+      ]);
+    }
+
+    it("reads them from message_start onto the done frame", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        stream({ input_transformations: [DROPPED, ALLOWED] }, { input_transformations: null }),
+      );
+
+      const { meta } = await drainFrames(provider.chatStream(params));
+
+      expect(meta.inputTransformations).toEqual([DROPPED, ALLOWED]);
+    });
+
+    it("takes a final message_delta's, which replace message_start's after a model fallback", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        stream({ input_transformations: [DROPPED] }, { input_transformations: [ALLOWED] }),
+      );
+
+      const { meta } = await drainFrames(provider.chatStream(params));
+
+      expect(meta.inputTransformations).toEqual([ALLOWED]);
+    });
+
+    it("reports an empty list as empty and an absent one as absent", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(stream({ input_transformations: [] }, {}));
+      mockCreate.mockResolvedValueOnce(stream({}, {}));
+
+      const reported = await drainFrames(provider.chatStream(params));
+      const absent = await drainFrames(provider.chatStream(params));
+
+      expect(reported.meta.inputTransformations).toEqual([]);
+      expect(absent.meta).not.toHaveProperty("inputTransformations");
+    });
+
+    it("drops an entry missing a field, as an unknown entry type", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        stream({ input_transformations: [{ type: "something_new" }, DROPPED] }, {}),
+      );
+
+      const { meta } = await drainFrames(provider.chatStream(params));
+
+      expect(meta.inputTransformations).toEqual([DROPPED]);
+    });
+
+    it("reads them from a non-streaming response", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-opus-5-5",
+        usage: { input_tokens: 10, output_tokens: 2 },
+        input_transformations: [ALLOWED],
+      });
+
+      const result = await provider.chat(params);
+
+      expect(result.inputTransformations).toEqual([ALLOWED]);
+    });
+  });
+
   describe("abort signal", () => {
     const params = {
       model: "claude-sonnet-5",

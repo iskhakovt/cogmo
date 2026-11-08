@@ -304,6 +304,73 @@ describe("runAgenticStage", () => {
     expect(fork.clearToolResults).toBeDefined();
   });
 
+  describe("transcript heads", () => {
+    /** A stage loop whose one request carried a head. */
+    function headedLoop(historyLength: number): StreamingLoopOutcome {
+      return planLoop({
+        requests: {
+          system: "SYSTEM PROMPT",
+          tools: [],
+          historyLength,
+          sent: [{ length: historyLength, digest: "f".repeat(64) }],
+          diverged: false,
+        },
+      });
+    }
+
+    function replyHead(h: Awaited<ReturnType<typeof harness>>) {
+      const [, params] = expectDefined(
+        vi.mocked(h.agentStore.insertMessages).mock.calls[0],
+        "insertMessages call",
+      );
+      return params.messages.at(-1)?.transcriptHead;
+    }
+
+    it("counts under site stage and heads the reply from the loaded history's start", async () => {
+      const h = await harness();
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(1));
+      const { steps } = recordingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+      expect(loopParams.site).toBe("stage");
+      expect(replyHead(h)).toMatchObject({ length: 2, historyStart: "msg-1", status: "intact" });
+    });
+
+    it("heads the reply compacted when its summary wasn't stored", async () => {
+      const h = await harness();
+      vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+        { id: "m1", role: "user", content: "m1" },
+        { id: "m2", role: "assistant", content: "r1" },
+        { id: "m3", role: "user", content: "m2" },
+        { id: "m4", role: "assistant", content: "r2" },
+        { id: "m5", role: "user", content: "m3" },
+        { id: "m6", role: "assistant", content: "r3" },
+        { id: "m7", role: "user", content: "m4" },
+        { id: "m8", role: "assistant", content: "r4" },
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]);
+      const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+      vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
+      // Cut at its output cap, so the stage uses it and stores nothing.
+      vi.mocked(provider.chat).mockResolvedValueOnce({
+        content: [{ type: "text", text: "Summary of the run" }],
+        stopReason: "max_tokens",
+        model: "claude-sonnet-4-6",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(7));
+      const { steps } = recordingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      expect(h.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+      expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
+    });
+  });
+
   it("summarizes a view past 80% of the view cap without counting it", async () => {
     const h = await harness();
     // Past 80% of the view cap, within 80% of the request cap it leaves the wire room under.

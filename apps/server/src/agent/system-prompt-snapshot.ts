@@ -15,6 +15,7 @@ import {
   type ScopedCoreMemoryBlock,
 } from "./core-memory/scope.js";
 import type { SystemPromptSnapshot } from "./store/index.js";
+import type { SystemPromptEpochReason } from "./store/schema.js";
 
 /** An epoch's snapshot as a step returns it. */
 export interface EpochSnapshot {
@@ -114,6 +115,26 @@ export function continuesEpoch(
     snapshot.configDigest === current.configDigest &&
     snapshot.historyStart === current.historyStart
   );
+}
+
+/**
+ * Why a turn that doesn't continue its epoch opens one: the first that applies
+ * in the epoch rule's precedence. No snapshot is the conversation's first
+ * turn; a different digest is `configuration`; a history start other than the
+ * snapshot's, the loaded one or the one after a summary this turn stored, is
+ * `summary`. A turn that matches on all three opens only because it advanced
+ * the attachment cutoff.
+ */
+export function epochReason(
+  snapshot: { configDigest: string; historyStart: string } | null,
+  turn: { configDigest: string; loadedStart: string; epochStart: string },
+): SystemPromptEpochReason {
+  if (snapshot === null) return "first_turn";
+  if (snapshot.configDigest !== turn.configDigest) return "configuration";
+  if (snapshot.historyStart !== turn.loadedStart || snapshot.historyStart !== turn.epochStart) {
+    return "summary";
+  }
+  return "attachments";
 }
 
 /**
