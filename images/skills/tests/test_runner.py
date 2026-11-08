@@ -98,7 +98,6 @@ class TestErrors:
         assert result["errorKind"] == "skill_raised"
         assert "RuntimeError" in result["error"]
         assert "skill failed" in result["error"]
-        assert "traceback" in result
 
     @pytest.mark.asyncio
     async def test_missing_run_function(self) -> None:

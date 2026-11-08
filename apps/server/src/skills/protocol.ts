@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CtxErrorKindSchema } from "./ctx-contract.js";
 import type { SkillRunErrorKind } from "./store/index.js";
 
 /**
@@ -19,7 +20,7 @@ import type { SkillRunErrorKind } from "./store/index.js";
 export const SUPERVISOR_PROTOCOL_VERSION = 5;
 
 /** Container tier only: the supervisor's first frame, announcing its protocol version. */
-const SupervisorReadySchema = z.object({
+export const SupervisorReadySchema = z.object({
   type: z.literal("supervisor_ready"),
   protocolVersion: z.number().int(),
 });
@@ -224,8 +225,8 @@ const CtxResultErrSchema = z.object({
   taskId: z.string().min(1),
   id: z.string().min(1),
   ok: z.literal(false),
-  /** Typed error code surfaced to Python as a specific exception class. */
-  errorKind: z.string().min(1),
+  /** Raised in the skill as `CtxError.kind`. */
+  errorKind: CtxErrorKindSchema,
   message: z.string(),
 });
 export const CtxResultSchema = z.union([CtxResultOkSchema, CtxResultErrSchema]);

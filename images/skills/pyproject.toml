@@ -4,7 +4,7 @@
 # `python3 -I -u -m cogmo_skills_runtime`.
 #
 # Production has zero runtime deps (stdlib only). Dev group covers
-# ruff/pyrefly/pytest for the local + CI workflow. uv-managed lockfile
+# ruff/pyrefly/pytest and jsonschema for the local + CI workflow. uv-managed lockfile
 # is the source of truth for what the image installs.
 
 [project]
@@ -17,6 +17,7 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4.26.0",
     "pyrefly>=0.61.0",
     "ruff>=0.14.0",
     "pytest>=9.0.0",

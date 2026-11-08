@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,9 @@ pytestmark = pytest.mark.skipif(
 
 RUN = {"id": "run-1", "key": "key-1"}
 
+# The `protocol` fixture (conftest.py).
+type ProtocolCheck = Callable[[str, object], None]
+
 
 class _Supervisor:
     """A supervisor subprocess plus a reader thread queueing its stdout frames.
@@ -39,7 +42,8 @@ class _Supervisor:
     `main()`, to stub one of its internals.
     """
 
-    def __init__(self, *, cwd: Path, patch: str | None = None) -> None:
+    def __init__(self, *, cwd: Path, protocol: ProtocolCheck, patch: str | None = None) -> None:
+        self._protocol = protocol
         argv = ["-m", "cogmo_skills_runtime"]
         if patch is not None:
             argv = ["-c", f"from cogmo_skills_runtime import supervisor\n{patch}\nsupervisor.main()\n"]
@@ -69,7 +73,10 @@ class _Supervisor:
                 self._frames.put(frame)
         self._frames.put(None)
 
-    def send(self, frame: Mapping[str, object]) -> None:
+    def send(self, frame: Mapping[str, object], *, conforming: bool = True) -> None:
+        """Send a host frame, checked against the protocol unless the test means it not to conform."""
+        if conforming:
+            self._protocol(str(frame["type"]), frame)
         assert self.proc.stdin is not None
         self.proc.stdin.write((json.dumps(frame) + "\n").encode())
         self.proc.stdin.flush()
@@ -131,8 +138,8 @@ class _Supervisor:
 
 
 @pytest.fixture
-def sup(tmp_path: Path) -> Generator[_Supervisor]:
-    s = _Supervisor(cwd=tmp_path)
+def sup(tmp_path: Path, protocol: ProtocolCheck) -> Generator[_Supervisor]:
+    s = _Supervisor(cwd=tmp_path, protocol=protocol)
     yield s
     s.close()
 
@@ -276,11 +283,13 @@ class TestTaskIsolation:
         # 39 = PR_GET_NO_NEW_PRIVS
         assert sup.run_task("t-nnp", body, {})["output"] == 1
 
-    def test_a_module_a_task_plants_in_the_cwd_never_loads_in_a_later_task(self, tmp_path: Path) -> None:
+    def test_a_module_a_task_plants_in_the_cwd_never_loads_in_a_later_task(
+        self, tmp_path: Path, protocol: ProtocolCheck
+    ) -> None:
         """The host starts the supervisor in `$HOME`, which tasks can write,
         and every task forks from it. Started isolated, the supervisor keeps
         that cwd off `sys.path`, so a later task's `import csv` is the stdlib's."""
-        sup = _Supervisor(cwd=tmp_path)
+        sup = _Supervisor(cwd=tmp_path, protocol=protocol)
         try:
             planted = sup.run_task("t-plant", _PLANT_CSV, {})
             assert planted["output"] == str(tmp_path), planted
@@ -319,6 +328,32 @@ def _descendant_pids(root: int) -> list[int]:
 class TestSupervisorProtocol:
     def test_announces_its_protocol_version_first(self, sup: _Supervisor) -> None:
         assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 5}
+
+    @pytest.mark.parametrize(
+        ("body", "wall_clock_s", "outcome"),
+        [
+            ("async def run(inputs, ctx):\n    return {'now': await ctx.now()}\n", 5, {"ok": True}),
+            (
+                "import time\nasync def run(inputs, ctx):\n    await ctx.now()\n    time.sleep(30)\n",
+                1,
+                {"ok": False, "errorKind": "wall_clock_exceeded"},
+            ),
+        ],
+    )
+    def test_every_frame_it_sends_matches_the_protocol(
+        self, sup: _Supervisor, protocol: ProtocolCheck, body: str, wall_clock_s: float, outcome: dict[str, object]
+    ) -> None:
+        sent = [frame for frame in [sup.next_frame(10)] if frame is not None]
+        sup.send_task("t-frames", body, {}, wall_clock_s=wall_clock_s)
+        call = sup.next_frame(5)
+        assert call is not None
+        sent.append(call)
+        sup.send({"type": "ctx_result", "taskId": "t-frames", "id": call["id"], "ok": True, "value": "now"})
+        sent.extend(sup.frames_until_exit(timeout=wall_clock_s + 5))
+        assert [frame["type"] for frame in sent] == ["supervisor_ready", "ctx_call", "task_result", "task_exited"]
+        assert outcome.items() <= sent[2].items()
+        for frame in sent:
+            protocol(frame["type"], frame)
 
     def test_confirms_each_task_exited_and_serves_the_next(self, sup: _Supervisor) -> None:
         first = sup.run_task("t-1", _ECHO, {"n": 1})
@@ -382,7 +417,7 @@ class TestSupervisorProtocol:
         while call is not None and call.get("type") != "ctx_call":
             call = sup.next_frame(5)
         assert call is not None
-        sup.send({"type": "ctx_result", "id": call["id"], "ok": True, "value": "untagged"})
+        sup.send({"type": "ctx_result", "id": call["id"], "ok": True, "value": "untagged"}, conforming=False)
         frames = sup.frames_until_exit(timeout=5)
         assert frames[0] == {
             "type": "task_result",
@@ -393,8 +428,12 @@ class TestSupervisorProtocol:
         }
         assert frames[-1] == {"type": "task_exited", "id": "t-old"}
 
-    def test_exits_without_task_exited_when_the_sweep_cannot_empty_the_subtree(self, tmp_path: Path) -> None:
-        sup = _Supervisor(cwd=tmp_path, patch="supervisor._sweep_descendants = lambda deadline_s: False")
+    def test_exits_without_task_exited_when_the_sweep_cannot_empty_the_subtree(
+        self, tmp_path: Path, protocol: ProtocolCheck
+    ) -> None:
+        sup = _Supervisor(
+            cwd=tmp_path, protocol=protocol, patch="supervisor._sweep_descendants = lambda deadline_s: False"
+        )
         try:
             result = sup.run_task("t-stuck", _ECHO, {})
             assert result["ok"] is True

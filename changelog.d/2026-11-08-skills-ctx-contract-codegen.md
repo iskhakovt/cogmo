@@ -1,0 +1,5 @@
+The skills `ctx` surface has one contract, `src/skills/ctx-contract.ts`, from which the Python side's types and the worker protocol's JSON Schemas are generated (design/skills.md → Contracts).
+
+- The Zod contract names each ctx method's arguments and result and the `CtxErrorKind`s a refusal carries. The handler validates arguments against it and types each method's result against it at compile time.
+- `pnpm --filter cogmo codegen:ctx` writes `cogmo_ctx/_contract.py` and `images/skills/contract/worker-protocol.schema.json`, and a unit test fails when either is stale. The Python module holds the result `TypedDict`s, `CtxErrorKind` and a `Bridge` typed per method, so `Ctx`'s signatures name real types (`await ctx.http.get(...)` is an `HttpResponse`) and pyrefly checks them against the contract.
+- The skills runtime's pytest suite checks frames in both directions against the schemas: each method's arguments, the runner's `task_result`s, the supervisor's frames and the host frames its harness sends. A `task_result` carries no `traceback` field, which the host never read.
