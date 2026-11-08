@@ -342,13 +342,12 @@ function runFailureOf(py: PyodideInterface): StageFailure | null {
  */
 function keptOutputOf(py: PyodideInterface): unknown {
   return Result.fromThrowable(
-    () => py.runPython("_cogmo_encode_output(__cogmo_result)"),
+    (): unknown => {
+      const encoded: unknown = py.runPython("_cogmo_encode_output(__cogmo_result)");
+      return typeof encoded === "string" ? (JSON.parse(encoded) ?? undefined) : undefined;
+    },
     () => undefined,
-  )().match(
-    (encoded: unknown) =>
-      typeof encoded === "string" ? (JSON.parse(encoded) ?? undefined) : undefined,
-    () => undefined,
-  );
+  )().unwrapOr(undefined);
 }
 
 /**

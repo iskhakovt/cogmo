@@ -4,14 +4,13 @@ import { logger } from "../../logger.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { truncate } from "../../util/string.js";
 import { DefaultCtxHandler, type DefaultCtxHandlerOptions } from "../ctx-handler.js";
-import type { DispatchDecision, DispatchGate, TaskErrorKind, TaskOutcome } from "../protocol.js";
+import type { DispatchDecision, DispatchGate, TaskOutcome } from "../protocol.js";
 import type { SkillRunAs } from "../run-as.js";
 import type { SkillSourceCacheEntry } from "../source-cache.js";
 import type {
   ExecutedOutcome,
   ExecuteRunTransition,
   SkillRow,
-  SkillRunError,
   SkillRunRow,
   SkillStore,
 } from "../store/index.js";
@@ -159,24 +158,20 @@ async function recordExecuted(
 
 /** A task's outcome as the `executed` row records it. */
 function executedOutcomeOfTask(result: TaskOutcome): ExecutedOutcome {
-  return match(result)
-    .returnType<ExecutedOutcome>()
-    .with({ ok: true }, ({ output }) => ({ kind: "output", output: output ?? null }))
-    .with({ ok: false }, ({ errorKind, error, output }) => ({
-      kind: "error",
-      error: taskError(errorKind, error, output),
-    }))
-    .exhaustive();
-}
-
-/**
- * A runtime's error as a run error. An `output_invalid` keeps the output its
- * worker kept: what an `Output` model refused, when JSON carried it.
- */
-function taskError(kind: TaskErrorKind, message: string, output: unknown): SkillRunError {
-  return match(kind)
-    .returnType<SkillRunError>()
-    .with("output_invalid", (k) => ({ kind: k, message, output: output ?? null }))
-    .with(P.not("output_invalid"), (k) => ({ kind: k, message }))
-    .exhaustive();
+  return (
+    match(result)
+      .returnType<ExecutedOutcome>()
+      .with({ ok: true }, ({ output }) => ({ kind: "output", output: output ?? null }))
+      // An `output_invalid` keeps the output its worker kept: what an `Output`
+      // model refused, when JSON carried it.
+      .with({ ok: false, errorKind: "output_invalid" }, ({ errorKind, error, output }) => ({
+        kind: "error",
+        error: { kind: errorKind, message: error, output: output ?? null },
+      }))
+      .with({ ok: false, errorKind: P.not("output_invalid") }, ({ errorKind, error }) => ({
+        kind: "error",
+        error: { kind: errorKind, message: error },
+      }))
+      .exhaustive()
+  );
 }

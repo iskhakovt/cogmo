@@ -19,13 +19,14 @@ import type { SkillManifest } from "../types.js";
  *     committed lockfile is missing/empty, the resolver couldn't run
  *     ('transport_failed'), the resolver itself failed
  *     ('resolver_failed'), the committed file is stale relative
- *     to a fresh resolve, or it shadows the runtime's pydantic
- *     ('runtime_package_conflict'). The caller surfaces the message verbatim
+ *     to a fresh resolve, or it pins pydantic or pydantic-core at
+ *     another version than the runtime's, or one of pydantic's other
+ *     requirements below its floor ('runtime_package_conflict'). The caller surfaces the message verbatim
  *     as the register `errors[]` payload.
  *
  * When `verifyFresh` is false, verification degrades to presence + hash
- * only — the committed file is trusted as-is; when `compiler` is undefined,
- * to that and the runtime pins. `verifyFresh: false` is the rollback
+ * only — the committed file is trusted as-is. With `compiler` undefined,
+ * `verifyFresh` checks presence, hash and the runtime pins. `verifyFresh: false` is the rollback
  * mode: the target lockfile was valid at deploy time, hashes are
  * still pinned, and a wheel yanked from PyPI since shouldn't block
  * the operator from rewinding to a known-good revision.

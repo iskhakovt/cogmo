@@ -944,6 +944,29 @@ async def run(inputs, ctx):
     });
   });
 
+  it("keeps nothing, and stays output_invalid, when the skill's own encoder writes no JSON", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+def _cogmo_encode_output(value):
+    return "not json"
+
+async def run(inputs, ctx):
+    return {"receipt": "r-1"}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Field required",
+    });
+  });
+
   it("keeps nothing of an output an Output model refuses when JSON cannot carry it", async () => {
     const result = await boundaryRun(
       `

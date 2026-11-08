@@ -103,6 +103,28 @@ async def test_bytes_json_mode_cannot_decode_are_output_invalid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_output_json_mode_would_change_is_output_invalid() -> None:
+    class Measured(BaseModel):
+        ratio: float
+        counts: dict[Any, int]
+
+    async def nan(inputs: object, ctx: Ctx) -> object:
+        return {"ratio": float("nan"), "counts": {}}
+
+    async def colliding(inputs: object, ctx: Ctx) -> object:
+        return {"ratio": 1.0, "counts": {1: 1, "1": 2}}
+
+    assert (await call_run({"Output": Measured}, nan, {}, CTX))[0] == (
+        "output_invalid",
+        "nan is not a finite number, which JSON writes as null",
+    )
+    assert (await call_run({"Output": Measured}, colliding, {}, CTX))[0] == (
+        "output_invalid",
+        "two keys of one dict are written alike as JSON strings, so one would be lost",
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_refusal_names_twenty_fields_and_counts_the_rest() -> None:
     class Many(BaseModel):
         items: list[int]

@@ -184,9 +184,15 @@ export type TaskOutcome =
   | { ok: true; output?: unknown; rusage?: RuntimeRusage }
   | {
       ok: false;
-      errorKind: TaskErrorKind;
+      errorKind: Exclude<TaskErrorKind, "output_invalid">;
       error: string;
-      /** What the skill returned, kept by an `output_invalid`. */
+      rusage?: RuntimeRusage;
+    }
+  | {
+      ok: false;
+      errorKind: "output_invalid";
+      error: string;
+      /** What the skill returned, when its worker kept it. */
       output?: unknown;
       rusage?: RuntimeRusage;
     };
