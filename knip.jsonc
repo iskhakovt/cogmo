@@ -34,6 +34,9 @@
     },
     "packages/contracts": {
       "project": ["src/**/*.ts"]
+    },
+    "packages/connector-proto": {
+      "project": ["src/**/*.ts"]
     }
   }
 }
