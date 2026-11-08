@@ -801,6 +801,7 @@ inputs:
           reasons: [],
           declared_network: null,
         },
+        schemas: { inputs: { type: "object", properties: {} }, outputs: null },
         resolvedAt: new Date(),
       }),
     );

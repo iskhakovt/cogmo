@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { assertKind, expectOk } from "../../test/assertions.js";
+import { assertKind, expectDefined, expectOk } from "../../test/assertions.js";
 import { mockFilesService } from "../../test/factories.js";
+import { frontmatterSchemas } from "../deploy/schemas.js";
 import { hashLockfileContents } from "../deps.js";
 import { parseManifest } from "../manifest.js";
 import { type TaskOutcome, withheldOutcome } from "../protocol.js";
@@ -36,6 +37,7 @@ function cachedEntry() {
   return new SkillSourceCache(undefined).put(
     "sha-1",
     { manifest, body: "" },
+    expectDefined(frontmatterSchemas(manifest), "the manifest's schemas"),
     { hash: hashLockfileContents(LOCKFILE), contents: LOCKFILE },
   );
 }
