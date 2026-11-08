@@ -75,14 +75,12 @@ export function makeSandboxSchemaImporter(
   return {
     async importSchemas(params) {
       const { lockfile, signal } = params;
-      if (lockfile !== null && opts.depsCacheVolumeName === undefined) {
-        throw new Error("schema import: a lockfile needs the shared venv volume");
-      }
-      const depsCacheVolume =
-        lockfile === null || opts.depsCacheVolumeName === undefined
-          ? undefined
-          : { volumeName: opts.depsCacheVolumeName };
-      if (lockfile !== null && depsCacheVolume !== undefined) {
+      let depsCacheVolume: DepsCacheVolumeSpec | undefined;
+      if (lockfile !== null) {
+        if (opts.depsCacheVolumeName === undefined) {
+          throw new Error("schema import: a lockfile needs the shared venv volume");
+        }
+        depsCacheVolume = { volumeName: opts.depsCacheVolumeName };
         const installed = await withSession(
           opts,
           {
@@ -132,7 +130,8 @@ async function withSession<T>(
   signal: AbortSignal | undefined,
   use: (session: SandboxSession, taskId: string) => Promise<Result<T, SchemaImportError>>,
 ): Promise<Result<T, SchemaImportError>> {
-  const taskId = `${spec.name}-${randomUUID()}`;
+  // A bare UUID: Local-Docker names the session's cgroup slice after it.
+  const taskId = randomUUID();
   let session: SandboxSession;
   try {
     signal?.throwIfAborted();
@@ -156,7 +155,10 @@ async function withSession<T>(
     return await use(session, taskId);
   } finally {
     await opts.sandbox.delete(session).catch((e: unknown) => {
-      log.warn({ taskId, err: describeError(e) }, "schema import: sandbox.delete failed");
+      log.warn(
+        { taskId, session: spec.name, err: describeError(e) },
+        "schema import: sandbox.delete failed",
+      );
     });
   }
 }
@@ -241,7 +243,7 @@ async function runImport(
       stdoutBytes += chunk.length;
       if (stdoutBytes > MAX_REPLY_BYTES) {
         overflowed = true;
-        void exec.dispose().catch(() => {});
+        void exec.dispose().catch(logDisposeFailure);
         return;
       }
       stdout.push(chunk);
@@ -271,8 +273,12 @@ async function runImport(
       ),
     );
   } finally {
-    await exec.dispose().catch(() => {});
+    await exec.dispose().catch(logDisposeFailure);
   }
+}
+
+function logDisposeFailure(e: unknown): void {
+  log.warn({ err: describeError(e) }, "schema import: exec.dispose failed");
 }
 
 /** The reply on `line`, or undefined when it holds none. */

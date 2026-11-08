@@ -26,10 +26,10 @@ def _restore_process_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
     os.environ.update(saved_env)
 
 
-def _import(body: str, argv: list[str] | None = None) -> tuple[dict[str, object], str, str]:
-    """Run the import on `body`: its one reply, then everything on stdout, then stderr."""
+def _import(body: str, argv: list[str]) -> tuple[dict[str, object], str, str]:
+    """Run the import on `body` with `argv`: its one reply, then everything on stdout, then stderr."""
     stdout, stderr = io.StringIO(), io.StringIO()
-    schema.main(argv or [], io.StringIO(body), stdout, stderr)
+    schema.main(argv, io.StringIO(body), stdout, stderr)
     lines = stdout.getvalue().splitlines()
     assert len(lines) == 1, stdout.getvalue()
     return json.loads(lines[0]), stdout.getvalue(), stderr.getvalue()
@@ -50,7 +50,7 @@ async def run(inputs, ctx):
 
 
 def test_replies_with_the_models_schemas(protocol: ProtocolCheck) -> None:
-    reply, _, _ = _import(_MODELS)
+    reply, _, _ = _import(_MODELS, [])
 
     protocol("schema_import_reply", reply)
     assert reply["type"] == "schemas"
@@ -60,11 +60,16 @@ def test_replies_with_the_models_schemas(protocol: ProtocolCheck) -> None:
         "title": "Input",
         "type": "object",
     }
-    assert reply["outputs"] is not None
+    assert reply["outputs"] == {
+        "properties": {"celsius": {"title": "Celsius", "type": "number"}},
+        "required": ["celsius"],
+        "title": "Output",
+        "type": "object",
+    }
 
 
 def test_a_skill_with_no_models_has_no_schemas(protocol: ProtocolCheck) -> None:
-    reply, _, _ = _import("async def run(inputs, ctx):\n    return None\n")
+    reply, _, _ = _import("async def run(inputs, ctx):\n    return None\n", [])
 
     protocol("schema_import_reply", reply)
     assert reply == {"type": "schemas", "inputs": None, "outputs": None}
@@ -79,7 +84,7 @@ def test_a_skill_with_no_models_has_no_schemas(protocol: ProtocolCheck) -> None:
     ],
 )
 def test_a_skill_that_does_not_load_fails(protocol: ProtocolCheck, body: str, error: str) -> None:
-    reply, _, _ = _import(body)
+    reply, _, _ = _import(body, [])
 
     protocol("schema_import_reply", reply)
     assert reply["type"] == "schema_failed"
@@ -92,7 +97,7 @@ def test_a_model_pydantic_cannot_describe_fails(protocol: ProtocolCheck) -> None
         "class Input(BaseModel):\n    hook: Callable[[], int]\n"
     )
 
-    reply, _, _ = _import(body)
+    reply, _, _ = _import(body, [])
 
     protocol("schema_import_reply", reply)
     assert reply["type"] == "schema_failed"
@@ -100,7 +105,7 @@ def test_a_model_pydantic_cannot_describe_fails(protocol: ProtocolCheck) -> None
 
 
 def test_module_prints_go_to_stderr_so_the_reply_is_the_only_line() -> None:
-    reply, _, stderr = _import(f'print("hello from the module")\n{_MODELS}')
+    reply, _, stderr = _import(f'print("hello from the module")\n{_MODELS}', [])
 
     assert reply["type"] == "schemas"
     assert "hello from the module" in stderr

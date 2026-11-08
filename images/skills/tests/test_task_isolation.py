@@ -373,7 +373,7 @@ def _descendant_pids(root: int) -> list[int]:
 
 class TestSupervisorProtocol:
     def test_announces_its_protocol_version_first(self, sup: _Supervisor) -> None:
-        assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 6}
+        assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 7}
 
     @pytest.mark.parametrize(
         ("body", "wall_clock_s", "outcome"),

@@ -17,7 +17,7 @@ import type { SkillRunErrorKind } from "./store/index.js";
  * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
  * change, and when the host comes to run something new in the image.
  */
-export const SUPERVISOR_PROTOCOL_VERSION = 6;
+export const SUPERVISOR_PROTOCOL_VERSION = 7;
 
 /** Container tier only: the supervisor's first frame, announcing its protocol version. */
 export const SupervisorReadySchema = z.object({

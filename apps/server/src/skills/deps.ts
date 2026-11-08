@@ -146,12 +146,12 @@ export const DEPENDENCY_EXEC_OPTIONS = {
 } as const satisfies ExecOptions;
 
 /** What a dependency session (the compile, register's install and schema import) runs under by default. */
-export const DEFAULT_DEPENDENCY_SESSION_LIMITS: Required<ResourceLimits> = {
+export const DEFAULT_DEPENDENCY_SESSION_LIMITS = {
   cpus: 1,
   memory_bytes: 512 * 1024 * 1024,
   pids: 256,
   disk_bytes: 512 * 1024 * 1024,
-};
+} as const satisfies Required<ResourceLimits>;
 
 // Covers the cold-cache path (sandbox boot + PyPI metadata + hash downloads).
 const DEFAULT_COMPILE_TIMEOUT_MS = 180_000;
@@ -192,7 +192,8 @@ export function makeSandboxLockfileCompiler(
       options?: { signal?: AbortSignal },
     ): Promise<Result<string, LockfileCompileError>> {
       const signal = options?.signal;
-      const taskId = `lockfile-compile-${randomUUID()}`;
+      // A bare UUID: Local-Docker names the session's cgroup slice after it.
+      const taskId = randomUUID();
       // Buffer for slightly longer than the exec budget so an exec
       // timeout fires first and the reaper has a margin to clean up
       // if the host crashes before delete().

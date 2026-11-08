@@ -30,13 +30,6 @@ export interface DeployDeps {
   /** What this deployment enforces; the classifier reads it for the tier. */
   capabilities: SkillsCapabilities;
   /**
-   * The wasm tier's host side at register: the probe that load-tests native
-   * built-ins under the boundary's flags, the fill of the cache it loads
-   * from, and the schema import, which fetches and publishes the skill's
-   * packages, so the first run pays no download, and reads its models' JSON
-   * Schemas in a child.
-   */
-  /**
    * The container tier's schema import at register, or undefined when the
    * backend creates no session with no network: every container skill then
    * takes the legacy schema path, its frontmatter. Without the shared venv
@@ -56,6 +49,13 @@ export interface DeployDeps {
         ): Promise<Result<ImportedSchemas, SchemaImportError>>;
       }
     | undefined;
+  /**
+   * The wasm tier's host side at register: the probe that load-tests native
+   * built-ins under the boundary's flags, the fill of the cache it loads
+   * from, and the schema import, which fetches and publishes the skill's
+   * packages, so the first run pays no download, and reads its models' JSON
+   * Schemas in a child.
+   */
   wasm: {
     /** What register's PyPI lookups and downloads go through. */
     fetchImpl: typeof fetch;

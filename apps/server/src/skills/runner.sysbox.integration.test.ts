@@ -645,9 +645,9 @@ class Input(BaseModel):
       const properties = imported._unsafeUnwrap().inputs?.properties;
       expect(properties).toMatchObject({
         host: { default: "xn--bcher-kva.example" },
-        reached: { default: expect.any(String) },
+        // No route out of a session with no network: connect fails at once.
+        reached: { default: "OSError" },
       });
-      expect(properties?.reached).not.toMatchObject({ default: "reached" });
     } finally {
       await docker
         .getVolume(depsCacheVolumeName)

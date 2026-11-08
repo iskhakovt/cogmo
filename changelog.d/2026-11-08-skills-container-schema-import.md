@@ -4,3 +4,5 @@ A container-tier skill's pydantic models are now its schemas too (design/skills.
 - A backend that creates no session with no network (`SandboxCapabilities.noNetworkSessions`; Daytona) keeps the frontmatter, and so does a skill with dependencies where no shared venv volume is configured.
 - The register-time lockfile compile mounts no venv volume, since resolving can run a dependency's build backend.
 - Both tiers' import replies share one schema, `schema_import_reply` in the generated worker protocol.
+- `SUPERVISOR_PROTOCOL_VERSION` is 7, since the host runs a new module in the image: the container tier needs the `cogmo-skills` image of this release, and an older one fails worker creation and is refused at register.
+- The lockfile compile's session takes a bare UUID as its task id, which Local-Docker names the session's cgroup slice after, so registering a skill with dependencies there no longer fails before the compile runs.

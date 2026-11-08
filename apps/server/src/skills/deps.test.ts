@@ -242,9 +242,14 @@ describe("makeSandboxLockfileCompiler", () => {
 
     // Session lifecycle — created with the requested image, deleted in finally.
     expect(h.ensureCalls[0]?.[0]).toBe("cogmo-skills:test");
-    expect(h.createCalls[0]).toMatchObject({ image: "cogmo-skills:test", network: "bridge" });
-    // Resolving can run a build backend, so the compile mounts no venv volume.
-    expect(h.createCalls[0]).not.toHaveProperty("depsCacheVolume");
+    expect(h.createCalls[0]).toMatchObject({
+      image: "cogmo-skills:test",
+      network: "bridge",
+      // Local-Docker names the session's cgroup slice after its task id, which must be a UUID.
+      taskId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+    });
     expect(h.deleteCalls).toBe(1);
   });
 
