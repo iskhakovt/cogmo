@@ -23,17 +23,18 @@ allowBuilds:
 # against ajv's `^3.0.1`, and a bare `<4.13.5` selector would drag a hono 3.x
 # across a major. One major per entry — which does leave a sub-6 qs unpatched
 # against GHSA-4mjr-xmp4-gh2g (spans >=2.2.5); none is in the tree, and one
-# arriving wants investigating rather than a silent major bump. minimatch is
-# the investigated exception: no 10.x is patched, and every call
-# @stryker-mutator/core makes (`Minimatch` with `dot`, `flipNegate` and
-# `nocase`, `match`, `negate`, `hasMagic`, `minimatch`) is unchanged in 11.
+# arriving wants investigating rather than a silent major bump. Stryker's
+# minimatch is the investigated exception, scoped to it: no 10.x is patched,
+# and every call @stryker-mutator/core makes (`Minimatch` with `dot`,
+# `flipNegate` and `nocase`, `match`, `negate`, `hasMagic`, `minimatch`)
+# behaves the same in 11 outside extglobs and non-ASCII `nocase`. glob 10's
+# minimatch 9, two majors back, stays exposed.
 overrides:
   "@hono/node-server@>=2 <2.1.3": ">=2.1.3 <3" # GHSA-rmxm-3fg6-px4f (moderate) via @modelcontextprotocol/sdk
   "body-parser@>=2 <2.4.0": ">=2.4.0 <3" # GHSA-27r3-jxmh-p828 (high) via express
   "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
   "follow-redirects@>=1 <1.16.2": ">=1.16.2 <2" # GHSA-mrwp-f3q8-3g9p (high) via @daytona/sdk, axios
   "hono@>=4 <4.13.5": ">=4.13.5 <5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
-  "minimatch@>=10 <11.0.1": ">=11.0.1 <12" # GHSA-g3hv-75wg-m249 (moderate) via @stryker-mutator/core
   "qs@>=6 <6.16.0": ">=6.16.0 <7" # GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate) via express, body-parser
   "seroval@>=1 <1.6.11": ">=1.6.11 <2" # GHSA-97r2-qh9m-474h, -wp97-x4hv-qvhp, -7rv5-mrxv-xcr9 (high), -f86p-h4j2-7qgj, -9wx9-5pv9-3349 (moderate) via @tanstack/router-core
   "systeminformation@>=5 <5.33.16": ">=5.33.16 <6" # GHSA-3f7j-7jwc-fxfj (high), -7648-jmwf-vw7j (moderate), -4vjg-vx72-qq4g (low) via inngest, @opentelemetry/instrumentation-host-metrics
@@ -42,6 +43,8 @@ overrides:
   # copy the resolver reuses, and Dependabot's re-resolution picks 18. One copy
   # leaves `*` one candidate. Move it with apps/server's @types/node.
   "@types/ssh2>@types/node": "^26.6.6"
+  # GHSA-g3hv-75wg-m249 (moderate); see above.
+  "@stryker-mutator/core>minimatch": ">=11.0.1 <12"
 
 # Every pnpm install, local and in CI, resolves to releases at least 7 days old,
 # the soak Dependabot's `cooldown` waits out, and re-checks each lockfile entry
