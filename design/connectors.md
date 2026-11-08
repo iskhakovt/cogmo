@@ -16,7 +16,7 @@ A connector is a process outside cogmo that runs part of cogmo's work somewhere 
 | Direction | Connectors dial in. One listening port, one auth model, connectors behind NAT work, and channel connectors share the session. | cogmo dialling each connector: a URL per connector, and no path to one cogmo cannot reach. |
 | Contract home | `packages/connector-proto/`: the `.proto`, `buf.yaml`, and the generated TypeScript, committed. Ships in cogmo's release. Package `cogmo.connector.v1`; a breaking change is a `v2` package. | A separate repo with its own versioning, until a connector outside this repo needs it. |
 | Contract CI | `buf lint`, `buf breaking` against `origin/main`, and a check that `buf generate` leaves the tree clean. | — |
-| Credentials | cogmo sends no secret to a connector. A connector pushes with its own git credentials; cogmo opens the PR with the repo's GitHub identity. | A PAT in a job: the identity would leave cogmo's custody for a process cogmo does not run. |
+| Credentials | cogmo sends no secret to a connector. A connector pushes with its own git credentials; cogmo opens the PR with the repo's GitHub identity. `PrepareSpec.remote_url` is the repo's remote with any password removed, and with the whole userinfo removed from an http(s) remote, where a token can sit in either position. An SSH login name such as `git@` stays. | A PAT in a job: the identity would leave cogmo's custody for a process cogmo does not run. |
 | Process model | One cogmo process serves connectors. The hub is process memory: a second process, such as a rolling deploy's overlap, holds no session or job of the first. | — |
 | Runtime dependencies | `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf`; dev: `@bufbuild/buf`, `@bufbuild/protoc-gen-es`. Pinned at implementation under the 7-day release-age gate. | — |
 
@@ -30,7 +30,7 @@ package cogmo.connector.v1;
 
 service ConnectorService {
   // The connector's session: cogmo sends jobs and cancels down it while it is open.
-  rpc Connect(ConnectRequest) returns (stream ServerMessage);
+  rpc Connect(ConnectRequest) returns (stream ConnectResponse);
   // Connector to cogmo.
   rpc AcceptJob(AcceptJobRequest) returns (AcceptJobResponse);           // idempotent on job_id
   rpc ReportEvents(ReportEventsRequest) returns (ReportEventsResponse);  // idempotent on (job_id, seq)
@@ -42,15 +42,17 @@ message ConnectRequest {
   repeated string held_task_ids = 2;  // tasks whose workspaces it holds
 }
 
-message ServerMessage {
+message ConnectResponse {
   oneof message {
     SessionAccepted accepted = 1;     // first message
     Job job = 2;
-    CancelJob cancel = 3;             // job_id
+    CancelJob cancel = 3;
     Heartbeat heartbeat = 4;
   }
 }
 message SessionAccepted { repeated string awaited_job_ids = 1; }
+message CancelJob { string job_id = 1; }
+message Heartbeat {}
 
 message Job {
   string job_id = 1;                  // "<task_id>/<phase>/<spec digest>"
@@ -71,16 +73,21 @@ message PublishSpec   { string commit_message = 1; string remote_ref = 2; }
 message ReleaseSpec   { optional string salvage_ref = 1; }
 
 message AcceptJobRequest { string job_id = 1; }
+message AcceptJobResponse {}
 message ReportEventsRequest { string job_id = 1; repeated JobEvent events = 2; }
+message ReportEventsResponse {}
 message JobEvent {
   uint64 seq = 1;                     // strictly increasing per job, from 1
   oneof event {
     string text_delta = 2;
-    ToolCall tool_call = 3;           // name, summary
-    ToolResult tool_result = 4;       // name, ok, summary
-    Usage usage = 5;                  // input_tokens, output_tokens, cost_usd; cumulative for the job
+    ToolCall tool_call = 3;
+    ToolResult tool_result = 4;
+    Usage usage = 5;
   }
 }
+message ToolCall { string name = 1; string summary = 2; }
+message ToolResult { string name = 1; bool ok = 2; string summary = 3; }
+message Usage { uint64 input_tokens = 1; uint64 output_tokens = 2; double cost_usd = 3; }  // cumulative for the job
 
 message FinishJobRequest {
   string job_id = 1;
@@ -90,16 +97,33 @@ message FinishJobRequest {
     Cancelled cancelled = 4;
   }
 }
+message FinishJobResponse {}
+message Cancelled {}
 message JobResult {
   oneof result {
     Prepared prepared = 1;
-    PlanResult plan = 2;              // plan text, session_id
-    Executed executed = 3;            // usage
-    VerifyVerdict verify = 4;         // exit_code, timed_out, output_tail
-    Published published = 5;          // head_sha
-    Released released = 6;            // removed_clean | salvaged_and_removed (ref, sha) | kept (reason)
+    PlanResult plan = 2;
+    Executed executed = 3;
+    VerifyVerdict verify = 4;
+    Published published = 5;
+    Released released = 6;
   }
 }
+message Prepared {}
+message PlanResult { string plan = 1; string session_id = 2; }
+message Executed { Usage usage = 1; }
+message VerifyVerdict { int32 exit_code = 1; bool timed_out = 2; string output_tail = 3; }
+message Published { string head_sha = 1; }
+message Released {
+  oneof outcome {
+    RemovedClean removed_clean = 1;
+    SalvagedAndRemoved salvaged_and_removed = 2;
+    Kept kept = 3;
+  }
+}
+message RemovedClean {}
+message SalvagedAndRemoved { string salvage_ref = 1; string sha = 2; }
+message Kept { string reason = 1; }
 message JobError { JobErrorCode code = 1; string message = 2; }
 enum JobErrorCode {
   JOB_ERROR_CODE_UNSPECIFIED = 0;
@@ -135,7 +159,7 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 - Each call checks its token against the hub's cache of active connectors. A 30 s hub timer refreshes the cache from the table, as does a token the cache does not recognise (at most once every 5 s), so a new token works within seconds and a revoke or rotate takes effect, closing the old token's stream, within 30 s.
 - Jobs are keyed on (connector, `job_id`). A call naming another connector's job fails with `PERMISSION_DENIED`, and one naming a job this process does not know fails with `NOT_FOUND`.
 
-**Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_PORT`. When it is unset, no server starts, and boot warns if a repo points at a connector. TLS belongs to the operator's network: a reverse proxy, or a tailnet. cogmo sends a `Heartbeat` every 30 s and both sides send HTTP/2 keepalive pings. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
+**Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_HOST`:`CONNECTOR_PORT`. When `CONNECTOR_PORT` is unset, no server starts, and boot warns if a repo points at a connector. `CONNECTOR_HOST` defaults to `0.0.0.0`, the container convention `WEB_HOST` follows ([web-ui.md](web-ui.md) → Auth and bind). As there, the boundary is the publish layer: the token crosses h2c in cleartext, so the port is published on host loopback, or reached through a tailnet or a TLS proxy. A bare-metal run with no such layer sets `CONNECTOR_HOST=127.0.0.1`. cogmo sends a `Heartbeat` every 30 s and both sides send HTTP/2 keepalive pings. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
 
 ## Data model `[proposed]`
 
