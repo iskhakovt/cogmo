@@ -193,11 +193,31 @@ export interface Usage {
   reasoningTokens?: number;
 }
 
+/**
+ * One change the provider made to a request's input before the model read it,
+ * or one block that failed a check and was shown anyway: Anthropic's
+ * `input_transformations` entry (design/prompt-caching.md → Server-side
+ * controls). `type` and `reason` stay open strings, since the provider adds
+ * values over time; `path` locates the block as `messages.{i}.content.{j}`.
+ */
+export const InputTransformationSchema = z.object({
+  type: z.string(),
+  reason: z.string(),
+  path: z.string(),
+});
+export type InputTransformation = z.infer<typeof InputTransformationSchema>;
+
 /** How a response ended, and what it cost. */
 export interface ResponseMeta {
   stopReason: StopReason;
   model: string;
   usage: Usage;
+  /**
+   * What the provider reported changing in the request's input. Absent when
+   * it reports nothing: a provider without the signal, or a request without
+   * the binding-controls beta.
+   */
+  inputTransformations?: InputTransformation[];
 }
 
 export interface LlmResponse extends ResponseMeta {

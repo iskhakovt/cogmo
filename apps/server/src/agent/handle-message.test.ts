@@ -58,6 +58,7 @@ import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
 import type { StoredContent, StoredMessage } from "./stored-content.js";
 import { ToolRegistry, type ToolSpec } from "./tools.js";
+import { baseDigest } from "./transcript-head.js";
 import { asNonRetriable, failureCause } from "./turn-step-runner.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -5071,6 +5072,7 @@ describe("system prompt snapshot", () => {
         rendered: "FIRST PROMPT",
         configDigest: expect.any(String),
         attachmentCutoff: null,
+        reason: "first_turn",
       },
     );
     expect(loopParams(deps).systemPrompt).toBe("FIRST PROMPT");
@@ -5154,7 +5156,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3" }),
+      expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3", reason: "attachments" }),
     );
     const { messages } = loopParams(deps);
     expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
@@ -5385,7 +5387,7 @@ describe("system prompt snapshot", () => {
 
     expect(next.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1" }),
+      expect.objectContaining({ openedBy: "msg-1", reason: "configuration" }),
     );
     expect(loopParams(next).systemPrompt).toContain("## identity\nName: Sam");
     expect(loopParams(next).systemPrompt).not.toContain("You don't know your user yet.");
@@ -5417,7 +5419,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", historyStart: "m1" }),
+      expect.objectContaining({ openedBy: "msg-1", historyStart: "m1", reason: "configuration" }),
     );
     const { systemPrompt, messages } = loopParams(deps);
     expect(systemPrompt).toBe("system prompt");
@@ -5491,7 +5493,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", historyStart: "m3" }),
+      expect.objectContaining({ openedBy: "msg-1", historyStart: "m3", reason: "summary" }),
     );
     expect(loopParams(deps).messages[2]).toEqual({
       role: "assistant",
@@ -5542,7 +5544,7 @@ describe("system prompt snapshot", () => {
       // 8 messages, 6 retained: the summary covers m1 and m2.
       expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ openedBy: "m7", historyStart: "m3" }),
+        expect.objectContaining({ openedBy: "m7", historyStart: "m3", reason: "summary" }),
       );
       // The retained turns before m7 replay without the thinking bound to the
       // old prefix; m8, after it, keeps its own.
@@ -5577,6 +5579,52 @@ describe("system prompt snapshot", () => {
       expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
       expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
       expect(loopParams(deps).systemPrompt).toBe("EPOCH PROMPT");
+    });
+
+    /** A loop whose one request carried a head, and whose reply is the turn's one row. */
+    function headedLoop() {
+      return vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        finishedLoop({
+          text: "reply",
+          newMessages: [{ role: "assistant", content: [{ type: "text", text: "reply" }] }],
+          requests: {
+            base: baseDigest("EPOCH PROMPT", []),
+            historyLength: 8,
+            sent: [{ length: 8, digest: "f".repeat(64) }],
+            diverged: false,
+          },
+        }),
+      );
+    }
+
+    /** The transcript head the turn wrote on its reply. */
+    function replyHead(deps: HandleMessageDeps) {
+      const [, params] = expectDefined(
+        vi.mocked(deps.agentStore.insertMessages).mock.calls[0],
+        "insertMessages call",
+      );
+      return params.messages.at(-1)?.transcriptHead;
+    }
+
+    it("heads the reply compacted, from the loaded history's start, when its summary wasn't stored", async () => {
+      const deps = summarizingDeps(await defaultDigest(), "max_tokens");
+      deps.runStreamingAgentLoop = headedLoop();
+
+      await run(deps);
+
+      expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply intact, from after the summary the turn stored", async () => {
+      const deps = summarizingDeps(await defaultDigest());
+      deps.runStreamingAgentLoop = headedLoop();
+
+      await run(deps);
+
+      // The summary covers m1 and m2: the epoch the turn opened, and the
+      // view its requests sent, start at m3.
+      expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalled();
+      expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m3", status: "intact" });
     });
   });
 });

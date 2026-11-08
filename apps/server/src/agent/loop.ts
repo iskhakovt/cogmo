@@ -1,6 +1,7 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
+import { match } from "ts-pattern";
 import type { Durable } from "../inngest/durable.js";
 import { canonicalizeToolInputs, extractText } from "../llm/content.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
@@ -9,6 +10,7 @@ import type { LlmProvider } from "../llm/provider.js";
 import type {
   CacheIntent,
   ContentBlock,
+  InputTransformation,
   Message,
   ResponseMeta,
   StopReason,
@@ -18,9 +20,10 @@ import type {
   Usage,
 } from "../llm/types.js";
 import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
+import { promptServerMismatches } from "../metrics.js";
+import { canonicalJson, sha256 } from "../util/canonical-json.js";
 import { validateHistory } from "./history-invariants.js";
 import {
-  canonicalJson,
   classifyClassDTrip,
   classifyPostStream,
   classifyStreamError,
@@ -31,7 +34,6 @@ import {
   formatVolumeClusterContent,
   freshBudgets,
   type RepairBudgets,
-  sha256,
   summarizeToolHistory,
   truncationNotice,
 } from "./repair.js";
@@ -44,6 +46,14 @@ import {
   type ToolRegistry,
   type ToolSpec,
 } from "./tools.js";
+import {
+  baseDigest,
+  isDivergingTransformation,
+  type LoopRequests,
+  type RequestHead,
+  type SentRequest,
+  TranscriptHasher,
+} from "./transcript-head.js";
 
 const tracer = trace.getTracer("cogmo.agent");
 
@@ -167,6 +177,12 @@ export interface AgentLoopResult {
    * `degraded`.
    */
   truncated?: true;
+  /**
+   * The requests the loop sent, which the transcript heads of its persisted
+   * rows extend (design/prompt-caching.md → Head check). The non-streaming
+   * loop, whose rows nothing persists, records none.
+   */
+  requests: LoopRequests;
 }
 
 const DEFAULT_MAX_ITERATIONS = 20;
@@ -246,10 +262,15 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // tool_result" — content presence is the only safe gate.
     const hasToolUse = content.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
-      return buildResult(messages, initialLength, totalUsage, finalModel, iterations, {
-        text: "",
-        toolUseIds: [],
-      });
+      return buildResult(
+        messages,
+        initialLength,
+        totalUsage,
+        finalModel,
+        iterations,
+        { text: "", toolUseIds: [] },
+        unrecordedRequests(baseDigest(systemPrompt, toolDefs), initialLength),
+      );
     }
 
     // Volume-cluster intercept (Class D) — same shape as the streaming
@@ -268,10 +289,20 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   }
 
   log.warn({ maxIterations }, "agent loop hit iteration limit");
-  return buildResult(messages, initialLength, totalUsage, finalModel, iterations, {
-    text: "",
-    toolUseIds: [],
-  });
+  return buildResult(
+    messages,
+    initialLength,
+    totalUsage,
+    finalModel,
+    iterations,
+    { text: "", toolUseIds: [] },
+    unrecordedRequests(baseDigest(systemPrompt, toolDefs), initialLength),
+  );
+}
+
+/** {@link AgentLoopResult.requests} for a loop that records no request heads. */
+function unrecordedRequests(base: string, historyLength: number): LoopRequests {
+  return { base, historyLength, sent: [], diverged: false };
 }
 
 // Stable identifier for one `tool_use` invocation: `iteration` is the
@@ -650,6 +681,7 @@ function buildResult(
   model: string,
   iterations: number,
   streamed: EmittedLedger,
+  requests: LoopRequests,
 ): AgentLoopResult {
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   const text = lastAssistant ? extractText(lastAssistant.content) : "";
@@ -665,6 +697,7 @@ function buildResult(
     model,
     iterations,
     streamed: { text: streamed.text, toolUseIds: [...streamed.toolUseIds] },
+    requests,
   };
 }
 
@@ -689,6 +722,7 @@ function buildDegradedResult(
   reason: string,
   subtype: DegradeSubtype | null,
   streamed: EmittedLedger,
+  requests: LoopRequests,
 ): AgentLoopResult {
   const kept = messages.slice(initialLength);
   const last = kept.at(-1);
@@ -705,6 +739,7 @@ function buildDegradedResult(
     iterations,
     streamed: { text: streamed.text, toolUseIds: [...streamed.toolUseIds] },
     degraded: { reason, subtype },
+    requests,
   };
 }
 
@@ -759,6 +794,12 @@ export interface StreamingAgentLoopParams extends AgentLoopParams {
    * one without asking again.
    */
   superseded?: () => Promise<boolean>;
+  /**
+   * Where the loop's requests come from, the `site` its server-reported
+   * mismatches are counted under: `iteration` for a chat turn, `stage` for a
+   * pipeline stage's turn.
+   */
+  site: "iteration" | "stage";
 }
 
 /**
@@ -807,10 +848,29 @@ type LlmIterationOutcome =
        */
       repaired: "stream_truncation" | null;
       emitted: EmittedLedger;
+      /**
+       * The head of the request the body sent. Optional, as is
+       * `transformations`, because a memo written before heads lacks both;
+       * absent means no head (design/prompt-caching.md → Head check →
+       * Replay safety).
+       */
+      head?: RequestHead;
+      /** What the provider reported changing in the request's input. */
+      transformations?: InputTransformation[];
     }
-  | { kind: "degrade"; reason: string; subtype: DegradeSubtype; emitted: EmittedLedger }
+  | {
+      kind: "degrade";
+      reason: string;
+      subtype: DegradeSubtype;
+      emitted: EmittedLedger;
+      /** As on `drained`: optional for a memo written before heads. */
+      head?: RequestHead;
+    }
   /** The `superseded` check held: no provider call, nothing emitted. */
   | { kind: "superseded" };
+
+/** An outcome of an iteration that reached the provider. */
+type SentIterationOutcome = Exclude<LlmIterationOutcome, { kind: "superseded" }>;
 
 /** The id of the durable step that runs LLM iteration `iteration`, from 1. */
 export function llmIterStepId(iteration: number): string {
@@ -839,7 +899,7 @@ async function runLlmIteration(
   onEvent: (event: StreamEvent) => Promise<void>,
   budgets: Readonly<RepairBudgets>,
   log: Logger,
-): Promise<LlmIterationOutcome> {
+): Promise<SentIterationOutcome> {
   const emitted: EmittedLedger = { text: "", toolUseIds: [] };
   const ledgered = async (event: StreamEvent): Promise<void> => {
     if (event.type === "text_delta") emitted.text += event.text;
@@ -895,6 +955,7 @@ async function runLlmIteration(
       usage: replayResult.usage,
       repaired: "stream_truncation",
       emitted,
+      ...(replayResult.transformations && { transformations: replayResult.transformations }),
     };
   }
 }
@@ -938,6 +999,7 @@ export async function runStreamingAgentLoop(
     cache,
     clearToolResults,
     superseded,
+    site,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
@@ -960,6 +1022,20 @@ export async function runStreamingAgentLoop(
   // Turn-wide emission ledger, rebuilt every invocation from the durable
   // iteration outcomes (cached or live) — see AgentLoopResult.streamed.
   const streamed: EmittedLedger = { text: "", toolUseIds: [] };
+  // The requests the iterations sent, rebuilt every invocation from their
+  // outcomes like the ledger above. Every invocation hashes h₀ once, over the
+  // system prompt and tool definitions; message heads are hashed inside the
+  // step bodies, so a replayed iteration hashes no messages.
+  const hasher = new TranscriptHasher();
+  const base = baseDigest(systemPrompt, toolDefs);
+  const sent: SentRequest[] = [];
+  let diverged = false;
+  const requests = (): LoopRequests => ({
+    base,
+    historyLength: initialLength,
+    sent: [...sent],
+    diverged,
+  });
   let iterations = 0;
   let finalModel = model;
 
@@ -989,16 +1065,24 @@ export async function runStreamingAgentLoop(
     // step id derives from the SDK-local iteration counter, which replays
     // deterministically because every input to the control flow below comes
     // from cached outcomes. The `superseded` check runs first in the same
-    // body, so its verdict is memoized with the iteration it gates.
-    const iterate = async (): Promise<LlmIterationOutcome> =>
-      (await superseded?.())
-        ? { kind: "superseded" }
-        : runLlmIteration(provider, chatParams, onEvent, budgets, log);
+    // body, so its verdict is memoized with the iteration it gates. The body
+    // also hashes the request it sends and counts what the provider reported
+    // changing in it, so both happen once, live.
+    const iterate = async (): Promise<LlmIterationOutcome> => {
+      if (await superseded?.()) return { kind: "superseded" };
+      const head = hasher.head(base, chatParams.messages);
+      const outcome = await runLlmIteration(provider, chatParams, onEvent, budgets, log);
+      countServerMismatches(reportedTransformations(outcome), site);
+      return { ...outcome, head };
+    };
     const iterOutcome = stepRun
       ? await stepRun(llmIterStepId(iterations), iterate)
       : await iterate();
 
     if (iterOutcome.kind === "superseded") return { kind: "superseded" };
+
+    sent.push(iterOutcome.head ?? { length: messages.length, digest: null });
+    if (reportedTransformations(iterOutcome).some(isDivergingTransformation)) diverged = true;
 
     streamed.text += iterOutcome.emitted.text;
     streamed.toolUseIds.push(...iterOutcome.emitted.toolUseIds);
@@ -1014,6 +1098,7 @@ export async function runStreamingAgentLoop(
           iterOutcome.reason,
           iterOutcome.subtype,
           streamed,
+          requests(),
         ),
       );
     }
@@ -1060,6 +1145,7 @@ export async function runStreamingAgentLoop(
           outcome.reason,
           outcome.subtype,
           streamed,
+          requests(),
         ),
       );
     }
@@ -1128,7 +1214,15 @@ export async function runStreamingAgentLoop(
         ],
       });
       return finished({
-        ...buildResult(messages, initialLength, totalUsage, finalModel, iterations, streamed),
+        ...buildResult(
+          messages,
+          initialLength,
+          totalUsage,
+          finalModel,
+          iterations,
+          streamed,
+          requests(),
+        ),
         truncated: true,
       });
     }
@@ -1137,7 +1231,15 @@ export async function runStreamingAgentLoop(
     const hasToolUse = iterationContent.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
       return finished(
-        buildResult(messages, initialLength, totalUsage, finalModel, iterations, streamed),
+        buildResult(
+          messages,
+          initialLength,
+          totalUsage,
+          finalModel,
+          iterations,
+          streamed,
+          requests(),
+        ),
       );
     }
 
@@ -1289,6 +1391,7 @@ export async function runStreamingAgentLoop(
           "stuck_loop",
           trip,
           streamed,
+          requests(),
         ),
       );
     }
@@ -1309,6 +1412,7 @@ export async function runStreamingAgentLoop(
       "iteration_cap",
       null,
       streamed,
+      requests(),
     ),
   );
 }
@@ -1318,6 +1422,7 @@ interface DrainedStream {
   stopReason: StopReason;
   model: string;
   usage: Usage;
+  transformations?: InputTransformation[];
 }
 
 /**
@@ -1389,6 +1494,7 @@ async function drainStream(
     stopReason: meta.stopReason,
     model: meta.model,
     usage: meta.usage,
+    ...(meta.inputTransformations && { transformations: meta.inputTransformations }),
   };
 }
 
@@ -1410,6 +1516,7 @@ type StreamReplayResult =
       stopReason: StopReason;
       model: string;
       usage: Usage;
+      transformations?: InputTransformation[];
     }
   | { kind: "degrade"; subtype: DegradeSubtype; reason: string };
 
@@ -1474,5 +1581,29 @@ async function applyStreamReplay(
     stopReason: replay.stopReason,
     model: replay.model,
     usage: replay.usage,
+    ...(replay.inputTransformations && { transformations: replay.inputTransformations }),
   };
+}
+
+/**
+ * What the provider reported changing in an iteration's request. A stream that
+ * failed into a degrade reported nothing the adapter could surface.
+ */
+function reportedTransformations(
+  outcome: SentIterationOutcome,
+): ReadonlyArray<InputTransformation> {
+  return match(outcome)
+    .with({ kind: "drained" }, ({ transformations }) => transformations ?? [])
+    .with({ kind: "degrade" }, () => [])
+    .exhaustive();
+}
+
+/** Count each transformation the provider reported on one request. */
+function countServerMismatches(
+  transformations: ReadonlyArray<InputTransformation>,
+  site: StreamingAgentLoopParams["site"],
+): void {
+  for (const { type, reason } of transformations) {
+    promptServerMismatches.add(1, { type, reason, site });
+  }
 }

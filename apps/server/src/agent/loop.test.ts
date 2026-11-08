@@ -1,6 +1,6 @@
 import { ok } from "neverthrow";
 import type { Logger } from "pino";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { anthropicAttachmentLimits } from "../llm/attachment-limits.js";
@@ -11,6 +11,7 @@ import type {
   ChatStreamFrame,
   ContentBlock,
   ContentFrame,
+  InputTransformation,
   LlmResponse,
   Message,
   StopReason,
@@ -18,6 +19,7 @@ import type {
   Usage,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
+import { promptServerMismatches } from "../metrics.js";
 import { expectDefined, expectFinished } from "../test/assertions.js";
 import { doneFrame, mockFilesService, scriptedStream } from "../test/factories.js";
 import type {
@@ -30,6 +32,7 @@ import type {
 import { runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
 import { defineTool, reject, type ToolOutcome, ToolRegistry } from "./tools.js";
+import { baseDigest, rowHeads, TranscriptHasher } from "./transcript-head.js";
 
 function stubService(): Service {
   return {
@@ -89,8 +92,9 @@ function toolUseResponse(toolName: string, toolId: string, input: unknown): LlmR
 type LoopDefaultable = "model" | "systemPrompt" | "service" | "turnLogger";
 type LoopOverrides = Omit<AgentLoopParams, LoopDefaultable> &
   Partial<Pick<AgentLoopParams, LoopDefaultable>>;
-type StreamingLoopOverrides = Omit<StreamingAgentLoopParams, LoopDefaultable> &
-  Partial<Pick<StreamingAgentLoopParams, LoopDefaultable>>;
+type StreamingLoopDefaultable = LoopDefaultable | "site";
+type StreamingLoopOverrides = Omit<StreamingAgentLoopParams, StreamingLoopDefaultable> &
+  Partial<Pick<StreamingAgentLoopParams, StreamingLoopDefaultable>>;
 
 function testRunAgentLoop(overrides: LoopOverrides): Promise<AgentLoopResult> {
   return runAgentLoop({
@@ -106,6 +110,7 @@ function testStreamingLoopOutcome(
   overrides: StreamingLoopOverrides,
 ): Promise<StreamingLoopOutcome> {
   return runStreamingAgentLoop({
+    site: "iteration",
     model: "test",
     systemPrompt: "sys",
     service: stubService(),
@@ -4180,6 +4185,7 @@ describe("volume-cluster trigger", () => {
     const turnLogger = mock<Logger>();
 
     const result = await runStreamingAgentLoop({
+      site: "iteration",
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4242,6 +4248,7 @@ describe("volume-cluster trigger", () => {
     tools.register(budgetedTool("img", 2)); // handler always succeeds
 
     const result = await runStreamingAgentLoop({
+      site: "iteration",
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4278,6 +4285,7 @@ describe("volume-cluster trigger", () => {
     tools.register(budgetedTool("search", 5));
 
     const result = await runStreamingAgentLoop({
+      site: "iteration",
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4313,6 +4321,7 @@ describe("volume-cluster trigger", () => {
       { events: [{ type: "text_delta", text: "done1" }], stopReason: "end_turn" },
     ]);
     const r1 = await runStreamingAgentLoop({
+      site: "iteration",
       provider: provider1,
       model: "test",
       systemPrompt: "sys",
@@ -4335,6 +4344,7 @@ describe("volume-cluster trigger", () => {
       { events: [{ type: "text_delta", text: "done2" }], stopReason: "end_turn" },
     ]);
     const r2 = await runStreamingAgentLoop({
+      site: "iteration",
       provider: provider2,
       model: "test",
       systemPrompt: "sys",
@@ -4398,6 +4408,7 @@ describe("volume-cluster trigger", () => {
     tools.register(budgetedTool("img", 2));
 
     const result = await runStreamingAgentLoop({
+      site: "iteration",
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4445,6 +4456,7 @@ describe("volume-cluster trigger", () => {
     const turnLogger = mock<Logger>();
 
     const result = await runStreamingAgentLoop({
+      site: "iteration",
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4499,6 +4511,7 @@ describe("volume-cluster trigger", () => {
     const turnLogger = mock<Logger>();
 
     const result = await runStreamingAgentLoop({
+      site: "iteration",
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4560,6 +4573,7 @@ describe("volume-cluster trigger", () => {
     tools.register(budgetedTool("img", 2, true));
 
     const result = await runStreamingAgentLoop({
+      site: "iteration",
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4589,6 +4603,7 @@ describe("volume-cluster trigger", () => {
     const turnLogger = mock<Logger>();
 
     await runStreamingAgentLoop({
+      site: "iteration",
       provider,
       model: "test",
       systemPrompt: "sys",
@@ -4979,5 +4994,306 @@ describe("tool rejections", () => {
         isError: true,
       });
     }
+  });
+});
+
+describe("transcript heads", () => {
+  const SYSTEM = "sys";
+
+  // A spy left by a failing test would leak into the rest of the file.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function echoTools(): ToolRegistry {
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => ok(`pong from ${input.text}`),
+      }),
+    );
+    return tools;
+  }
+
+  /** A provider whose one stream replies "ok" and reports `transformations`. */
+  function reportingProvider(transformations: InputTransformation[]): LlmProvider {
+    return {
+      name: "mock",
+      chat: vi.fn(),
+      chatStream: vi.fn(() =>
+        scriptedStream([{ type: "text_delta", text: "ok" }], {
+          type: "done",
+          meta: {
+            stopReason: "end_turn",
+            model: "mock-model",
+            usage: { inputTokens: 10, outputTokens: 5 },
+            inputTransformations: transformations,
+          },
+        }),
+      ),
+      countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
+    };
+  }
+
+  const DROPPED_FOR_PREFIX: InputTransformation = {
+    type: "thinking_dropped",
+    reason: "prefix_binding_mismatch",
+    path: "messages.1.content.0",
+  };
+  const DROPPED_FOR_MODEL: InputTransformation = {
+    type: "thinking_dropped",
+    reason: "model_binding_mismatch",
+    path: "messages.1.content.1",
+  };
+
+  it("stores the head of the request each iteration sent in its memo", async () => {
+    const cache = new Map<string, unknown>();
+    const tools = echoTools();
+    const history: Message[] = [{ role: "user", content: "echo hi" }];
+
+    const result = await testRunStreamingAgentLoop({
+      provider: mockStreamProvider([
+        {
+          events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "hi" } }],
+          stopReason: "tool_use",
+        },
+        { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+      ]),
+      messages: [...history],
+      tools,
+      onEvent: async () => {},
+      stepRun: cachingStepRun(cache).stepRun,
+    });
+
+    const hasher = new TranscriptHasher();
+    const base = baseDigest(SYSTEM, tools.definitions());
+    const first = hasher.head(base, history);
+    const second = hasher.head(base, [...history, ...result.newMessages.slice(0, 2)]);
+    expect(cache.get("llm-iter1")).toMatchObject({ head: first });
+    expect(cache.get("llm-iter2")).toMatchObject({ head: second });
+    expect(result.requests).toEqual({
+      base,
+      historyLength: 1,
+      sent: [first, second],
+      diverged: false,
+    });
+  });
+
+  /** The degraded off-ramp's apology, as `handle-message` appends it to the persisted rows. */
+  const APOLOGY: Message = { role: "assistant", content: [{ type: "text", text: "Sorry." }] };
+
+  it.each<{ name: string; turns: RepairTurn[]; apology: boolean }>([
+    {
+      name: "a plain reply",
+      turns: [
+        { kind: "stream", events: [{ type: "text_delta", text: "hi" }], stopReason: "end_turn" },
+      ],
+      apology: false,
+    },
+    {
+      name: "a tool turn",
+      turns: [
+        {
+          kind: "stream",
+          events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "a" } }],
+          stopReason: "tool_use",
+        },
+        { kind: "stream", events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+      ],
+      apology: false,
+    },
+    {
+      name: "a reply after the continuation prompt",
+      turns: [
+        { kind: "stream", events: [], stopReason: "end_turn" },
+        { kind: "stream", events: [{ type: "text_delta", text: "ok" }], stopReason: "end_turn" },
+      ],
+      apology: false,
+    },
+    {
+      name: "a reply cut off at the output cap, with its notice",
+      turns: [
+        {
+          kind: "stream",
+          events: [{ type: "text_delta", text: "Once" }],
+          stopReason: "max_tokens",
+        },
+      ],
+      apology: false,
+    },
+    {
+      name: "a degraded reply after a tool round",
+      turns: [
+        {
+          kind: "stream",
+          events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "a" } }],
+          stopReason: "tool_use",
+        },
+        { kind: "throw", error: new RefusalError("policy") },
+      ],
+      apology: true,
+    },
+    {
+      name: "a degraded reply to a continuation prompt it doesn't persist",
+      turns: [
+        { kind: "stream", events: [], stopReason: "end_turn" },
+        { kind: "throw", error: new RefusalError("policy") },
+      ],
+      apology: true,
+    },
+  ])(
+    "heads $name with the head the next request sends over the persisted rows",
+    async ({ turns, apology }) => {
+      const tools = echoTools();
+      const history: Message[] = [{ role: "user", content: "go" }];
+
+      const result = await testRunStreamingAgentLoop({
+        provider: repairStreamProvider(turns).provider,
+        messages: [...history],
+        tools,
+        onEvent: async () => {},
+        stepRun: async (_id, fn) => fn(),
+      });
+
+      expect(result.degraded !== undefined).toBe(apology);
+      const rows = apology ? [...result.newMessages, APOLOGY] : result.newMessages;
+      const heads = rowHeads(result.requests, rows, {
+        historyStart: "m1",
+        compacted: false,
+      });
+      // As a later turn loads them: the history, then the rows.
+      const transcript = [...history, ...rows];
+      const base = baseDigest(SYSTEM, tools.definitions());
+      const expected = rows.map((row, i) =>
+        row.role === "assistant"
+          ? {
+              ...new TranscriptHasher().head(base, transcript.slice(0, history.length + i + 1)),
+              base,
+              historyStart: "m1",
+              status: "intact",
+            }
+          : null,
+      );
+      expect(heads).toEqual(expected);
+      expect(heads.filter((h) => h !== null).length).toBeGreaterThan(0);
+    },
+  );
+
+  it.each(["iteration", "stage"] as const)(
+    "counts each reported transformation once under site %s, and not on a replay",
+    async (site) => {
+      const add = vi.spyOn(promptServerMismatches, "add");
+      const cache = new Map<string, unknown>();
+      const run = () =>
+        testRunStreamingAgentLoop({
+          provider: reportingProvider([DROPPED_FOR_PREFIX, DROPPED_FOR_MODEL]),
+          messages: [{ role: "user", content: "hi" }],
+          tools: new ToolRegistry(),
+          onEvent: async () => {},
+          stepRun: cachingStepRun(cache).stepRun,
+          site,
+        });
+
+      const live = await run();
+
+      expect(add.mock.calls).toEqual([
+        [1, { type: "thinking_dropped", reason: "prefix_binding_mismatch", site }],
+        [1, { type: "thinking_dropped", reason: "model_binding_mismatch", site }],
+      ]);
+      expect(cache.get("llm-iter1")).toMatchObject({
+        transformations: [DROPPED_FOR_PREFIX, DROPPED_FOR_MODEL],
+      });
+      expect(live.requests.diverged).toBe(true);
+
+      add.mockClear();
+      const replayed = await run();
+
+      expect(add).not.toHaveBeenCalled();
+      expect(replayed.requests).toEqual(live.requests);
+    },
+  );
+
+  it("counts a transformation that doesn't diverge without marking the turn diverged", async () => {
+    const add = vi.spyOn(promptServerMismatches, "add");
+
+    const result = await testRunStreamingAgentLoop({
+      provider: reportingProvider([DROPPED_FOR_MODEL]),
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+    });
+
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(result.requests.diverged).toBe(false);
+  });
+
+  it("counts the transformations the in-step replay of a broken stream reports", async () => {
+    const add = vi.spyOn(promptServerMismatches, "add");
+    const provider: LlmProvider = {
+      name: "mock",
+      // biome-ignore lint/correctness/useYield: a stream that fails before its first frame
+      chatStream: vi.fn(async function* (): AsyncGenerator<ChatStreamFrame> {
+        throw new ProviderProtocolError("bad tool JSON", new Error("parse"));
+      }),
+      chat: vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "recovered" }],
+        stopReason: "end_turn",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+        inputTransformations: [DROPPED_FOR_PREFIX],
+      }),
+      countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
+    };
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+    });
+
+    expect(result.text).toBe("recovered");
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(result.requests.diverged).toBe(true);
+  });
+
+  it("replays an iteration memoized before heads, recording its request without one", async () => {
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "text", text: "Hello" }],
+          stopReason: "end_turn",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "Hello", toolUseIds: [] },
+        },
+      ],
+    ]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider: mockStreamProvider([]),
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      stepRun: cachingStepRun(cache).stepRun,
+    });
+
+    expect(result.text).toBe("Hello");
+    expect(result.requests.sent).toEqual([{ length: 1, digest: null }]);
+    expect(result.requests.diverged).toBe(false);
+    expect(
+      rowHeads(result.requests, result.newMessages, {
+        historyStart: "m1",
+        compacted: false,
+      }),
+    ).toEqual([null]);
   });
 });

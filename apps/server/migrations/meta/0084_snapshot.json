@@ -1,5 +1,5 @@
 {
-  "id": "1c46dea7-6430-4f26-bda1-3b210b006ada",
+  "id": "2a867f78-13ec-4d9f-9993-1133c22dca80",
   "prevId": "96818a69-e6bb-4013-86d8-c84fb44f45c4",
   "version": "7",
   "dialect": "postgresql",
@@ -2302,6 +2302,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "transcript_head": {
+          "name": "transcript_head",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2371,7 +2377,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_messages_transcript_head_assistant": {
+          "name": "chk_messages_transcript_head_assistant",
+          "value": "\"messages\".\"transcript_head\" IS NULL OR \"messages\".\"role\" = 'assistant'"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.system_prompt_snapshots": {
@@ -2420,6 +2431,13 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "system_prompt_epoch_reason",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
@@ -3723,12 +3741,6 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true
-        },
-        "schemas": {
-          "name": "schemas",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -5101,6 +5113,18 @@
       "name": "summary_source",
       "schema": "public",
       "values": ["turn", "manual"]
+    },
+    "public.system_prompt_epoch_reason": {
+      "name": "system_prompt_epoch_reason",
+      "schema": "public",
+      "values": [
+        "first_turn",
+        "configuration",
+        "summary",
+        "compaction",
+        "attachments",
+        "prefix_violation"
+      ]
     },
     "public.observation_failure_kind": {
       "name": "observation_failure_kind",

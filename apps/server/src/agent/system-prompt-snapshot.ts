@@ -7,7 +7,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { match } from "ts-pattern";
 import type { Message } from "../llm/types.js";
+import type { FixedCutoff } from "./attachments/attachment-cutoff.js";
 import {
   type CoreMemoryScope,
   type CoreMemoryView,
@@ -15,6 +17,7 @@ import {
   type ScopedCoreMemoryBlock,
 } from "./core-memory/scope.js";
 import type { SystemPromptSnapshot } from "./store/index.js";
+import type { SystemPromptEpochReason } from "./store/schema.js";
 
 /** An epoch's snapshot as a step returns it. */
 export interface EpochSnapshot {
@@ -114,6 +117,36 @@ export function continuesEpoch(
     snapshot.configDigest === current.configDigest &&
     snapshot.historyStart === current.historyStart
   );
+}
+
+/**
+ * Why a turn that doesn't continue its epoch opens one: the first that applies
+ * in the epoch rule's precedence. No snapshot is the conversation's first
+ * turn; a different digest is `configuration`; a history start other than the
+ * snapshot's, the loaded one or the one after a summary this turn stored, is
+ * `summary`; an advanced attachment cutoff is `attachments`. A turn opening
+ * with none of these is a bug in the decision that opened it.
+ */
+export function epochReason(
+  snapshot: { configDigest: string; historyStart: string } | null,
+  turn: {
+    configDigest: string;
+    loadedStart: string;
+    epochStart: string;
+    cutoff: FixedCutoff;
+  },
+): SystemPromptEpochReason {
+  if (snapshot === null) return "first_turn";
+  if (snapshot.configDigest !== turn.configDigest) return "configuration";
+  if (snapshot.historyStart !== turn.loadedStart || snapshot.historyStart !== turn.epochStart) {
+    return "summary";
+  }
+  return match(turn.cutoff)
+    .with({ kind: "advanced" }, (): SystemPromptEpochReason => "attachments")
+    .with({ kind: "kept" }, () => {
+      throw new Error("a turn opened an epoch that no reason in the epoch rule explains");
+    })
+    .exhaustive();
 }
 
 /**

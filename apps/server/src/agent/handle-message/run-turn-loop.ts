@@ -102,6 +102,7 @@ export async function runTurnLoop(
       cache: turnCacheIntent(args.conversationId, "chat"),
       clearToolResults: turnModel.clearToolResults,
       superseded: args.superseded,
+      site: "iteration",
       turnLogger,
     });
     // Awaited inside the `try`, so a failure in either arm aborts the stream.

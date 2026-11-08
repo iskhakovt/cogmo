@@ -7,6 +7,7 @@ import { storeTurnContext } from "../conversation/store-turn-context.js";
 import type { CoreMemoryScope } from "../core-memory/scope.js";
 import {
   type EpochSnapshot,
+  epochReason,
   historyStart,
   stripThinkingBefore,
   unannounced,
@@ -79,6 +80,12 @@ export async function finalizeTurnContext(
             openedBy: turn.id,
             historyStart: epochStart,
             attachmentCutoff: args.view.cutoff.cutoff,
+            reason: epochReason(args.loadedSystemPrompt.snapshot, {
+              configDigest: args.loadedSystemPrompt.configDigest,
+              loadedStart: historyStart(turnHistory.messageIds, null),
+              epochStart,
+              cutoff: args.view.cutoff,
+            }),
           }),
         );
   const opensEpoch = epoch.openedBy === turn.id;
