@@ -79,8 +79,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "$PR_TITLE" | npx --yes \
-            -p @commitlint/cli@20.5.0 \
-            -p @commitlint/config-conventional@20.5.0 \
+            -p @commitlint/cli@21.2.4 \
+            -p @commitlint/config-conventional@21.2.4 \
             commitlint
 
   # A PR that changes stored shape changes the design doc that owns it
