@@ -20,6 +20,7 @@ import {
   SUPERVISOR_PROTOCOL_VERSION,
   type TaskInvoke,
   type TaskOutcome,
+  type TaskRun,
   withheldOutcome,
 } from "../protocol.js";
 import { timeoutSignal } from "../wall-clock.js";
@@ -143,6 +144,7 @@ function taskFailureOutcome(
 
 export interface InvokeParams {
   taskId: string;
+  run: TaskRun;
   /** Skill name — informational only; surfaced in logs and labels. */
   skillName: string;
   /** Source of `skill.py`. */
@@ -163,7 +165,7 @@ export interface InvokeParams {
    * the lockfile hash into `task_invoke.lockfileHash` so the
    * supervisor can construct the ABI-qualified venv path on its side.
    * Absent (or `null` lockfile hash) means the skill declared no
-   * dependencies and runs against stdlib only.
+   * dependencies and runs against the stdlib and the runtime's pydantic.
    */
   deps?: {
     /** sha256 of `requirements.lock` at the skill's `git_sha`. */
@@ -270,6 +272,10 @@ export class SysboxSkillWorker {
       image: opts.image,
       resourceLimits,
       expiresAt: opts.expiresAt,
+      // The worker's populate reaches the package index, and container-tier
+      // skill code reaches its hosts directly until it runs behind the egress
+      // proxy (design/skills.md → Egress proxy).
+      network: "bridge",
       ...(opts.depsCacheVolumeName !== undefined && {
         depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
       }),
@@ -438,6 +444,7 @@ export class SysboxSkillWorker {
     const invoke: TaskInvoke = {
       type: "task_invoke",
       id: params.taskId,
+      run: params.run,
       skill: params.skillName,
       inputs: params.inputs,
       body: params.body,

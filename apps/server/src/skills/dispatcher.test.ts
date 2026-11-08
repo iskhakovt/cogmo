@@ -109,6 +109,7 @@ function failed(reason: string): TaskOutcome {
 const INVOKE: TaskInvoke = {
   type: "task_invoke",
   id: "task-1",
+  run: { id: "run-1", key: "key-1" },
   skill: "echo",
   inputs: { x: 1 },
 };

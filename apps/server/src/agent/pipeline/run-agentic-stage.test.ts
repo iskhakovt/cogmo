@@ -11,7 +11,7 @@ import { installLiveCatalog } from "../../llm/litellm-data.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../../llm/request-size.js";
-import type { ToolDefinition } from "../../llm/types.js";
+import type { StopReason, ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { SkillRunner } from "../../skills/runner.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
@@ -34,6 +34,7 @@ import { createAttachmentReader } from "../attachments/attachment-reader.js";
 import { toolResultClearing } from "../context.js";
 import type { AgentLoopResult, StepRunner, StreamingLoopOutcome } from "../loop.js";
 import { defineTool, ToolRegistry } from "../tools.js";
+import { baseDigest } from "../transcript-head.js";
 import {
   type AgenticStageArgs,
   type AgenticStageDeps,
@@ -302,6 +303,102 @@ describe("runAgenticStage", () => {
     const fork = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
     expect(fork.clearToolResults).toEqual(loopParams.clearToolResults);
     expect(fork.clearToolResults).toBeDefined();
+  });
+
+  describe("transcript heads", () => {
+    /** A stage loop whose one request carried a head. */
+    function headedLoop(historyLength: number): StreamingLoopOutcome {
+      return planLoop({
+        requests: {
+          base: baseDigest("SYSTEM PROMPT", []),
+          historyLength,
+          sent: [{ length: historyLength, digest: "f".repeat(64) }],
+          diverged: false,
+        },
+      });
+    }
+
+    function replyHead(h: Awaited<ReturnType<typeof harness>>) {
+      const [, params] = expectDefined(
+        vi.mocked(h.agentStore.insertMessages).mock.calls[0],
+        "insertMessages call",
+      );
+      return params.messages.at(-1)?.transcriptHead;
+    }
+
+    it("counts under site stage and heads the reply from the loaded history's start", async () => {
+      const h = await harness();
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(1));
+      const { steps } = recordingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+      expect(loopParams.site).toBe("stage");
+      expect(replyHead(h)).toMatchObject({ length: 2, historyStart: "msg-1", status: "intact" });
+    });
+
+    const STAGE_HISTORY = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"];
+
+    /** A stage over eight earlier messages whose compaction summarizes, as `summary` says. */
+    async function summarizingStage(summary: {
+      stopReason: StopReason;
+      storeFails: boolean;
+    }): Promise<Awaited<ReturnType<typeof harness>>> {
+      const h = await harness();
+      vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+        ...STAGE_HISTORY.map((id, i) => ({
+          id,
+          role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+          content: id,
+        })),
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]);
+      const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+      vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
+      vi.mocked(provider.chat).mockResolvedValueOnce({
+        content: [{ type: "text", text: "Summary of the run" }],
+        stopReason: summary.stopReason,
+        model: "claude-sonnet-4-6",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+      if (summary.storeFails) {
+        vi.mocked(h.agentStore.insertOrRecoverSummary).mockRejectedValue(new Error("db down"));
+      }
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(7));
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+      return h;
+    }
+
+    it("heads the reply compacted when its summary wasn't stored", async () => {
+      // Cut at its output cap, so the stage uses it and stores nothing.
+      const h = await summarizingStage({ stopReason: "max_tokens", storeFails: false });
+
+      expect(h.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+      expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply compacted when storing its summary failed", async () => {
+      const h = await summarizingStage({ stopReason: "end_turn", storeFails: true });
+
+      expect(replyHead(h)).toMatchObject({ historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply intact, from after the summary it stored", async () => {
+      const h = await summarizingStage({ stopReason: "end_turn", storeFails: false });
+
+      const [, stored] = expectDefined(
+        vi.mocked(h.agentStore.insertOrRecoverSummary).mock.calls[0],
+        "stored summary",
+      );
+      const start = expectDefined(
+        STAGE_HISTORY[STAGE_HISTORY.indexOf(stored.throughMessageId) + 1],
+        "history start",
+      );
+      expect(start).not.toBe("m1");
+      expect(replyHead(h)).toMatchObject({ historyStart: start, status: "intact" });
+    });
   });
 
   it("summarizes a view past 80% of the view cap without counting it", async () => {

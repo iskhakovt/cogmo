@@ -91,6 +91,7 @@ export function createConversationTriggers(
     compactConversation(conversationId, {
       runInTx: core.runInTx,
       agentStore: core.agentStore,
+      transportStore: core.transportStore,
       resolveProvider: core.resolveProvider,
       promptSource,
       attachmentReader,

@@ -425,6 +425,31 @@ export function computeRiskTier(input: RiskTierInput): RiskTierResult {
 }
 
 /**
+ * The top-level package of every absolute import in `body`, at any depth:
+ * `import a.b` and `from a.b import c` both name `a`. Throws when the parser
+ * cannot load or returns no tree, as the classifier treats both.
+ */
+export async function importRoots(body: string): Promise<ReadonlySet<string>> {
+  const parser = await getParser();
+  const tree = parser.parse(body);
+  if (!tree) throw new Error("tree-sitter returned no tree for the skill body");
+  try {
+    return new Set(
+      tree.rootNode
+        .descendantsOfType(["import_statement", "import_from_statement"])
+        .flatMap((node) => {
+          if (node === null) return [];
+          if (node.type === "import_statement") return extractImportModules(node);
+          const module = extractImportFromModule(node);
+          return module ? [module] : [];
+        }),
+    );
+  } finally {
+    tree.delete();
+  }
+}
+
+/**
  * Run the AST classifier. Throws on parser-load or walk failure; the
  * caller is responsible for catching and falling back to the stub.
  */

@@ -11,15 +11,17 @@ import type { ContentBlock, Message } from "../../llm/types.js";
 import {
   type AttachmentRef,
   isAttachmentRef,
+  originalPath,
   type StoredContent,
+  type StoredContentBlock,
   type StoredMessage,
 } from "../stored-content.js";
 import type { AttachmentReader } from "./attachment-reader.js";
 
 /**
  * Why a ref renders as a placeholder. `rejected` is an original the provider
- * refused (design/transport/attachments.md → Rejected attachments); its
- * wording is pinned here ahead of the marking that produces it.
+ * refused (design/transport/attachments.md → Rejected attachments), which
+ * {@link withRejectedOriginals} and arrival write.
  */
 type PlaceholderReason = "cutoff" | "unreadable" | "rejected";
 
@@ -55,6 +57,34 @@ export const RENDERER_PLACEHOLDERS: string = JSON.stringify(
     (["image_ref", "document_ref"] as const).map((kind) => placeholderText(reason, kind, "{name}")),
   ),
 );
+
+/**
+ * `content` with every ref whose original is in `rejected`, and an image's
+ * label with it, replaced by the rejection placeholder, tagged as arrival tags
+ * its own. The transcript's rows are loaded through it, so the cutoff,
+ * compaction and every request see the placeholder.
+ */
+export function withRejectedOriginals(
+  content: StoredContent,
+  rejected: ReadonlySet<string>,
+): StoredContent {
+  if (typeof content === "string" || rejected.size === 0) return content;
+  const isRejected = (block: StoredContentBlock | undefined): block is AttachmentRef =>
+    block !== undefined && isAttachmentRef(block) && rejected.has(originalPath(block));
+  return content.flatMap((block, i): StoredContentBlock[] => {
+    if (isRejected(block)) {
+      return [
+        {
+          type: "text",
+          text: placeholderText("rejected", block.type, refName(block)),
+          harness: "attachment_placeholder",
+        },
+      ];
+    }
+    const isLabel = block.type === "text" && block.harness === "image_label";
+    return isLabel && isRejected(content[i + 1]) ? [] : [block];
+  });
+}
 
 async function renderRef(
   ref: AttachmentRef,

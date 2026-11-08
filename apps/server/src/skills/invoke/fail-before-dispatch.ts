@@ -58,7 +58,10 @@ function preDispatchError(
     .with(
       P.union(
         "load_failed",
+        "input_invalid",
         "skill_raised",
+        "skill_failed",
+        "skill_retryable",
         "memory_exceeded",
         "output_invalid",
         "wall_clock_exceeded",

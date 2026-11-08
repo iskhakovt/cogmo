@@ -14,7 +14,7 @@ import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import { memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
-import { expectDefined } from "../test/assertions.js";
+import { assertInstanceOf, expectDefined } from "../test/assertions.js";
 import {
   directStep,
   doneFrame,
@@ -44,6 +44,7 @@ import {
 } from "../test/factories.js";
 import { liveRegisterResult } from "../test/skills-fixtures.js";
 import type { StreamDeliveryError } from "../transport/delivery-router.js";
+import type { TransportStore } from "../transport/store/index.js";
 import { createAttachmentReader } from "./attachments/attachment-reader.js";
 import { toolResultClearing } from "./context.js";
 import type { InboundContent } from "./conversation/inbound-content.js";
@@ -57,6 +58,8 @@ import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
 import type { StoredContent, StoredMessage } from "./stored-content.js";
 import { ToolRegistry, type ToolSpec } from "./tools.js";
+import { baseDigest } from "./transcript-head.js";
+import { asNonRetriable, failureCause } from "./turn-step-runner.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
 
@@ -529,10 +532,9 @@ describe("createHandleMessage", () => {
       caught = err;
     }
 
-    expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).constructor.name).toBe("NonRetriableError");
-    expect((caught as Error).message).toBe("Bad Request");
-    expect((caught as Error & { cause?: unknown }).cause).toBe(apiError);
+    assertInstanceOf(caught, NonRetriableError);
+    expect(caught.message).toBe("Bad Request");
+    expect(caught.cause).toBe(apiError);
     expect(handle.abort).toHaveBeenCalledWith("Bad Request");
   });
 
@@ -627,6 +629,115 @@ describe("createHandleMessage", () => {
         causeClass: "BadRequestError",
         errorMessage: "Bad Request",
       },
+    });
+  });
+
+  describe("onFailure on a provider refusal", () => {
+    const pdfRow = {
+      id: "m3",
+      cursor: "inbound-1",
+      role: "user" as const,
+      content: [
+        {
+          type: "document_ref" as const,
+          path: "inbound/r.pdf",
+          mediaType: "application/pdf",
+          name: "r.pdf",
+          bytes: 3,
+        },
+      ],
+    };
+
+    function refused(status: number) {
+      const callOrder: string[] = [];
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getLastAssistantMessage: vi
+            .fn()
+            .mockResolvedValue({ id: "m2", lastInboundMessageId: "inbound-0" }),
+          listUserRowsAfter: vi.fn().mockResolvedValue([pdfRow]),
+        }),
+        transportStore: mockTransportStore({
+          rejectAttachmentOriginals: vi.fn(async () => {
+            callOrder.push("reject");
+            return 1;
+          }),
+        }),
+        deliveryRouter: mockDeliveryRouter({
+          notifyConversation: vi.fn(async () => {
+            callOrder.push("notify");
+          }),
+        }),
+      });
+      const stepRun = vi.fn(async (_id: string, body: () => Promise<unknown>) => body());
+      const sendEvent = vi.fn(async () => {
+        callOrder.push("emit");
+      });
+      // As the step runner raises it on the turn's first iteration.
+      const upstream = Object.assign(new Error(`${status} refused`), {
+        name: "BadRequestError",
+        status,
+      });
+      const invoke = () =>
+        invokeInngestOnFailure<HandleMessageFailureCtx>(createHandleMessage(deps), {
+          event: {
+            data: {
+              run_id: "run-refused",
+              event: { data: { conversationId: "conv-1", triggerInboundId: "inbound-1" } },
+            },
+          },
+          error: asNonRetriable(upstream, { step: "llm-iter1", cursor: "inbound-1" }),
+          step: { run: stepRun, sendEvent },
+        });
+      return { deps, stepRun, sendEvent, callOrder, invoke };
+    }
+
+    it("marks the failed turn's attachments rejected before telling the user to try again", async () => {
+      const { deps, stepRun, sendEvent, callOrder, invoke } = refused(400);
+
+      await invoke();
+
+      expect(callOrder).toEqual(["emit", "reject", "notify"]);
+      expect(stepRun.mock.calls.map(([id]) => id)).toEqual([
+        "mark-rejected-attachments",
+        "notify-user",
+      ]);
+      expect(deps.transportStore.rejectAttachmentOriginals).toHaveBeenCalledWith(
+        expect.anything(),
+        ["inbound/r.pdf"],
+        "bad_request",
+      );
+      // The refusal link doesn't hide the provider's class from the reflector.
+      expect(sendEvent.mock.calls[0]).toEqual([
+        "emit-conversation-errored",
+        expect.objectContaining({
+          data: expect.objectContaining({
+            errorClass: "NonRetriableError",
+            causeClass: "BadRequestError",
+          }),
+        }),
+      ]);
+    });
+
+    it("marks nothing on a 401", async () => {
+      const { deps, stepRun, callOrder, invoke } = refused(401);
+
+      await invoke();
+
+      expect(callOrder).toEqual(["emit", "notify"]);
+      expect(stepRun.mock.calls.map(([id]) => id)).toEqual(["notify-user"]);
+      expect(deps.transportStore.rejectAttachmentOriginals).not.toHaveBeenCalled();
+    });
+
+    it("still tells the user when the marks fail", async () => {
+      const { deps, callOrder, invoke } = refused(400);
+      vi.mocked(deps.transportStore.rejectAttachmentOriginals).mockRejectedValue(
+        new Error("db down"),
+      );
+
+      await expect(invoke()).resolves.toBeUndefined();
+
+      expect(callOrder).toEqual(["emit", "notify"]);
     });
   });
 
@@ -4353,9 +4464,10 @@ describe("createHandleMessage", () => {
   // directly: mockStep's passthrough runs the wrapper body, so the
   // rejection type IS what Inngest would see.
   describe("stepRun wrapper retry policy", () => {
-    async function captureStepRun(): Promise<StepRunner> {
+    async function captureStepRun(transportStore?: TransportStore): Promise<StepRunner> {
       let captured: StepRunner | undefined;
       const deps = mockDeps({
+        ...(transportStore !== undefined && { transportStore }),
         runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
           captured = params.stepRun;
           return finishedLoop({
@@ -4405,7 +4517,15 @@ describe("createHandleMessage", () => {
     });
 
     it("translates deterministic provider 4xx on llm-iter steps to NonRetriableError", async () => {
-      const stepRun = await captureStepRun();
+      // A batch of two: the turn's cursor is its last inbound, not the trigger.
+      const stepRun = await captureStepRun(
+        mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            { id: "inbound-1", content: "hello", source: "user" },
+            { id: "inbound-2", content: "and this", source: "user" },
+          ]),
+        }),
+      );
       const badRequest = Object.assign(new Error("Bad Request"), { status: 400 });
       let caught: unknown;
       try {
@@ -4413,8 +4533,11 @@ describe("createHandleMessage", () => {
       } catch (err) {
         caught = err;
       }
-      expect(caught).toBeInstanceOf(NonRetriableError);
-      expect((caught as NonRetriableError).cause).toBe(badRequest);
+      assertInstanceOf(caught, NonRetriableError);
+      expect(failureCause(caught)).toEqual({
+        refusal: { status: 400, step: "llm-iter1", cursor: "inbound-2" },
+        cause: badRequest,
+      });
     });
   });
 
@@ -4445,8 +4568,8 @@ describe("createHandleMessage", () => {
       const caught = await runTurn(deps);
 
       expect(handle.abort).toHaveBeenCalledWith("Bad Request");
-      expect(caught).toBeInstanceOf(NonRetriableError);
-      expect((caught as NonRetriableError).cause).toBe(badRequest);
+      assertInstanceOf(caught, NonRetriableError);
+      expect(caught.cause).toBe(badRequest);
     });
 
     it("rethrows a retriable loop error as itself when the abort fails", async () => {
@@ -4949,6 +5072,7 @@ describe("system prompt snapshot", () => {
         rendered: "FIRST PROMPT",
         configDigest: expect.any(String),
         attachmentCutoff: null,
+        reason: "first_turn",
       },
     );
     expect(loopParams(deps).systemPrompt).toBe("FIRST PROMPT");
@@ -5032,7 +5156,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3" }),
+      expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3", reason: "attachments" }),
     );
     const { messages } = loopParams(deps);
     expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
@@ -5263,7 +5387,7 @@ describe("system prompt snapshot", () => {
 
     expect(next.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1" }),
+      expect.objectContaining({ openedBy: "msg-1", reason: "configuration" }),
     );
     expect(loopParams(next).systemPrompt).toContain("## identity\nName: Sam");
     expect(loopParams(next).systemPrompt).not.toContain("You don't know your user yet.");
@@ -5295,7 +5419,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", historyStart: "m1" }),
+      expect.objectContaining({ openedBy: "msg-1", historyStart: "m1", reason: "configuration" }),
     );
     const { systemPrompt, messages } = loopParams(deps);
     expect(systemPrompt).toBe("system prompt");
@@ -5369,7 +5493,7 @@ describe("system prompt snapshot", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ openedBy: "msg-1", historyStart: "m3" }),
+      expect.objectContaining({ openedBy: "msg-1", historyStart: "m3", reason: "summary" }),
     );
     expect(loopParams(deps).messages[2]).toEqual({
       role: "assistant",
@@ -5420,7 +5544,7 @@ describe("system prompt snapshot", () => {
       // 8 messages, 6 retained: the summary covers m1 and m2.
       expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ openedBy: "m7", historyStart: "m3" }),
+        expect.objectContaining({ openedBy: "m7", historyStart: "m3", reason: "summary" }),
       );
       // The retained turns before m7 replay without the thinking bound to the
       // old prefix; m8, after it, keeps its own.
@@ -5455,6 +5579,52 @@ describe("system prompt snapshot", () => {
       expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
       expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
       expect(loopParams(deps).systemPrompt).toBe("EPOCH PROMPT");
+    });
+
+    /** A loop whose one request carried a head, and whose reply is the turn's one row. */
+    function headedLoop() {
+      return vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        finishedLoop({
+          text: "reply",
+          newMessages: [{ role: "assistant", content: [{ type: "text", text: "reply" }] }],
+          requests: {
+            base: baseDigest("EPOCH PROMPT", []),
+            historyLength: 8,
+            sent: [{ length: 8, digest: "f".repeat(64) }],
+            diverged: false,
+          },
+        }),
+      );
+    }
+
+    /** The transcript head the turn wrote on its reply. */
+    function replyHead(deps: HandleMessageDeps) {
+      const [, params] = expectDefined(
+        vi.mocked(deps.agentStore.insertMessages).mock.calls[0],
+        "insertMessages call",
+      );
+      return params.messages.at(-1)?.transcriptHead;
+    }
+
+    it("heads the reply compacted, from the loaded history's start, when its summary wasn't stored", async () => {
+      const deps = summarizingDeps(await defaultDigest(), "max_tokens");
+      deps.runStreamingAgentLoop = headedLoop();
+
+      await run(deps);
+
+      expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m1", status: "compacted" });
+    });
+
+    it("heads the reply intact, from after the summary the turn stored", async () => {
+      const deps = summarizingDeps(await defaultDigest());
+      deps.runStreamingAgentLoop = headedLoop();
+
+      await run(deps);
+
+      // The summary covers m1 and m2: the epoch the turn opened, and the
+      // view its requests sent, start at m3.
+      expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalled();
+      expect(replyHead(deps)).toMatchObject({ length: 9, historyStart: "m3", status: "intact" });
     });
   });
 });

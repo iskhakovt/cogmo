@@ -582,6 +582,20 @@
       "when": 1793933603707,
       "tag": "0082_skill_run_schema",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1794094188494,
+      "tag": "0083_attachment_rejection",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1794100941510,
+      "tag": "0084_transcript_head_epoch_reason",
+      "breakpoints": true
     }
   ]
 }

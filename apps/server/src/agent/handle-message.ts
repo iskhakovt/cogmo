@@ -40,6 +40,7 @@ import type { PromptSource } from "./prompt.js";
 import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import type { StoredContent } from "./stored-content.js";
+import { historyStart } from "./system-prompt-snapshot.js";
 import type { ToolRegistry } from "./tools.js";
 import { createTurnStepRunner } from "./turn-step-runner.js";
 
@@ -154,7 +155,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       concurrency: conversationTurnConcurrency,
       onFailure: async ({ event, error, step }) => {
         const { conversationId, triggerInboundId } = event.data.event.data;
-        await reportTurnFailure(fromStepTools(step), deps.deliveryRouter, {
+        await reportTurnFailure(fromStepTools(step), deps, {
           conversationId,
           triggerInboundId,
           runId: event.data.run_id,
@@ -236,7 +237,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // In-turn durable boundary wrapper — per-step-kind retry policy lives in
       // `createTurnStepRunner`.
-      const stepRun = createTurnStepRunner(durable.run);
+      const stepRun = createTurnStepRunner(durable.run, { cursor: maxInboundId });
 
       // Ahead of the view, whose attachment cutoff reads the route's frozen limits.
       const turnModel = await resolveTurnModel(stepRun, deps.resolveProvider, snapshot.model);
@@ -338,6 +339,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         lastAnsweredMessageId,
         priorCooldown: conv.cooldownState,
         result,
+        // The view the turn's requests sent starts after any summary it stored.
+        view: {
+          historyStart: historyStart(transcript.history.messageIds, compacted.storedCutoff),
+          compacted: compacted.rewroteView,
+        },
       });
 
       return match(persisted)

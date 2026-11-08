@@ -105,6 +105,7 @@ function task(
     memoryMb: 128,
     dispatch: sendingGate(),
     wallClockS: 30,
+    run: { id: params.taskId, key: `key-${params.taskId}` },
     ...params,
   };
 }
@@ -168,7 +169,7 @@ async def run(inputs, ctx):
 
   it("raises a refused ctx call in the skill as CtxError with its kind and message", async () => {
     const handler: CtxHandler = {
-      handle: vi.fn(async () =>
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
         err({ kind: "not_in_allowlist", message: "secret 'x' is not declared" }),
       ),
     };
@@ -196,9 +197,95 @@ async def run(inputs, ctx):
     });
   });
 
+  it("raises the cogmo_ctx CtxError, the class the skill's global names too", async () => {
+    const handler: CtxHandler = {
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
+        err({ kind: "not_in_allowlist", message: "no" }),
+      ),
+    };
+    const result = await runOnWorker(
+      task({
+        taskId: "task-imported",
+        skillName: "imported",
+        body: `
+import cogmo_ctx
+async def run(inputs, ctx):
+    try:
+        await ctx.secrets.get("x")
+    except cogmo_ctx.CtxError as e:
+        return {"kind": e.kind, "global": CtxError is cogmo_ctx.CtxError}
+`,
+        inputs: {},
+        ctxHandler: handler,
+      }),
+    );
+    assert(result.ok);
+    expect(result.output).toEqual({ kind: "not_in_allowlist", global: true });
+  });
+
+  it.each([
+    ["False", "skill_failed"],
+    ["True", "skill_retryable"],
+  ])("reports a SkillError with retryable=%s as %s", async (retryable, errorKind) => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-skill-error",
+        skillName: "skill-error",
+        body: `
+from cogmo_ctx import SkillError
+async def run(inputs, ctx):
+    raise SkillError("not_found", "no such feed", retryable=${retryable})
+`,
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    expect(result).toMatchObject({ ok: false, errorKind, error: "not_found: no such feed" });
+  });
+
+  it("reports a skill that forges another kind through the failure report as skill_raised", async () => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-forged",
+        skillName: "forged",
+        body: `
+async def _cogmo_call_run(namespace, run, inputs, ctx):
+    return ("runtime_unavailable", "no skill code ran"), None
+
+async def run(inputs, ctx):
+    return {}
+`,
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      errorKind: "skill_raised",
+      error: "the skill replaced the run's failure report",
+    });
+  });
+
+  it("hands the task's run to ctx.run()", async () => {
+    const result = await runOnWorker(
+      task({
+        taskId: "task-run",
+        run: { id: "run-9", key: "skill-tool:call-9" },
+        skillName: "run",
+        body: "async def run(inputs, ctx):\n    return ctx.run()\n",
+        inputs: {},
+        ctxHandler: { handle: vi.fn() },
+      }),
+    );
+    assert(result.ok);
+    expect(result.output).toEqual({ id: "run-9", key: "skill-tool:call-9" });
+  });
+
   it("fails the task naming the CtxError a skill leaves uncaught", async () => {
     const handler: CtxHandler = {
-      handle: vi.fn(async () => err({ kind: "missing_effect", message: "needs reads_memory" })),
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
+        err({ kind: "missing_effect", message: "needs reads_memory" }),
+      ),
     };
     const result = await runOnWorker(
       task({
@@ -809,6 +896,95 @@ async def run(inputs, ctx):
     );
     assert(result.ok, result.ok ? "" : result.error);
     expect(result.output).toEqual({ x: 3, version: expect.any(String) });
+  });
+
+  it("applies the skill's Input and Output models in the child", async () => {
+    const body = `
+from pydantic import BaseModel
+
+class Input(BaseModel):
+    n: int = 2
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return Output(doubled=inputs.n * 2)
+`;
+    const packages = { builtins: ["pydantic"], wheelDir: null };
+    expect(await boundaryRun(body, { packages })).toMatchObject({
+      ok: true,
+      output: { doubled: 4 },
+    });
+    expect(await boundaryRun(body, { packages, inputs: { n: "many" } })).toMatchObject({
+      ok: false,
+      errorKind: "input_invalid",
+      error: expect.stringMatching(/^n: Input should be a valid integer/),
+    });
+  });
+
+  it("keeps the output an Output model refuses, when JSON carries it", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return {"receipt": "r-1"}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Field required",
+      output: { receipt: "r-1" },
+    });
+  });
+
+  it("keeps nothing, and stays output_invalid, when the skill's own encoder writes no JSON", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+def _cogmo_encode_output(value):
+    return "not json"
+
+async def run(inputs, ctx):
+    return {"receipt": "r-1"}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Field required",
+    });
+  });
+
+  it("keeps nothing of an output an Output model refuses when JSON cannot carry it", async () => {
+    const result = await boundaryRun(
+      `
+from pydantic import BaseModel
+
+class Output(BaseModel):
+    doubled: int
+
+async def run(inputs, ctx):
+    return {"doubled": float("nan")}
+`,
+      { packages: { builtins: ["pydantic"], wheelDir: null } },
+    );
+    expect(result).toEqual({
+      ok: false,
+      errorKind: "output_invalid",
+      error: "doubled: Input should be a finite number",
+    });
   });
 
   it("fails the boot when a built-in is missing from the cache, rather than fetch it", async () => {

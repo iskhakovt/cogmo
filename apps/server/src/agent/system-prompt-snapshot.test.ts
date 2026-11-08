@@ -6,6 +6,7 @@ import {
   configDigest,
   continuesEpoch,
   coreMemoryChangesSince,
+  epochReason,
   hasIdentityOverride,
   historyStart,
   stripThinkingBefore,
@@ -84,6 +85,53 @@ describe("continuesEpoch", () => {
     expect(continuesEpoch(null, current)).toBe(false);
     expect(continuesEpoch({ ...current, configDigest: "d0" }, current)).toBe(false);
     expect(continuesEpoch({ ...current, historyStart: "m0" }, current)).toBe(false);
+  });
+});
+
+describe("epochReason", () => {
+  const snapshot = { configDigest: "d1", historyStart: "m1" };
+  const kept = { kind: "kept", cutoff: null } as const;
+  const advanced = { kind: "advanced", cutoff: "m2" } as const;
+  const same = { configDigest: "d1", loadedStart: "m1", epochStart: "m1", cutoff: kept };
+
+  it.each([
+    { name: "no snapshot", current: null, turn: same, reason: "first_turn" },
+    {
+      name: "another digest",
+      current: snapshot,
+      turn: { ...same, configDigest: "d2" },
+      reason: "configuration",
+    },
+    {
+      name: "another digest and a summary",
+      current: snapshot,
+      turn: { configDigest: "d2", loadedStart: "m3", epochStart: "m5", cutoff: advanced },
+      reason: "configuration",
+    },
+    {
+      name: "a summary `/compact` stored",
+      current: snapshot,
+      turn: { ...same, loadedStart: "m3", epochStart: "m3" },
+      reason: "summary",
+    },
+    {
+      name: "a summary this turn stored",
+      current: snapshot,
+      turn: { ...same, epochStart: "m5" },
+      reason: "summary",
+    },
+    {
+      name: "only an advanced attachment cutoff",
+      current: snapshot,
+      turn: { ...same, cutoff: advanced },
+      reason: "attachments",
+    },
+  ] as const)("records $name as $reason", ({ current, turn, reason }) => {
+    expect(epochReason(current, turn)).toBe(reason);
+  });
+
+  it("refuses an opening no reason explains", () => {
+    expect(() => epochReason(snapshot, same)).toThrow(/no reason/);
   });
 });
 

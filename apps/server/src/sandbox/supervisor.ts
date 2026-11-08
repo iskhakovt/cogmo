@@ -319,6 +319,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
           NanoCpus: Math.round(spec.resourceLimits.cpus * 1_000_000_000),
           Memory: spec.resourceLimits.memory_bytes,
           PidsLimit: spec.resourceLimits.pids,
+          NetworkMode: spec.network,
           AutoRemove: false,
         },
       });

@@ -10,6 +10,7 @@ import {
   SandboxState,
   SnapshotState,
 } from "@daytona/sdk";
+import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { withRetry } from "../../util/with-retry.js";
 import {
@@ -567,6 +568,18 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         "DaytonaSandboxClient.create: SessionSpec.allowPrivilegedRunc is Local-Docker-specific — Daytona uses the provider's runtime",
       );
     }
+    // `networkBlockAll` binds only on Tier 3 and 4: a Tier 1 or 2
+    // organisation's network policy overrides the sandbox's, so Daytona
+    // cannot promise a session with no network. No skills session runs here
+    // with one (the container tier and the deps reaper are Local-Docker's).
+    match(spec.network)
+      .with("bridge", () => {})
+      .with("none", () => {
+        throw new Error(
+          'DaytonaSandboxClient.create: SessionSpec.network "none" is unsupported — a Tier 1 or 2 organisation overrides networkBlockAll',
+        );
+      })
+      .exhaustive();
 
     const autoStopInterval = computeAutoStopInterval(spec.expiresAt);
     const warmedSnapshot = this.#snapshotByImage.get(spec.image);

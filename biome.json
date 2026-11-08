@@ -9,6 +9,7 @@
     "includes": [
       "**",
       "!apps/server/test/fixtures",
+      "!images/skills/contract",
       "!design/web-ui/mockups",
       "!pnpm-lock.yaml",
       "!pnpm-workspace.yaml"

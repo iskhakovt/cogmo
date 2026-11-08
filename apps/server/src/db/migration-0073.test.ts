@@ -41,6 +41,10 @@ beforeEach(async () => {
   await truncateAll(db);
   await db.execute(sql`DROP INDEX IF EXISTS uq_channels_fixed_type`);
   await db.execute(sql`ALTER TABLE channels ALTER COLUMN identity_mode TYPE text`);
+  // A later migration's CHECK reads `role`, which blocks retyping it.
+  await db.execute(
+    sql`ALTER TABLE messages DROP CONSTRAINT IF EXISTS chk_messages_transcript_head_assistant`,
+  );
   await db.execute(sql`ALTER TABLE messages ALTER COLUMN role TYPE text`);
   await db.execute(sql`DROP TYPE IF EXISTS channel_identity_mode`);
   await db.execute(sql`DROP TYPE IF EXISTS message_role`);

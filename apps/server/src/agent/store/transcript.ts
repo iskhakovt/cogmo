@@ -21,12 +21,14 @@ import type { Transaction } from "../../db/index.js";
 import { NOT_TURN_ROW_JSONPATH } from "../../llm/content.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import type { StoredContent, StoredMessage } from "../stored-content.js";
+import type { TranscriptHead } from "../transcript-head.js";
 import type { TurnContext } from "../turn-context.js";
 import {
   conversationSummaries,
   type MessageRole,
   messages,
   type SummarySourceValue,
+  type SystemPromptEpochReason,
   systemPromptSnapshots,
   turnContexts,
 } from "./schema.js";
@@ -74,7 +76,17 @@ export interface SystemPromptSnapshot {
   configDigest: string;
   /** The last row whose attachments render as placeholders; null: none. */
   attachmentCutoff: string | null;
+  /** Why the epoch opened. */
+  reason: SystemPromptEpochReason;
   createdAt: Date;
+}
+
+/**
+ * A row `insertMessages` writes. An assistant row may carry its transcript
+ * head; `messages` refuses one on a user row.
+ */
+export interface NewMessageRow extends StoredMessage {
+  transcriptHead?: TranscriptHead;
 }
 
 /**
@@ -154,7 +166,7 @@ export interface TranscriptStore {
     tx: Transaction,
     params: {
       conversationId: string;
-      messages: ReadonlyArray<StoredMessage>;
+      messages: ReadonlyArray<NewMessageRow>;
       profileId: string;
       model: string;
       lastInboundMessageId: string;
@@ -226,6 +238,15 @@ export interface TranscriptStore {
     tx: Transaction,
     conversationId: string,
   ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
+
+  /**
+   * The user rows newer than `afterMessageId` (any row when `null`) with
+   * their cursors, ordered by id: the batches no reply has answered yet.
+   */
+  listUserRowsAfter(
+    tx: Transaction,
+    params: { conversationId: string; afterMessageId: string | null },
+  ): Promise<ReadonlyArray<TurnMessage>>;
 
   /** The rows of the conversation's turns with these cursors, ordered by id: what the Observer renders. */
   listTurnMessages(
@@ -409,7 +430,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     params: {
       conversationId: string;
-      messages: ReadonlyArray<StoredMessage>; // must be non-empty
+      messages: ReadonlyArray<NewMessageRow>; // must be non-empty
       profileId: string;
       model: string;
       lastInboundMessageId: string;
@@ -428,6 +449,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       profileId: params.profileId,
       model: params.model,
       lastInboundMessageId: params.lastInboundMessageId,
+      transcriptHead: msg.transcriptHead ?? null,
       ...(i === lastIdx &&
         params.lastMessageInputTokens != null && {
           inputTokens: params.lastMessageInputTokens,
@@ -648,6 +670,29 @@ export class DrizzleTranscriptStore implements TranscriptStore {
         })
         .returning(),
     );
+  }
+
+  async listUserRowsAfter(
+    tx: Transaction,
+    params: { conversationId: string; afterMessageId: string | null },
+  ): Promise<ReadonlyArray<TurnMessage>> {
+    const { conversationId, afterMessageId } = params;
+    return tx
+      .select({
+        id: messages.id,
+        role: messages.role,
+        content: messages.content,
+        cursor: messages.lastInboundMessageId,
+      })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.role, "user"),
+          afterMessageId === null ? undefined : gt(messages.id, afterMessageId),
+        ),
+      )
+      .orderBy(asc(messages.id));
   }
 
   async listTurnMessages(

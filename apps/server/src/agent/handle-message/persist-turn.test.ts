@@ -2,12 +2,15 @@ import * as R from "remeda";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
+import type { Message } from "../../llm/types.js";
 import { agentIterations } from "../../metrics.js";
+import { expectDefined } from "../../test/assertions.js";
 import { FAKE_TX } from "../../test/factories.js";
 import { fakeDurable } from "../../test/fake-durable.js";
 import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
+import { baseDigest, type LoopRequests, TranscriptHasher } from "../transcript-head.js";
 import { type PersistTurnArgs, persistTurn } from "./persist-turn.js";
 
 const ELAPSED_COOLDOWN: CooldownState = {
@@ -25,6 +28,7 @@ const RESULT: AgentLoopResult = {
   iterations: 2,
   streamed: { text: "reply", toolUseIds: [] },
   degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+  requests: { base: baseDigest("system", []), historyLength: 1, sent: [], diverged: false },
 };
 
 const ARGS: PersistTurnArgs = {
@@ -38,6 +42,7 @@ const ARGS: PersistTurnArgs = {
   // whenever the turn persists.
   priorCooldown: ELAPSED_COOLDOWN,
   result: RESULT,
+  view: { historyStart: "m1", compacted: false },
 };
 
 interface Setup {
@@ -202,6 +207,106 @@ describe("persistTurn", () => {
     const { step, deps } = setup({ memo: { "persist-new-messages": { kind: "lost" } } });
 
     await expect(persistTurn(step, deps, ARGS)).rejects.toThrow();
+  });
+
+  describe("transcript heads", () => {
+    const HISTORY: Message = { role: "user", content: "read a.txt" };
+    const CALL: Message = {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "a.txt" } }],
+    };
+    const OUTPUT: Message = {
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "contents" }],
+    };
+    const REPLY: Message = { role: "assistant", content: [{ type: "text", text: "done" }] };
+    const BASE = baseDigest("system", []);
+
+    /** A tool turn whose two requests sent the history, then the call and its output. */
+    function toolTurn(overrides?: Partial<LoopRequests>): AgentLoopResult {
+      const hasher = new TranscriptHasher();
+      return {
+        ...R.omit(RESULT, ["degraded"]),
+        newMessages: [CALL, OUTPUT, REPLY],
+        requests: {
+          base: BASE,
+          historyLength: 1,
+          sent: [hasher.head(BASE, [HISTORY]), hasher.head(BASE, [HISTORY, CALL, OUTPUT])],
+          diverged: false,
+          ...overrides,
+        },
+      };
+    }
+
+    /** The rows `insertMessages` was given. */
+    function insertedRows(agentStore: ReturnType<typeof setup>["agentStore"]) {
+      const [, params] = expectDefined(agentStore.insertMessages.mock.calls[0], "insert");
+      return params.messages;
+    }
+
+    it("writes each assistant row's head, extended through it, and none on user rows", async () => {
+      const { step, deps, agentStore } = setup({});
+
+      await persistTurn(step, deps, { ...ARGS, result: toolTurn() });
+
+      const hasher = new TranscriptHasher();
+      const head = (length: number) => ({
+        ...hasher.head(BASE, [HISTORY, CALL, OUTPUT, REPLY].slice(0, length)),
+        base: BASE,
+        historyStart: "m1",
+        status: "intact",
+      });
+      expect(insertedRows(agentStore)).toEqual([
+        { role: "assistant", content: CALL.content, transcriptHead: head(2) },
+        { role: "user", content: OUTPUT.content },
+        { role: "assistant", content: REPLY.content, transcriptHead: head(4) },
+      ]);
+    });
+
+    it("marks the heads compacted when the turn's compaction rewrote its view, even if diverged", async () => {
+      const { step, deps, agentStore } = setup({});
+
+      await persistTurn(step, deps, {
+        ...ARGS,
+        result: toolTurn({ diverged: true }),
+        view: { historyStart: "m3", compacted: true },
+      });
+
+      const heads = insertedRows(agentStore).map((row) => row.transcriptHead);
+      expect(heads).toEqual([
+        expect.objectContaining({ status: "compacted", historyStart: "m3" }),
+        undefined,
+        expect.objectContaining({ status: "compacted", historyStart: "m3" }),
+      ]);
+    });
+
+    it("marks the heads diverged when a request saw a diverging transformation", async () => {
+      const { step, deps, agentStore } = setup({});
+
+      await persistTurn(step, deps, { ...ARGS, result: toolTurn({ diverged: true }) });
+
+      expect(insertedRows(agentStore).at(-1)?.transcriptHead?.status).toBe("diverged");
+    });
+
+    it("writes no head after a request whose memo predates heads", async () => {
+      const { step, deps, agentStore } = setup({});
+
+      await persistTurn(step, deps, {
+        ...ARGS,
+        result: toolTurn({
+          sent: [
+            { length: 1, digest: null },
+            { length: 3, digest: null },
+          ],
+        }),
+      });
+
+      expect(insertedRows(agentStore).map((row) => row.transcriptHead)).toEqual([
+        undefined,
+        undefined,
+        undefined,
+      ]);
+    });
   });
 
   it("throws without a transaction when the loop returned no messages", async () => {
