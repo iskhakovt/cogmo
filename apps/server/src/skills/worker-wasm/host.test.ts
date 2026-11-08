@@ -169,7 +169,7 @@ async def run(inputs, ctx):
 
   it("raises a refused ctx call in the skill as CtxError with its kind and message", async () => {
     const handler: CtxHandler = {
-      handle: vi.fn(async () =>
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
         err({ kind: "not_in_allowlist", message: "secret 'x' is not declared" }),
       ),
     };
@@ -199,7 +199,9 @@ async def run(inputs, ctx):
 
   it("raises the cogmo_ctx CtxError, the class the skill's global names too", async () => {
     const handler: CtxHandler = {
-      handle: vi.fn(async () => err({ kind: "not_in_allowlist", message: "no" })),
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
+        err({ kind: "not_in_allowlist", message: "no" }),
+      ),
     };
     const result = await runOnWorker(
       task({
@@ -281,7 +283,9 @@ async def run(inputs, ctx):
 
   it("fails the task naming the CtxError a skill leaves uncaught", async () => {
     const handler: CtxHandler = {
-      handle: vi.fn(async () => err({ kind: "missing_effect", message: "needs reads_memory" })),
+      handle: vi.fn<CtxHandler["handle"]>(async () =>
+        err({ kind: "missing_effect", message: "needs reads_memory" }),
+      ),
     };
     const result = await runOnWorker(
       task({

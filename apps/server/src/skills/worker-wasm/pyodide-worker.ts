@@ -10,6 +10,7 @@ import type { PyodideInterface } from "pyodide";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import COGMO_CTX_PY from "../../../../../images/skills/src/cogmo_ctx/__init__.py";
+import COGMO_CTX_CONTRACT_PY from "../../../../../images/skills/src/cogmo_ctx/_contract.py";
 import {
   CtxResultSchema,
   TaskInvokeSchema,
@@ -278,6 +279,7 @@ const COGMO_CTX_ROOT = "/cogmo/lib";
 function installCogmoCtx(py: PyodideInterface): void {
   py.FS.mkdirTree(`${COGMO_CTX_ROOT}/cogmo_ctx`);
   py.FS.writeFile(`${COGMO_CTX_ROOT}/cogmo_ctx/__init__.py`, COGMO_CTX_PY);
+  py.FS.writeFile(`${COGMO_CTX_ROOT}/cogmo_ctx/_contract.py`, COGMO_CTX_CONTRACT_PY);
   const sys = py.pyimport("sys");
   try {
     sys.path.insert(0, COGMO_CTX_ROOT);

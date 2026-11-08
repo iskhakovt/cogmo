@@ -165,14 +165,7 @@ def _emit_result(bridge: _Bridge, stdout: TextIO, result: Mapping[str, object]) 
     stdout.flush()
 
 
-def _emit_failure(
-    bridge: _Bridge,
-    stdout: TextIO,
-    task_id: str,
-    error_kind: str,
-    error: str,
-    extra: Mapping[str, object],
-) -> None:
+def _emit_failure(bridge: _Bridge, stdout: TextIO, task_id: str, error_kind: str, error: str) -> None:
     """Emit a failed `task_result`; `error_kind` is a run error kind the host accepts."""
     _emit_result(
         bridge,
@@ -183,7 +176,6 @@ def _emit_failure(
             "ok": False,
             "errorKind": error_kind,
             "error": error,
-            **extra,
             "rusage": _current_rusage(),
         },
     )
@@ -287,21 +279,21 @@ async def _main(
     try:
         exec(compile(skill_body, "<skill>", "exec"), skill_module)
     except SyntaxError as e:
-        _emit_failure(bridge, out, task_id, "load_failed", f"SyntaxError: {e.msg} (line {e.lineno})", {})
+        _emit_failure(bridge, out, task_id, "load_failed", f"SyntaxError: {e.msg} (line {e.lineno})")
         stdin_task.cancel()
         return
     except MemoryError as e:
-        _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}", {})
+        _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}")
         stdin_task.cancel()
         return
     except Exception as e:
-        _emit_failure(bridge, out, task_id, "load_failed", f"{type(e).__name__}: {e}", {})
+        _emit_failure(bridge, out, task_id, "load_failed", f"{type(e).__name__}: {e}")
         stdin_task.cancel()
         return
 
     run_fn = skill_module.get("run")
     if not callable(run_fn) or not inspect.iscoroutinefunction(run_fn):
-        _emit_failure(bridge, out, task_id, "load_failed", "skill must define `async def run(inputs, ctx)`", {})
+        _emit_failure(bridge, out, task_id, "load_failed", "skill must define `async def run(inputs, ctx)`")
         stdin_task.cancel()
         return
 
@@ -310,27 +302,22 @@ async def _main(
         output = await run_fn(inputs, ctx)
     except SkillError as e:
         kind = "skill_retryable" if e.retryable else "skill_failed"
-        _emit_failure(bridge, out, task_id, kind, f"{e.kind}: {e.message}", {})
+        _emit_failure(bridge, out, task_id, kind, f"{e.kind}: {e.message}")
     except CtxError as e:
-        _emit_failure(bridge, out, task_id, "skill_raised", f"{e.kind}: {e.message}", {})
+        _emit_failure(bridge, out, task_id, "skill_raised", f"{e.kind}: {e.message}")
     except MemoryError as e:
-        _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}", {})
+        _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}")
     except Exception as e:
-        _emit_failure(
-            bridge,
-            out,
-            task_id,
-            "skill_raised",
-            f"{type(e).__name__}: {e}",
-            {"traceback": traceback.format_exc()},
-        )
+        # The stack reaches the host's log through stderr; the result carries the message.
+        err.write(traceback.format_exc())
+        _emit_failure(bridge, out, task_id, "skill_raised", f"{type(e).__name__}: {e}")
     else:
         try:
             encoded = _encode_output(output)
         except MemoryError as e:
-            _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}", {})
+            _emit_failure(bridge, out, task_id, "memory_exceeded", f"MemoryError: {e}")
         except Exception as e:
-            _emit_failure(bridge, out, task_id, "output_invalid", f"output is not JSON: {e}", {})
+            _emit_failure(bridge, out, task_id, "output_invalid", f"output is not JSON: {e}")
         else:
             _emit_output(bridge, out, task_id, encoded)
     finally:

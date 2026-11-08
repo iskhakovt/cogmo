@@ -2,6 +2,7 @@ import { err, ok, type Result } from "neverthrow";
 import { isMatching, match } from "ts-pattern";
 import { logger } from "../logger.js";
 import { describeError } from "../util/describe-error.js";
+import type { CtxErrorKind } from "./ctx-contract.js";
 import {
   type CtxCall,
   type CtxResult,
@@ -61,7 +62,7 @@ export interface CtxHandler {
 
 /** A refused ctx call. `kind` is the `errorKind` on `ctx_result` and the Python `CtxError.kind`. */
 export interface CtxFailure {
-  kind: string;
+  kind: CtxErrorKind;
   message: string;
 }
 

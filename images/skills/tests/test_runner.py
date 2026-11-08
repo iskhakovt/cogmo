@@ -98,7 +98,21 @@ class TestErrors:
         assert result["errorKind"] == "skill_raised"
         assert "RuntimeError" in result["error"]
         assert "skill failed" in result["error"]
-        assert "traceback" in result
+
+    @pytest.mark.asyncio
+    async def test_skill_raises_writes_its_stack_to_stderr(self) -> None:
+        stderr = io.StringIO()
+        await _main(
+            "async def run(inputs, ctx):\n    raise RuntimeError('skill failed')\n",
+            {},
+            "t-stack",
+            RUN,
+            stdin=io.BytesIO(b""),
+            stdout=io.StringIO(),
+            stderr=stderr,
+        )
+        assert "Traceback (most recent call last)" in stderr.getvalue()
+        assert "RuntimeError: skill failed" in stderr.getvalue()
 
     @pytest.mark.asyncio
     async def test_missing_run_function(self) -> None:

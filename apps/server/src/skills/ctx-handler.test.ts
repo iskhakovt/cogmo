@@ -1160,6 +1160,14 @@ describe("DefaultCtxHandler", () => {
       });
     });
 
+    it.each(["now", "user"])("%s refuses arguments, which it takes none of", async (method) => {
+      const h = makeHandler(manifest(), deps());
+      expect(await refusal(h.handle({ method, args: { tz: "UTC" } }))).toEqual({
+        kind: "invalid_args",
+        message: `${method} takes no arguments`,
+      });
+    });
+
     it("log.info accepts a plain message", async () => {
       const d = deps();
       const h = makeHandler(manifest(), d);
@@ -1252,21 +1260,19 @@ describe("DefaultCtxHandler", () => {
       });
     });
 
-    it("memory.remember names the running skill whatever source or name the skill passes", async () => {
+    it("memory.remember refuses a source or name the skill passes, staging nothing", async () => {
       const m = manifest("effects:\n  - writes_memory");
       const d = deps();
       const h = makeHandler(m, d);
-      await served(
-        h.handle({
-          method: "memory.remember",
-          args: { content: "x", skillName: "other", source: "live_retain" },
-        }),
-      );
-      expect(d.memory.stageRetain).toHaveBeenCalledWith("x", {
-        context: "from skill 'test-skill'",
-        source: "skill",
-        skillName: "test-skill",
-      });
+      expect(
+        await refusal(
+          h.handle({
+            method: "memory.remember",
+            args: { content: "x", skillName: "other", source: "live_retain" },
+          }),
+        ),
+      ).toMatchObject({ kind: "invalid_args" });
+      expect(d.memory.stageRetain).not.toHaveBeenCalled();
     });
 
     it("log.info accepts structured fields and emits them on the pino child", async () => {

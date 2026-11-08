@@ -7,13 +7,29 @@ so the skills image installs this file and the wasm child embeds it.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, TypedDict
+from typing import TypedDict
 
-__all__ = ["Bridge", "Ctx", "CtxError", "RunInfo", "SkillError"]
+from cogmo_ctx._contract import Bridge, CtxErrorKind, FileEntry, HttpResponse, MemoryRecall, User
+
+__all__ = [
+    "Bridge",
+    "Ctx",
+    "CtxError",
+    "CtxErrorKind",
+    "FileEntry",
+    "HttpResponse",
+    "MemoryRecall",
+    "RunInfo",
+    "SkillError",
+    "User",
+]
 
 
 class CtxError(Exception):
-    """The host refused a ctx call; `kind` says why."""
+    """The host refused a ctx call.
+
+    `kind` says why: a `CtxErrorKind`, or `task_finished` for a call made after `run` returned.
+    """
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(f"{kind}: {message}")
@@ -37,14 +53,6 @@ class SkillError(Exception):
         self.retryable = retryable
 
 
-class Bridge(Protocol):
-    """The tier's channel to the host."""
-
-    async def call(self, method: str, args: Mapping[str, object]) -> Any:
-        """Send one ctx call; return its value, or raise `CtxError` when the host refuses it."""
-        ...
-
-
 class RunInfo(TypedDict):
     """The run a task belongs to: its id, and the invocation's logical key."""
 
@@ -56,7 +64,7 @@ class _Secrets:
     def __init__(self, bridge: Bridge) -> None:
         self._b = bridge
 
-    async def get(self, name: str) -> Any:
+    async def get(self, name: str) -> str:
         return await self._b.call("secrets.get", {"name": name})
 
 
@@ -64,13 +72,13 @@ class _Memory:
     def __init__(self, bridge: Bridge) -> None:
         self._b = bridge
 
-    async def recall(self, query: str, limit: int | None = None) -> Any:
+    async def recall(self, query: str, limit: int | None = None) -> MemoryRecall:
         args: dict[str, object] = {"query": query}
         if limit is not None:
             args["limit"] = limit
         return await self._b.call("memory.recall", args)
 
-    async def remember(self, content: str, tags: Sequence[str] | None = None) -> Any:
+    async def remember(self, content: str, tags: Sequence[str] | None = None) -> None:
         args: dict[str, object] = {"content": content}
         if tags is not None:
             args["tags"] = list(tags)
@@ -81,13 +89,13 @@ class _Files:
     def __init__(self, bridge: Bridge) -> None:
         self._b = bridge
 
-    async def read(self, path: str) -> Any:
+    async def read(self, path: str) -> str:
         return await self._b.call("files.read", {"path": path})
 
-    async def write(self, path: str, content: str) -> Any:
+    async def write(self, path: str, content: str) -> None:
         return await self._b.call("files.write", {"path": path, "content": content})
 
-    async def list(self, prefix: str | None = None) -> Any:
+    async def list(self, prefix: str | None = None) -> list[FileEntry]:
         args: dict[str, object] = {}
         if prefix is not None:
             args["prefix"] = prefix
@@ -114,7 +122,7 @@ class _Http:
         headers: Mapping[str, str] | None = None,
         body: str | None = None,
         timeout_ms: int | None = None,
-    ) -> Any:
+    ) -> HttpResponse:
         args: dict[str, object] = {"method": method.upper(), "url": url}
         if headers is not None:
             args["headers"] = dict(headers)
@@ -124,7 +132,9 @@ class _Http:
             args["timeoutMs"] = timeout_ms
         return await self._b.call("http.request", args)
 
-    async def get(self, url: str, headers: Mapping[str, str] | None = None, timeout_ms: int | None = None) -> Any:
+    async def get(
+        self, url: str, headers: Mapping[str, str] | None = None, timeout_ms: int | None = None
+    ) -> HttpResponse:
         return await self.request("GET", url, headers=headers, timeout_ms=timeout_ms)
 
     async def post(
@@ -133,7 +143,7 @@ class _Http:
         body: str | None = None,
         headers: Mapping[str, str] | None = None,
         timeout_ms: int | None = None,
-    ) -> Any:
+    ) -> HttpResponse:
         return await self.request("POST", url, headers=headers, body=body, timeout_ms=timeout_ms)
 
 
@@ -141,7 +151,7 @@ class _Log:
     def __init__(self, bridge: Bridge) -> None:
         self._b = bridge
 
-    async def info(self, message: str, **fields: object) -> Any:
+    async def info(self, message: str, **fields: object) -> None:
         return await self._b.call("log.info", {"message": message, "fields": fields})
 
 
@@ -166,8 +176,8 @@ class Ctx:
         """
         return {"id": self._run["id"], "key": self._run["key"]}
 
-    async def now(self) -> Any:
+    async def now(self) -> str:
         return await self._b.call("now", {})
 
-    async def user(self) -> Any:
+    async def user(self) -> User:
         return await self._b.call("user", {})
