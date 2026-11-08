@@ -43,10 +43,9 @@ const ALLOWED_OPTIONAL_ONLY: ReadonlyArray<string> = [
   "cpu-features",
   "buildcheck",
   "nan",
-  // debug's colour detection, and jackspeak's argument parser.
+  // debug's colour detection.
   "supports-color",
   "has-flag",
-  "@pkgjs/parseargs",
 ];
 
 function matches(entry: string, name: string): boolean {
@@ -94,7 +93,7 @@ function target(
   { name, version }: Edge,
 ): { snapshot: string } | { importer: string } {
   if (version.startsWith("link:")) return { importer: join(from, version.slice("link:".length)) };
-  // An alias (`wrap-ansi-cjs: wrap-ansi@7.0.0`) resolves to the package it names.
+  // An alias (`<alias>: <name>@<version>`) resolves to the package it names.
   return { snapshot: /^\d/.test(version) ? `${name}@${version}` : version };
 }
 
