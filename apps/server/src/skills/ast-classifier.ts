@@ -426,13 +426,13 @@ export function computeRiskTier(input: RiskTierInput): RiskTierResult {
 
 /**
  * The top-level package of every absolute import in `body`, at any depth:
- * `import a.b` and `from a.b import c` both name `a`. Throws on a parser-load
- * failure, as the classifier does.
+ * `import a.b` and `from a.b import c` both name `a`. Throws when the parser
+ * cannot load or returns no tree, as the classifier treats both.
  */
 export async function importRoots(body: string): Promise<ReadonlySet<string>> {
   const parser = await getParser();
   const tree = parser.parse(body);
-  if (!tree) return new Set();
+  if (!tree) throw new Error("tree-sitter returned no tree for the skill body");
   try {
     return new Set(
       tree.rootNode

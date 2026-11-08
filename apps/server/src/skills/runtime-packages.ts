@@ -39,13 +39,18 @@ function release(version: string): number[] {
   return (/^\d+(\.\d+)*/.exec(version)?.[0] ?? "0").split(".").map(Number);
 }
 
+/** A pre-release or development release, which PEP 440 orders below its release. */
+function isPreRelease(version: string): boolean {
+  return /^\d+(\.\d+)*(a|b|rc|\.?dev)/i.test(version);
+}
+
 function below(version: string, floor: string): boolean {
   const [a, b] = [release(version), release(floor)];
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     const [x, y] = [a[i] ?? 0, b[i] ?? 0];
     if (x !== y) return x < y;
   }
-  return false;
+  return isPreRelease(version) && !isPreRelease(floor);
 }
 
 /**
@@ -57,12 +62,12 @@ function below(version: string, floor: string): boolean {
  * author-facing line.
  */
 export function checkRuntimePins(lockfileContents: string): Result<void, string> {
-  const pins: Readonly<Record<string, string>> = RUNTIME_PACKAGES;
-  const floors: Readonly<Record<string, string>> = RUNTIME_FLOORS;
+  const pins = new Map<string, string>(Object.entries(RUNTIME_PACKAGES));
+  const floors = new Map<string, string>(Object.entries(RUNTIME_FLOORS));
   const conflicts = parseLockfileEntries(lockfileContents).flatMap((entry) => {
     const name = normalizePackageName(entry.name);
-    const pin = pins[name];
-    const floor = floors[name];
+    const pin = pins.get(name);
+    const floor = floors.get(name);
     if (pin !== undefined && pin !== entry.version) {
       return [`${name}==${entry.version} (the runtime's is ${pin})`];
     }

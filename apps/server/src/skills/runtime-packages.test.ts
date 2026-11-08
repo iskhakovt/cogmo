@@ -33,6 +33,13 @@ describe("checkRuntimePins", () => {
     );
   });
 
+  it("orders a pre-release below its release, and reads no inherited key as a runtime package", () => {
+    expect(checkRuntimePins("typing-extensions==4.14.1rc1\n").isErr()).toBe(true);
+    expect(checkRuntimePins("typing-extensions==4.14.1.dev3\n").isErr()).toBe(true);
+    expect(checkRuntimePins("typing-extensions==4.15.0rc1\n").isOk()).toBe(true);
+    expect(checkRuntimePins("constructor==1.0\ntostring==2.0\n").isOk()).toBe(true);
+  });
+
   it("refuses a lockfile pinning a runtime package at another version, whatever its spelling", () => {
     const pinned = checkRuntimePins(
       "Pydantic_Core==2.45.0 \\\n    --hash=sha256:aa\npydantic==2.14.3 \\\n    --hash=sha256:bb\n",
