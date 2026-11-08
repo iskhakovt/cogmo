@@ -15,7 +15,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { Result } from "neverthrow";
-import { belowFloor } from "../src/agent/model-catalog/refresh-model-catalog.js";
+import { belowFloor, fetchJson } from "../src/agent/model-catalog/refresh-model-catalog.js";
 import { LITELLM_REGISTRY_URL, OPENROUTER_MODELS_URL } from "../src/llm/catalog-urls.js";
 import {
   isOpenRouterKey,
@@ -27,19 +27,14 @@ import { pruneOpenRouterModels, withOpenRouterNamespace } from "../src/llm/openr
 
 const OUTPUT = resolve(import.meta.dirname, "../data/litellm-models.json");
 
-/** LiteLLM's registry is a few MB; this bounds a stalled connection. */
-const FETCH_TIMEOUT_MS = 60_000;
-
 async function fetchPruned(
   url: string,
   prune: (raw: unknown) => Result<PrunedRegistry, string>,
 ): Promise<PrunedRegistry> {
   console.log(`Fetching ${url}...`);
-  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  if (!res.ok) {
-    throw new Error(`${url} returned ${res.status}`);
-  }
-  const pruned = prune(await res.json());
+  const raw = await fetchJson(fetch, url);
+  if (raw.isErr()) throw new Error(raw.error.message);
+  const pruned = prune(raw.value);
   if (pruned.isErr()) throw new Error(pruned.error);
   const { entries, skippedNoTokenData, skippedUnusable } = pruned.value;
   console.log(

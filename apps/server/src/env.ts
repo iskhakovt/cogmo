@@ -169,8 +169,8 @@ export const env = createEnv({
     /**
      * Where the same refresh fetches OpenRouter's model list, which supplies
      * the limits of `openrouter/*` ids, or `off` to refresh LiteLLM's registry
-     * alone and leave those ids to the bundled snapshot. Unread while
-     * `MODEL_CATALOG_URL` is `off`.
+     * alone and leave those ids to its keys and the bundled snapshot. Unread
+     * while `MODEL_CATALOG_URL` is `off`.
      */
     MODEL_CATALOG_OPENROUTER_URL: ModelCatalogUrlSchema.default(OPENROUTER_MODELS_URL),
     S3_ENDPOINT: z.string().optional(),

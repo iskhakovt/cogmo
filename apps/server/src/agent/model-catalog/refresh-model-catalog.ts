@@ -7,12 +7,15 @@
  * with no release in between.
  *
  * LiteLLM's registry is required: when it fails, nothing is stored. OpenRouter's
- * list is not: when it is off or fails, the catalog stores LiteLLM's entries
- * alone, and `openrouter/*` ids resolve from the bundled snapshot until a later
- * refresh brings the list back.
+ * list is not: when it fails, the refresh stores LiteLLM's entries with the
+ * previous catalog's `openrouter/*` entries carried forward, so a failed list
+ * leaves that namespace one refresh stale rather than empty. When it is off, the
+ * catalog holds no `openrouter/*` entries.
  */
 import { err, ok, type Result } from "neverthrow";
-import type { Transactor } from "../../db/index.js";
+import * as R from "remeda";
+import { z } from "zod";
+import type { Transaction, Transactor } from "../../db/index.js";
 import {
   isOpenRouterKey,
   type LitellmCatalog,
@@ -25,7 +28,7 @@ import { describeError } from "../../util/describe-error.js";
 import type { ModelCatalogStore } from "./store/index.js";
 
 /** LiteLLM's registry is a few MB; this bounds a stalled connection. */
-const FETCH_TIMEOUT_MS = 60_000;
+export const FETCH_TIMEOUT_MS = 60_000;
 
 /** How many new ids the result names. The count covers the rest. */
 const ADDED_SAMPLE = 20;
@@ -57,8 +60,8 @@ export interface ModelCatalogRefreshed {
 export type OpenRouterOutcome =
   | { kind: "off" }
   | { kind: "refreshed"; models: number }
-  /** The stored catalog holds no `openrouter/*` entries; the bundled snapshot answers for them. */
-  | { kind: "failed"; error: ModelCatalogRefreshError };
+  /** The previous catalog's `openrouter/*` entries, `carried` of them, stand in for the list. */
+  | { kind: "failed"; error: ModelCatalogRefreshError; carried: number };
 
 export type ModelCatalogRefreshError =
   /** A source's fetch failed or returned no JSON; a later attempt may succeed. */
@@ -86,12 +89,22 @@ export async function refreshModelCatalog(
   if (litellmFloor) return err({ kind: "rejected", message: litellmFloor });
 
   const openRouter = openRouterRaw === null ? null : openRouterEntries(openRouterRaw, deps.bundled);
-  const entries = withOpenRouterNamespace(litellm.value.entries, openRouter?.unwrapOr({}) ?? {});
 
-  const { previousIds, stored } = await deps.runInTx(async (tx) => ({
-    previousIds: await deps.modelCatalogStore.latestModelIds(tx),
-    stored: await deps.modelCatalogStore.replace(tx, entries),
-  }));
+  const { previousIds, stored, entries, carried } = await deps.runInTx(async (tx) => {
+    const carried = openRouter?.isErr()
+      ? await previousOpenRouterEntries(deps.modelCatalogStore, tx)
+      : {};
+    const entries = withOpenRouterNamespace(
+      litellm.value.entries,
+      openRouter?.unwrapOr(carried) ?? {},
+    );
+    return {
+      previousIds: await deps.modelCatalogStore.latestModelIds(tx),
+      stored: await deps.modelCatalogStore.replace(tx, entries),
+      entries,
+      carried: Object.keys(carried).length,
+    };
+  });
   deps.installCatalog({ entries, fetchedAt: stored.createdAt });
 
   const baseline = new Set(previousIds ?? Object.keys(deps.bundled));
@@ -108,9 +121,27 @@ export async function refreshModelCatalog(
         ? { kind: "off" }
         : openRouter.match(
             (models) => ({ kind: "refreshed", models: Object.keys(models).length }),
-            (error) => ({ kind: "failed", error }),
+            (error) => ({ kind: "failed", error, carried }),
           ),
   });
+}
+
+/**
+ * The newest stored catalog's `openrouter/*` entries. A row an older
+ * `LitellmCatalogSchema` wrote carries nothing; the bundled snapshot answers
+ * for those ids until OpenRouter's list is back.
+ */
+async function previousOpenRouterEntries(
+  store: ModelCatalogStore,
+  tx: Transaction,
+): Promise<Record<string, LitellmEntry>> {
+  try {
+    const previous = await store.latest(tx);
+    return previous ? R.pickBy(previous.entries, (_entry, key) => isOpenRouterKey(key)) : {};
+  } catch (e) {
+    if (e instanceof z.ZodError) return {};
+    throw e;
+  }
 }
 
 /** OpenRouter's list pruned to the `openrouter/` namespace, held to its floor. */
@@ -126,7 +157,7 @@ function openRouterEntries(
   });
 }
 
-async function fetchJson(
+export async function fetchJson(
   fetch: typeof globalThis.fetch,
   url: string,
 ): Promise<Result<unknown, ModelCatalogRefreshError>> {

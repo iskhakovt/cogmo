@@ -67,6 +67,7 @@ describe("createModelCatalogRefresh", () => {
       openRouter: {
         kind: "failed",
         error: { kind: "unavailable", message: "https://openrouter.ai/api/v1/models returned 503" },
+        carried: 451,
       },
     };
     const refresh = vi.fn(async () => ok(degraded));

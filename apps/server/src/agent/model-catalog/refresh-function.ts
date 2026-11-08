@@ -44,7 +44,7 @@ export function createModelCatalogRefresh(
           .with({ kind: "failed" }, () =>
             log.warn(
               result.value,
-              "model catalog refreshed without OpenRouter's model list — openrouter/ ids resolve from the bundled snapshot until a later refresh",
+              "model catalog refreshed without OpenRouter's model list — the previous catalog's openrouter/ entries carried forward",
             ),
           )
           .with({ kind: "off" }, { kind: "refreshed" }, () =>

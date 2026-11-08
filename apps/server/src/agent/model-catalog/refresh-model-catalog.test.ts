@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import type { LitellmCatalog, LiveCatalog } from "../../llm/litellm-data.js";
 import { fakeRunInTx } from "../../test/factories.js";
 import { type RefreshModelCatalogDeps, refreshModelCatalog } from "./refresh-model-catalog.js";
@@ -38,6 +39,7 @@ function makeDeps(
     response?: Response | Error;
     openRouter?: Response | Error | null;
     previousIds?: string[] | null;
+    previous?: LitellmCatalog | Error;
     url?: string;
     bundled?: LitellmCatalog;
   } = {},
@@ -47,6 +49,11 @@ function makeDeps(
 } {
   const store = mock<ModelCatalogStore>();
   store.latestModelIds.mockResolvedValue(opts.previousIds ?? null);
+  if (opts.previous instanceof Error) store.latest.mockRejectedValue(opts.previous);
+  else
+    store.latest.mockResolvedValue(
+      opts.previous ? { id: "old", entries: opts.previous, createdAt: FETCHED_AT } : null,
+    );
   store.replace.mockResolvedValue({ id: "new", createdAt: FETCHED_AT });
   const installed: LiveCatalog[] = [];
   const bundled = opts.bundled ?? BUNDLED;
@@ -199,7 +206,7 @@ describe("refreshModelCatalog", () => {
       });
     });
 
-    it("leaves the openrouter/ namespace to the bundled snapshot when the source is off", async () => {
+    it("stores no openrouter/ entries when the source is off", async () => {
       const deps = makeDeps({
         response: Response.json(upstream([...Object.keys(BUNDLED), "openrouter/legacy/model"])),
       });
@@ -235,18 +242,21 @@ describe("refreshModelCatalog", () => {
         Response.json(openRouterList([])),
         { kind: "rejected", message: expect.stringMatching(/only 0 usable OpenRouter models/) },
       ],
-    ])("stores LiteLLM's entries alone and reports %s", async (_label, openRouter, error) => {
-      const deps = makeDeps({
-        response: Response.json(upstream([...Object.keys(BUNDLED), "openrouter/legacy/model"])),
-        openRouter,
-      });
+    ])(
+      "stores LiteLLM's entries, with nothing before to carry forward, and reports %s",
+      async (_label, openRouter, error) => {
+        const deps = makeDeps({
+          response: Response.json(upstream([...Object.keys(BUNDLED), "openrouter/legacy/model"])),
+          openRouter,
+        });
 
-      const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
+        const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
 
-      expect(deps.store.replace.mock.calls[0]?.[1]).toEqual(BUNDLED);
-      expect(deps.installed).toHaveLength(1);
-      expect(result.openRouter).toEqual({ kind: "failed", error });
-    });
+        expect(deps.store.replace.mock.calls[0]?.[1]).toEqual(BUNDLED);
+        expect(deps.installed).toHaveLength(1);
+        expect(result.openRouter).toEqual({ kind: "failed", error, carried: 0 });
+      },
+    );
 
     it("holds a list to half the bundled snapshot's openrouter/ entries", async () => {
       const bundled: LitellmCatalog = {
@@ -261,6 +271,7 @@ describe("refreshModelCatalog", () => {
 
       expect(result.openRouter).toEqual({
         kind: "failed",
+        carried: 0,
         error: {
           kind: "rejected",
           message:
@@ -268,6 +279,44 @@ describe("refreshModelCatalog", () => {
         },
       });
       expect(deps.store.replace.mock.calls[0]?.[1]).toEqual(BUNDLED);
+    });
+
+    it("carries the previous catalog's openrouter/ entries forward when the list fails", async () => {
+      const grok = { contextWindow: 256_000, maxOutputTokens: 16_000 };
+      const deps = makeDeps({
+        previous: { "model-a": LIMITS, "openrouter/x-ai/grok-9": grok },
+        previousIds: ["model-a", "openrouter/x-ai/grok-9"],
+        openRouter: new Response("unavailable", { status: 503 }),
+      });
+
+      const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
+
+      expect(deps.store.replace.mock.calls[0]?.[1]).toEqual({
+        ...BUNDLED,
+        "openrouter/x-ai/grok-9": grok,
+      });
+      expect(result.openRouter).toMatchObject({ kind: "failed", carried: 1 });
+      expect(result.added).toEqual(["model-b", "model-c", "model-d"]);
+    });
+
+    it("carries nothing from a previous catalog that no longer parses", async () => {
+      const deps = makeDeps({
+        previous: new z.ZodError([]),
+        openRouter: new Response("unavailable", { status: 503 }),
+      });
+
+      const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
+
+      expect(deps.store.replace.mock.calls[0]?.[1]).toEqual(BUNDLED);
+      expect(result.openRouter).toMatchObject({ kind: "failed", carried: 0 });
+    });
+
+    it("leaves the previous catalog unread when the list arrives", async () => {
+      const deps = makeDeps({ openRouter: Response.json(openRouterList(["x-ai/grok-9"])) });
+
+      await refreshModelCatalog(deps);
+
+      expect(deps.store.latest).not.toHaveBeenCalled();
     });
 
     it("stores nothing when LiteLLM's registry fails, whatever OpenRouter sends", async () => {

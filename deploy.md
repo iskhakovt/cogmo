@@ -154,7 +154,7 @@ Defaults below match the in-image expectations: every host-state path sits under
 | Variable | Default | Purpose |
 |-|-|-|
 | `MODEL_CATALOG_URL` | LiteLLM's `model_prices_and_context_window.json` on `raw.githubusercontent.com` | Where the six-hourly refresh fetches each model's context window and output limit (an http(s) URL), so a model released since the last cogmo release gets real limits. `off` disables the refresh; limits then come from the snapshot bundled with the release. Needs egress to the URL's host; a URL with embedded credentials is refused. |
-| `MODEL_CATALOG_OPENROUTER_URL` | OpenRouter's `https://openrouter.ai/api/v1/models` | Where the same refresh fetches the limits of `openrouter/*` model ids, which LiteLLM's registry lacks. `off` refreshes LiteLLM's registry alone and leaves those ids to the bundled snapshot. Same URL rules as `MODEL_CATALOG_URL`; unread while that is `off`. |
+| `MODEL_CATALOG_OPENROUTER_URL` | OpenRouter's `https://openrouter.ai/api/v1/models` | Where the same refresh fetches the limits of `openrouter/*` model ids, which LiteLLM's registry lacks. `off` refreshes LiteLLM's registry alone and leaves those ids to its keys and the bundled snapshot. When the list can't be fetched, the previous refresh's entries for those ids stay. Same URL rules as `MODEL_CATALOG_URL`; unread while that is `off`. |
 
 #### Memory (Hindsight)
 
