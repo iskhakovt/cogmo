@@ -7,10 +7,11 @@ import type { SandboxClient, SandboxSession, SessionSpec } from "../../sandbox/i
 import { expectDefined } from "../../test/assertions.js";
 import { makeSandboxSchemaImporter } from "./schema-import.js";
 
-/** What one exec does: write `stdout` and `stderr`, then exit or fail. */
+/** What one exec does: write `stdout` and `stderr`, then exit or fail; or run until its signal aborts. */
 type ExecScript =
   | { stdout?: string; stderr?: string; exitCode: number }
-  | { stdout?: string; stderr?: string; failure: ExecFailure };
+  | { stdout?: string; stderr?: string; failure: ExecFailure }
+  | { hang: true };
 
 interface Harness {
   sandbox: SandboxClient;
@@ -33,11 +34,11 @@ function harness(...scripts: ExecScript[]): Harness {
   sandbox.create.mockImplementation(async (spec) => {
     state.specs.push(spec);
     const session = mock<SandboxSession>();
-    session.execStreaming.mockImplementation(async (cmd) => {
+    session.execStreaming.mockImplementation(async (cmd, opts) => {
       const script = expectDefined(scripts.shift(), `a script for ${cmd.join(" ")}`);
       const entry = { cmd, stdin: "" };
       state.execs.push(entry);
-      return fakeExec(script, (input) => {
+      return fakeExec(script, opts?.signal, (input) => {
         entry.stdin = input;
       });
     });
@@ -50,8 +51,12 @@ function harness(...scripts: ExecScript[]): Harness {
   return state;
 }
 
-/** An exec that plays `script` once its stdin ends. */
-function fakeExec(script: ExecScript, onStdin: (input: string) => void): ExecStreamingHandle {
+/** An exec that plays `script` once its stdin ends; a hanging one settles `disposed` on `signal`. */
+function fakeExec(
+  script: ExecScript,
+  signal: AbortSignal | undefined,
+  onStdin: (input: string) => void,
+): ExecStreamingHandle {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -60,6 +65,14 @@ function fakeExec(script: ExecScript, onStdin: (input: string) => void): ExecStr
   const exited = new Promise<Awaited<ExecStreamingHandle["exited"]>>((resolve) => {
     stdin.on("end", () => {
       onStdin(Buffer.concat(chunks).toString("utf-8"));
+      if ("hang" in script) {
+        signal?.addEventListener("abort", () => {
+          stdout.end();
+          stderr.end();
+          resolve(err({ kind: "disposed" }));
+        });
+        return;
+      }
       if (script.stdout) stdout.write(script.stdout);
       if (script.stderr) stderr.write(script.stderr);
       stdout.end();
@@ -74,7 +87,11 @@ function fakeExec(script: ExecScript, onStdin: (input: string) => void): ExecStr
     stdout,
     stderr,
     exited,
-    wait: async () => (await exited)._unsafeUnwrap(),
+    wait: async () => {
+      const exit = await exited;
+      if (exit.isErr()) throw new Error(exit.error.kind);
+      return exit.value;
+    },
     dispose: async () => {},
   };
 }
@@ -147,6 +164,26 @@ describe("makeSandboxSchemaImporter", () => {
       stdin: BODY,
     });
     expect(h.deleted).toBe(2);
+  });
+
+  it("stops an install the register's signal aborts, and imports nothing", async () => {
+    const h = harness({ hang: true });
+    const controller = new AbortController();
+
+    const pending = importer(h).importSchemas({
+      body: BODY,
+      lockfile: LOCKFILE,
+      resourceLimits: {},
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(h.execs).toHaveLength(1));
+    controller.abort(new Error("register deadline"));
+    const imported = await pending;
+
+    expect(imported._unsafeUnwrapErr()).toMatchObject({ kind: "unavailable" });
+    expect(h.specs).toHaveLength(1);
+    expect(h.deleted).toBe(1);
   });
 
   it("refuses dependencies that do not install, and imports nothing", async () => {

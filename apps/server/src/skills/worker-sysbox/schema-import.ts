@@ -93,7 +93,7 @@ export function makeSandboxSchemaImporter(
             budgetMs: INSTALL_TIMEOUT_MS,
           },
           signal,
-          (session, taskId) => install(session, lockfile, taskId),
+          (session, taskId) => install(session, lockfile, taskId, signal),
         );
         if (installed.isErr()) return err(installed.error);
       }
@@ -166,6 +166,7 @@ async function install(
   session: SandboxSession,
   lockfile: LockfileSnapshot,
   taskId: string,
+  signal: AbortSignal | undefined,
 ): Promise<Result<void, SchemaImportError>> {
   const populated = await ensureVenvPopulated({
     session,
@@ -173,6 +174,7 @@ async function install(
     lockfileContents: lockfile.contents,
     workerId: taskId,
     timeoutMs: INSTALL_TIMEOUT_MS,
+    ...(signal && { signal }),
   });
   return populated.mapErr((e) =>
     match(e)

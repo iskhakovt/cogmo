@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -131,3 +132,20 @@ def test_a_venv_that_does_not_activate_is_fatal(protocol: ProtocolCheck) -> None
     protocol("schema_import_reply", reply)
     assert reply["type"] == "fatal"
     assert str(reply["error"]).startswith("skill_venv: skill_venv has no site-packages")
+
+
+def test_what_module_code_writes_to_fd_1_goes_to_stderr_as_a_script() -> None:
+    body = f"import os\nos.write(1, b'native progress')\n{_MODELS}"
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-m", "cogmo_skills_runtime.schema"],
+        input=body,
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd="/",
+    )
+
+    assert json.loads(done.stdout)["type"] == "schemas"
+    assert done.stdout.count("\n") == 1
+    assert "native progress" in done.stderr

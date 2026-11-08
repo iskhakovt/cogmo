@@ -426,6 +426,8 @@ export interface EnsureVenvPopulatedOptions {
    */
   workerId: string;
   timeoutMs?: number;
+  /** Aborting it disposes the populate's exec. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -462,7 +464,12 @@ export async function ensureVenvPopulated(
   try {
     handle = await opts.session.execStreaming(
       ["sh", "-c", POPULATE_SCRIPT, "populate", opts.lockfileHash, opts.workerId],
-      { ...DEPENDENCY_EXEC_OPTIONS, attachStdin: true, timeoutMs },
+      {
+        ...DEPENDENCY_EXEC_OPTIONS,
+        attachStdin: true,
+        timeoutMs,
+        ...(opts.signal && { signal: opts.signal }),
+      },
     );
   } catch (e) {
     return err({

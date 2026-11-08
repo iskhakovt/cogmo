@@ -3,12 +3,13 @@
 Reads `skill.py` from stdin, activates the skill venv for the lockfile hash when one is given, imports the body
 and writes one `schema_import_reply` line to stdout: the models' JSON Schemas (`cogmo_ctx._run.contract_schemas`),
 `schema_failed` when the skill did not load or a model could not be described, or `fatal` when the venv would not
-activate. The host runs it in a session created with no network (design/skills.md → Contracts). Module code's own
-prints go to stderr, so the reply is the only line on stdout.
+activate. The host runs it in a session created with no network (design/skills.md → Contracts). What module code
+writes to stdout, through Python or straight to fd 1, goes to stderr, so the reply is the only line on stdout.
 """
 
 import contextlib
 import json
+import os
 import sys
 from typing import TextIO
 
@@ -49,4 +50,9 @@ def main(argv: list[str], stdin: TextIO, stdout: TextIO, stderr: TextIO) -> None
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:], sys.stdin, sys.stdout, sys.stderr)
+    # The reply goes out on a copy of stdout; fd 1 becomes stderr, so what module code or a native extension writes
+    # there cannot split the reply's line.
+    reply_fd = os.dup(1)
+    os.dup2(2, 1)
+    with os.fdopen(reply_fd, "w") as reply:
+        main(sys.argv[1:], sys.stdin, reply, sys.stderr)
