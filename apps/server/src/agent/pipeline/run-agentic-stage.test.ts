@@ -374,6 +374,25 @@ describe("runAgenticStage", () => {
       expect(add.mock.calls).toEqual([[1, { site: "stage" }]]);
     });
 
+    it("counts no in-turn violation for a stage that wrote no rows", async () => {
+      const add = vi.spyOn(promptPrefixViolations, "add");
+      const h = await harness();
+      const violated = headedLoop(1);
+      assertKind(violated, "finished");
+      h.runStreamingAgentLoop.mockResolvedValue({
+        kind: "finished",
+        result: {
+          ...violated.result,
+          newMessages: [],
+          requests: { ...violated.result.requests, violatedAt: 1 },
+        },
+      });
+
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      expect(add).not.toHaveBeenCalled();
+    });
+
     it("counts nothing for a stage whose requests all matched", async () => {
       const add = vi.spyOn(promptPrefixViolations, "add");
       const h = await harness();

@@ -62,9 +62,9 @@ import {
 import { storeTurnContext } from "../conversation/store-turn-context.js";
 import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
 import { offeredBuiltIns } from "../core-memory-tools.js";
-import { reportInTurnViolation } from "../handle-message/persist-turn.js";
 import { freezeLimits, limitsPolicy } from "../handle-message/resolve-turn-model.js";
 import type { ImageToolsLoader } from "../image-tools-loader.js";
+import { reportInTurnViolation } from "../in-turn-violation.js";
 import type {
   AgentLoopResult,
   StepRunner,
@@ -601,8 +601,9 @@ export async function runAgenticStage(
       result,
       headView,
     });
-    // After the write, so a transaction that keeps failing counts nothing.
-    reportInTurnViolation(result.requests, "stage", log);
+    // After the write, so a transaction that keeps failing counts nothing,
+    // and only when it wrote the stage's rows and their heads.
+    if (persisted.id !== null) reportInTurnViolation(result.requests, "stage", log);
     return persisted;
   });
 

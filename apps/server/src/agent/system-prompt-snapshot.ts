@@ -127,13 +127,13 @@ export function continuesEpoch(
   );
 }
 
-/** The epoch reasons a head verdict gives: an unexplained divergence is a `prefix_violation`. */
-function headReasons(head: HeadVerdict): ReadonlySet<HeadExplanation> {
+/** The epoch reason a head verdict gives, if any: an unexplained divergence is a `prefix_violation`. */
+function headReason(head: HeadVerdict): HeadExplanation | null {
   return match(head)
-    .returnType<ReadonlySet<HeadExplanation>>()
-    .with({ kind: "skipped" }, { kind: "matched" }, () => new Set<HeadExplanation>())
-    .with({ kind: "explained" }, ({ reason }) => new Set([reason]))
-    .with({ kind: "violated" }, () => new Set<HeadExplanation>(["prefix_violation"]))
+    .returnType<HeadExplanation | null>()
+    .with({ kind: "skipped" }, { kind: "matched" }, () => null)
+    .with({ kind: "explained" }, ({ reason }) => reason)
+    .with({ kind: "violated" }, () => "prefix_violation")
     .exhaustive();
 }
 
@@ -158,20 +158,20 @@ export function epochReason(
     head: HeadVerdict;
   },
 ): SystemPromptEpochReason {
-  const fromHead = headReasons(turn.head);
+  const fromHead = headReason(turn.head);
   const applies: Record<SystemPromptEpochReason, boolean> = {
     first_turn: snapshot === null,
-    configuration: snapshot?.configDigest !== turn.configDigest || fromHead.has("configuration"),
+    configuration: snapshot?.configDigest !== turn.configDigest || fromHead === "configuration",
     summary:
       snapshot?.historyStart !== turn.loadedStart ||
       snapshot?.historyStart !== turn.epochStart ||
-      fromHead.has("summary"),
-    compaction: fromHead.has("compaction"),
+      fromHead === "summary",
+    compaction: fromHead === "compaction",
     attachments: match(turn.cutoff)
       .with({ kind: "advanced" }, () => true)
       .with({ kind: "kept" }, () => false)
       .exhaustive(),
-    prefix_violation: fromHead.has("prefix_violation"),
+    prefix_violation: fromHead === "prefix_violation",
   };
   const reason = systemPromptEpochReason.enumValues.find((r) => applies[r]);
   if (reason === undefined) {

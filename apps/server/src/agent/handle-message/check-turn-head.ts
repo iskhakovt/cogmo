@@ -20,9 +20,12 @@ import {
   type TranscriptHead,
 } from "../transcript-head.js";
 import type { TurnTranscript } from "./load-turn-transcript.js";
+import type { TurnView } from "./render-turn-view.js";
 
 export interface CheckTurnHeadArgs {
   transcript: TurnTranscript;
+  /** The turn's rendered view: its rows as sent, when its cutoff is the epoch's. */
+  view: TurnView;
   /** The conversation's epoch, as `load-system-prompt` returned it; null before its first. */
   snapshot: EpochSnapshot | null;
   /** The frozen tool definitions every request of the turn sends. */
@@ -96,11 +99,9 @@ async function turnHeadVerdict(
   const reason = explanation(latest.head, base, start);
   if (reason !== null) return { kind: "explained", reason };
 
-  const sent = await renderAsSent(deps, history, snapshot, openerIndex);
-  const hasher = new TranscriptHasher();
-  const holds = (head: TranscriptHead): boolean =>
-    head.length <= sent.length &&
-    hasher.head(base, sent.slice(0, head.length)).digest === head.digest;
+  const sent = await renderAsSent(deps, args.view, history, snapshot, openerIndex);
+  const chain = chainDigests(base, sent, latest.head.length);
+  const holds = (head: TranscriptHead): boolean => chain[head.length] === head.digest;
   if (holds(latest.head)) return { kind: "matched" };
   // `latest` is comparable and doesn't hold, so the search always finds a row.
   const first =
@@ -137,18 +138,47 @@ function explanation(head: TranscriptHead, base: string, start: string): HeadExp
     .exhaustive();
 }
 
-/** The loaded history as the epoch's requests send it, before the turn's own compaction. */
+/**
+ * The chain's digest at every position up to `through` over `messages`, from
+ * `base` at position 0; shorter when `messages` runs out first.
+ */
+function chainDigests(base: string, messages: ReadonlyArray<Message>, through: number): string[] {
+  const hasher = new TranscriptHasher();
+  const end = Math.min(through, messages.length);
+  return messages.slice(0, end).reduce<string[]>(
+    (chain, _, i) => {
+      const previous = chain.at(-1) ?? base;
+      chain.push(
+        hasher.extend({ length: i, digest: previous }, messages.slice(0, i + 1), i).digest,
+      );
+      return chain;
+    },
+    [base],
+  );
+}
+
+/**
+ * The loaded history as the epoch's requests send it, before the turn's own
+ * compaction. The turn's view already renders it under the epoch's cutoff
+ * when the turn kept that cutoff; an advanced one is rendered again.
+ */
 async function renderAsSent(
   deps: { attachmentReader: AttachmentReader },
+  view: TurnView,
   history: TurnHistory,
   snapshot: EpochSnapshot,
   openerIndex: number,
 ): Promise<Message[]> {
-  const rendered = await renderStoredMessages(
-    history.messages,
-    history.messageIds,
-    deps.attachmentReader,
-    snapshot.attachmentCutoff ?? null,
-  );
+  const rendered = await match(view.cutoff)
+    .with({ kind: "kept" }, () => Promise.resolve(view.messages))
+    .with({ kind: "advanced" }, () =>
+      renderStoredMessages(
+        history.messages,
+        history.messageIds,
+        deps.attachmentReader,
+        snapshot.attachmentCutoff ?? null,
+      ),
+    )
+    .exhaustive();
   return validateHistory(stripThinkingBefore(rendered, openerIndex)).messages;
 }

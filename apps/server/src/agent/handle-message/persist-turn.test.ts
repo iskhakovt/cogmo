@@ -311,7 +311,7 @@ describe("persistTurn", () => {
       expect(add.mock.calls).toEqual([[1, { site: "iteration" }]]);
     });
 
-    it("counts an in-turn violation of a superseded turn, and not again on its own earlier write", async () => {
+    it("counts no in-turn violation where the turn wrote no heads", async () => {
       const add = vi.spyOn(promptPrefixViolations, "add");
       const superseded = setup({ rebatched: true });
 
@@ -319,9 +319,8 @@ describe("persistTurn", () => {
         ...ARGS,
         result: toolTurn({ violatedAt: 1 }),
       });
-      expect(add).toHaveBeenCalledTimes(1);
+      expect(add).not.toHaveBeenCalled();
 
-      add.mockClear();
       const rerun = setup({ existingReply: { id: "asst-final", sameContent: true } });
       await persistTurn(rerun.step, rerun.deps, { ...ARGS, result: toolTurn({ violatedAt: 1 }) });
       expect(add).not.toHaveBeenCalled();

@@ -187,6 +187,17 @@ describe("baseDigest", () => {
 });
 
 describe("TranscriptHasher", () => {
+  it("digests a non-finite number as the null JSON sends", () => {
+    const call = (n: number | null): Message => ({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "toolu_1", name: "calc", input: { n } }],
+    });
+
+    expect(new TranscriptHasher().head(BASE, [USER, call(Number.POSITIVE_INFINITY)])).toEqual(
+      new TranscriptHasher().head(BASE, [USER, call(null)]),
+    );
+  });
+
   it("chains each message onto the base, so position matters", () => {
     const hasher = new TranscriptHasher();
     const head = hasher.head(BASE, [USER, TOOL_CALL, TOOL_RESULT, REPLY]);

@@ -9,12 +9,13 @@ import {
   calculateElapsedCooldown,
   conversationDegraded,
 } from "../../inngest/events.js";
-import { agentIterations, promptPrefixViolations } from "../../metrics.js";
+import { agentIterations } from "../../metrics.js";
+import { reportInTurnViolation } from "../in-turn-violation.js";
 import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
 import { toStoredContent, toStoredMessage } from "../stored-content.js";
-import { type HeadView, type LoopRequests, rowHeads } from "../transcript-head.js";
+import { type HeadView, rowHeads } from "../transcript-head.js";
 
 export interface PersistTurnDeps {
   runInTx: Transactor;
@@ -161,7 +162,8 @@ export async function persistTurn(
     // the result records the turn twice. For a histogram read to spot
     // runaway iteration counts, repeated copies of one value are worse than
     // a missing one, and that retry window is the only source of them.
-    // The in-turn violation is counted by the same attempts, for the same reason.
+    // The in-turn violation is counted where the turn's diverged heads were
+    // written, so the count matches the stored divergence.
     return match(write)
       .returnType<PersistOutcome>()
       .with({ kind: "inserted" }, ({ messageId }) => {
@@ -172,7 +174,6 @@ export async function persistTurn(
       .with({ kind: "own_earlier_write" }, ({ messageId }) => ({ kind: "persisted", messageId }))
       .with({ kind: "superseded" }, () => {
         agentIterations.record(result.iterations, { model: result.model });
-        reportInTurnViolation(result.requests, "iteration", args.turnLogger);
         return { kind: "superseded" };
       })
       .exhaustive();
@@ -237,22 +238,4 @@ async function emitTurnEvents(
       }),
     );
   }
-}
-
-/**
- * Count and log the loop's in-turn head check failure, if it had one: the
- * first iteration whose rebuilt request differed from its memoized head. The
- * persist step that calls it fires once, so the count does too.
- */
-export function reportInTurnViolation(
-  requests: LoopRequests,
-  site: "iteration" | "stage",
-  log: Logger,
-): void {
-  if (requests.violatedAt === null) return;
-  promptPrefixViolations.add(1, { site });
-  log.warn(
-    { site, iteration: requests.violatedAt },
-    "a replay rebuilt a request other than the one its iteration sent; heads stored as diverged",
-  );
 }

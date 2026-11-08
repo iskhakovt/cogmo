@@ -80,7 +80,10 @@ async function sentAs(rows: ReadonlyArray<Row>, snapshot: EpochSnapshot): Promis
   return validateHistory(stripThinkingBefore(rendered, ids.indexOf(snapshot.openedBy))).messages;
 }
 
-/** The check's arguments over `rows`, whose last row is the turn's own. */
+/**
+ * The check's arguments over `rows`, whose last row is the turn's own. The
+ * view advanced its cutoff, so the check renders the rows itself.
+ */
 function args(
   rows: ReadonlyArray<Row>,
   heads: (TranscriptHead | null)[] | undefined,
@@ -101,6 +104,7 @@ function args(
       },
       turn,
     },
+    view: { messages: [], turnIndex: rows.length - 1, cutoff: { kind: "advanced", cutoff: "m0" } },
     snapshot,
     toolDefs: TOOLS,
     policy,
@@ -171,6 +175,23 @@ describe("checkTurnHead", () => {
     it("a history that still has its latest head", async () => {
       const heads = await headsFor(TWO_TURNS, EPOCH, ["m2", "m4"], {});
       expect(await verdict(TWO_TURNS, heads, EPOCH)).toEqual({ kind: "matched" });
+    });
+
+    it("over the view's own render when the turn kept the epoch's cutoff", async () => {
+      const heads = await headsFor(TWO_TURNS, EPOCH, ["m2", "m4"], {});
+      const kept = (messages: Message[]): CheckTurnHeadArgs => ({
+        ...args(TWO_TURNS, heads, EPOCH, "reopen"),
+        view: { messages, turnIndex: 4, cutoff: { kind: "kept", cutoff: null } },
+      });
+      const rendered = await sentAs(TWO_TURNS, EPOCH);
+      const edited = rendered.with(1, { role: "assistant", content: "edited" });
+
+      expect(await checkTurnHead({ attachmentReader: reader() }, kept(rendered))).toEqual({
+        kind: "matched",
+      });
+      expect(await checkTurnHead({ attachmentReader: reader() }, kept(edited))).toMatchObject({
+        kind: "violated",
+      });
     });
 
     it("rendered with the thinking before the epoch's opening row stripped", async () => {

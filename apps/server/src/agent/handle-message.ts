@@ -259,6 +259,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       const head = await checkTurnHead(deps, {
         transcript,
+        view,
         snapshot: loadedSystemPrompt.snapshot,
         toolDefs: frozen.toolDefs,
         policy: deps.prefixViolation,
