@@ -845,6 +845,20 @@ outputs:
         expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], {});
       });
 
+      it("rejects a fresh lockfile that pins pydantic at another version than the runtime's", async () => {
+        const lockfile = "httpx==0.27.0 --hash=sha256:0\npydantic==2.14.3 --hash=sha256:1\n";
+        const compiler = { compile: vi.fn().mockResolvedValue(ok(lockfile)) };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        await commitWithLockfile("skill/echo-pydantic", lockfile);
+
+        const result = await runner.register({ branch: "skill/echo-pydantic", origin: OWNER });
+        assertStatus(result, "rejected");
+        expect(result.errors?.[0]).toMatch(
+          /^runtime_package_conflict: requirements\.lock pins pydantic==2\.14\.3 \(the runtime's is 2\.12\.5\)/,
+        );
+        expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+      });
+
       it("rejects with requirements_lock_stale when the compile output differs", async () => {
         const committed = "httpx==0.27.0 --hash=sha256:OLD\n";
         const fresh = "httpx==0.27.0 --hash=sha256:NEW\n";

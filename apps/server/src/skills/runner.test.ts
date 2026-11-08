@@ -631,6 +631,24 @@ inputs:
     expect(resolvePackages).toHaveBeenCalledTimes(2);
   });
 
+  it("fills the runtime's pydantic for a wasm skill that imports it, and refuses the run when it cannot", async () => {
+    // `offlineWasm`'s fetch throws, so the empty package cache cannot be filled.
+    const runner = await makeRunner();
+    await runner.__registerForTests({
+      name: "echo",
+      manifestSource: ECHO_MANIFEST,
+      body: "import pydantic\n\nasync def run(inputs, ctx):\n    return pydantic.VERSION\n",
+    });
+
+    const rejected = await runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() });
+
+    expect(rejected._unsafeUnwrapErr()).toMatchObject({
+      kind: "wasm_packages_unavailable",
+      name: "echo",
+      error: { kind: "prefetch_failed" },
+    });
+  });
+
   it("two sequential invokes succeed independently (no shared state)", async () => {
     const runner = await makeRunner();
     await runner.__registerForTests({
@@ -882,6 +900,32 @@ inputs:
       expect(run?.recoveryPoint).toBe("finished");
       expect(run?.status).toBe("success");
       expect(run?.idempotencyKey).toBe("skill-cron:echo:t1");
+    });
+
+    it("hands ctx.run() the invocation's key, or the run id when it has none", async () => {
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: "async def run(inputs, ctx):\n    return ctx.run()\n",
+      });
+
+      const keyed = (
+        await runner.invoke({
+          name: "echo",
+          inputs: { x: 1 },
+          idempotencyKey: "skill-cron:echo:t-key",
+          runAs: runAs(),
+        })
+      )._unsafeUnwrap();
+      const unkeyed = (
+        await runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() })
+      )._unsafeUnwrap();
+
+      assertStatus(keyed, "success");
+      expect(keyed.output).toEqual({ id: keyed.runId, key: "skill-cron:echo:t-key" });
+      assertStatus(unkeyed, "success");
+      expect(unkeyed.output).toEqual({ id: unkeyed.runId, key: unkeyed.runId });
     });
 
     it("second call with same key returns the cached terminal result WITHOUT re-executing the skill", async () => {

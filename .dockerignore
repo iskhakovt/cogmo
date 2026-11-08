@@ -35,6 +35,14 @@ apps/web/*
 !packages/
 packages/*
 !packages/contracts/
+# The ctx package both skill tiers ship; the wasm child bundle embeds it.
+!images/
+images/*
+!images/skills/
+images/skills/*
+!images/skills/src/
+images/skills/src/*
+!images/skills/src/cogmo_ctx/
 
 # Trim what the build doesn't need from the allowed trees.
 apps/server/src/test/

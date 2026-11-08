@@ -104,6 +104,7 @@ const noopCtx = mock<CtxHandler>();
 function invokeParams(taskId: string): InvokeParams {
   return {
     taskId,
+    run: { id: taskId, key: `key-${taskId}` },
     skillName: "test",
     body: "async def run(inputs, ctx): return {}",
     inputs: {},
