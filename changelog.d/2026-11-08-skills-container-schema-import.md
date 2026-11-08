@@ -5,4 +5,4 @@ A container-tier skill's pydantic models are now its schemas too (design/skills.
 - The register-time lockfile compile mounts no venv volume, since resolving can run a dependency's build backend.
 - Both tiers' import replies share one schema, `schema_import_reply` in the generated worker protocol.
 - `SUPERVISOR_PROTOCOL_VERSION` is 7, since the host runs a new module in the image: the container tier needs the `cogmo-skills` image of this release, and an older one fails worker creation and is refused at register.
-- The lockfile compile's session takes a bare UUID as its task id, which Local-Docker names the session's cgroup slice after, so registering a skill with dependencies there no longer fails before the compile runs.
+- The lockfile compile's and the deps reaper's sessions take a bare UUID as their task id, which Local-Docker names the session's cgroup slice after. Registering a skill with dependencies no longer fails there before the compile runs, and the reaper's sweep runs.
