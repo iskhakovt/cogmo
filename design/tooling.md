@@ -202,6 +202,7 @@ pnpm dev:app              # backend only: tsx watch src/main.ts serve
 pnpm build                # backend: tsc && tsup → apps/server/dist
 pnpm typecheck            # tsc in every workspace package
 pnpm test                 # backend unit tier (Vitest); apps/web: pnpm --filter web test
+pnpm test:mutation        # mutation testing, run by hand (design/testing.md)
 pnpm lint                 # biome check, whole workspace
 ```
 

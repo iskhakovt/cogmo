@@ -86,6 +86,9 @@ updates:
       noble:
         applies-to: version-updates
         patterns: ["@noble/*"]
+      stryker:
+        applies-to: version-updates
+        patterns: ["@stryker-mutator/*"]
       # `@types/*` share a group for noise reduction, not coupling — a
       # major there is independent of its siblings, so it keeps the
       # minor/patch bound and majors arrive individually.
