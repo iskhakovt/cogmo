@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gt, inArray, lt, lte, ne, notExists, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import * as R from "remeda";
 import { match, P } from "ts-pattern";
 import type { JsonValue } from "type-fest";
 import {
@@ -16,6 +17,7 @@ import type { FinishedOriginal, NormalizedImageResult } from "../attachment-orig
 import {
   ACTIVE_SESSION,
   type AttachmentOriginalState,
+  type AttachmentRejection,
   attachmentOriginals,
   type BufferedInboundEntry,
   boundaryPending,
@@ -480,6 +482,23 @@ export interface TransportStore {
     tx: Transaction,
     originalPath: string,
   ): Promise<{ kind: "abandoned" } | { kind: "stale" }>;
+
+  /**
+   * none or `ready` → `rejected` with `rejection` for each of `originalPaths`:
+   * a provider refused a request carrying them. A `decoding` or `rejected`
+   * record is left as it is. Returns how many records transitioned.
+   */
+  rejectAttachmentOriginals(
+    tx: Transaction,
+    originalPaths: ReadonlyArray<string>,
+    rejection: AttachmentRejection,
+  ): Promise<number>;
+
+  /** Which of `originalPaths` a provider rejected. */
+  listRejectedAttachmentOriginals(
+    tx: Transaction,
+    originalPaths: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<string>>;
 }
 
 /**
@@ -1384,5 +1403,50 @@ export class DrizzleTransportStore implements TransportStore {
       )
       .returning({ id: attachmentOriginals.id });
     return deleted.length > 0 ? { kind: "abandoned" } : { kind: "stale" };
+  }
+
+  async rejectAttachmentOriginals(
+    tx: Transaction,
+    originalPaths: ReadonlyArray<string>,
+    rejection: AttachmentRejection,
+  ): Promise<number> {
+    // One row per path: an upsert can't touch the same row twice.
+    const paths = R.unique(originalPaths);
+    if (paths.length === 0) return 0;
+    const rejected = await tx
+      .insert(attachmentOriginals)
+      .values(
+        paths.map((originalPath) => ({
+          originalPath,
+          state: "rejected" as const,
+          result: null,
+          decodeAttempts: 0,
+          rejection,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: attachmentOriginals.originalPath,
+        set: { state: "rejected", result: null, rejection },
+        setWhere: eq(attachmentOriginals.state, "ready"),
+      })
+      .returning({ id: attachmentOriginals.id });
+    return rejected.length;
+  }
+
+  async listRejectedAttachmentOriginals(
+    tx: Transaction,
+    originalPaths: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<string>> {
+    if (originalPaths.length === 0) return [];
+    const rows = await tx
+      .select({ originalPath: attachmentOriginals.originalPath })
+      .from(attachmentOriginals)
+      .where(
+        and(
+          inArray(attachmentOriginals.originalPath, [...originalPaths]),
+          eq(attachmentOriginals.state, "rejected"),
+        ),
+      );
+    return rows.map((row) => row.originalPath);
   }
 }

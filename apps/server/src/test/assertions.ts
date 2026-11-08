@@ -95,6 +95,16 @@ export function assertStatus<U extends { status: string }, S extends U["status"]
   }
 }
 
+/** Narrow `value` to an instance of `ctor`, naming what it was otherwise. */
+export function assertInstanceOf<T>(
+  value: unknown,
+  ctor: abstract new (...args: never[]) => T,
+): asserts value is T {
+  if (!(value instanceof ctor)) {
+    throw new Error(`expected an instance of ${ctor.name}, got ${String(value)}`);
+  }
+}
+
 /**
  * Assert that `error` — a rejection from a store or raw query — carries the
  * Postgres SQLSTATE `code` raised by `constraint`. A rejection carrying

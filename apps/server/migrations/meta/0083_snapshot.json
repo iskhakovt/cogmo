@@ -1,5 +1,5 @@
 {
-  "id": "a329bfdb-4929-4302-bdd0-48479bdc734c",
+  "id": "96818a69-e6bb-4013-86d8-c84fb44f45c4",
   "prevId": "c3dea044-e4b0-4c1e-8f2c-cdcfa6d5ee2f",
   "version": "7",
   "dialect": "postgresql",
@@ -3724,12 +3724,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "schemas": {
-          "name": "schemas",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -4231,6 +4225,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "rejection": {
+          "name": "rejection",
+          "type": "attachment_rejection",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -4262,6 +4263,10 @@
         "chk_attachment_originals_rejected_result": {
           "name": "chk_attachment_originals_rejected_result",
           "value": "\"attachment_originals\".\"state\" <> 'rejected' OR \"attachment_originals\".\"result\" IS NULL"
+        },
+        "chk_attachment_originals_rejection": {
+          "name": "chk_attachment_originals_rejection",
+          "value": "(\"attachment_originals\".\"state\" = 'rejected') = (\"attachment_originals\".\"rejection\" IS NOT NULL)"
         }
       },
       "isRLSEnabled": false
@@ -5223,6 +5228,11 @@
       "name": "attachment_original_state",
       "schema": "public",
       "values": ["decoding", "ready", "rejected"]
+    },
+    "public.attachment_rejection": {
+      "name": "attachment_rejection",
+      "schema": "public",
+      "values": ["bad_request", "too_large"]
     },
     "public.channel_identity_mode": {
       "name": "channel_identity_mode",

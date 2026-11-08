@@ -1,17 +1,23 @@
 import * as R from "remeda";
 import type { Transaction, Transactor } from "../../db/index.js";
+import type { TransportStore } from "../../transport/store/index.js";
+import { withRejectedOriginals } from "../attachments/render-stored-content.js";
 import { formatSummaryMessage } from "../context.js";
 import type { TranscriptStore } from "../store/index.js";
-import type { StoredMessage } from "../stored-content.js";
+import { refOriginals, type StoredMessage } from "../stored-content.js";
 import { type TurnContext, withTurnContext } from "../turn-context.js";
 
 export interface LoadTurnHistoryDeps {
   runInTx: Transactor;
   agentStore: TranscriptStore;
+  transportStore: Pick<TransportStore, "listRejectedAttachmentOriginals">;
 }
 
 export interface TurnHistory {
-  /** Stored content: attachments are refs, which the renderer resolves. */
+  /**
+   * Stored content: attachments are refs, which the renderer resolves, except
+   * one whose original a provider rejected, which is its placeholder.
+   */
   messages: StoredMessage[];
   messageIds: (string | null)[];
   turnContexts: (TurnContext | null)[];
@@ -31,6 +37,9 @@ export class TurnRowMissingError extends Error {
  * summary standing in for everything up to its cutoff, followed by the
  * messages that arrived after, each turn-starting message led by the turn
  * context it was sent with.
+ *
+ * A ref whose original a provider rejected loads as the rejection
+ * placeholder (design/transport/attachments.md → Rejected attachments).
  *
  * This is the compacted view, and it is deliberately not what `listMessages`
  * returns. The Observer and the web history read take the raw transcript, so
@@ -71,7 +80,15 @@ export async function loadTurnHistory(
       ).map((c) => [c.messageId, c] as const),
     );
 
-    const messages = rows.map(({ id, role, content }): StoredMessage => {
+    const rejected = new Set(
+      await deps.transportStore.listRejectedAttachmentOriginals(
+        tx,
+        R.unique(rows.flatMap(({ content }) => refOriginals(content))),
+      ),
+    );
+
+    const messages = rows.map(({ id, role, content: rowContent }): StoredMessage => {
+      const content = withRejectedOriginals(rowContent, rejected);
       const context = stored.get(id);
       return context ? withTurnContext({ role, content }, context.rendered) : { role, content };
     });

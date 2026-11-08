@@ -7,6 +7,7 @@ import {
   RENDERER_PLACEHOLDERS,
   renderStoredContent,
   renderStoredMessages,
+  withRejectedOriginals,
 } from "./render-stored-content.js";
 
 const photo: ImageRefBlock = {
@@ -127,6 +128,43 @@ describe("renderStoredMessages", () => {
       [{ type: "text", text: "[Image: photo. Sent earlier and no longer attached.]" }],
       [expect.objectContaining({ type: "document", name: "report.pdf" })],
     ]);
+  });
+});
+
+describe("withRejectedOriginals", () => {
+  it("replaces each ref whose original was rejected, and its label, matched by the original's key", () => {
+    const label = (n: number) => ({
+      type: "text" as const,
+      text: `Image ${n}: normalized/x.jpg`,
+      harness: "image_label" as const,
+    });
+    const unnamed: ImageRefBlock = {
+      ...photo,
+      original: { path: "inbound/b.jpg", mediaType: "image/jpeg" },
+    };
+    const content = withRejectedOriginals(
+      [{ type: "text", text: "both" }, label(1), photo, label(2), unnamed, report],
+      new Set(["inbound/b.jpg", "inbound/r.pdf", "normalized/a.jpg"]),
+    );
+    expect(content).toEqual([
+      { type: "text", text: "both" },
+      label(1),
+      photo,
+      {
+        type: "text",
+        text: "[Image: photo. The model provider refused this file; ask for it another way.]",
+        harness: "attachment_placeholder",
+      },
+      {
+        type: "text",
+        text: "[Document: report.pdf. The model provider refused this file; ask for it another way.]",
+        harness: "attachment_placeholder",
+      },
+    ]);
+  });
+
+  it("leaves a string row as it is", () => {
+    expect(withRejectedOriginals("[image]", new Set(["inbound/r.pdf"]))).toBe("[image]");
   });
 });
 

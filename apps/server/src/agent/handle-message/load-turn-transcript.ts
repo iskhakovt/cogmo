@@ -1,4 +1,3 @@
-import type { Transactor } from "../../db/index.js";
 import type { Durable } from "../../inngest/durable.js";
 import {
   type LoadTurnHistoryDeps,
@@ -24,7 +23,7 @@ export interface TurnTranscript {
  */
 export async function loadTurnTranscript(
   step: Durable,
-  deps: { runInTx: Transactor; agentStore: LoadTurnHistoryDeps["agentStore"] },
+  deps: LoadTurnHistoryDeps,
   args: { conversationId: string; turnInboundId: string },
 ): Promise<TurnTranscript> {
   const history = await step.run("load-turn-transcript", async () => {

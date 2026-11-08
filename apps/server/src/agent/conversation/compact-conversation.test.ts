@@ -9,6 +9,7 @@ import {
   mockAttachmentStore,
   mockProvider,
   mockResolver,
+  mockTransportStore,
 } from "../../test/factories.js";
 import { createAttachmentReader } from "../attachments/attachment-reader.js";
 import type { PromptSource } from "../prompt.js";
@@ -61,6 +62,7 @@ function deps(
   return {
     runInTx: fakeRunInTx,
     agentStore: overrides.agentStore ?? mockAgentStore(),
+    transportStore: mockTransportStore(),
     resolveProvider: mockResolver(overrides.provider ?? mockProvider()),
     promptSource,
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),

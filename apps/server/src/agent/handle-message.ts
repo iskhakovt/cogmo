@@ -154,7 +154,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       concurrency: conversationTurnConcurrency,
       onFailure: async ({ event, error, step }) => {
         const { conversationId, triggerInboundId } = event.data.event.data;
-        await reportTurnFailure(fromStepTools(step), deps.deliveryRouter, {
+        await reportTurnFailure(fromStepTools(step), deps, {
           conversationId,
           triggerInboundId,
           runId: event.data.run_id,
@@ -236,7 +236,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // In-turn durable boundary wrapper — per-step-kind retry policy lives in
       // `createTurnStepRunner`.
-      const stepRun = createTurnStepRunner(durable.run);
+      const stepRun = createTurnStepRunner(durable.run, { cursor: maxInboundId });
 
       // Ahead of the view, whose attachment cutoff reads the route's frozen limits.
       const turnModel = await resolveTurnModel(stepRun, deps.resolveProvider, snapshot.model);
