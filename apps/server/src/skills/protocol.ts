@@ -81,7 +81,8 @@ export const TaskInvokeSchema = z.object({
    *
    * Populated by the host via `ensureVenvPopulated` (see deps.ts) when the
    * skill declares dependencies. Absent for skills with empty
-   * `dependencies` — the task runs against the stdlib only.
+   * `dependencies` — the task runs against the stdlib and the runtime's
+   * pydantic.
    *
    * The wasm tier (Pyodide) ignores this field: its child installs the
    * packages it was forked with, before the handshake.

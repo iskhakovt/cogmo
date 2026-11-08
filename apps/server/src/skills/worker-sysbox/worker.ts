@@ -165,7 +165,7 @@ export interface InvokeParams {
    * the lockfile hash into `task_invoke.lockfileHash` so the
    * supervisor can construct the ABI-qualified venv path on its side.
    * Absent (or `null` lockfile hash) means the skill declared no
-   * dependencies and runs against stdlib only.
+   * dependencies and runs against the stdlib and the runtime's pydantic.
    */
   deps?: {
     /** sha256 of `requirements.lock` at the skill's `git_sha`. */

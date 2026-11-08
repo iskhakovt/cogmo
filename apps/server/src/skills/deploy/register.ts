@@ -6,6 +6,7 @@ import { classifyManifest } from "../classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
 import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
+import { checkRuntimePins } from "../runtime-packages.js";
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
@@ -113,7 +114,8 @@ async function deleteFeatureBranch(repoPath: string, branch: string): Promise<vo
 
 /**
  * Every check `register` makes before its transaction: the branch, its
- * manifest and body, the classifier, the lockfile, Pyodide compatibility.
+ * manifest and body, the classifier, the lockfile and its runtime pins,
+ * Pyodide compatibility.
  * Errs with the rejection `register` returns.
  */
 async function prepareRegister(
@@ -214,6 +216,10 @@ async function prepareRegister(
     return err(rejectedResult(branchSha, lockfileResult.error));
   }
   const lockfile = lockfileResult.value;
+  if (lockfile !== null) {
+    const pins = checkRuntimePins(lockfile.contents);
+    if (pins.isErr()) return err(rejectedResult(branchSha, pins.error));
+  }
 
   if (manifest.tier === "wasm" && lockfile !== null) {
     const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents), {

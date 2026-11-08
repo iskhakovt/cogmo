@@ -9,6 +9,7 @@ import {
   GENERATED_CONTRACT_FILES,
   renderContractSchema,
   renderPythonContract,
+  renderRuntimePackages,
 } from "../src/skills/ctx-contract-codegen.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -16,6 +17,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 for (const [path, contents] of [
   [GENERATED_CONTRACT_FILES.schema, renderContractSchema()],
   [GENERATED_CONTRACT_FILES.python, renderPythonContract()],
+  [GENERATED_CONTRACT_FILES.runtimePackages, renderRuntimePackages()],
 ] as const) {
   const target = join(repoRoot, path);
   mkdirSync(dirname(target), { recursive: true });

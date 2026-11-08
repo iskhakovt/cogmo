@@ -7,6 +7,7 @@ import {
   renderContractSchema,
   renderPythonContract,
   renderPythonModule,
+  renderRuntimePackages,
 } from "./ctx-contract-codegen.js";
 
 const repoRoot = join(import.meta.dirname, "../../../..");
@@ -15,6 +16,7 @@ describe("the generated ctx contract", () => {
   it.each([
     [GENERATED_CONTRACT_FILES.schema, renderContractSchema],
     [GENERATED_CONTRACT_FILES.python, renderPythonContract],
+    [GENERATED_CONTRACT_FILES.runtimePackages, renderRuntimePackages],
   ])(
     "%s matches the contract; run `pnpm --filter cogmo codegen:ctx` when it does not",
     (path, render) => {
