@@ -81,18 +81,20 @@ async function sentAs(rows: ReadonlyArray<Row>, snapshot: EpochSnapshot): Promis
 }
 
 /**
- * The check's arguments over `rows`, whose last row is the turn's own. The
- * view advanced its cutoff, so the check renders the rows itself.
+ * The check's arguments over `rows`, whose last row is the turn's own, with
+ * the view rendering them under the epoch's cutoff, which the turn kept.
  */
-function args(
+async function args(
   rows: ReadonlyArray<Row>,
   heads: (TranscriptHead | null)[] | undefined,
   snapshot: EpochSnapshot | null,
   policy: PrefixViolationPolicy,
-): CheckTurnHeadArgs {
+): Promise<CheckTurnHeadArgs> {
   const turnRow = rows.at(-1);
   if (turnRow === undefined) throw new Error("a history needs the turn's row");
   const turn = { id: turnRow.id, createdAt: "2026-11-08T00:00:00.000Z" };
+  const ids = rows.map((row) => row.id);
+  const cutoff = snapshot?.attachmentCutoff ?? null;
   return {
     transcript: {
       history: {
@@ -104,7 +106,11 @@ function args(
       },
       turn,
     },
-    view: { messages: [], turnIndex: rows.length - 1, cutoff: { kind: "advanced", cutoff: "m0" } },
+    view: {
+      messages: await renderStoredMessages(rows, ids, reader(), cutoff),
+      turnIndex: rows.length - 1,
+      cutoff: { kind: "kept", cutoff },
+    },
     snapshot,
     toolDefs: TOOLS,
     policy,
@@ -125,7 +131,7 @@ async function verdict(
   heads: (TranscriptHead | null)[] | undefined,
   snapshot: EpochSnapshot | null,
 ) {
-  return checkTurnHead({ attachmentReader: reader() }, args(rows, heads, snapshot, "reopen"));
+  return checkTurnHead(await args(rows, heads, snapshot, "reopen"));
 }
 
 describe("checkTurnHead", () => {
@@ -179,18 +185,34 @@ describe("checkTurnHead", () => {
 
     it("over the view's own render when the turn kept the epoch's cutoff", async () => {
       const heads = await headsFor(TWO_TURNS, EPOCH, ["m2", "m4"], {});
+      const base = await args(TWO_TURNS, heads, EPOCH, "reopen");
       const kept = (messages: Message[]): CheckTurnHeadArgs => ({
-        ...args(TWO_TURNS, heads, EPOCH, "reopen"),
+        ...base,
         view: { messages, turnIndex: 4, cutoff: { kind: "kept", cutoff: null } },
       });
       const rendered = await sentAs(TWO_TURNS, EPOCH);
       const edited = rendered.with(1, { role: "assistant", content: "edited" });
 
-      expect(await checkTurnHead({ attachmentReader: reader() }, kept(rendered))).toEqual({
-        kind: "matched",
+      expect(checkTurnHead(kept(rendered))).toEqual({ kind: "matched" });
+      expect(checkTurnHead(kept(edited))).toMatchObject({ kind: "violated" });
+    });
+
+    it("nothing when the turn advanced its attachment cutoff, but still explains a head", async () => {
+      const heads = await headsFor(TWO_TURNS, EPOCH, ["m2", "m4"], {});
+      const base = await args(TWO_TURNS, heads, EPOCH, "throw");
+      const advanced = (h: (TranscriptHead | null)[]): CheckTurnHeadArgs => ({
+        ...base,
+        transcript: { ...base.transcript, history: { ...base.transcript.history, heads: h } },
+        view: { messages: [], turnIndex: 4, cutoff: { kind: "advanced", cutoff: "m2" } },
       });
-      expect(await checkTurnHead({ attachmentReader: reader() }, kept(edited))).toMatchObject({
-        kind: "violated",
+      const compacted = await headsFor(TWO_TURNS, EPOCH, ["m2", "m4"], {
+        m4: { status: "compacted" },
+      });
+
+      expect(checkTurnHead(advanced(heads))).toEqual({ kind: "skipped" });
+      expect(checkTurnHead(advanced(compacted))).toEqual({
+        kind: "explained",
+        reason: "compaction",
       });
     });
 
@@ -365,19 +387,16 @@ describe("checkTurnHead", () => {
 
     it("throws a PrefixViolationError under throw", async () => {
       const heads = await headsFor(TWO_TURNS, EPOCH, ["m2", "m4"], {});
-      const check = checkTurnHead(
-        { attachmentReader: reader() },
-        args(edited("m4", "edited"), heads, EPOCH, "throw"),
-      );
-      await expect(check).rejects.toThrow(PrefixViolationError);
-      await expect(check).rejects.toThrow(/assistant row m4/);
+      const check = await args(edited("m4", "edited"), heads, EPOCH, "throw");
+      expect(() => checkTurnHead(check)).toThrow(PrefixViolationError);
+      expect(() => checkTurnHead(check)).toThrow(/assistant row m4/);
     });
 
     it("doesn't throw under throw when the head matches", async () => {
       const heads = await headsFor(TWO_TURNS, EPOCH, ["m2", "m4"], {});
-      expect(
-        await checkTurnHead({ attachmentReader: reader() }, args(TWO_TURNS, heads, EPOCH, "throw")),
-      ).toEqual({ kind: "matched" });
+      expect(checkTurnHead(await args(TWO_TURNS, heads, EPOCH, "throw"))).toEqual({
+        kind: "matched",
+      });
     });
   });
 });

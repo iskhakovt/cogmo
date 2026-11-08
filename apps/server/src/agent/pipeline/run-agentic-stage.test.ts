@@ -393,6 +393,28 @@ describe("runAgenticStage", () => {
       expect(add).not.toHaveBeenCalled();
     });
 
+    it("leaves the transcript heads out of its load-turn-transcript memo", async () => {
+      const h = await harness();
+      const head = {
+        length: 1,
+        base: "a".repeat(64),
+        historyStart: "m1",
+        digest: "b".repeat(64),
+        status: "intact" as const,
+      };
+      vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+        { id: "m1", role: "user", content: "earlier", transcriptHead: null },
+        { id: "m2", role: "assistant", content: "reply", transcriptHead: head },
+        { id: "msg-1", role: "user", content: "Draft a plan.", transcriptHead: null },
+      ]);
+      h.runStreamingAgentLoop.mockResolvedValue(headedLoop(3));
+      const { memo, steps } = memoizingSteps();
+
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      expect(memo.get("load-turn-transcript")).not.toHaveProperty("heads");
+    });
+
     it("counts nothing for a stage whose requests all matched", async () => {
       const add = vi.spyOn(promptPrefixViolations, "add");
       const h = await harness();

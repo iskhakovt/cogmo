@@ -220,10 +220,11 @@ export async function runAgenticStage(
   );
 
   // Finds the stage's prompt row by its inbound (design/crash-recovery.md →
-  // Where the turn's row comes from).
+  // Where the turn's row comes from). A stage skips the across-turn check, so
+  // its memo leaves the transcript heads out.
   const turnHistory = await steps.run("load-turn-transcript", async () => {
     try {
-      return await loadTurnHistory(
+      const { heads: _, ...history } = await loadTurnHistory(
         {
           runInTx: deps.runInTx,
           agentStore: deps.agentStore,
@@ -231,6 +232,7 @@ export async function runAgenticStage(
         },
         { conversationId, turnInboundId: inboundId },
       );
+      return history;
     } catch (err) {
       if (err instanceof TurnRowMissingError) throw asNonRetriable(err);
       throw err;

@@ -257,7 +257,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         substitutedMessages,
       });
 
-      const head = await checkTurnHead(deps, {
+      const head = checkTurnHead({
         transcript,
         view,
         snapshot: loadedSystemPrompt.snapshot,

@@ -1,9 +1,6 @@
 import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { Message, ToolDefinition } from "../../llm/types.js";
-import type { AttachmentReader } from "../attachments/attachment-reader.js";
-import { renderStoredMessages } from "../attachments/render-stored-content.js";
-import type { TurnHistory } from "../conversation/load-turn-history.js";
 import { validateHistory } from "../history-invariants.js";
 import {
   type EpochSnapshot,
@@ -50,22 +47,19 @@ interface HeadedRow {
  * Only rows after the epoch's opening row are compared: those before it were
  * sent under an earlier epoch's render state, which the opening turn rewrote.
  * An opening row missing from the history belongs to an epoch that opened
- * after the turn loaded it, so no row is compared.
+ * after the turn loaded it, so no row is compared. Nor is any when the turn
+ * advanced its attachment cutoff, which opens an epoch anyway.
  *
  * Under `throw`, a `violated` verdict throws {@link PrefixViolationError}.
  *
  * Bare body, on every invocation. Its inputs are memoized, or the view
  * rendered from them — `load-turn-transcript`'s rows and heads,
  * `load-system-prompt`'s snapshot and the frozen tool table — so every
- * invocation reaches the same verdict; the
- * render and the hash re-run each time. `open-system-prompt-epoch` counts and
- * logs a violation.
+ * invocation reaches the same verdict; the hash re-runs each time.
+ * `open-system-prompt-epoch` counts and logs a violation.
  */
-export async function checkTurnHead(
-  deps: { attachmentReader: AttachmentReader },
-  args: CheckTurnHeadArgs,
-): Promise<HeadVerdict> {
-  const verdict = await turnHeadVerdict(deps, args);
+export function checkTurnHead(args: CheckTurnHeadArgs): HeadVerdict {
+  const verdict = turnHeadVerdict(args);
   return match(verdict)
     .returnType<HeadVerdict>()
     .with({ kind: "violated" }, (violated) =>
@@ -83,10 +77,7 @@ export async function checkTurnHead(
     .exhaustive();
 }
 
-async function turnHeadVerdict(
-  deps: { attachmentReader: AttachmentReader },
-  args: CheckTurnHeadArgs,
-): Promise<HeadVerdict> {
+function turnHeadVerdict(args: CheckTurnHeadArgs): HeadVerdict {
   const { snapshot } = args;
   const { history } = args.transcript;
   if (snapshot === null || history.heads === undefined) return { kind: "skipped" };
@@ -100,7 +91,8 @@ async function turnHeadVerdict(
   const reason = explanation(latest.head, base, start);
   if (reason !== null) return { kind: "explained", reason };
 
-  const sent = await renderAsSent(deps, args.view, history, snapshot, openerIndex);
+  const sent = sentHistory(args.view, openerIndex);
+  if (sent === null) return { kind: "skipped" };
   const chain = chainDigests(base, sent, latest.head.length);
   const holds = (head: TranscriptHead): boolean => chain[head.length] === head.digest;
   if (holds(latest.head)) return { kind: "matched" };
@@ -158,26 +150,18 @@ function chainDigests(base: string, messages: ReadonlyArray<Message>, through: n
 
 /**
  * The loaded history as the epoch's requests send it, before the turn's own
- * compaction. The turn's view already renders it under the epoch's cutoff
- * when the turn kept that cutoff; an advanced one is rendered again.
+ * compaction: the turn's view, which renders it under the epoch's cutoff when
+ * the turn kept that cutoff. Null when the turn advanced it: the turn opens an
+ * `attachments` epoch whatever the comparison finds, so it compares nothing
+ * rather than render attachments it won't send.
  */
-async function renderAsSent(
-  deps: { attachmentReader: AttachmentReader },
-  view: TurnView,
-  history: TurnHistory,
-  snapshot: EpochSnapshot,
-  openerIndex: number,
-): Promise<Message[]> {
-  const rendered = await match(view.cutoff)
-    .with({ kind: "kept" }, () => Promise.resolve(view.messages))
-    .with({ kind: "advanced" }, () =>
-      renderStoredMessages(
-        history.messages,
-        history.messageIds,
-        deps.attachmentReader,
-        snapshot.attachmentCutoff ?? null,
-      ),
+function sentHistory(view: TurnView, openerIndex: number): Message[] | null {
+  return match(view.cutoff)
+    .returnType<Message[] | null>()
+    .with(
+      { kind: "kept" },
+      () => validateHistory(stripThinkingBefore(view.messages, openerIndex)).messages,
     )
+    .with({ kind: "advanced" }, () => null)
     .exhaustive();
-  return validateHistory(stripThinkingBefore(rendered, openerIndex)).messages;
 }
