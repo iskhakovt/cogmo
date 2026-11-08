@@ -47,8 +47,9 @@ interface HeadedRow {
  * Only rows after the epoch's opening row are compared: those before it were
  * sent under an earlier epoch's render state, which the opening turn rewrote.
  * An opening row missing from the history belongs to an epoch that opened
- * after the turn loaded it, so no row is compared. Nor is any when the turn
- * advanced its attachment cutoff, which opens an epoch anyway.
+ * after the turn loaded it, so no row is compared. A turn that advanced its
+ * attachment cutoff, which opens an epoch anyway, compares no digest: its head
+ * is still explained, but never found violated.
  *
  * Under `throw`, a `violated` verdict throws {@link PrefixViolationError}.
  *

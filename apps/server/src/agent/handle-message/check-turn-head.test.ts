@@ -227,7 +227,7 @@ describe("checkTurnHead", () => {
       expect(await verdict(TWO_TURNS, unstripped, opened)).toMatchObject({ kind: "violated" });
     });
 
-    it("rendered under the epoch's attachment cutoff", async () => {
+    it("a view showing a cut image as the placeholder the epoch's turns sent", async () => {
       const photo: Row = {
         id: "m1",
         role: "user",
@@ -248,7 +248,7 @@ describe("checkTurnHead", () => {
       const heads = await headsFor(rows, cut, ["m2", "m4"], {});
       expect(await verdict(rows, heads, cut)).toEqual({ kind: "matched" });
 
-      // The image itself, which the epoch's turns didn't send, doesn't match.
+      // A view showing the image itself, which those turns didn't send, doesn't.
       expect(await verdict(rows, heads, EPOCH)).toMatchObject({ kind: "violated" });
     });
 
