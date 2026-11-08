@@ -54,7 +54,7 @@ HINDSIGHT_API_RERANKER_1_PROVIDER=rrf
 ```
 
 - **Indexed members inherit nothing.** `HINDSIGHT_API_RERANKER_1_*` reads nothing from the primary's settings or the shared provider keys, so give each member every setting it needs under its own index. `rrf` needs none.
-- **A dead primary still costs time on every recall.** Hindsight tries members in order on every request, with no circuit breaker, so a primary that is down spends its full timeout before `rrf` answers. That is why the timeout is short and retries are off.
+- **A dead primary costs time once per 30 seconds.** Hindsight sets a failed member aside for 30s, trying the healthy members first, then probes it again on the next request. So the first recall of each window spends the primary's full timeout before `rrf` answers. That is why the timeout is short and retries are off.
 - **A quiet counter is not proof of health.** It only sees turns that recall, and the default `heuristic` mode skips greetings, acks and continuations while an `off` profile never recalls at all.
 - **A failover is not a failure.** When `rrf` answers, the recall succeeds and `cogmo.memory.recall.failures` stays at zero, even though ranking quality has dropped. Hindsight logs each failover at `WARNING`, so watch its logs to catch a primary that stays down.
 - **Skipping the cross-encoder is valid.** `HINDSIGHT_API_RERANKER_PROVIDER=rrf` on its own is free and has no dependency that can go down, at a cost of a few percent of ranking quality. For model choice and costs, see [design/memory.md → Reranking](design/memory.md#reranking).
