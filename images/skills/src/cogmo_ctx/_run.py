@@ -4,6 +4,7 @@ The container runner and the wasm worker share this file, so a skill's contract 
 tiers (design/skills.md → Contracts).
 """
 
+import json
 import math
 import sys
 from collections.abc import Awaitable, Callable, Mapping
@@ -48,27 +49,24 @@ def _describe(error: Exception) -> str:
     return "; ".join(segments)
 
 
-def _lossy(value: object) -> str | None:
-    """What JSON mode would change in a validated output, or None.
+def _lossy(python: object, dumped: object) -> str | None:
+    """What the model's JSON changed of its Python dump, or None.
 
-    pydantic writes a non-finite float as `null`, and two keys of one dict that JSON writes alike (`1` and
-    `"1"`) as one; both would reach the host changed.
+    Walked side by side, so the model's own serialization settings stand: a dict that lost keys (two keys
+    JSON writes alike, `1` and `"1"`), or a non-finite float written as `null`. Both would reach the host
+    changed.
     """
-    from pydantic_core import to_jsonable_python
-
-    pending = [value]
+    pending: list[tuple[object, object]] = [(python, dumped)]
     while pending:
-        item = pending.pop()
-        if isinstance(item, float) and not math.isfinite(item):
-            return f"{item} is not a finite number, which JSON writes as null"
-        if isinstance(item, dict):
-            # pydantic's own key conversion, which the JSON dump applies: `b"x"`, `1` and `True` become
-            # `"x"`, `"1"` and `"true"`.
-            if len(to_jsonable_python(dict.fromkeys(item))) < len(item):
+        before, after = pending.pop()
+        if isinstance(before, float) and not math.isfinite(before) and after is None:
+            return f"{before} is not a finite number, which JSON writes as null"
+        if isinstance(before, dict) and isinstance(after, dict):
+            if len(after) < len(before):
                 return "two keys of one dict are written alike as JSON strings, so one would be lost"
-            pending.extend(item.values())
-        elif isinstance(item, list | tuple | set | frozenset):
-            pending.extend(item)
+            pending.extend(zip(before.values(), after.values(), strict=True))
+        elif isinstance(before, list | tuple) and isinstance(after, list) and len(before) == len(after):
+            pending.extend(zip(before, after, strict=True))
     return None
 
 
@@ -82,7 +80,7 @@ async def call_run(
 
     With an `Input` model, `run` receives `Input.model_validate(inputs)`, so pydantic applies defaults and
     coercion; a refusal is `input_invalid`. With an `Output` model, the output is
-    `Output.model_validate(result).model_dump(mode="json")`; a refusal is `output_invalid`, and `kept` is what
+    `Output.model_validate(result)` written as the model's own JSON; a refusal is `output_invalid`, and `kept` is what
     `run` returned, which the worker keeps when JSON carries it. A `SkillError` is `skill_failed`, or
     `skill_retryable` with `retryable=True`, raised by `run` or by a model's validator. `kept` is None but for
     `output_invalid`. Anything else propagates.
@@ -106,11 +104,13 @@ async def call_run(
             except ValidationError as e:
                 return ("output_invalid", _describe(e)), output
             try:
-                dumped = validated.model_dump(mode="json")
-                lossy = _lossy(validated.model_dump(mode="python"))
-            # `ValueError`: a `PydanticSerializationError`, or the `UnicodeDecodeError` of a `bytes` field that is
-            # not UTF-8. `TypeError`: a dict key JSON cannot hold.
-            except (ValueError, TypeError) as e:
+                # The model's own JSON, read back: its serialization settings (`ser_json_inf_nan`,
+                # `ser_json_bytes`) decide what the host receives.
+                dumped = json.loads(validated.model_dump_json())
+                lossy = _lossy(validated.model_dump(mode="python"), dumped)
+            # A `PydanticSerializationError`, a `ValueError`: a value or a dict key JSON cannot hold, or a `bytes`
+            # field that is not UTF-8.
+            except ValueError as e:
                 return ("output_invalid", _describe(e)), output
             if lossy is not None:
                 return ("output_invalid", lossy), output

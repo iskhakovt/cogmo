@@ -141,7 +141,7 @@ async def test_keys_pydantic_writes_alike_or_cannot_write_are_output_invalid() -
     )
     assert (await call_run({"Output": Keyed}, returning({frozenset([1]): 1}), {}, CTX))[0] == (
         "output_invalid",
-        "`frozenset` not valid as object key",
+        "Error serializing to JSON: TypeError: `frozenset` not valid as object key",
     )
     assert await call_run({"Output": Keyed}, returning({b"x": 1}), {}, CTX) == (None, {"counts": {"x": 1}})
 
@@ -158,6 +158,21 @@ async def test_a_model_s_own_json_serialization_stands() -> None:
         return {"raw": b"\xff"}
 
     assert await call_run({"Output": Encoded}, run, {}, CTX) == (None, {"raw": "_w=="})
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_writes_nan_and_bytes_keys_its_own_way_is_not_refused() -> None:
+    from pydantic import ConfigDict
+
+    class Faithful(BaseModel):
+        model_config = ConfigDict(ser_json_inf_nan="strings", ser_json_bytes="base64")
+        ratio: float
+        by_key: dict[bytes, int]
+
+    async def run(inputs: object, ctx: Ctx) -> object:
+        return {"ratio": float("nan"), "by_key": {b"\xff": 1}}
+
+    assert await call_run({"Output": Faithful}, run, {}, CTX) == (None, {"ratio": "NaN", "by_key": {"_w==": 1}})
 
 
 @pytest.mark.asyncio
