@@ -43,15 +43,15 @@ for (const name of [
 }
 
 /**
- * A service base URL without `user:password@` — credentials go in the
- * service's key variable. The issue message never echoes the value.
- */
-/**
  * Connector job lease in seconds, capped at 2,147,483: the longest delay
  * `setTimeout` honours is 2^31 - 1 ms, and a longer one fires at once.
  */
 export const ConnectorLeaseSecondsSchema = z.coerce.number().int().positive().max(2_147_483);
 
+/**
+ * A service base URL without `user:password@` — credentials go in the
+ * service's key variable. The issue message never echoes the value.
+ */
 export const ServiceUrlSchema = z
   .string()
   .url()
