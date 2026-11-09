@@ -31,12 +31,17 @@ export type TranscriptView =
   | { kind: "unchanged"; messages: ReadonlyArray<Message> }
   | { kind: "rewritten"; messages: ReadonlyArray<Message> };
 
-/** One request: the prefix, every message so far, and the head of the chain over them. */
+/**
+ * One request: the prefix, every message so far, and the head of the chain
+ * over them. The arrays and the head are the caller's own; the messages and
+ * tool definitions in them are the transcript's, shared rather than copied,
+ * since a copy would duplicate every attachment's bytes on each request.
+ */
 export interface TranscriptRequest {
   readonly system: string;
-  readonly tools: ReadonlyArray<ToolDefinition>;
-  readonly messages: ReadonlyArray<Message>;
-  readonly head: RequestHead;
+  readonly tools: ReadonlyArray<Readonly<ToolDefinition>>;
+  readonly messages: ReadonlyArray<Readonly<Message>>;
+  readonly head: Readonly<RequestHead>;
 }
 
 /**
@@ -50,9 +55,9 @@ export interface Transcript {
   /** h₀ of every request: the digest of the system prompt and tool definitions. */
   readonly base: string;
   readonly system: string;
-  readonly tools: ReadonlyArray<ToolDefinition>;
+  readonly tools: ReadonlyArray<Readonly<ToolDefinition>>;
   /** Every message, the opened view first. Reading records nothing, so forks read here. */
-  readonly messages: ReadonlyArray<Message>;
+  readonly messages: ReadonlyArray<Readonly<Message>>;
   /** How many messages the opened view holds: where the turn's own messages start. */
   readonly openedLength: number;
   append(message: Message): void;
@@ -121,11 +126,11 @@ class OpenedTranscript implements Transcript {
     return this.#system;
   }
 
-  get tools(): ReadonlyArray<ToolDefinition> {
+  get tools(): ReadonlyArray<Readonly<ToolDefinition>> {
     return this.#tools;
   }
 
-  get messages(): ReadonlyArray<Message> {
+  get messages(): ReadonlyArray<Readonly<Message>> {
     return [...this.#messages];
   }
 
@@ -162,7 +167,7 @@ class OpenedTranscript implements Transcript {
         ? this.#hasher.head(this.#base, messages)
         : this.#hasher.extend(this.#sent, messages, this.#sent.length);
     this.#sent = head;
-    return { system: this.#system, tools: this.#tools, messages, head };
+    return { system: this.#system, tools: [...this.#tools], messages, head: { ...head } };
   }
 
   /** The last message, when it is one the turn appended and no request carried. */

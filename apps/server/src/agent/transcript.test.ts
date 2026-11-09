@@ -144,6 +144,19 @@ describe("Transcript.request", () => {
 
     expect(transcript.request().messages).toEqual(history());
   });
+
+  it("hands out its head as a copy: changing a request's head changes no later request's", () => {
+    const transcript = opened(history());
+    const first = transcript.request();
+    // Intentionally invalid: the head is typed readonly.
+    (first.head as { length: number }).length = 0;
+    transcript.append(assistant("reply"));
+
+    const next = transcript.request();
+
+    expect(next.head).toEqual(fullChain(next.messages));
+    expect(next.head.length).toBe(history().length + 1);
+  });
 });
 
 describe("Transcript.amendUnsent", () => {
