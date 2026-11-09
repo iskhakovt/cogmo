@@ -191,6 +191,7 @@ One PR per slice, in order; each later slice assumes the earlier ones.
 - [ ] `p3` Redact a bound secret's substituted value when an upstream reflects it into a response (an echoed query parameter, a `Location` header). Needs a response hook, which ends streaming (design/skills.md → Egress proxy → Substitution). (design review 2026-11-01)
 - [ ] `p3` Scrub the exact secret values issued to a run from its output, `ctx.log` lines, memory and file writes (design/skills.md → Secrets: pull model). (design review 2026-11-01)
 - [ ] `p3` Point the code comments that cite design/skills.md → "Exactly-once invocation" at its heading "At-most-once invocation" (`invoke-rejection.ts`, `invoke/start-run.ts`, `runner.ts`, `store/schema.ts` under `apps/server/src/skills/`), and correct the two that claim exactly-once execution (`store/index.ts`, `skill-tool-builder.ts`): the guarantee is at-most-once with cached-result recovery. (design review 2026-11-01)
+- [ ] `p3` Test the skills mirror state on real Postgres and real pushes: a two-connection integration test of `syncLocalSha`'s `FOR UPDATE` waiting for, or retrying (40001) after, a deploy that marks the row before its `update-ref`; the 40001-at-mark retry for register, approve and the layout move (only rollback's is tested); and entering `diverged` through the reconcile's own rejected push with the real store (today only the mocked store covers it). (S5c bug review, 2026-11-09)
 
 ### Skills, voice & transport
 

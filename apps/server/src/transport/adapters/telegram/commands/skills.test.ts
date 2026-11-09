@@ -44,7 +44,7 @@ describe("handleSkills", () => {
     ],
     [
       { status: "diverged", lastFailure: "rejected" },
-      "Skills remote: diverged from local main; push local main to it by hand (`git -C $COGMO_SKILLS_PATH push origin main`).",
+      "Skills remote: diverged from local main. Check what its main holds (`git -C $COGMO_SKILLS_PATH ls-remote origin main`), then push local main over it: `git -C $COGMO_SKILLS_PATH push --force-with-lease=main:<that sha> origin main`.",
     ],
   ])("ends with the skills remote's lag when it is %o", async (mirror, line) => {
     const transport = transportWith({
