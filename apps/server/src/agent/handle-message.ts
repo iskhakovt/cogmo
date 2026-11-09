@@ -210,6 +210,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         firstInboundId,
       });
 
+      // The rows the turn loaded. The transcript the loop sends opens from
+      // them once the epoch is settled: `finalized.transcript`.
       const transcript = await loadTurnTranscript(durable, deps, {
         conversationId,
         turnInboundId: maxInboundId,
@@ -297,7 +299,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
 
       const finalized = await finalizeTurnContext(durable, frozen.systemPromptDeps, {
-        messages: compacted.messages,
+        compacted: compacted.view,
         provisionalTurnContext: context.provisionalTurnContext,
         transcript,
         view,
@@ -306,6 +308,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         rewroteView: compacted.rewroteView,
         loadedSystemPrompt,
         head,
+        toolDefs: frozen.toolDefs,
         systemPromptArgs: frozen.systemPromptArgs,
         recalledMemories: context.recalledMemories,
         handledAt: context.handledAt,
@@ -319,8 +322,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const looped = await runTurnLoop(durable, stepRun, deps.runStreamingAgentLoop, {
         conversationId,
         turnModel,
-        systemPrompt: finalized.systemPrompt,
-        messages: finalized.messages,
+        transcript: finalized.transcript,
         tools: frozen.turnTools,
         service,
         delivery,

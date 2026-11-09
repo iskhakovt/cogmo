@@ -137,6 +137,22 @@ def test_it_passes_a_new_skill_and_writes_no_bytecode(repo: Path) -> None:
     assert not list((repo / "skills").rglob("__pycache__"))
 
 
+def test_it_checks_a_skill_against_the_repos_cogmo_ctx(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # This project's environment installs its own `cogmo_ctx`. A decoy ahead of it on the interpreter's path,
+    # with no `Ctx`, fails pyrefly and pytest unless each reads the repo's `.cogmo/` first.
+    decoy = tmp_path / "decoy" / "cogmo_ctx"
+    decoy.mkdir(parents=True)
+    (decoy / "__init__.py").write_text('raise ImportError("a cogmo_ctx outside the repo\'s .cogmo/")\n')
+    monkeypatch.setenv("PYTHONPATH", str(decoy.parent))
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(repo, "echo", _SKILL, _PASSING_TEST)
+    result = _verify(repo, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "echo passed" in result.stdout
+
+
 def test_it_fails_a_skill_whose_test_fails(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
     _write_skill(repo, "echo", _SKILL, _FAILING_TEST)

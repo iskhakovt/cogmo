@@ -284,20 +284,32 @@ const WRITE_ENDPOINTS: readonly WriteEndpoint[] = [
 /**
  * Whether a request is a write: a method other than `GET`; a `GET` to a host
  * with `WRITE_ENDPOINTS` entries whose path is templated, since a field can
- * form any of them; or a `GET` whose literal path matches one. `method` is
- * uppercased, as `cogmo_ctx` sends it.
+ * form any of them; or a `GET` whose literal path, percent-decoded, matches
+ * one. `method` is uppercased, as `cogmo_ctx` sends it.
  */
 export function isWriteRequest(method: string, host: string, path: RequestPath): boolean {
   if (method !== "GET") return true;
   const endpoints = WRITE_ENDPOINTS.filter((endpoint) => endpoint.host === host.toLowerCase());
   return match(path)
     .with({ kind: "templated" }, () => endpoints.length > 0)
-    .with({ kind: "literal" }, ({ path: sent }) =>
-      endpoints.some((endpoint) =>
-        endpoint.paths.some((pattern) => globRegExp(pattern).test(sent)),
-      ),
-    )
+    .with({ kind: "literal" }, ({ path: sent }) => {
+      const decoded = decodeAsciiEscapes(sent);
+      return endpoints.some((endpoint) =>
+        endpoint.paths.some((pattern) => globRegExp(pattern).test(decoded)),
+      );
+    })
     .exhaustive();
+}
+
+/**
+ * A path with each percent-encoded ASCII character decoded, as the API reads
+ * it: `/bot1/%73endMessage` is `/bot1/sendMessage`. The patterns are ASCII, so
+ * an escape of any other byte matches as it stands.
+ */
+function decodeAsciiEscapes(path: string): string {
+  return path.replace(/%([0-7][0-9A-Fa-f])/g, (_escape, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
 }
 
 /** Whether `network.allow` admits a `WRITE_ENDPOINTS` host, for a request whose host is not literal. */
@@ -313,6 +325,17 @@ function globRegExp(pattern: string): RegExp {
     .join("[^/]*");
   return new RegExp(`^${source}$`, "i");
 }
+
+/**
+ * The Entrypoint gate's rule as an author reads it, in the toolchain's
+ * `CLAUDE.md` and the authoring prompts (design/skills.md → Register-time
+ * gates → Entrypoint).
+ */
+export const ENTRYPOINT_RULE =
+  "`run` bound once, as one undecorated `async def run` directly at module level, taking exactly two parameters, none `*args`, `**kwargs` or keyword-only. With an `Input` or `Output` class, annotate `inputs: Input` and `-> Output` by their bare names.";
+
+/** The entrypoint's signature with pydantic models, `Ctx` from `cogmo_ctx`, which the Entrypoint gate accepts. */
+export const ENTRYPOINT_SIGNATURE = "async def run(inputs: Input, ctx: Ctx) -> Output";
 
 /** `skill.py`'s bounds (design/skills.md → Register-time gates → Size). */
 export const SKILL_BODY_MAX_LINES = 400;

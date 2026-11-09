@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
@@ -10,6 +12,7 @@ import { getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { readOriginUrl } from "../repo.js";
 import type { SkillStore, SkillsMirrorFailure } from "../store/index.js";
 
+const execFileP = promisify(execFile);
 const log = logger.child({ component: "skills.mirror" });
 
 /**
@@ -48,7 +51,8 @@ export type MirrorPushOutcome =
  * reconcile: local `main` and the database stay authoritative, so a failure
  * is recorded and logged, never thrown.
  *
- * The push gives up after `MIRROR_TIMEOUT_MS`, or once `signal` aborts.
+ * The push, and the read of the remote after a rejection, each give up
+ * after `MIRROR_TIMEOUT_MS`, or once `signal` aborts.
  */
 export async function mirrorMain(
   deps: MirrorDeps,
@@ -64,25 +68,31 @@ export async function mirrorMain(
     }),
   );
   try {
-    await recordPush(deps, repoPath, outcome);
+    await recordPush(deps, repoPath, outcome, options);
   } catch (e) {
     log.warn({ sha, error: describeError(e) }, "skills mirror push not recorded");
   }
   return outcome;
 }
 
-/** The remote's `main`, or null when it has none or there is no `origin`. */
+/**
+ * The remote's `main`, or null when it has none or there is no `origin`.
+ * Gives up after `MIRROR_TIMEOUT_MS`, or once `signal` aborts.
+ */
 export async function readRemoteMain(
   deps: Pick<MirrorDeps, "runInTx" | "secretsStore">,
   repoPath: string,
+  options?: { signal?: AbortSignal },
 ): Promise<Result<string | null, RemoteUnreadable>> {
   const remoteUrl = await readOriginUrl(repoPath);
   if (!remoteUrl) return ok(null);
   return ResultAsync.fromPromise(
-    withRemoteAuth(deps, remoteUrl, (env) =>
-      runGit(["-C", repoPath, "ls-remote", remoteUrl, "refs/heads/main"], env, {
-        signal: AbortSignal.timeout(MIRROR_TIMEOUT_MS),
-      }),
+    runRemoteGit(
+      deps,
+      repoPath,
+      remoteUrl,
+      ["ls-remote", remoteUrl, "refs/heads/main"],
+      remoteCallSignal(options),
     ),
     (e): RemoteUnreadable => ({ kind: "unreadable", detail: describeError(e) }),
   ).map(({ stdout }) => stdout.split("\t")[0]?.trim() || null);
@@ -96,13 +106,14 @@ async function pushMain(
 ): Promise<MirrorPushOutcome> {
   const remoteUrl = await readOriginUrl(repoPath);
   if (!remoteUrl) return { kind: "no_origin" };
-  const signal = AbortSignal.any([
-    AbortSignal.timeout(MIRROR_TIMEOUT_MS),
-    ...(options?.signal ? [options.signal] : []),
-  ]);
+  const signal = remoteCallSignal(options);
   try {
-    await withRemoteAuth(deps, remoteUrl, (env) =>
-      runGit(["-C", repoPath, "push", remoteUrl, `${sha}:refs/heads/main`], env, { signal }),
+    await runRemoteGit(
+      deps,
+      repoPath,
+      remoteUrl,
+      ["push", remoteUrl, `${sha}:refs/heads/main`],
+      signal,
     );
     return { kind: "landed", sha };
   } catch (e) {
@@ -114,8 +125,12 @@ async function pushMain(
 function classifyPushFailure(e: unknown, signal: AbortSignal): SkillsMirrorFailure {
   if (signal.aborted) return "timeout";
   const text = describeError(e);
+  // The remote refused to update `main` because another push moved it
+  // first: a rejection, whose winner `lostToNewerPush` reads. A ref the remote
+  // cannot lock for another reason (permissions, I/O) is a failure to record.
+  if (/incorrect old value provided/i.test(text)) return "rejected";
   if (
-    /\[remote rejected\]|protected branch|Authentication failed|Permission denied|could not read Username|\b40[13]\b/i.test(
+    /\[remote rejected\]|protected branch|Authentication failed|Permission denied|denied to|marked as read only|could not read Username|\b40[13]\b/i.test(
       text,
     )
   ) {
@@ -129,6 +144,7 @@ async function recordPush(
   deps: MirrorDeps,
   repoPath: string,
   outcome: MirrorPushOutcome,
+  options: { signal?: AbortSignal } | undefined,
 ): Promise<void> {
   await match(outcome)
     .with({ kind: "no_origin" }, async () => {
@@ -143,7 +159,7 @@ async function recordPush(
       log.info({ sha, synced }, "mirrored skills main to remote");
     })
     .with({ kind: "failed", failure: "rejected" }, async ({ detail }) => {
-      const lost = await lostToNewerPush(deps, repoPath);
+      const lost = await lostToNewerPush(deps, repoPath, options);
       if (lost.isErr()) {
         log.warn(
           { detail, error: lost.error.detail },
@@ -155,7 +171,9 @@ async function recordPush(
       const entered = await deps.runInTx((tx) => deps.store.recordMirrorDiverged(tx));
       log.warn(
         { detail, entered },
-        "skills remote main diverged from local main; push local main to the remote by hand",
+        // A plain push is a non-fast-forward; the bare repo keeps no
+        // remote-tracking ref, so the lease names the sha.
+        "skills remote main diverged from local main; check what its main holds (`git -C $COGMO_SKILLS_PATH ls-remote origin main`), then push local main over it, as an identity allowed to force-push it: `git -C $COGMO_SKILLS_PATH push --force-with-lease=main:<that sha> origin main`",
       );
     })
     .with(
@@ -175,8 +193,9 @@ async function recordPush(
 async function lostToNewerPush(
   deps: Pick<MirrorDeps, "runInTx" | "secretsStore">,
   repoPath: string,
+  options: { signal?: AbortSignal } | undefined,
 ): Promise<Result<boolean, RemoteUnreadable>> {
-  const remote = await readRemoteMain(deps, repoPath);
+  const remote = await readRemoteMain(deps, repoPath, options);
   if (remote.isErr()) return err(remote.error);
   const remoteMain = remote.value;
   const localMain = await getMainSha(repoPath);
@@ -196,16 +215,83 @@ export async function remoteMainIsAncestor(
   );
 }
 
-/** Run `fn` against `remoteUrl`, with the GitHub identity's token for an HTTPS remote. */
-async function withRemoteAuth<T>(
+/** A remote call's signal: aborts after `MIRROR_TIMEOUT_MS`, or with the caller's. */
+function remoteCallSignal(options: { signal?: AbortSignal } | undefined): AbortSignal {
+  return AbortSignal.any([
+    AbortSignal.timeout(MIRROR_TIMEOUT_MS),
+    ...(options?.signal ? [options.signal] : []),
+  ]);
+}
+
+/**
+ * Run `git -C repoPath <args>` against `remoteUrl`, without prompting, and
+ * with the GitHub identity's token for an HTTPS remote.
+ */
+async function runRemoteGit(
   deps: Pick<MirrorDeps, "runInTx" | "secretsStore">,
+  repoPath: string,
   remoteUrl: string,
-  fn: (env?: GitEnv) => Promise<T>,
-): Promise<T> {
+  args: ReadonlyArray<string>,
+  signal: AbortSignal,
+): Promise<{ stdout: string }> {
+  const opts = { signal, env: await nonInteractiveEnv(repoPath) };
+  const run = (askpass?: GitEnv) => runGit(["-C", repoPath, ...args], askpass, opts);
   // SSH remotes use ssh-agent or deploy keys; only HTTPS reads the identity.
-  if (!remoteUrl.startsWith("https://")) return fn();
+  if (!remoteUrl.startsWith("https://")) return run();
   const identity = await deps.runInTx((tx) =>
     resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
   );
-  return identity.isOk() ? withGitAskpass(identity.value.pat, fn) : fn();
+  return identity.isOk() ? withGitAskpass(identity.value.pat, run) : run();
+}
+
+/**
+ * The env that makes a remote call fail instead of waiting on a prompt, which
+ * would hold `cogmo serve`'s boot for the call's cap: no terminal prompt for
+ * credentials, and ssh in batch mode, with no passphrase or host-key prompt.
+ * `BatchMode` goes into the ssh command git would run, from `GIT_SSH_COMMAND`
+ * or `core.sshCommand`, so a key or wrapper configured there still applies. A
+ * `GIT_SSH` program, whose options git adapts to its variant, is left as it is.
+ */
+async function nonInteractiveEnv(repoPath: string): Promise<NodeJS.ProcessEnv> {
+  const configured = process.env.GIT_SSH_COMMAND || (await readSshCommand(repoPath));
+  const ssh = configured ?? (process.env.GIT_SSH ? null : "ssh");
+  return {
+    GIT_TERMINAL_PROMPT: "0",
+    ...(ssh !== null && { GIT_SSH_COMMAND: withBatchMode(ssh) }),
+  };
+}
+
+/** One shell word: unquoted characters, backslash escapes, and quoted spans. */
+const SHELL_WORD = /(?:[^\s'"\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+/g;
+
+/** A shell word that sets a variable for the command after it. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * `command` with `-o BatchMode=yes` right after its executable, the first
+ * shell word past any variable assignments, so it precedes the command's own
+ * options: ssh keeps the first value it reads for an option.
+ */
+function withBatchMode(command: string): string {
+  const executable = command.matchAll(SHELL_WORD).find((word) => !ASSIGNMENT.test(word[0]));
+  const end = executable === undefined ? command.length : executable.index + executable[0].length;
+  return `${command.slice(0, end)} -o BatchMode=yes${command.slice(end)}`;
+}
+
+/** `core.sshCommand` as git reads it for the repo, or null when it is unset. */
+async function readSshCommand(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP("git", [
+      "-C",
+      repoPath,
+      "config",
+      "--get",
+      "core.sshCommand",
+    ]);
+    return stdout.trim() || null;
+  } catch (e) {
+    // Exit 1 is git's "the key is not set".
+    if (typeof e === "object" && e !== null && "code" in e && e.code === 1) return null;
+    throw e;
+  }
 }

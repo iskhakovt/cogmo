@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
-import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
+import { type GitEnv, runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import {
   describeResolveIdentityError,
   type GitHubIdentity,
@@ -107,8 +107,9 @@ export interface BaseMissing {
  *
  * The mirror may lack a base an earlier attempt recorded: the default branch
  * rewritten on the remote since, say. Then the remote's run branch, and if
- * need be its default branch, are fetched and the base is looked for again;
- * it is never replaced. Errs with `base_missing` when neither holds it.
+ * need be its default branch, when the remote still has one, are fetched and
+ * the base is looked for again; it is never replaced. Errs with
+ * `base_missing` when none holds it.
  *
  * Inherits — does not enforce — single-writer-per-task semantics. Task
  * IDs are UUIDv7 and the orchestrator wraps this call in a durable
@@ -123,18 +124,7 @@ export async function pushTaskBranchToRemote(
   requireRemoteUrl(p.remoteUrl);
   const runBranch = runBranchFor(p.taskId);
   return withGitAskpass(p.identity.pat, async (env) => {
-    // The run branch first, as a pattern, which matches nothing rather than
-    // failing the fetch when no earlier attempt pushed it; then the default
-    // branch, whose fetch fails when the remote no longer has it.
-    const sources = [
-      `+refs/heads/${runBranch}*:refs/remotes/origin/${runBranch}*`,
-      `+${p.defaultBranch}:refs/remotes/origin/${p.defaultBranch}`,
-    ];
-    for (const source of sources) {
-      if (await hasCommit(p.localRepoPath, p.baseSha)) break;
-      await runGit(["-C", p.localRepoPath, "fetch", p.remoteUrl, source], env);
-    }
-    if (!(await hasCommit(p.localRepoPath, p.baseSha))) {
+    if (!(await fetchBase(p, runBranch, env))) {
       return err({ kind: "base_missing" as const, baseSha: p.baseSha });
     }
     await runGit(
@@ -143,6 +133,50 @@ export async function pushTaskBranchToRemote(
     );
     return ok(undefined);
   });
+}
+
+/**
+ * Whether the mirror holds `p.baseSha`, after fetching the remote's
+ * `runBranch`, then its default branch, until it does. The run branch is
+ * fetched as a pattern, which matches nothing rather than failing the fetch
+ * when no earlier attempt pushed it. A fetch of a default branch the remote
+ * lacks fails with the exit code an unreadable remote gives, so the branch is
+ * listed first and, when absent, not fetched; a failed fetch lists it again,
+ * and is a miss when the branch has gone since, a fetch failure otherwise.
+ */
+async function fetchBase(
+  p: PushTaskBranchParams,
+  runBranch: string,
+  env: GitEnv,
+): Promise<boolean> {
+  const fetchRefspec = (refspec: string) =>
+    runGit(["-C", p.localRepoPath, "fetch", p.remoteUrl, refspec], env);
+  if (await hasCommit(p.localRepoPath, p.baseSha)) return true;
+  await fetchRefspec(`+refs/heads/${runBranch}*:refs/remotes/origin/${runBranch}*`);
+  if (await hasCommit(p.localRepoPath, p.baseSha)) return true;
+  if (!(await remoteHasBranch(p, p.defaultBranch, env))) return false;
+  try {
+    await fetchRefspec(`+${p.defaultBranch}:refs/remotes/origin/${p.defaultBranch}`);
+  } catch (fetchError) {
+    if (await remoteHasBranch(p, p.defaultBranch, env)) throw fetchError;
+  }
+  return hasCommit(p.localRepoPath, p.baseSha);
+}
+
+/**
+ * Whether the remote has `refs/heads/<branch>`. `ls-remote` succeeds listing
+ * nothing for a branch the remote lacks, and fails, as the fetch would, when
+ * the remote cannot be read. The pattern matches ref names by suffix, so a
+ * line counts only when it names exactly that ref.
+ */
+async function remoteHasBranch(
+  p: Pick<PushTaskBranchParams, "localRepoPath" | "remoteUrl">,
+  branch: string,
+  env: GitEnv,
+): Promise<boolean> {
+  const ref = `refs/heads/${branch}`;
+  const { stdout } = await runGit(["-C", p.localRepoPath, "ls-remote", p.remoteUrl, ref], env);
+  return stdout.split("\n").some((line) => line.endsWith(`\t${ref}`));
 }
 
 /**

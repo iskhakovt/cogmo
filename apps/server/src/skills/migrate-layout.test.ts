@@ -221,6 +221,119 @@ describe("migrateSkillsLayout", () => {
     expect(await tx((trx) => store.getMirror(trx))).toMatchObject({ localSha: layout });
   });
 
+  /**
+   * alpha deployed at the repo root, the layout commit on top, then a deploy
+   * of beta from a draft cut before the move that merged `main`, so the
+   * layout commit is the merge's second parent. Returns both commits.
+   */
+  async function mergeDeployFromPreLayoutBase(): Promise<{ layout: string; merge: string }> {
+    const alpha = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", alpha, false);
+    const layout = await migrate();
+    await git(work, "checkout", "-q", "-b", "draft", alpha);
+    await mkdir(join(work, "skills", "beta"), { recursive: true });
+    await writeFile(join(work, "skills", "beta", "SKILL.md"), manifest("beta"));
+    await writeFile(join(work, "skills", "beta", "skill.py"), "b\n");
+    await git(work, "add", "-A");
+    await git(work, "commit", "-q", "-m", "add beta");
+    await git(work, "fetch", "-q", bare, "main");
+    await git(work, "merge", "-q", "--no-edit", "FETCH_HEAD");
+    const merge = await git(work, "rev-parse", "HEAD");
+    expect(await git(work, "rev-parse", `${merge}^2`)).toBe(layout);
+    await git(work, "push", "-q", bare, "HEAD:refs/heads/staging");
+    await git(bare, "update-ref", "refs/heads/main", merge);
+    return { layout, merge };
+  }
+
+  it("records a layout commit a merge deploy took off main's first-parent history", async () => {
+    const { layout, merge } = await mergeDeployFromPreLayoutBase();
+    await seedSkill("beta", merge, false);
+    await db.execute(sql`DELETE FROM skills_repo_layout`);
+
+    expect(await migrate()).toBe(layout);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(merge);
+  });
+
+  it("records that layout commit with no skills rows, as an adopt into a fresh database does", async () => {
+    const { layout, merge } = await mergeDeployFromPreLayoutBase();
+    await truncateAll(db);
+
+    expect(await migrate()).toBe(layout);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(merge);
+    expect(await git(bare, "ls-tree", "-r", "--name-only", "refs/heads/main")).toContain(
+      "skills/beta/skill.py",
+    );
+  });
+
+  /** A bare layout commit from another repo's boot, dated before every other commit. */
+  async function unrelatedBareLayoutCommit(): Promise<string> {
+    const emptyTree = await git(bare, "hash-object", "-t", "tree", "-w", "/dev/null");
+    const date = "2000-01-01T00:00:00Z";
+    return (
+      await execFileP(
+        "git",
+        ["-C", bare, "commit-tree", emptyTree, "-m", "c", "-m", "Cogmo-Layout: v1"],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Cogmo",
+            GIT_AUTHOR_EMAIL: "skills@cogmo.invalid",
+            GIT_AUTHOR_DATE: date,
+            GIT_COMMITTER_NAME: "Cogmo",
+            GIT_COMMITTER_EMAIL: "skills@cogmo.invalid",
+            GIT_COMMITTER_DATE: date,
+          },
+        },
+      )
+    ).stdout.trim();
+  }
+
+  /** Point main at an author's merge of `side` into `first`, keeping `first`'s tree. */
+  async function mergeOnMain(first: string, side: string): Promise<string> {
+    const tree = await git(bare, "rev-parse", `${first}^{tree}`);
+    const merge = (
+      await execFileP(
+        "git",
+        ["-C", bare, "commit-tree", tree, "-p", first, "-p", side, "-m", "m"],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@t",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@t",
+          },
+        },
+      )
+    ).stdout.trim();
+    await git(bare, "update-ref", "refs/heads/main", merge);
+    return merge;
+  }
+
+  it("records the layout commit on main's first-parent history over one a merge brought in", async () => {
+    const alpha = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", alpha, false);
+    const layout = await migrate();
+    await mergeOnMain(layout, await unrelatedBareLayoutCommit());
+    await db.execute(sql`DELETE FROM skills_repo_layout`);
+
+    expect(await migrate()).toBe(layout);
+  });
+
+  it("fails the boot when main merges two layout commits and its first-parent history holds none", async () => {
+    const { layout, merge } = await mergeDeployFromPreLayoutBase();
+    await seedSkill("beta", merge, false);
+    const unrelated = await unrelatedBareLayoutCommit();
+    const main = await mergeOnMain(merge, unrelated);
+    await db.execute(sql`DELETE FROM skills_repo_layout`);
+
+    await expect(migrate()).rejects.toThrow(
+      `main's history merges more than one layout commit, none on its first-parent history: ${unrelated}, ${layout}`,
+    );
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(main);
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBeNull();
+  });
+
   it("skips a commit carrying the layout trailer under another identity", async () => {
     const forged = await commitOnMain({ "README.md": "x\n" }, "c\n\nCogmo-Layout: v1");
 
@@ -338,6 +451,20 @@ describe("migrateSkillsLayout", () => {
 
     expect(layout).not.toBe(recordedBare);
     expect(await git(bare, "rev-parse", `${layout}^`)).toBe(orphanMain);
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
+  });
+
+  it("moves again when main is unborn under a recorded layout commit", async () => {
+    await migrate();
+    // The operator deletes main, as remote_diverged advises before an adopt.
+    await git(bare, "update-ref", "-d", "refs/heads/main");
+
+    const layout = await migrate();
+
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(layout);
+    expect(await git(bare, "log", "-1", "--format=%P|%T", layout)).toBe(
+      "|4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    );
     expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
   });
 

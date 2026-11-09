@@ -96,29 +96,56 @@ export async function migrateSkillsLayout(
 }
 
 /**
- * The layout commit on `mainSha`'s first-parent history: the oldest commit
- * carrying the layout trailer under Cogmo's identity whose tree keeps no skill
- * file at the root and a `skills/<name>/` for each row at it or an ancestor.
+ * The layout commit in `mainSha`'s history: the oldest one on its first-parent
+ * history, or, when that holds none, the one its merges bring in, since a
+ * deploy merging `main` into a draft cut before the move makes it a second
+ * parent. More than one there fails the boot, naming them, for the operator
+ * to record the one the skills moved in.
  */
 async function findLayoutCommit(
   repoPath: string,
   mainSha: string,
   rows: readonly SkillRow[],
 ): Promise<string | null> {
+  const [onFirstParent] = await layoutCommitsIn(repoPath, rows, ["--first-parent", mainSha]);
+  if (onFirstParent !== undefined) return onFirstParent;
+  const merged = await layoutCommitsIn(repoPath, rows, [mainSha]);
+  if (merged.length > 1) {
+    throw new Error(
+      `migrateSkillsLayout: main's history merges more than one layout commit, none on its first-parent history: ${merged.join(", ")}; record the one the skills moved in as the skills_repo_layout row`,
+    );
+  }
+  return merged[0] ?? null;
+}
+
+/**
+ * The commits `git log <revs>` lists, oldest first, that pass as the layout
+ * commit: the layout trailer under Cogmo's identity, and a tree that keeps no
+ * skill file at the root and a `skills/<name>/` for each row at it or an
+ * ancestor.
+ */
+async function layoutCommitsIn(
+  repoPath: string,
+  rows: readonly SkillRow[],
+  revs: readonly string[],
+): Promise<string[]> {
   const candidates = await logCommits(repoPath, [
-    "--first-parent",
     "--reverse",
     "--fixed-strings",
     `--grep=${LAYOUT_TRAILER}: ${LAYOUT_TRAILER_VALUE}`,
-    mainSha,
+    ...revs,
   ]);
+  const found: string[] = [];
   for (const commit of candidates) {
-    if (commit.trailers.get(LAYOUT_TRAILER) !== LAYOUT_TRAILER_VALUE || !madeByCogmo(commit)) {
-      continue;
+    if (
+      commit.trailers.get(LAYOUT_TRAILER) === LAYOUT_TRAILER_VALUE &&
+      madeByCogmo(commit) &&
+      (await hasLayoutTree(repoPath, commit.sha, rows))
+    ) {
+      found.push(commit.sha);
     }
-    if (await hasLayoutTree(repoPath, commit.sha, rows)) return commit.sha;
   }
-  return null;
+  return found;
 }
 
 async function hasLayoutTree(
@@ -195,17 +222,18 @@ async function onHistoryOf(repoPath: string, sha: string, head: string): Promise
 
 /**
  * Whether a recorded layout commit no longer describes the repo: the repo
- * was recreated without it, or it is a bare layout commit `main` no longer
- * descends from, as after an adopt replaced it. A bare one holds no skill, so
- * moving again reads every row as before.
+ * was recreated without it, `main` is unborn (the operator deleted it), or it
+ * is a bare layout commit `main` no longer descends from, as after an adopt
+ * replaced it. A bare one holds no skill, so moving again reads every row as
+ * before; moving onto an unborn `main` makes it Cogmo-only.
  */
 async function isStaleLayout(repoPath: string, recorded: string): Promise<boolean> {
   if ((await revParse(repoPath, `${recorded}^{commit}`)).isErr()) return true;
   const mainSha = await getMainSha(repoPath);
   return (
-    mainSha !== null &&
-    !(await isAncestor(repoPath, recorded, mainSha)) &&
-    (await isBareLayoutCommit(repoPath, recorded))
+    mainSha === null ||
+    (!(await isAncestor(repoPath, recorded, mainSha)) &&
+      (await isBareLayoutCommit(repoPath, recorded)))
   );
 }
 

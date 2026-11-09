@@ -2,6 +2,7 @@ import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
 import type { SkillsCapabilities } from "../capabilities.js";
+import type { SkillTree } from "../python-ast.js";
 import type { SkillFinding } from "../skill-gates.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
 
@@ -16,14 +17,20 @@ interface CheckedSkill {
 
 /** The checks, each throwing when its parse or a walk throws. */
 interface RegisterBodyChecks {
-  /** The register-time gates' three stages (`runSkillGates`). */
-  runGates(skill: CheckedSkill): Promise<readonly SkillFinding[]>;
-  /** The AST classifier as register runs it (`classifyWithAst`). */
+  /**
+   * The register-time gates' three stages, which hand the tree they parsed to
+   * `read` once they pass (`runSkillGates`).
+   */
+  runGates(
+    skill: CheckedSkill,
+    read: (tree: SkillTree) => ClassifierLog,
+  ): Promise<Result<ClassifierLog, readonly SkillFinding[]>>;
+  /** The AST classifier as register runs it, on the gates' tree (`classifyWithAst`). */
   classify(
+    tree: SkillTree,
     manifest: SkillManifest,
-    body: string,
     capabilities: SkillsCapabilities,
-  ): Promise<ClassifierLog>;
+  ): ClassifierLog;
 }
 
 /** Why register's body checks refuse a tip (design/skills.md → Register-time gates → Outcomes). */
@@ -38,8 +45,9 @@ export type RegisterBodyRejection =
 /**
  * Register's step-4 checks of `skill.py`, before its transaction and its
  * sandbox sessions: the register-time gates' three stages, then the AST
- * classifier, each rejecting with one kind. A throw from either is the
- * pausing `registrar_unavailable` (`parser`), logged at error.
+ * classifier on the tree the gates parsed, each rejecting with one kind. A
+ * throw from either is the pausing `registrar_unavailable` (`parser`), logged
+ * at error.
  */
 export async function checkRegisterBody(
   checks: RegisterBodyChecks,
@@ -65,9 +73,11 @@ async function judge(
   skill: CheckedSkill,
   capabilities: SkillsCapabilities,
 ): Promise<Result<ClassifierLog, RegisterBodyRejection>> {
-  const findings = await checks.runGates(skill);
-  if (findings.length > 0) return err({ kind: "lint_failed", findings });
-  const classifierLog = await checks.classify(skill.manifest, skill.body, capabilities);
+  const gated = await checks.runGates(skill, (tree) =>
+    checks.classify(tree, skill.manifest, capabilities),
+  );
+  if (gated.isErr()) return err({ kind: "lint_failed", findings: gated.error });
+  const classifierLog = gated.value;
   return classifierLog.validation_errors.length > 0
     ? err({ kind: "classifier_rejected", validationErrors: classifierLog.validation_errors })
     : ok(classifierLog);

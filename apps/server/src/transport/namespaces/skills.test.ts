@@ -733,7 +733,7 @@ describe("Transport.skills.rollbackDeploy", () => {
       {
         code: "skill_rollback_failed",
         deployId: PENDING_ID,
-        reason: "the deploy did not go live, or replaced no live version",
+        reason: "the deploy did not go live, or replaced no other live version",
       },
     ],
     [

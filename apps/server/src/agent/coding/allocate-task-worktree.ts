@@ -27,8 +27,8 @@ interface AllocateTaskWorktreeDeps extends TaskStoreDeps {
 }
 
 /**
- * How allocation ended: the worktree ready, or a saved base neither the
- * mirror nor the remote holds, which ends the task `push_failed`.
+ * How allocation ended: the worktree ready, or, on git-remote, a saved base
+ * neither the mirror nor the remote holds, which ends the task `push_failed`.
  */
 export type AllocateOutcome =
   | { kind: "allocated"; assignment: WorktreeAssignment }
@@ -52,9 +52,10 @@ export type AllocateOutcome =
  * A retry cuts at the saved base; an assignment without one cuts at the
  * parent's current HEAD, or the freshly fetched tip, and records none.
  *
- * The step returns `base_missing` for a saved base the mirror and the remote
- * both lack, and `null` otherwise; an older build's void result replays as
- * `null` too. The run reads the assignment from the
+ * The step returns `base_missing` for a git-remote saved base the mirror and
+ * the remote both lack, and `null` otherwise; an older build's void result
+ * replays as `null` too. A bind-mount saved base the parent no longer holds
+ * fails the checkout, so the step throws. The run reads the assignment from the
  * task row, where the step wrote it. The GitHub identity is loaded inside the
  * body and never returned, so the PAT stays out of Inngest's state store.
  */

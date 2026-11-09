@@ -8,8 +8,7 @@ import {
   SKILL_FILES,
   SKILLS_DIR,
   type SkillsRepo,
-  sameSkillBlobs,
-  skillBlobsAt,
+  skillBlobsMatchAt,
   skillBlobsUnder,
   skillDir,
 } from "../skill-files.js";
@@ -112,7 +111,7 @@ async function skillAtUnchangedTip(
   for (const name of await skillNamesAt(repo.path, tipSha)) {
     const row = live.get(name);
     const atTip = await skillBlobsUnder(repo.path, tipSha, skillDir(name));
-    if (row === undefined || !sameSkillBlobs(atTip, await skillBlobsAt(repo, name, row.gitSha))) {
+    if (row === undefined || !(await skillBlobsMatchAt(repo, name, row.gitSha, atTip))) {
       differing.push(name);
     }
   }

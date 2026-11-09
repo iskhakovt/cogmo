@@ -1,3 +1,4 @@
+import { err, ok, type Result } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { BUILD_CAPABILITIES } from "../capabilities.js";
 import { classifyManifestStub } from "../classifier.js";
@@ -29,13 +30,20 @@ function classifierLog(validationErrors: string[]): ClassifierLog {
   };
 }
 
-/** Fakes for the gates and the classifier, each answering or throwing as given. */
-function checks(
-  gates: () => Promise<readonly SkillFinding[]>,
-  classify: () => Promise<ClassifierLog>,
-) {
+/** The tree the fake gates hand on; nothing reads into it. */
+const FAKE_TREE = { __mockTree: true } as never;
+
+type Gated = Result<ClassifierLog, readonly SkillFinding[]>;
+
+/**
+ * Fakes for the gates and the classifier, each answering or throwing as
+ * given. `gates` errs with findings, or passes by handing `FAKE_TREE` on.
+ */
+function checks(gates: (pass: () => Gated) => Promise<Gated>, classify: () => ClassifierLog) {
   return {
-    runGates: vi.fn<RegisterBodyChecks["runGates"]>(gates),
+    runGates: vi.fn<RegisterBodyChecks["runGates"]>((_skill, read) =>
+      gates(() => ok(read(FAKE_TREE))),
+    ),
     classify: vi.fn<RegisterBodyChecks["classify"]>(classify),
   };
 }
@@ -49,22 +57,22 @@ const FINDING: SkillFinding = {
 };
 
 describe("checkRegisterBody", () => {
-  it("returns the classifier's log once the gates pass", async () => {
+  it("returns the classifier's log on the tree the gates parsed, once they pass", async () => {
     const log = classifierLog([]);
     const fakes = checks(
-      async () => [],
-      async () => log,
+      async (pass) => pass(),
+      () => log,
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrap()).toBe(log);
-    expect(fakes.runGates).toHaveBeenCalledWith(SKILL);
-    expect(fakes.classify).toHaveBeenCalledWith(MANIFEST, SKILL.body, BUILD_CAPABILITIES);
+    expect(fakes.runGates).toHaveBeenCalledWith(SKILL, expect.any(Function));
+    expect(fakes.classify).toHaveBeenCalledWith(FAKE_TREE, MANIFEST, BUILD_CAPABILITIES);
   });
 
   it("rejects as lint_failed with the gates' findings, without running the classifier", async () => {
     const fakes = checks(
-      async () => [FINDING],
-      async () => classifierLog([]),
+      async () => err([FINDING]),
+      () => classifierLog([]),
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrapErr()).toEqual({
@@ -76,8 +84,8 @@ describe("checkRegisterBody", () => {
 
   it("rejects as classifier_rejected with the validation errors", async () => {
     const fakes = checks(
-      async () => [],
-      async () => classifierLog(["first", "second"]),
+      async (pass) => pass(),
+      () => classifierLog(["first", "second"]),
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrapErr()).toEqual({
@@ -89,7 +97,7 @@ describe("checkRegisterBody", () => {
   it("pauses when a gate's parse or walk throws", async () => {
     const fakes = checks(
       () => Promise.reject(new Error("tree-sitter-python.wasm: ENOENT")),
-      async () => classifierLog([]),
+      () => classifierLog([]),
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrapErr()).toEqual({
@@ -102,8 +110,10 @@ describe("checkRegisterBody", () => {
 
   it("pauses when the classifier throws after the gates passed, rather than taking the stub", async () => {
     const fakes = checks(
-      async () => [],
-      () => Promise.reject(new Error("walk panic")),
+      async (pass) => pass(),
+      () => {
+        throw new Error("walk panic");
+      },
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrapErr()).toEqual({

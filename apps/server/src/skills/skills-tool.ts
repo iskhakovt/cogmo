@@ -2,6 +2,7 @@ import { ok } from "neverthrow";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { defineTool, reject, type ToolSpec } from "../agent/tools.js";
+import { ENTRYPOINT_RULE, ENTRYPOINT_SIGNATURE } from "./ast-rules.js";
 
 const RegisterSkillInput = z.object({
   branch: z
@@ -15,7 +16,7 @@ const RegisterSkillInput = z.object({
 
 export const SKILLS_PROMPT_GUIDANCE = `You can author Python skills — small programs that become tools you can call later. Workflow:
 
-1. Use \`delegate_coding\` against the skills repo — it's registered as \`skills\` automatically on every boot, no \`/repo add\` needed. The goal should describe both the SKILL.md (manifest: name, description, tier, inputs, effects) and the skill.py (a single \`async def run(inputs, ctx) -> dict\`). Wait for the user to approve and the task to finish.
+1. Use \`delegate_coding\` against the skills repo — it's registered as \`skills\` automatically on every boot, no \`/repo add\` needed. The goal should describe both the SKILL.md (manifest: name, description, tier, effects, and \`inputs\` when skill.py defines no \`Input\` model) and the skill.py, whose entrypoint register checks: ${ENTRYPOINT_RULE} With pydantic models: \`${ENTRYPOINT_SIGNATURE}\`, \`Ctx\` imported from \`cogmo_ctx\`. Wait for the user to approve and the task to finish.
 
    If the skill needs the network, say so in the goal and have it use \`await ctx.http.get(url)\` — the wasm tier has no sockets, so \`urllib\`/\`httpx\`/\`requests\` are rejected at register time. It returns \`{"status", "headers", "body"}\` and needs no dependency. The manifest must also list every host reached through \`ctx.http\` under \`network.allow\`, or that request is refused (the container tier's raw \`httpx\` has real sockets and is not bound by it); a skill declaring both a secret and a network allowlist always needs the user's approval before it goes live.
 2. When the task opens its PR, Cogmo registers the branch itself and the user receives the outcome message; don't call \`register_skill\` for it. \`register_skill\` is for a skills-repo branch that arrived some other way (the user pushed it and asked). The classifier tiers every deploy, and nothing deploys silently. A \`notify\` skill goes live at once, and the user gets a message listing what it declares, with a Disable button. An \`approve\` skill — tier \`container\`, an acting effect (sending, deleting, writing files, financial or a subprocess), a secret together with a network allowlist, three or more secrets, or a dependency on the approve list — waits until the user taps Approve on the message they receive.

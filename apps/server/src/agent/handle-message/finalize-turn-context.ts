@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { match, P } from "ts-pattern";
 import type { Durable } from "../../inngest/durable.js";
-import type { Message } from "../../llm/types.js";
+import type { ToolDefinition } from "../../llm/types.js";
 import { promptPrefixViolations } from "../../metrics.js";
 import type { LoadedSystemPrompt } from "../conversation/load-system-prompt.js";
 import { openSystemPromptEpoch } from "../conversation/open-system-prompt-epoch.js";
@@ -15,6 +15,7 @@ import {
   stripThinkingBefore,
   unannounced,
 } from "../system-prompt-snapshot.js";
+import { openTranscript, type Transcript, type TranscriptView } from "../transcript.js";
 import type { HeadVerdict } from "../transcript-head.js";
 import {
   announcedInView,
@@ -28,9 +29,10 @@ import type { TurnTranscript } from "./load-turn-transcript.js";
 import type { TurnView } from "./render-turn-view.js";
 
 export interface FinalizeTurnContextArgs {
-  /** The compacted history, the turn's message led by its provisional turn context. */
-  messages: Message[];
+  /** The compacted view, the turn's message led by its provisional turn context. */
+  compacted: TranscriptView;
   provisionalTurnContext: string;
+  /** The rows `load-turn-transcript` loaded. */
   transcript: TurnTranscript;
   /** The history as sent, and the attachment cutoff an epoch the turn opens stores. */
   view: TurnView;
@@ -43,6 +45,8 @@ export interface FinalizeTurnContextArgs {
   loadedSystemPrompt: LoadedSystemPrompt;
   /** The across-turn head check's verdict on the loaded history. */
   head: HeadVerdict;
+  /** The frozen tool definitions every request of the turn sends. */
+  toolDefs: ReadonlyArray<ToolDefinition>;
   systemPromptArgs: TurnSystemPromptArgs;
   recalledMemories: ReadonlyArray<string>;
   handledAt: Date;
@@ -53,17 +57,19 @@ export interface FinalizeTurnContextArgs {
 }
 
 export interface FinalizedTurnContext {
-  /** The epoch's system prompt, which the loop sends. */
-  systemPrompt: string;
-  /** The history the loop sends, the turn's message led by its stored turn context. */
-  messages: Message[];
+  /**
+   * The transcript the loop sends: the epoch's system prompt and the frozen
+   * tools ahead of the history, the turn's message led by its stored turn
+   * context.
+   */
+  transcript: Transcript;
 }
 
 /**
  * Settle the epoch the turn sends and its stored turn context, over the
- * compacted view. An epoch opened on a violated head check counts
- * `cogmo.prompt.prefix_violations{site: "turn"}` and warns, once: only the
- * attempt whose insert stored the snapshot does.
+ * compacted view, and open the turn's transcript on them. An epoch opened on a
+ * violated head check counts `cogmo.prompt.prefix_violations{site: "turn"}`
+ * and warns, once: only the attempt whose insert stored the snapshot does.
  *
  * Steps, in order: `open-system-prompt-epoch` (unless the turn continues its
  * epoch), `render-turn-context`.
@@ -75,7 +81,8 @@ export async function finalizeTurnContext(
 ): Promise<FinalizedTurnContext> {
   const { transcript, continuing } = args;
   const { history: turnHistory, turn } = transcript;
-  const turnPosition = findTurnContext(args.messages, args.provisionalTurnContext);
+  const { compacted } = args;
+  const turnPosition = findTurnContext(compacted.messages, args.provisionalTurnContext);
   if (turnPosition === -1) throw new Error("compaction dropped the turn's own message");
 
   // A summary this turn stored moves the history's start, and a view
@@ -106,8 +113,8 @@ export async function finalizeTurnContext(
         });
   const opensEpoch = epoch.openedBy === turn.id;
   const historyMessages = opensEpoch
-    ? stripThinkingBefore(args.messages, turnPosition)
-    : args.messages;
+    ? stripThinkingBefore(compacted.messages, turnPosition)
+    : compacted.messages;
 
   // Deduplicated after compaction: before it, a memory whose only earlier
   // copy compaction then removes would be dropped. An opening turn's snapshot
@@ -144,8 +151,14 @@ export async function finalizeTurnContext(
   );
 
   return {
-    systemPrompt: epoch.rendered,
-    messages: replaceTurnContext(historyMessages, turnPosition, renderedTurnContext),
+    transcript: openTranscript(
+      { system: epoch.rendered, tools: args.toolDefs, epoch: opensEpoch ? "opened" : "continued" },
+      {
+        ...compacted,
+        messages: replaceTurnContext(historyMessages, turnPosition, renderedTurnContext),
+      },
+      args.turnLogger,
+    ),
   };
 }
 

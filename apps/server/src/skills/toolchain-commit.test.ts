@@ -304,6 +304,20 @@ describe("commitToolchain", () => {
     expect(await tx((trx) => store.getMirror(trx))).toMatchObject({ localSha: landed });
   });
 
+  it("commits after the boot's layout move once main is deleted under a recorded layout commit", async () => {
+    await layout();
+    await commit(shipped);
+    // The operator deletes main, as remote_diverged advises before an adopt.
+    await git(bare, "update-ref", "-d", "refs/heads/main");
+
+    const moved = await layout();
+    const outcome = await commit(shipped);
+
+    const sha = await mainSha();
+    expect(outcome._unsafeUnwrap()).toEqual({ kind: "committed", sha });
+    expect(await git(bare, "rev-parse", `${sha}^`)).toBe(moved);
+  });
+
   it("refuses an unborn main", async () => {
     await expect(commit(shipped)).rejects.toThrow(/main is unborn/);
   });

@@ -1,3 +1,4 @@
+import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { Node } from "web-tree-sitter";
@@ -12,7 +13,6 @@ import { hostAllowed, parseHttpUrl } from "./http-destination.js";
 import type { CheckFinding } from "./protocol.js";
 import {
   callArgument,
-  ctxCalls,
   ctxRequest,
   fromImportStatementBindings,
   importStatementBindings,
@@ -22,6 +22,8 @@ import {
   type NameBinding,
   parameterList,
   positionOf,
+  readSkillTree,
+  type SkillTree,
   scopeBindings,
 } from "./python-ast.js";
 import { withPythonTree } from "./python-parser.js";
@@ -71,22 +73,29 @@ interface GatedSkill {
 /**
  * The gates' first three stages, each refusing with every finding it made:
  * Size, on the text; Syntax, the parse; then Entrypoint, Dynamic code,
- * Effects and `wasm-lint`. Returns the first stage's findings that has any,
- * or none. Throws when the grammar cannot load or a walk throws.
+ * Effects and `wasm-lint`. Errs with the first stage's findings that has any;
+ * once all pass, hands the tree they read to `read`, the classifier at
+ * register, and returns what it returns. Throws when the grammar cannot load,
+ * or a walk or `read` throws.
  */
-export async function runSkillGates(skill: GatedSkill): Promise<readonly SkillFinding[]> {
+export async function runSkillGates<T>(
+  skill: GatedSkill,
+  read: (tree: SkillTree) => T,
+): Promise<Result<T, readonly SkillFinding[]>> {
   const path = `${skillDir(skill.name)}${SKILL_BODY_FILE}`;
   const size = sizeFindings(path, skill.body);
-  if (size.length > 0) return size;
-  return withPythonTree(skill.body, (root) => {
+  if (size.length > 0) return err(size);
+  return withPythonTree(skill.body, (root): Result<T, readonly SkillFinding[]> => {
     const syntax = syntaxFindings(path, root);
-    if (root === null || syntax.length > 0) return syntax;
-    return [
+    if (root === null || syntax.length > 0) return err(syntax);
+    const tree = readSkillTree(root);
+    const findings = [
       ...byPosition(entrypointFindings(path, root)),
       ...byPosition(dynamicCodeFindings(path, root)),
-      ...byPosition(effectsFindings(path, root, skill.manifest)),
+      ...byPosition(effectsFindings(path, tree, skill.manifest)),
       ...wasmLintFindings(path, skill),
     ];
+    return findings.length > 0 ? err(findings) : ok(read(tree));
   });
 }
 
@@ -339,14 +348,11 @@ function dynamicCodeFindings(path: string, root: Node): SkillFinding[] {
     ...runsCode.map((b) => runs(b.node, b.name)),
     ...importsModule.map((b) => importsNamed(b.node, b.name)),
   ];
-  const references = root
-    .descendantsOfType("identifier")
-    .filter(isReference)
-    .flatMap((id) => {
-      if (DYNAMIC_CODE_NAMES.has(id.text) || runsCodeNames.has(id.text)) return [runs(id, id.text)];
-      if (importsModuleNames.has(id.text)) return [importsNamed(id, id.text)];
-      return [];
-    });
+  const references = referenceIdentifiers(root).flatMap((id) => {
+    if (DYNAMIC_CODE_NAMES.has(id.text) || runsCodeNames.has(id.text)) return [runs(id, id.text)];
+    if (importsModuleNames.has(id.text)) return [importsNamed(id, id.text)];
+    return [];
+  });
   const attributes = root.descendantsOfType("attribute").flatMap((attribute) => {
     const object = attribute.childForFieldName("object");
     const name = attribute.childForFieldName("attribute");
@@ -377,19 +383,51 @@ function dynamicCodeFindings(path: string, root: Node): SkillFinding[] {
   return [...imports, ...references, ...attributes, ...getattrs];
 }
 
+const IMPORT_STATEMENTS: ReadonlySet<string> = new Set([
+  "import_statement",
+  "import_from_statement",
+  "future_import_statement",
+]);
+
+/** A node, and the ancestors a walk from the root passed through to reach it. */
+interface Lineage {
+  node: Node;
+  parent: Lineage | null;
+}
+
+/**
+ * Every identifier outside the import statements, whose names the
+ * forbidden-target check above reads, that refers to a name. One walk from
+ * the root carrying each node's ancestors: tree-sitter finds a node's
+ * `parent` by walking down from the root, which costs the tree's depth per
+ * identifier.
+ */
+function referenceIdentifiers(root: Node): Node[] {
+  const references: Node[] = [];
+  const stack: Lineage[] = [{ node: root, parent: null }];
+  for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
+    if (at.node.type === "identifier" && isReference(at)) references.push(at.node);
+    if (IMPORT_STATEMENTS.has(at.node.type)) continue;
+    for (const child of at.node.namedChildren.toReversed()) stack.push({ node: child, parent: at });
+  }
+  return references;
+}
+
 /**
  * Whether an identifier refers to a name: not an attribute node's
- * `attribute`, a keyword argument's name, a parameter's name, a definition's
- * name, or a name in an import statement, which the forbidden-target check
- * above reads.
+ * `attribute`, a dotted name's part after the first, a keyword argument's
+ * name, a keyword pattern's keyword, a parameter's name or a definition's
+ * name.
  */
-function isReference(id: Node): boolean {
-  const parent = id.parent;
-  if (parent === null) return true;
-  if (inImportStatement(id)) return false;
+function isReference({ node: id, parent: up }: Lineage): boolean {
+  if (up === null) return true;
+  const parent = up.node;
   const isField = (field: string) => parent.childForFieldName(field)?.equals(id) === true;
+  const isFirst = () => parent.namedChild(0)?.equals(id) === true;
   return match(parent.type)
     .with("attribute", () => !isField("attribute"))
+    .with("dotted_name", isFirst)
+    .with("keyword_pattern", () => !isFirst())
     .with(
       "keyword_argument",
       "default_parameter",
@@ -399,27 +437,12 @@ function isReference(id: Node): boolean {
     .with("function_definition", "class_definition", () => !isField("name"))
     .with("parameters", "lambda_parameters", "typed_parameter", () => false)
     .with("list_splat_pattern", "dictionary_splat_pattern", () => {
-      const holder = parent.parent?.type;
+      const holder = up.parent?.node.type;
       return (
         holder !== "parameters" && holder !== "lambda_parameters" && holder !== "typed_parameter"
       );
     })
     .otherwise(() => true);
-}
-
-const IMPORT_STATEMENTS: ReadonlySet<string> = new Set([
-  "import_statement",
-  "import_from_statement",
-  "future_import_statement",
-]);
-
-function inImportStatement(node: Node): boolean {
-  let ancestor = node.parent;
-  while (ancestor !== null && ancestor.type !== "block" && ancestor.type !== "module") {
-    if (IMPORT_STATEMENTS.has(ancestor.type)) return true;
-    ancestor = ancestor.parent;
-  }
-  return false;
 }
 
 /**
@@ -429,11 +452,11 @@ function inImportStatement(node: Node): boolean {
  * refused as the handler would refuse the call at run time; a non-literal URL
  * or name is left to the run.
  */
-function effectsFindings(path: string, root: Node, manifest: SkillManifest): SkillFinding[] {
+function effectsFindings(path: string, tree: SkillTree, manifest: SkillManifest): SkillFinding[] {
   const allow = manifest.network?.allow ?? [];
   const secrets = new Set(manifest.secrets.map((s) => (typeof s === "string" ? s : s.name)));
   const at = (node: Node, message: string) => findingAt("effects", path, node, message);
-  return ctxCalls(root).flatMap((call): SkillFinding[] => {
+  return tree.ctxCalls.flatMap((call): SkillFinding[] => {
     if (call.namespace === "secrets" && call.method === "get") {
       const nameNode = callArgument(call.call, 0, "name");
       const name = literalText(nameNode);

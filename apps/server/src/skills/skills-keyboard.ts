@@ -39,7 +39,7 @@ export function buildSkillsApprovalKeyboard(pendingId: string): SkillsInlineKeyb
 /**
  * Disable for the live skill `skillId`, and Roll back for the deploy
  * `rollbackDeployId`, an edit whose prior version it restores; null for a
- * first deploy, which has none.
+ * deploy that replaced no other version.
  */
 export function buildSkillsLiveKeyboard(args: {
   skillId: string;

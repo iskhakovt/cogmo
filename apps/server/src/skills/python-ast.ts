@@ -89,41 +89,107 @@ export interface CtxCall {
   method: string;
 }
 
+/** A parsed `skill.py` as the gates and the classifier read it: its root, and its ctx calls, resolved once. */
+export interface SkillTree {
+  root: Node;
+  ctxCalls: readonly CtxCall[];
+}
+
+export function readSkillTree(root: Node): SkillTree {
+  return { root, ctxCalls: ctxCalls(root) };
+}
+
 /**
- * Every ctx call under `root`. The receiver is an `identifier` whose nearest
- * binding, walking out through the functions, lambdas and comprehensions
- * enclosing the call, is a parameter, other than the first parameter of a
- * function defined directly in a class body; a parameter its function
- * reassigns stays a receiver. A nearer binding of any other kind makes the
- * name no receiver.
+ * Every ctx call under `root`, in document order. The receiver is an
+ * `identifier` whose nearest binding, walking out through the functions,
+ * lambdas and comprehensions enclosing the call, is a parameter, other than
+ * the first parameter of a function defined directly in a class body; a
+ * parameter its function reassigns stays a receiver. A nearer binding of any
+ * other kind makes the name no receiver.
+ *
+ * One walk from the root, which reads each scope's bindings once on entering
+ * it, so the cost is linear in the tree; an explicit stack, so no depth of
+ * tree overflows the call stack.
  */
-export function ctxCalls(root: Node): CtxCall[] {
-  return root.descendantsOfType("call").flatMap((call): CtxCall[] => {
-    const fn = call.childForFieldName("function");
-    const inner = fn?.type === "attribute" ? fn.childForFieldName("object") : null;
-    const method = fn?.childForFieldName("attribute");
-    if (inner?.type !== "attribute" || method === null || method === undefined) return [];
-    const receiver = inner.childForFieldName("object");
-    const namespace = inner.childForFieldName("attribute");
-    if (receiver?.type !== "identifier" || namespace === null) return [];
-    return isCtxReceiver(receiver)
-      ? [{ call, namespace: namespace.text, method: method.text }]
-      : [];
-  });
+function ctxCalls(root: Node): CtxCall[] {
+  const calls: CtxCall[] = [];
+  const stack: ScopedNode[] = [{ node: root, scopes: null }];
+  for (let visit = stack.pop(); visit !== undefined; visit = stack.pop()) {
+    const call = ctxCallAt(visit);
+    if (call !== null) calls.push(call);
+    for (const child of scopedChildren(visit).toReversed()) stack.push(child);
+  }
+  return calls;
 }
 
 /** How a scope resolves a name: to a ctx receiver, to another binding, or not at all. */
 type Resolution = "receiver" | "shadowed" | "unbound";
 
-function isCtxReceiver(receiver: Node): boolean {
-  const resolve = (scope: Node | null, child: Node): boolean =>
-    scope !== null &&
-    match(resolveIn(scope, child, receiver))
+/** The names a scope enclosing a call binds, read once on entering it. */
+type Scope =
+  | {
+      kind: "function";
+      /** The parameters' names in order, a function's or a lambda's. */
+      parameters: ReadonlyArray<string | null>;
+      /** Whether the first parameter is a method's own, a function defined directly in a class body. */
+      methodSelf: boolean;
+      nonlocal: ReadonlySet<string>;
+      /** Its other bindings (`scopeBindings`), and its `global` names. */
+      bound: ReadonlySet<string>;
+    }
+  | { kind: "comprehension"; targets: ReadonlySet<string> };
+
+/** The scopes enclosing a node, innermost first. */
+interface ScopeChain {
+  scope: Scope;
+  outer: ScopeChain | null;
+}
+
+interface ScopedNode {
+  node: Node;
+  scopes: ScopeChain | null;
+}
+
+/** The node's ctx call, when it is a call of that shape on a receiver its scopes resolve to a parameter. */
+function ctxCallAt({ node, scopes }: ScopedNode): CtxCall | null {
+  if (node.type !== "call") return null;
+  const fn = node.childForFieldName("function");
+  const inner = fn?.type === "attribute" ? fn.childForFieldName("object") : null;
+  const method = fn?.childForFieldName("attribute");
+  if (inner?.type !== "attribute" || method === null || method === undefined) return null;
+  const receiver = inner.childForFieldName("object");
+  const namespace = inner.childForFieldName("attribute");
+  if (receiver?.type !== "identifier" || namespace === null) return null;
+  return resolvesToReceiver(scopes, receiver.text)
+    ? { call: node, namespace: namespace.text, method: method.text }
+    : null;
+}
+
+function resolvesToReceiver(scopes: ScopeChain | null, name: string): boolean {
+  for (let chain = scopes; chain !== null; chain = chain.outer) {
+    const decided = match(resolveIn(chain.scope, name))
       .with("receiver", () => true)
       .with("shadowed", () => false)
-      .with("unbound", () => resolve(scope.parent, scope))
+      .with("unbound", () => null)
       .exhaustive();
-  return resolve(receiver.parent, receiver);
+    if (decided !== null) return decided;
+  }
+  return false;
+}
+
+function resolveIn(scope: Scope, name: string): Resolution {
+  return match(scope)
+    .with({ kind: "function" }, (fn): Resolution => {
+      const position = fn.parameters.indexOf(name);
+      if (position !== -1) return position === 0 && fn.methodSelf ? "shadowed" : "receiver";
+      if (fn.nonlocal.has(name)) return "unbound";
+      return fn.bound.has(name) ? "shadowed" : "unbound";
+    })
+    .with(
+      { kind: "comprehension" },
+      ({ targets }): Resolution => (targets.has(name) ? "shadowed" : "unbound"),
+    )
+    .exhaustive();
 }
 
 const COMPREHENSIONS: ReadonlySet<string> = new Set([
@@ -133,42 +199,62 @@ const COMPREHENSIONS: ReadonlySet<string> = new Set([
   "generator_expression",
 ]);
 
-/** How `scope`, reached from its child `child`, resolves the receiver's name. */
-function resolveIn(scope: Node, child: Node, receiver: Node): Resolution {
-  const name = receiver.text;
-  if (scope.type === "function_definition" || scope.type === "lambda") {
-    // Defaults, decorators and annotations run in the enclosing scope.
-    const body = scope.childForFieldName("body");
-    if (body === null || !body.equals(child)) return "unbound";
-    const parameters = scope.childForFieldName("parameters");
-    const names = parameters === null ? [] : parameterList(parameters).map((p) => p.name);
-    const position = names.indexOf(name);
-    if (position !== -1) {
-      const methodSelf =
-        position === 0 && scope.type === "function_definition" && inClassBody(scope);
-      return methodSelf ? "shadowed" : "receiver";
-    }
-    const declares = (type: string) =>
-      scopeNodes(body).some(
-        (node) => node.type === type && node.namedChildren.some((id) => id.text === name),
-      );
-    if (declares("nonlocal_statement")) return "unbound";
-    const bound = declares("global_statement") || scopeBindings(body).some((b) => b.name === name);
-    return bound ? "shadowed" : "unbound";
+/**
+ * The node's named children, each with the scopes enclosing it. A function's
+ * or lambda's body is in its scope, and its defaults, decorators and
+ * annotations in the enclosing one; a comprehension's parts are in its scope,
+ * but for its outermost iterable, which the enclosing scope evaluates.
+ */
+function scopedChildren({ node, scopes }: ScopedNode): ScopedNode[] {
+  const children = node.namedChildren;
+  const under = (scope: ScopeChain | null, child: Node): ScopedNode => ({
+    node: child,
+    scopes: scope,
+  });
+  if (node.type === "function_definition" || node.type === "lambda") {
+    const body = node.childForFieldName("body");
+    if (body === null) return children.map((child) => under(scopes, child));
+    const inner: ScopeChain = { scope: functionScope(node, body), outer: scopes };
+    return children.map((child) => under(child.equals(body) ? inner : scopes, child));
   }
-  if (COMPREHENSIONS.has(scope.type)) {
-    const clauses = scope.namedChildren.filter((node) => node.type === "for_in_clause");
-    // The outermost iterable runs in the enclosing scope.
-    const outermost = clauses[0]?.childForFieldName("right");
-    if (outermost && contains(outermost, receiver)) return "unbound";
+  if (COMPREHENSIONS.has(node.type)) {
+    const clauses = children.filter((child) => child.type === "for_in_clause");
     const targets = clauses.flatMap((clause) => targetNames(clause.childForFieldName("left")));
-    return targets.some((target) => target.text === name) ? "shadowed" : "unbound";
+    const inner: ScopeChain = {
+      scope: { kind: "comprehension", targets: new Set(targets.map((target) => target.text)) },
+      outer: scopes,
+    };
+    const outermost = clauses[0];
+    const iterable = outermost?.childForFieldName("right") ?? null;
+    return children.flatMap((child) =>
+      outermost !== undefined && child.equals(outermost)
+        ? child.namedChildren.map((part) =>
+            under(iterable !== null && part.equals(iterable) ? scopes : inner, part),
+          )
+        : [under(inner, child)],
+    );
   }
-  return "unbound";
+  return children.map((child) => under(scopes, child));
 }
 
-function contains(outer: Node, inner: Node): boolean {
-  return outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
+/** A function's or lambda's scope, read from its parameters and its body's own scope. */
+function functionScope(definition: Node, body: Node): Scope {
+  const parameters = definition.childForFieldName("parameters");
+  const own = scopeNodes(body);
+  const declared = (type: string) =>
+    own
+      .filter((node) => node.type === type)
+      .flatMap((node) => node.namedChildren.map((id) => id.text));
+  return {
+    kind: "function",
+    parameters: parameters === null ? [] : parameterList(parameters).map((p) => p.name),
+    methodSelf: definition.type === "function_definition" && inClassBody(definition),
+    nonlocal: new Set(declared("nonlocal_statement")),
+    bound: new Set([
+      ...declared("global_statement"),
+      ...own.flatMap(nodeBindings).map((b) => b.name),
+    ]),
+  };
 }
 
 /** A name a scope binds; `node` is a definition's statement, or the bound name. */
@@ -180,12 +266,18 @@ export type NameBinding =
  * Every name `scope` binds in its own scope — the module, a function's body
  * or a lambda's: a definition's name; an assignment target, plain, annotated,
  * augmented or unpacked; a `for`, `with` or `except … as` target; a named
- * expression; an `import` or `from … import` name; and a `match` capture.
+ * expression; an `import` or `from … import` name; a `type` statement's
+ * name; and a `match` capture.
  */
 export function scopeBindings(scope: Node): NameBinding[] {
+  return scopeNodes(scope).flatMap(nodeBindings);
+}
+
+/** The names one node of a scope binds there. */
+function nodeBindings(node: Node): NameBinding[] {
   const named = (nodes: readonly Node[]) =>
-    nodes.map((node): NameBinding => ({ kind: "name", name: node.text, node }));
-  return scopeNodes(scope).flatMap((node): NameBinding[] =>
+    nodes.map((name): NameBinding => ({ kind: "name", name: name.text, node: name }));
+  return (
     match(node.type)
       .with("function_definition", "class_definition", (): NameBinding[] => {
         const name = node.childForFieldName("name");
@@ -210,6 +302,7 @@ export function scopeBindings(scope: Node): NameBinding[] {
       .with("import_from_statement", () =>
         named(fromImportStatementBindings(node).map((b) => b.node)),
       )
+      .with("type_alias_statement", () => named(typeAliasName(node)))
       .with("case_clause", () =>
         named(
           node.namedChildren
@@ -217,8 +310,23 @@ export function scopeBindings(scope: Node): NameBinding[] {
             .flatMap(patternCaptures),
         ),
       )
-      .otherwise(() => []),
+      .otherwise(() => [])
   );
+}
+
+/**
+ * `roots` and their descendants in document order, `children` choosing the
+ * children of each node to visit. An explicit stack, so no depth of tree
+ * overflows the call stack.
+ */
+function preOrder(roots: readonly Node[], children: (node: Node) => readonly Node[]): Node[] {
+  const nodes: Node[] = [];
+  const stack = roots.toReversed();
+  for (let node = stack.pop(); node !== undefined; node = stack.pop()) {
+    nodes.push(node);
+    for (const child of children(node).toReversed()) stack.push(child);
+  }
+  return nodes;
 }
 
 /**
@@ -228,43 +336,46 @@ export function scopeBindings(scope: Node): NameBinding[] {
  * own, but a named expression inside it binds here, so it is read through.
  */
 function scopeNodes(scope: Node): Node[] {
-  const visit = (node: Node): Node[] =>
+  return preOrder(scope.namedChildren, (node) =>
     match(node.type)
       .with("function_definition", "class_definition", () => {
         const body = node.childForFieldName("body");
-        return [
-          node,
-          ...node.namedChildren
-            .filter((child) => body === null || !child.equals(body))
-            .flatMap(visit),
-        ];
+        return node.namedChildren.filter((child) => body === null || !child.equals(body));
       })
       .with("lambda", () => {
         const parameters = node.childForFieldName("parameters");
-        return [node, ...(parameters === null ? [] : visit(parameters))];
+        return parameters === null ? [] : [parameters];
       })
-      .otherwise(() => [node, ...node.namedChildren.flatMap(visit)]);
-  return scope.namedChildren.flatMap(visit);
+      .otherwise(() => node.namedChildren),
+  );
 }
+
+/** The nodes an assignment target is built from; an attribute or subscript binds no name. */
+const TARGET_CONTAINERS: ReadonlySet<string> = new Set([
+  "pattern_list",
+  "tuple_pattern",
+  "list_pattern",
+  "tuple",
+  "list",
+  "parenthesized_expression",
+  "list_splat_pattern",
+  "list_splat",
+  "as_pattern_target",
+]);
 
 /** The names an assignment target binds; an attribute or subscript binds none. */
 function targetNames(target: Node | null): Node[] {
   if (target === null) return [];
-  if (target.type === "identifier") return [target];
-  return match(target.type)
-    .with(
-      "pattern_list",
-      "tuple_pattern",
-      "list_pattern",
-      "tuple",
-      "list",
-      "parenthesized_expression",
-      "list_splat_pattern",
-      "list_splat",
-      "as_pattern_target",
-      () => target.namedChildren.flatMap(targetNames),
-    )
-    .otherwise(() => []);
+  return preOrder([target], (node) =>
+    TARGET_CONTAINERS.has(node.type) ? node.namedChildren : [],
+  ).filter((node) => node.type === "identifier");
+}
+
+/** The name `type X = …` or `type X[T] = …` binds. */
+function typeAliasName(statement: Node): Node[] {
+  const alias = statement.childForFieldName("left")?.namedChild(0) ?? null;
+  const name = alias?.type === "generic_type" ? alias.namedChild(0) : alias;
+  return name?.type === "identifier" ? [name] : [];
 }
 
 /**
@@ -274,33 +385,37 @@ function targetNames(target: Node | null): Node[] {
  * nothing.
  */
 function patternCaptures(pattern: Node): Node[] {
+  return preOrder([pattern], subPatterns).flatMap(ownCaptures);
+}
+
+/** The names a pattern node captures itself, not through a sub-pattern. */
+function ownCaptures(pattern: Node): readonly Node[] {
+  const children = pattern.namedChildren;
   return match(pattern.type)
     .with("dotted_name", () => {
-      const only = pattern.namedChildren;
-      const name = only.length === 1 ? only[0] : undefined;
+      const name = children.length === 1 ? children[0] : undefined;
       return name !== undefined && name.text !== "_" ? [name] : [];
     })
     .with("splat_pattern", () =>
-      pattern.namedChildren.filter((child) => child.type === "identifier" && child.text !== "_"),
+      children.filter((child) => child.type === "identifier" && child.text !== "_"),
     )
-    .with("as_pattern", () =>
-      pattern.namedChildren.flatMap((child) =>
-        child.type === "identifier" ? [child] : patternCaptures(child),
-      ),
-    )
-    .with("class_pattern", () =>
-      pattern.namedChildren
-        .filter((child) => child.type !== "dotted_name")
-        .flatMap(patternCaptures),
-    )
-    .with("keyword_pattern", () => pattern.namedChildren.slice(1).flatMap(patternCaptures))
+    .with("as_pattern", () => children.filter((child) => child.type === "identifier"))
+    .otherwise(() => []);
+}
+
+/** The sub-patterns of a pattern node whose captures are its own. */
+function subPatterns(pattern: Node): readonly Node[] {
+  const children = pattern.namedChildren;
+  return match(pattern.type)
+    .with("dotted_name", "splat_pattern", () => [])
+    .with("as_pattern", () => children.filter((child) => child.type !== "identifier"))
+    .with("class_pattern", () => children.filter((child) => child.type !== "dotted_name"))
+    .with("keyword_pattern", () => children.slice(1))
     .with("dict_pattern", () => {
       const keys = pattern.childrenForFieldName("key");
-      return pattern.namedChildren
-        .filter((child) => !keys.some((key) => key.equals(child)))
-        .flatMap(patternCaptures);
+      return children.filter((child) => !keys.some((key) => key.equals(child)));
     })
-    .otherwise(() => pattern.namedChildren.flatMap(patternCaptures));
+    .otherwise(() => children);
 }
 
 /** The `ctx.http` methods `cogmo_ctx` has, and the position of each one's URL argument. */
@@ -392,10 +507,13 @@ const HOLDS_AUTHORITY = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]+[/?#]/;
 /**
  * A URL argument that is a string literal, or an f-string whose text before
  * its first replacement field holds a complete authority that WHATWG parses:
- * non-empty, and ended by `/`, `?` or `#`. Null for any other argument, or
- * one holding an escape. An empty or unparseable authority leaves the host to
- * the field: WHATWG skips the empty one in `https:///`, so the field supplies
- * it.
+ * non-empty, and ended by `/`, `?` or `#`, in the text and as WHATWG reads it.
+ * Null for any other argument, or one holding an escape. An empty or
+ * unparseable authority leaves the host to the field: WHATWG skips the empty
+ * one in `https:///`, so the field supplies it. So does an authority that
+ * WHATWG reads as running to the head's end, so text appended to the head
+ * changes its host: it treats `\` as `/` and strips tabs and newlines, so in
+ * `https://\/h.com{x}` it skips both slashes and reads `h.com` as unended.
  */
 export function literalUrl(node: Node | null): LiteralUrl | null {
   if (node?.type !== "string") return null;
@@ -410,7 +528,9 @@ export function literalUrl(node: Node | null): LiteralUrl | null {
     .join("");
   if (field === -1) return { head, templatedPath: false };
   const authority = HOLDS_AUTHORITY.exec(head);
-  if (authority === null || URL.parse(head) === null) return null;
+  const parsed = URL.parse(head);
+  if (authority === null || parsed === null) return null;
+  if (URL.parse(`${head}x`)?.hostname !== parsed.hostname) return null;
   // The path runs from the authority's end to the first `?` or `#`, and the
   // first field directly follows the head.
   return { head, templatedPath: !/[?#]/.test(head.slice(authority[0].length - 1)) };

@@ -10,4 +10,4 @@ Register runs the verify stage's host-side gates before its transaction (design/
   - A `ctx.http` write request with no declared write effect is detected as `writes_user_data`, which raises the tier.
 - **A gate that cannot run** (any throw from the parse or a walk) pauses register as `registrar_unavailable: parser`, and nothing deploys. The skill runner's boot fails when the grammar does not load.
 - **Rollback:** an effect only the `ctx` calls show counts in the tier but does not refuse the rollback.
-- **Authoring guide:** the generated `CLAUDE.md` states the gate rules.
+- **Authoring guide:** the generated `CLAUDE.md` states the gate rules, and the skills tool's guidance and the coding task's plan prompt state the Entrypoint rule's `run` signature.

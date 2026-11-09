@@ -18,6 +18,10 @@ describe("isWriteRequest", () => {
     ["a file download", "/file/bot1:abc/sendMessage", false],
     ["a send method a segment deeper", "/bot1/extra/sendMessage", false],
     ["a send method with a trailing segment", "/bot1/sendMessage/x", false],
+    ["a percent-encoded send method", "/bot123/%73endMessage", true],
+    ["a percent-encoded method in another case", "/bot123/%45DIT%4dessageText", true],
+    ["a percent-encoded read method", "/bot123/%67etMe", false],
+    ["an escape of a byte outside ASCII", "/bot123/send%C3%A9", true],
   ])("reads a Telegram GET to %s by its literal path", (_label, path, expected) => {
     expect(isWriteRequest("GET", "api.telegram.org", literal(path))).toBe(expected);
   });

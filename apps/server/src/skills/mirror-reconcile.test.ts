@@ -145,6 +145,15 @@ describe("reconcileMirror", () => {
     expect(await reconcile()).toEqual({ kind: "unborn" });
   });
 
+  it("pushes nothing once main is deleted, though the row still records a sha", async () => {
+    await commitLocal("a");
+    await ensureSkillsMirror({ runInTx: tx, store }, local);
+    await git(local, "update-ref", "-d", "refs/heads/main");
+
+    expect(await reconcile()).toEqual({ kind: "unborn" });
+    await expect(git(remote, "rev-parse", "--verify", "-q", "refs/heads/main")).rejects.toThrow();
+  });
+
   it("brings a synced row up to a main that moved without marking it, and pushes it", async () => {
     await commitLocal("a");
     await ensureSkillsMirror({ runInTx: tx, store }, local);
