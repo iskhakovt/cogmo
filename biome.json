@@ -11,6 +11,7 @@
       "!apps/server/test/fixtures",
       "!images/skills/contract",
       "!images/skills/toolchain/.cogmo/skill.schema.json",
+      "!packages/connector-proto/src/gen",
       "!design/web-ui/mockups",
       "!pnpm-lock.yaml",
       "!pnpm-workspace.yaml"

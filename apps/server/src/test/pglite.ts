@@ -6,6 +6,7 @@ import * as codingSchema from "../agent/coding/store/schema.js";
 import * as modelCatalogSchema from "../agent/model-catalog/store/schema.js";
 import * as pipelineSchema from "../agent/pipeline/store/schema.js";
 import * as agentSchema from "../agent/store/schema.js";
+import * as connectorSchema from "../connector/store/schema.js";
 import { type Database, type Transactor, transactor } from "../db/transactor.js";
 import * as mcpSchema from "../mcp/store/schema.js";
 import * as sandboxSchema from "../sandbox/store/schema.js";
@@ -25,6 +26,7 @@ const schema = {
   ...skillsSchema,
   ...mcpSchema,
   ...webSchema,
+  ...connectorSchema,
 };
 
 /**

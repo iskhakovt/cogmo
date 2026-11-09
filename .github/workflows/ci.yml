@@ -172,6 +172,54 @@ jobs:
       - run: pnpm lint
       - run: pnpm knip
 
+  # The connector contract (design/connectors.md → Decisions → Contract CI):
+  # buf's lint, file-level compatibility against the base branch (buf.yaml's
+  # FILE rules, stricter than wire compatibility), and the committed
+  # protobuf-es code matching what `buf generate` writes from the `.proto`.
+  connector-proto:
+    name: Connector contract
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/connector-proto
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `buf breaking` reads the base branch from the clone.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        working-directory: ${{ github.workspace }}
+      - run: pnpm run lint:proto
+      - name: buf breaking
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          if git cat-file -e "origin/$BASE_REF:packages/connector-proto/buf.yaml" 2>/dev/null; then
+            pnpm run breaking --against "../../.git#ref=refs/remotes/origin/$BASE_REF,subdir=packages/connector-proto"
+          else
+            echo "origin/$BASE_REF has no connector contract to compare against."
+          fi
+      - name: Generated code matches the .proto
+        run: |
+          set -euo pipefail
+          pnpm run generate
+          if [ -n "$(git status --porcelain -- src/gen)" ]; then
+            git status --porcelain -- src/gen
+            echo "::error::packages/connector-proto/src/gen differs from what \`buf generate\` writes. Run \`pnpm --filter @cogmo/connector-proto generate\` and commit the result."
+            exit 1
+          fi
+
   # Dockerfile lint. Runs against all three repo-owned Dockerfiles. Matrix
   # over files so a violation in one image reports independently. Config
   # in .hadolint.yaml at the repo root (auto-picked-up).
@@ -487,6 +535,7 @@ jobs:
       - pr-title
       - schema-docs
       - check
+      - connector-proto
       - hadolint
       - skills-runtime
       - unit
@@ -499,4 +548,4 @@ jobs:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-          allowed-skips: pr-title,schema-docs,check,hadolint,skills-runtime,unit,web,integration,e2e
+          allowed-skips: pr-title,schema-docs,check,connector-proto,hadolint,skills-runtime,unit,web,integration,e2e
