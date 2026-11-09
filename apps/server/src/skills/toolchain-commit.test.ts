@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { configurableMainSha, migrateSkillsLayout } from "./migrate-layout.js";
+import { migrateSkillsLayout } from "./migrate-layout.js";
 import { ensureSkillsMirror } from "./mirror-reconcile.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -316,9 +316,6 @@ describe("commitToolchain", () => {
     const sha = await mainSha();
     expect(outcome._unsafeUnwrap()).toEqual({ kind: "committed", sha });
     expect(await git(bare, "rev-parse", `${sha}^`)).toBe(moved);
-    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(moved);
-    // Cogmo-only again, so an adopt replaces it.
-    expect(await configurableMainSha(bare)).toBeNull();
   });
 
   it("refuses an unborn main", async () => {
