@@ -47,6 +47,7 @@ import { renderForkSpan } from "../attachments/render-fork-span.js";
 import { renderStoredMessages } from "../attachments/render-stored-content.js";
 import type { CodingService } from "../coding/service.js";
 import {
+  compactedView,
   compactMessages,
   extractSummaryText,
   rewroteWithoutSummary,
@@ -81,6 +82,7 @@ import { toStoredMessage } from "../stored-content.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
 import { historyStart, stripThinkingBefore } from "../system-prompt-snapshot.js";
 import type { ToolRegistry } from "../tools.js";
+import { openTranscript } from "../transcript.js";
 import { type HeadView, type PrefixViolationPolicy, rowHeads } from "../transcript-head.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import {
@@ -519,7 +521,16 @@ export async function runAgenticStage(
       },
     ),
   );
-  const messages = replaceTurnContext(compacted.messages, turnPosition, renderedTurnContext);
+  // A stage sends a prefix of its own, so a view its compaction rewrote may
+  // open its transcript.
+  const transcript = openTranscript(
+    { system: systemPrompt, tools: toolDefs, epoch: "opened" },
+    {
+      ...compactedView(compacted),
+      messages: replaceTurnContext(compacted.messages, turnPosition, renderedTurnContext),
+    },
+    log,
+  );
 
   // Broadcast, not source routing: a stage answers no inbound a session sent,
   // so it goes to every session on the run's (private) conversation.
@@ -542,8 +553,7 @@ export async function runAgenticStage(
     const looped = await deps.runStreamingAgentLoop({
       provider,
       model: ctx.model,
-      systemPrompt,
-      messages,
+      transcript,
       tools: stageTools,
       service,
       maxTokens: limits.maxOutputTokens,

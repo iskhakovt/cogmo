@@ -24,6 +24,7 @@ import type {
 } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { validateHistory } from "./history-invariants.js";
+import type { TranscriptView } from "./transcript.js";
 
 // --- Public interface ---
 
@@ -115,6 +116,17 @@ export function rewroteWithoutSummary(
   );
 }
 
+/**
+ * The view a compaction leaves: unchanged, or rewritten by Strategy 2 or 3,
+ * which only an epoch opening sends (design/prompt-caching.md → Transcript
+ * type).
+ */
+export function compactedView(result: CompactResult): TranscriptView {
+  return result.didCompact
+    ? { kind: "rewritten", messages: result.messages }
+    : { kind: "unchanged", messages: result.messages };
+}
+
 const CLEAR_THRESHOLD = 0.6;
 const SUMMARIZE_THRESHOLD = 0.8;
 const TRUNCATE_THRESHOLD = 0.95;
@@ -188,19 +200,19 @@ Be specific — preserve names, paths, and values, not abstractions.`;
  * model's own Strategy 1 intent, triggered at the fork's budget: the model's
  * budget with the request's output cap in place of the model's.
  *
- * The prefix is repaired first, through the same `validateHistory` the agent
- * loop applies to every request — so the summarizer reads the shape the model
- * reads. That is also why a repair here cannot lose anything: a stray
- * `tool_result` dropped from the prefix was already dropped from every LLM
- * payload by `sanitizeHistory`, and the row itself stays in `messages` for the
- * Observer. `sanitizeHistory` runs inside the agent loop,
- * which is downstream of compaction, so a summarization request is the one
- * LLM call in a turn built from raw history — and a split can land right after
- * an assistant `tool_use` that history never answered, which Anthropic rejects
- * outright. Unrepaired, that 400 is permanent for the conversation: the manual
- * path surfaces it as `compaction_failed` on every attempt, and the turn-time
- * path swallows it into a wasted billable call plus a silent drop to
- * truncation on every turn above the threshold.
+ * The prefix is repaired first, through the same `validateHistory` the turn's
+ * transcript applies once, when it opens — so the summarizer reads the shape
+ * the model reads. That is also why a repair here cannot lose anything: a
+ * stray `tool_result` dropped from the prefix was already dropped from every
+ * LLM payload by `openTranscript`, and the row itself stays in `messages` for
+ * the Observer. The transcript opens downstream of compaction, so a
+ * summarization request is the one LLM call in a turn built from raw history
+ * — and a split can land right after an assistant `tool_use` that history
+ * never answered, which Anthropic rejects outright. Unrepaired, that 400 is
+ * permanent for the conversation: the manual path surfaces it as
+ * `compaction_failed` on every attempt, and the turn-time path swallows it
+ * into a wasted billable call plus a silent drop to truncation on every turn
+ * above the threshold.
  *
  * The cap leaves room for reasoning as well as the summary, bounded by what
  * this model accepts — asking above its ceiling is a 400 of a different kind.
@@ -216,10 +228,10 @@ export function summarizationRequest(params: {
 }): ChatParams {
   const { messages: repaired, repairs } = validateHistory(params.messages);
   if (repairs.length > 0) {
-    // `validateHistory` leaves telemetry to the caller, and `sanitizeHistory`
-    // is the only other one. `/compact` never reaches the agent loop, so
-    // without this a manually-compacted conversation repairs its orphans
-    // silently — and folds them into a summary that is never re-derived.
+    // `validateHistory` leaves telemetry to its caller, and `openTranscript`
+    // logs a turn's repairs. `/compact` never opens a transcript, so without
+    // this a manually-compacted conversation repairs its orphans silently —
+    // and folds them into a summary that is never re-derived.
     logger.warn({ repairCount: repairs.length, repairs }, "repaired summarization prefix");
   }
   const maxTokens = Math.min(16_000, params.limits.maxOutputTokens);

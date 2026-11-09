@@ -7,6 +7,7 @@ import { type DeliveryHandle, pushOrThrow } from "../../transport/delivery-route
 import type { AttachmentReader } from "../attachments/attachment-reader.js";
 import { renderForkSpan } from "../attachments/render-fork-span.js";
 import {
+  compactedView,
   compactMessages,
   extractSummaryText,
   rewroteWithoutSummary,
@@ -18,6 +19,7 @@ import type { StepRunner } from "../loop.js";
 import { countServerMismatches } from "../server-mismatches.js";
 import type { AgentStore } from "../store/index.js";
 import type { StoredMessage } from "../stored-content.js";
+import type { TranscriptView } from "../transcript.js";
 import { resolveOrFail, type TurnModel } from "./resolve-turn-model.js";
 
 /** The id of the durable step that makes the turn's `count`th token count, from 1. */
@@ -57,8 +59,15 @@ export interface CompactTurnArgs {
   turnLogger: Logger;
 }
 
+/**
+ * What compaction did to the turn's view. `view.kind` says whether it rewrote
+ * the view at all; `rewroteView` whether no stored summary reproduces the
+ * rewrite. A view only this turn's stored summary rewrote is `rewritten` with
+ * `rewroteView` false.
+ */
 export interface CompactedTurn {
-  messages: Message[];
+  /** The view as compaction left it: unchanged, or rewritten, which only an epoch opening sends. */
+  view: TranscriptView;
   /** The cutoff of the summary this turn stored, which later turns' history starts after. */
   storedCutoff: string | null;
   /**
@@ -161,7 +170,7 @@ export async function compactTurn(
       : null;
 
   return {
-    messages: compactResult.messages,
+    view: compactedView(compactResult),
     storedCutoff,
     rewroteView: rewroteWithoutSummary(compactResult.event, storedCutoff),
   };

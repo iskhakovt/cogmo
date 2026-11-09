@@ -7,6 +7,7 @@ import { expectDefined } from "../test/assertions.js";
 import {
   type CompactionEvent,
   type ContextManagerDeps,
+  compactedView,
   compactMessages,
   extractSummaryText,
   rewroteWithoutSummary,
@@ -1173,6 +1174,28 @@ describe("rewroteWithoutSummary", () => {
   });
 });
 
+describe("compactedView", () => {
+  const messages = [msg("user", "hi")];
+
+  it("is unchanged when no strategy rewrote the view", () => {
+    expect(compactedView({ messages, didCompact: false })).toEqual({ kind: "unchanged", messages });
+  });
+
+  it("is rewritten when a strategy did, whether or not its summary is stored", () => {
+    const event: CompactionEvent = {
+      strategies: ["summarize"],
+      tokensBefore: 900,
+      tokensAfter: 500,
+      requestBytesBefore: 4000,
+      messagesSummarized: 4,
+    };
+    expect(compactedView({ messages, didCompact: true, event })).toEqual({
+      kind: "rewritten",
+      messages,
+    });
+  });
+});
+
 describe("toolResultClearing", () => {
   it("clears past 60% of the budget, keeps five results, and frees at least a tenth", () => {
     expect(toolResultClearing(200_000)).toEqual({
@@ -1563,9 +1586,10 @@ describe("summarizationRequest", () => {
 
   it("repairs an orphan tool_use at the prefix tail", () => {
     // A split can land right after an assistant `tool_use` that history never
-    // answered — a shape `validateHistory` exists for. Compaction runs upstream
-    // of the agent loop's sanitizer, so this is the one LLM call in a turn that
-    // would otherwise be built from raw history, and Anthropic rejects it.
+    // answered — a shape `validateHistory` exists for. Compaction runs before
+    // the turn's transcript opens and sanitizes its history, so this is the one
+    // LLM call in a turn that would otherwise be built from raw history, and
+    // Anthropic rejects it.
     const params = summarizationRequest({
       model: "m",
       limits: LIMITS,

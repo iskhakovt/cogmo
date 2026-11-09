@@ -5,6 +5,7 @@
 
 import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
+import type { Logger } from "pino";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -14,6 +15,7 @@ import type { AgentLoopResult, StreamingLoopOutcome } from "../agent/loop.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
+import { openTranscript, type Transcript } from "../agent/transcript.js";
 import { baseDigest, type PrefixViolationPolicy } from "../agent/transcript-head.js";
 import type { CliIo } from "../cli/run.js";
 import type { Transactor } from "../db/transactor.js";
@@ -23,6 +25,7 @@ import { constantResolver, type LlmProviderResolver } from "../llm/resolver.js";
 import type {
   ChatStreamFrame,
   ContentFrame,
+  Message,
   ResponseMeta,
   StopReason,
   Usage,
@@ -851,6 +854,24 @@ export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResul
   };
 }
 
+/**
+ * A transcript a loop test sends: `messages` under `system` and the
+ * definitions of `tools`, the registry the loop dispatches on, opened on a
+ * prefix of its own.
+ */
+export function testTranscript(args: {
+  system: string;
+  tools: ToolRegistry;
+  messages: ReadonlyArray<Message>;
+  log: Logger;
+}): Transcript {
+  return openTranscript(
+    { system: args.system, tools: args.tools.definitions(), epoch: "opened" },
+    { kind: "unchanged", messages: args.messages },
+    args.log,
+  );
+}
+
 /** A streaming loop that ran to {@link loopResult}'s result. */
 export function finishedLoop(overrides?: Partial<AgentLoopResult>): StreamingLoopOutcome {
   return { kind: "finished", result: loopResult(overrides) };
@@ -1132,7 +1153,7 @@ export function turnContextSent(deps: HandleMessageDeps, call = 0): string {
     vi.mocked(deps.runStreamingAgentLoop).mock.calls.at(call),
     `agent loop call ${call}`,
   )[0];
-  const content = expectDefined(params.messages.at(-1), "turn message").content;
+  const content = expectDefined(params.transcript.messages.at(-1), "turn message").content;
   const [first] = typeof content === "string" ? [] : content;
   if (first?.type !== "text") throw new Error("the turn's message has no leading text block");
   return first.text;
