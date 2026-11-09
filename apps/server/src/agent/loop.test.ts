@@ -2895,78 +2895,98 @@ describe("thinking blocks in history", () => {
   });
 });
 
-// Pre-flight history sanitization runs validateHistory where the transcript
-// opens (`openTranscript`, which the helpers above call with the loop's
-// `turnLogger`) and emits a warn-level repair log when the validator returns
-// repairs. A user message with a tool_result whose toolUseId has no matching
-// prior tool_use is the minimal repro — `validateHistory` flags it as
-// `dropped_stray_tool_result`, which routes through the `agent loop history
-// invariants repaired` warn emission. Tests below pin that the warn lands on
-// the per-invocation `turnLogger` for both loop variants, and that the loop's
-// own iteration-limit warn does too.
-describe("turnLogger plumbing", () => {
-  function historyWithStrayToolResult(): Message[] {
-    return [
-      { role: "user", content: "hi" },
-      { role: "assistant", content: [{ type: "text", text: "hello" }] },
-      {
-        role: "user",
-        content: [
-          { type: "tool_result", toolUseId: "ghost", content: "stray" },
-          { type: "text", text: "real text" },
-        ],
-      },
-    ];
+// A call the model makes to a tool its request offered has to reach that
+// tool's handler, so the registry the loop dispatches on defines exactly the
+// tools its transcript sends.
+describe("the registry the loop dispatches on", () => {
+  function echoTool(name: string) {
+    return defineTool({
+      name,
+      description: "echo",
+      schema: z.object({}),
+      handler: async () => ok("ok"),
+    });
   }
 
-  it("routes the history-repair warn through turnLogger when provided", async () => {
+  /** A transcript opened under a registry offering `names`, in that order. */
+  function transcriptOffering(...names: string[]) {
+    const offered = new ToolRegistry();
+    for (const name of names) offered.register(echoTool(name));
+    return testTranscript({
+      system: "sys",
+      tools: offered,
+      messages: [{ role: "user", content: "go" }],
+      log: logger,
+    });
+  }
+
+  function registryOf(...names: string[]): ToolRegistry {
+    const tools = new ToolRegistry();
+    for (const name of names) tools.register(echoTool(name));
+    return tools;
+  }
+
+  it("throws before the streaming loop's first request when it defines other tools", async () => {
     const provider = mockStreamProvider([
       { events: [{ type: "text_delta", text: "ok" }], stopReason: "end_turn" },
     ]);
-    const turnLogger = mock<Logger>();
-    const fallbackSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
 
-    try {
-      await testRunStreamingAgentLoop({
+    await expect(
+      runStreamingAgentLoop({
+        site: "iteration",
+        prefixViolation: TEST_PREFIX_VIOLATION,
         provider,
-        messages: historyWithStrayToolResult(),
-        tools: new ToolRegistry(),
+        model: "test",
+        transcript: transcriptOffering("echo", "other"),
+        tools: registryOf("other", "echo"),
+        service: stubService(),
         onEvent: async () => {},
-        turnLogger,
-      });
-
-      expect(turnLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ repairCount: expect.any(Number) }),
-        "agent loop history invariants repaired",
-      );
-      // Module-level logger must not see the repair warn — that's the whole
-      // point of the child-logger plumbing.
-      expect(fallbackSpy).not.toHaveBeenCalledWith(
-        expect.anything(),
-        "agent loop history invariants repaired",
-      );
-    } finally {
-      fallbackSpy.mockRestore();
-    }
+        turnLogger: logger,
+      }),
+    ).rejects.toThrow("the loop's tool registry doesn't define the tools its transcript sends");
+    expect(provider.chatStream).not.toHaveBeenCalled();
   });
 
-  it("routes the history-repair warn through turnLogger in runAgentLoop too", async () => {
+  it("throws before the non-streaming loop's first request when it defines other tools", async () => {
     const provider = mockProvider([textResponse("ok")]);
-    const turnLogger = mock<Logger>();
 
-    await testRunAgentLoop({
-      provider,
-      messages: historyWithStrayToolResult(),
-      tools: new ToolRegistry(),
-      turnLogger,
-    });
-
-    expect(turnLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ repairCount: expect.any(Number) }),
-      "agent loop history invariants repaired",
-    );
+    await expect(
+      runAgentLoop({
+        provider,
+        model: "test",
+        transcript: transcriptOffering("echo"),
+        tools: registryOf(),
+        service: stubService(),
+        turnLogger: logger,
+      }),
+    ).rejects.toThrow("the loop's tool registry doesn't define the tools its transcript sends");
+    expect(provider.chat).not.toHaveBeenCalled();
   });
 
+  it("runs when it defines the transcript's tools in the same order", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "ok" }], stopReason: "end_turn" },
+    ]);
+
+    const result = await runStreamingAgentLoop({
+      site: "iteration",
+      prefixViolation: TEST_PREFIX_VIOLATION,
+      provider,
+      model: "test",
+      transcript: transcriptOffering("echo", "other"),
+      tools: registryOf("echo", "other"),
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger: logger,
+    }).then(expectFinished);
+
+    expect(result.text).toBe("ok");
+  });
+});
+
+// The loop's own warnings land on the per-invocation `turnLogger`, which binds
+// the run and conversation ids downstream consumers join logs on.
+describe("turnLogger plumbing", () => {
   // Force the iteration-limit branch: provider always returns a tool_use block
   // (so the loop never exits via end_turn) and `maxIterations: 1` trips the
   // ceiling immediately after the first round of tool execution.

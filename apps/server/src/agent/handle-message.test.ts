@@ -406,6 +406,45 @@ describe("createHandleMessage", () => {
     }
   });
 
+  it("warns on the turn logger when the history it sends needs a repair", async () => {
+    const childLogger = mock<ReturnType<typeof logger.child>>();
+    const childSpy = vi.spyOn(logger, "child").mockReturnValue(childLogger);
+
+    try {
+      // A stray tool_result, as an earlier bug could have stored: the turn's
+      // transcript drops it when it opens.
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          listMessages: vi.fn().mockResolvedValue([
+            {
+              id: "m1",
+              role: "user",
+              content: [
+                { type: "tool_result", toolUseId: "ghost", content: "stray" },
+                { type: "text", text: "hi" },
+              ],
+              transcriptHead: null,
+            },
+            { id: "m2", role: "assistant", content: "hello", transcriptHead: null },
+            { id: "msg-1", role: "user", content: "hello", transcriptHead: null },
+          ]),
+        }),
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(childLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ repairCount: 1 }),
+        "agent loop history invariants repaired",
+      );
+    } finally {
+      childSpy.mockRestore();
+    }
+  });
+
   it("calls deliveryRouter.prepare with full routing context", async () => {
     const deps = mockDeps();
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {

@@ -200,15 +200,15 @@ Be specific — preserve names, paths, and values, not abstractions.`;
  * model's own Strategy 1 intent, triggered at the fork's budget: the model's
  * budget with the request's output cap in place of the model's.
  *
- * The prefix is repaired first, through the same `validateHistory` every
- * request of the turn's transcript applies — so the summarizer reads the shape
+ * The prefix is repaired first, through the same `validateHistory` the turn's
+ * transcript applies once, when it opens — so the summarizer reads the shape
  * the model reads. That is also why a repair here cannot lose anything: a
  * stray `tool_result` dropped from the prefix was already dropped from every
  * LLM payload by `openTranscript`, and the row itself stays in `messages` for
  * the Observer. The transcript opens downstream of compaction, so a
- * summarization request is the one LLM call in a turn built from raw history — and a split can land right after
- * an assistant `tool_use` that history never answered, which Anthropic rejects
- * outright. Unrepaired, that 400 is permanent for the conversation: the manual
+ * summarization request is the one LLM call in a turn built from raw history
+ * — and a split can land right after an assistant `tool_use` that history
+ * never answered, which Anthropic rejects outright. Unrepaired, that 400 is permanent for the conversation: the manual
  * path surfaces it as `compaction_failed` on every attempt, and the turn-time
  * path swallows it into a wasted billable call plus a silent drop to
  * truncation on every turn above the threshold.
@@ -227,10 +227,10 @@ export function summarizationRequest(params: {
 }): ChatParams {
   const { messages: repaired, repairs } = validateHistory(params.messages);
   if (repairs.length > 0) {
-    // `validateHistory` leaves telemetry to the caller, and `openTranscript`
-    // is the only other one. `/compact` never opens a transcript, so
-    // without this a manually-compacted conversation repairs its orphans
-    // silently — and folds them into a summary that is never re-derived.
+    // `validateHistory` leaves telemetry to its caller, and `openTranscript`
+    // logs a turn's repairs. `/compact` never opens a transcript, so without
+    // this a manually-compacted conversation repairs its orphans silently —
+    // and folds them into a summary that is never re-derived.
     logger.warn({ repairCount: repairs.length, repairs }, "repaired summarization prefix");
   }
   const maxTokens = Math.min(16_000, params.limits.maxOutputTokens);

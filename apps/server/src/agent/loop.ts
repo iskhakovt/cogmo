@@ -212,6 +212,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
+  assertDispatchesTranscriptTools(tools, transcript);
   const initialLength = transcript.openedLength;
   let totalUsage: Readonly<Usage> = ZERO_USAGE;
   let iterations = 0;
@@ -289,6 +290,18 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     { text: "", toolUseIds: [] },
     unrecordedRequests(transcript.base, initialLength),
   );
+}
+
+/**
+ * The loop's entry invariant: the registry it dispatches on defines exactly
+ * the tools its transcript sends, compared canonically, so a call to a tool a
+ * request offered reaches that tool's handler. Both come from one frozen
+ * table; a mismatch is a bug in the caller.
+ */
+function assertDispatchesTranscriptTools(tools: ToolRegistry, transcript: Transcript): void {
+  if (canonicalJson(tools.definitions()) !== canonicalJson(transcript.tools)) {
+    throw new Error("the loop's tool registry doesn't define the tools its transcript sends");
+  }
 }
 
 /** {@link AgentLoopResult.requests} for a loop that records no request heads. */
@@ -1002,6 +1015,7 @@ export async function runStreamingAgentLoop(
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
+  assertDispatchesTranscriptTools(tools, transcript);
   const initialLength = transcript.openedLength;
   let totalUsage: Readonly<Usage> = ZERO_USAGE;
   const budgets: RepairBudgets = freshBudgets();

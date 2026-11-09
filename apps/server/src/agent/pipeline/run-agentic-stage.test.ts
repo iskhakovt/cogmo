@@ -1,5 +1,6 @@
 import { NonRetriableError } from "inngest";
 import { err, ok } from "neverthrow";
+import type { Logger } from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -691,6 +692,34 @@ describe("runAgenticStage", () => {
     ]);
     // Stage prompts run no auto-recall.
     expect(h.deps.memory.recall).not.toHaveBeenCalled();
+  });
+
+  it("warns on the stage's logger when the history it sends needs a repair", async () => {
+    const h = await harness();
+    // A stray tool_result, as an earlier bug could have stored: the stage's
+    // transcript drops it when it opens.
+    vi.mocked(h.agentStore.listMessages).mockResolvedValue(
+      unheaded([
+        {
+          id: "m1",
+          role: "user",
+          content: [
+            { type: "tool_result", toolUseId: "ghost", content: "stray" },
+            { type: "text", text: "hi" },
+          ],
+        },
+        { id: "m2", role: "assistant", content: "hello" },
+        { id: "msg-1", role: "user", content: "Draft a plan." },
+      ]),
+    );
+    const stageLog = mock<Logger>();
+
+    await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, stageLog);
+
+    expect(stageLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ repairCount: 1 }),
+      "agent loop history invariants repaired",
+    );
   });
 
   it("names the delivery channels, and announces no core memory in its own system prompt", async () => {

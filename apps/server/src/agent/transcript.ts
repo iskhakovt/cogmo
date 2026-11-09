@@ -41,8 +41,9 @@ export interface TranscriptRequest {
 
 /**
  * A turn's transcript. A message is sent once a request carried it, and the
- * opened view counts as sent: earlier turns' requests carried it, and the
- * turn's own row renders to it. {@link Transcript.amendUnsent} and
+ * opened view counts as sent: the opening is the only point at which it may
+ * be rewritten, and every request of the turn replays it.
+ * {@link Transcript.amendUnsent} and
  * {@link Transcript.discardUnsent} touch only an unsent last message and throw
  * otherwise.
  */
@@ -89,6 +90,7 @@ export function openTranscript(
     .exhaustive();
   const { messages, repairs } = validateHistory(view.messages);
   if (repairs.length > 0) {
+    // Log queries match on this message, so it names the agent loop it guards.
     log.warn({ repairCount: repairs.length, repairs }, "agent loop history invariants repaired");
   }
   return new OpenedTranscript(prefix, messages);

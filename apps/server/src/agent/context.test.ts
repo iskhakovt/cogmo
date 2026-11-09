@@ -1586,9 +1586,10 @@ describe("summarizationRequest", () => {
 
   it("repairs an orphan tool_use at the prefix tail", () => {
     // A split can land right after an assistant `tool_use` that history never
-    // answered — a shape `validateHistory` exists for. Compaction runs upstream
-    // of the agent loop's sanitizer, so this is the one LLM call in a turn that
-    // would otherwise be built from raw history, and Anthropic rejects it.
+    // answered — a shape `validateHistory` exists for. Compaction runs before
+    // the turn's transcript opens and sanitizes its history, so this is the one
+    // LLM call in a turn that would otherwise be built from raw history, and
+    // Anthropic rejects it.
     const params = summarizationRequest({
       model: "m",
       limits: LIMITS,
