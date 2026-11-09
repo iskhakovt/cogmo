@@ -463,7 +463,7 @@ interface CacheIntent {
 
 `retention` maps to Anthropic's 5-minute / 1-hour TTL (directly, or through OpenRouter) and is ignored elsewhere. A structured-output call is one-shot, so every adapter maps it as if it had no intent; `countTokens` takes none.
 
-A fork's `toolChoice: "none"` ([source (h)](#sources-and-fixes)) goes to Anthropic as `tool_choice`, third-party Anthropic-compatible endpoints included. One that rejects it fails every fork: summarization falls through to Strategy 3, and the degraded reply sends its fixed text. The OpenAI-compatible adapters, whose routes replay no reasoning, omit `tools` and `tool_choice` instead, since some servers reject `tool_choice: "none"`. An adapter omits `tool_choice` when the request has no tools.
+A fork's `toolChoice: "none"` ([source (h)](#sources-and-fixes)) goes to Anthropic as `tool_choice`, third-party Anthropic-compatible endpoints included. One that rejects it fails every fork that sends tools: summarization falls through to Strategy 3, and the degraded reply sends its fixed text. The OpenAI-compatible adapters, whose routes replay no reasoning, omit `tools` and `tool_choice` instead, since some servers reject `tool_choice: "none"`. An adapter omits `tool_choice` when the request has no tools.
 
 #### Gemini through OpenRouter
 
