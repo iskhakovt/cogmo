@@ -111,11 +111,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
     return sum;
   }
 
-  async chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse> {
-    if (params.responseFormat && params.tools?.length) {
+  async chat(request: ChatParams, options?: ChatOptions): Promise<LlmResponse> {
+    if (request.responseFormat && request.tools?.length) {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
+    const params = withoutDisabledTools(request);
     const hints = cacheHints(this.#cacheDialect, params);
     const signal = options?.signal;
     const span = startChatSpan(this.name, params.model);
@@ -182,11 +183,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
     }
   }
 
-  chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame> {
-    if (params.responseFormat && params.tools?.length) {
+  chatStream(request: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame> {
+    if (request.responseFormat && request.tools?.length) {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
+    const params = withoutDisabledTools(request);
     const client = this.#client;
     const hints = cacheHints(this.#cacheDialect, params);
     const extraBody = this.#extraBody;
@@ -316,6 +318,17 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
     return generateFrames();
   }
+}
+
+/**
+ * The request as these routes take it. A fork's `toolChoice: "none"` goes as
+ * no tools and no `tool_choice`: the routes replay no reasoning for the tools
+ * to keep valid, and some servers reject `tool_choice: "none"`. Every read of
+ * the request, the reasoning effort and the clearing estimate included, sees
+ * the request without them.
+ */
+function withoutDisabledTools(params: ChatParams): ChatParams {
+  return params.toolChoice === "none" ? R.omit(params, ["tools", "toolChoice"]) : params;
 }
 
 // --- Model-family parameters ---

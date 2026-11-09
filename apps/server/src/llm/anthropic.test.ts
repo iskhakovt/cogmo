@@ -1290,6 +1290,72 @@ describe("AnthropicProvider", () => {
     });
   });
 
+  describe("tool choice", () => {
+    const SEARCH: ToolDefinition = {
+      name: "search",
+      description: "Search the web",
+      parameters: { type: "object" },
+    };
+
+    /** The `tool_choice` a fork's request carries on `path`, with `tools`. */
+    async function sentToolChoice(
+      path: "chat" | "chatStream",
+      baseURL: string | undefined,
+      tools: ToolDefinition[],
+    ): Promise<unknown> {
+      mockCreate.mockReset();
+      const provider = new AnthropicProvider("test-key", baseURL);
+      const params = {
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user" as const, content: "summarize" }],
+        tools,
+        toolChoice: "none" as const,
+      };
+      if (path === "chat") {
+        mockCreate.mockResolvedValueOnce({
+          content: [{ type: "text", text: "ok", citations: null }],
+          stop_reason: "end_turn",
+          model: params.model,
+          usage: { input_tokens: 5, output_tokens: 1 },
+        });
+        await provider.chat(params);
+      } else {
+        mockCreate.mockResolvedValueOnce(
+          mockStream([
+            {
+              type: "message_start",
+              message: { model: params.model, usage: { input_tokens: 5, output_tokens: 0 } },
+            },
+            {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn" },
+              usage: { output_tokens: 1 },
+            },
+          ]),
+        );
+        await drainFrames(provider.chatStream(params));
+      }
+      const body = z
+        .looseObject({ tool_choice: z.unknown().optional() })
+        .parse(expectDefined(mockCreate.mock.calls[0], "create call")[0]);
+      return body.tool_choice;
+    }
+
+    describe.each(["chat", "chatStream"] as const)("%s", (path) => {
+      it.each([
+        { endpoint: "Anthropic's API", baseURL: undefined },
+        { endpoint: "a third-party endpoint", baseURL: "https://openrouter.ai/api" },
+      ])(
+        "sends tool_choice none with the tools on $endpoint, and none without them",
+        async ({ baseURL }) => {
+          expect(await sentToolChoice(path, baseURL, [SEARCH])).toEqual({ type: "none" });
+          expect(await sentToolChoice(path, baseURL, [])).toBeUndefined();
+        },
+      );
+    });
+  });
+
   // Anthropic's `input_tokens` counts only what follows the last breakpoint.
   // The canonical `inputTokens` is the whole prompt, with cache reads and
   // writes as subsets of it — the compaction fast path reads it as the

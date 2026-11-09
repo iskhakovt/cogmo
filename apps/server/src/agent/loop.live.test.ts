@@ -31,7 +31,7 @@ import { AnthropicProvider } from "../llm/anthropic.js";
 import { logger } from "../logger.js";
 import { DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined, expectFinished } from "../test/assertions.js";
-import { TEST_PREFIX_VIOLATION } from "../test/factories.js";
+import { TEST_PREFIX_VIOLATION, testTranscript } from "../test/factories.js";
 import { createWireRecorder, type WireResponse } from "../test/wire-recorder.js";
 import { runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
@@ -127,13 +127,18 @@ describe.skipIf(API_KEY === undefined)("runStreamingAgentLoop prompt caching (li
         fetch: diagnosedFetch,
       });
       const calls: string[] = [];
+      const tools = lookupTools(calls);
 
       const result = await runStreamingAgentLoop({
         provider,
         model,
-        systemPrompt: systemPrompt(nonce),
-        messages: [{ role: "user", content: PROMPT }],
-        tools: lookupTools(calls),
+        transcript: testTranscript({
+          system: systemPrompt(nonce),
+          tools,
+          messages: [{ role: "user", content: PROMPT }],
+          log: logger,
+        }),
+        tools,
         service: mock<Service>(),
         maxTokens: 8000,
         onEvent: async () => {},

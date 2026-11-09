@@ -406,6 +406,45 @@ describe("createHandleMessage", () => {
     }
   });
 
+  it("warns on the turn logger when the history it sends needs a repair", async () => {
+    const childLogger = mock<ReturnType<typeof logger.child>>();
+    const childSpy = vi.spyOn(logger, "child").mockReturnValue(childLogger);
+
+    try {
+      // A stray tool_result, as an earlier bug could have stored: the turn's
+      // transcript drops it when it opens.
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          listMessages: vi.fn().mockResolvedValue([
+            {
+              id: "m1",
+              role: "user",
+              content: [
+                { type: "tool_result", toolUseId: "ghost", content: "stray" },
+                { type: "text", text: "hi" },
+              ],
+              transcriptHead: null,
+            },
+            { id: "m2", role: "assistant", content: "hello", transcriptHead: null },
+            { id: "msg-1", role: "user", content: "hello", transcriptHead: null },
+          ]),
+        }),
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(childLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ repairCount: 1 }),
+        "transcript history invariants repaired",
+      );
+    } finally {
+      childSpy.mockRestore();
+    }
+  });
+
   it("calls deliveryRouter.prepare with full routing context", async () => {
     const deps = mockDeps();
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -973,7 +1012,7 @@ describe("createHandleMessage", () => {
       vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
       "runStreamingAgentLoop call",
     )[0];
-    const lastMsg = expectDefined(callArgs.messages.at(-1), "last message");
+    const lastMsg = expectDefined(callArgs.transcript.messages.at(-1), "last message");
     expect(lastMsg.role).toBe("user");
     expect(lastMsg.content).toContainEqual({
       type: "document",
@@ -1021,7 +1060,7 @@ describe("createHandleMessage", () => {
       vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
       "runStreamingAgentLoop call",
     )[0];
-    const lastMsg = expectDefined(callArgs.messages.at(-1), "last message");
+    const lastMsg = expectDefined(callArgs.transcript.messages.at(-1), "last message");
     if (!Array.isArray(lastMsg.content)) throw new Error("expected ContentBlock[]");
     const docBlock = lastMsg.content.find((b) => b.type === "document");
     expect(docBlock).not.toHaveProperty("name");
@@ -1657,7 +1696,7 @@ describe("createHandleMessage", () => {
     expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
   });
 
-  it("sends the turn's Strategy 1 intent on every count and the summarization fork, and hands it to the loop", async () => {
+  it("sends the turn's Strategy 1 intent on every count and to the loop, and the summarization fork the turn's prefix with its own", async () => {
     // Over 80% of budget after clearing → summarization, then under.
     const countTokens = vi.fn().mockResolvedValueOnce(800_000).mockResolvedValueOnce(50_000);
     const chat = vi.fn().mockResolvedValue({
@@ -1666,9 +1705,17 @@ describe("createHandleMessage", () => {
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
+    const tools = new ToolRegistry();
+    tools.register(readFile);
+    const profile = expectDefined(
+      await mockAgentStore().getProfile(FAKE_TX, "profile-1"),
+      "default profile",
+    );
     const deps = mockDeps({
+      tools,
       resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
       agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({ ...profile, toolSet: ["*"] }),
         getLastTokens: vi.fn().mockResolvedValue(null),
         listMessages: vi.fn().mockResolvedValue([
           { id: "m1", role: "user", content: "m1" },
@@ -1699,9 +1746,18 @@ describe("createHandleMessage", () => {
     for (const [params] of countTokens.mock.calls) {
       expect(params.clearToolResults).toEqual(clearing);
     }
-    expect(expectDefined(chat.mock.calls[0], "summarization call")[0].clearToolResults).toEqual(
-      clearing,
-    );
+    // The system prompt and frozen tools the view was counted with, tool
+    // calls disabled, and the summarization model's intent: past the fork's
+    // budget, with its 16,000-token output cap, rather than 60% of the
+    // turn's budget.
+    const toolDefs = loopParams.tools.definitions();
+    expect(toolDefs.map((t) => t.name)).toContain("read_file");
+    expect(expectDefined(chat.mock.calls[0], "summarization call")[0]).toMatchObject({
+      system: "system prompt",
+      tools: toolDefs,
+      toolChoice: "none",
+      clearToolResults: { triggerTokens: 974_000, keep: 5, clearAtLeastTokens: 97_400 },
+    });
   });
 
   it("summarizes a view past 80% of the view cap on the fast path, without counting it", async () => {
@@ -2477,7 +2533,7 @@ describe("createHandleMessage", () => {
       expect(turnProvider.chat).not.toHaveBeenCalled();
     });
 
-    it("caps the summarization request at the summarization model's own output limit", async () => {
+    it("caps the summarization request and clears its tool results at the summarization model's own limits", async () => {
       // The cap has to come from this model's resolved limits, not the
       // turn model's: asking above a model's ceiling is a 400, and
       // compaction swallows that and falls through to truncation, so the
@@ -2546,7 +2602,14 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
-      expect(summaryChat).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 4096 }));
+      // 100,000 − 4,096 − the 10,000 safety buffer: the small model's
+      // budget, where the turn's would trigger at 60% of 926,000.
+      expect(summaryChat).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxTokens: 4096,
+          clearToolResults: { triggerTokens: 85_904, keep: 5, clearAtLeastTokens: 8_590 },
+        }),
+      );
     });
 
     it("does not resolve summarization_model when summarization is skipped", async () => {
@@ -2764,7 +2827,7 @@ describe("createHandleMessage", () => {
         "runStreamingAgentLoop call",
       )[0];
       // The transcript is the persisted row's text, after the turn context.
-      const last = expectDefined(callArgs.messages.at(-1), "turn message");
+      const last = expectDefined(callArgs.transcript.messages.at(-1), "turn message");
       expect(last.role).toBe("user");
       expect(last.content).toEqual([
         { type: "text", text: expect.stringMatching(/^<turn_context>\n/) },
@@ -3821,7 +3884,7 @@ describe("createHandleMessage", () => {
         vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
         "runStreamingAgentLoop call",
       );
-      const lastMsg = expectDefined(loopArgs.messages.at(-1), "last message");
+      const lastMsg = expectDefined(loopArgs.transcript.messages.at(-1), "last message");
       expect(lastMsg.content).toContainEqual({ type: "text", text: wrapped });
     });
   });
@@ -3865,7 +3928,7 @@ describe("createHandleMessage", () => {
         vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
         "runStreamingAgentLoop call",
       )[0];
-      expect(loopArgs.systemPrompt).toBe("system prompt");
+      expect(loopArgs.transcript.system).toBe("system prompt");
       expect(deps.agentStore.insertMessages).toHaveBeenCalled();
     });
 
@@ -3907,7 +3970,7 @@ describe("createHandleMessage", () => {
   // proceeds with the normal post-turn flow. Conversation stays `active`.
   // See design/agent-resilience.md → Degraded reply.
 
-  it("synthesizes the degraded apology via a tools-free LLM call and persists it", async () => {
+  it("synthesizes the degraded apology on the turn's prefix with tool calls disabled, and persists it", async () => {
     const handle = mockDeliveryHandle();
     const synthesisProvider = mockProvider({
       chat: vi.fn().mockResolvedValue({
@@ -3917,7 +3980,17 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 100, outputTokens: 12 },
       }),
     });
+    const tools = new ToolRegistry();
+    tools.register(readFile);
+    const profile = expectDefined(
+      await mockAgentStore().getProfile(FAKE_TX, "profile-1"),
+      "default profile",
+    );
     const deps = mockDeps({
+      tools,
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({ ...profile, toolSet: ["*"] }),
+      }),
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
@@ -3934,13 +4007,22 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // Synthesis call was made with tools disabled at the API level,
-    // temperature: 0 and the turn's Strategy 1 intent — pins the design
-    // constraints at the wiring layer.
+    // Synthesis call was made with the system prompt and tools the loop's
+    // requests sent, tool calls disabled at the API level, temperature: 0
+    // and the turn's Strategy 1 intent — pins the design constraints at the
+    // wiring layer.
+    const loopParams = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "loop call",
+    )[0];
+    const toolDefs = loopParams.tools.definitions();
+    expect(toolDefs.map((t) => t.name)).toContain("read_file");
     const chatCalls = vi.mocked(synthesisProvider.chat).mock.calls;
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]?.[0]).toMatchObject({
-      tools: [],
+      system: loopParams.transcript.system,
+      tools: toolDefs,
+      toolChoice: "none",
       temperature: 0,
       clearToolResults: toolResultClearing(926_000),
     });
@@ -4751,7 +4833,7 @@ describe("durable conversation summaries", () => {
 
     expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
     const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
-    const loopMessages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
+    const loopMessages = expectDefined(loopCalls[0], "agent loop call")[0].transcript.messages;
     expect(loopMessages[0]?.content).toContain("the earlier discussion");
   });
 
@@ -4798,7 +4880,7 @@ describe("durable conversation summaries", () => {
 
     expect(deps.agentStore.getHistoryAfter).toHaveBeenCalledWith(expect.anything(), "conv-1", "m4");
     const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
-    const messages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
+    const messages = expectDefined(loopCalls[0], "agent loop call")[0].transcript.messages;
     expect(messages[0]?.content).toContain("everything before this");
     // The covered span is gone — only the summary and what followed remain.
     expect(deps.agentStore.listMessages).not.toHaveBeenCalled();
@@ -4999,7 +5081,7 @@ describe("durable conversation summaries", () => {
       const { messages } = expectDefined(
         vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
         "agent loop call",
-      )[0];
+      )[0].transcript;
       expect(messages[6]).toEqual({
         role: "user",
         content: [
@@ -5081,7 +5163,7 @@ describe("system prompt snapshot", () => {
         reason: "first_turn",
       },
     );
-    expect(loopParams(deps).systemPrompt).toBe("FIRST PROMPT");
+    expect(loopParams(deps).transcript.system).toBe("FIRST PROMPT");
   });
 
   /** A normalized photo of `bytes` (base64 4/3 of it), stored under `path`. */
@@ -5132,7 +5214,7 @@ describe("system prompt snapshot", () => {
 
     await run(deps);
 
-    const [turn] = loopParams(deps).messages;
+    const [turn] = loopParams(deps).transcript.messages;
     expect(turn?.content).toEqual([
       expect.objectContaining({ type: "text" }),
       { type: "text", text: "Image 1: normalized/1.jpg", harness: "image_label" },
@@ -5164,7 +5246,7 @@ describe("system prompt snapshot", () => {
       expect.anything(),
       expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3", reason: "attachments" }),
     );
-    const { messages } = loopParams(deps);
+    const { messages } = loopParams(deps).transcript;
     expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
     expect(messages[2]?.content).toEqual([{ type: "text", text: CUT }]);
     expect(messages[4]?.content).toEqual([expect.objectContaining({ type: "image" })]);
@@ -5186,7 +5268,7 @@ describe("system prompt snapshot", () => {
     await run(deps);
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-    const { messages } = loopParams(deps);
+    const { messages } = loopParams(deps).transcript;
     expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
     expect(messages[2]?.content).toEqual([{ type: "text", text: CUT }]);
     expect(messages[3]?.content).toEqual([thinking, { type: "text", text: "three" }]);
@@ -5209,7 +5291,7 @@ describe("system prompt snapshot", () => {
     await run(deps);
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-    const { systemPrompt, messages } = loopParams(deps);
+    const { system: systemPrompt, messages } = loopParams(deps).transcript;
     expect(systemPrompt).toBe("EPOCH PROMPT");
     expect(messages[1]).toEqual({
       role: "assistant",
@@ -5360,7 +5442,7 @@ describe("system prompt snapshot", () => {
     await run(deps);
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-    const { systemPrompt, messages } = loopParams(deps);
+    const { system: systemPrompt, messages } = loopParams(deps).transcript;
     expect(systemPrompt).toBe("EPOCH PROMPT");
     expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "reply" }] });
   });
@@ -5395,8 +5477,8 @@ describe("system prompt snapshot", () => {
       expect.anything(),
       expect.objectContaining({ openedBy: "msg-1", reason: "configuration" }),
     );
-    expect(loopParams(next).systemPrompt).toContain("## identity\nName: Sam");
-    expect(loopParams(next).systemPrompt).not.toContain("You don't know your user yet.");
+    expect(loopParams(next).transcript.system).toContain("## identity\nName: Sam");
+    expect(loopParams(next).transcript.system).not.toContain("You don't know your user yet.");
   });
 
   it("names the delivery channels in the turn context", async () => {
@@ -5427,7 +5509,7 @@ describe("system prompt snapshot", () => {
       expect.anything(),
       expect.objectContaining({ openedBy: "msg-1", historyStart: "m1", reason: "configuration" }),
     );
-    const { systemPrompt, messages } = loopParams(deps);
+    const { system: systemPrompt, messages } = loopParams(deps).transcript;
     expect(systemPrompt).toBe("system prompt");
     expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "reply" }] });
   });
@@ -5501,7 +5583,7 @@ describe("system prompt snapshot", () => {
       expect.anything(),
       expect.objectContaining({ openedBy: "msg-1", historyStart: "m3", reason: "summary" }),
     );
-    expect(loopParams(deps).messages[2]).toEqual({
+    expect(loopParams(deps).transcript.messages[2]).toEqual({
       role: "assistant",
       content: [{ type: "text", text: "kept" }],
     });
@@ -5569,10 +5651,44 @@ describe("system prompt snapshot", () => {
       );
       // The retained turns before m7 replay without the thinking bound to the
       // old prefix; m8, after it, keeps its own.
-      const { messages } = loopParams(deps);
+      const { messages } = loopParams(deps).transcript;
       expect(JSON.stringify(messages.slice(0, -2))).not.toContain('"thinking"');
       expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
     });
+
+    it.each([
+      {
+        turn: "continues its epoch",
+        digest: async () => defaultDigest(),
+        system: "EPOCH PROMPT",
+        thinking: true,
+      },
+      {
+        turn: "opens an epoch for its configuration",
+        digest: async () => "a rule has changed since",
+        system: "system prompt",
+        thinking: false,
+      },
+    ])(
+      "sends the summarization fork the prompt the view is counted with, tool calls disabled, and thinking only when the turn $turn",
+      async ({ digest, system, thinking: keepsThinking }) => {
+        const deps = summarizingDeps(await digest(), SUMMARIZED);
+
+        await run(deps);
+
+        // The summary covers m1 and m2, whose thinking is bound to the epoch
+        // m1 opened.
+        const { provider } = await deps.resolveProvider("claude-sonnet-4-6");
+        const fork = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
+        expect(fork).toMatchObject({ system, toolChoice: "none" });
+        expect(fork.messages[1]).toEqual({
+          role: "assistant",
+          content: keepsThinking
+            ? [thinking, { type: "text", text: "turn 2" }]
+            : [{ type: "text", text: "turn 2" }],
+        });
+      },
+    );
 
     it("opens an epoch rather than announce again a change its unstored summary took out of view", async () => {
       // m1's context announced `identity`; this turn's summary, cut at its
@@ -5618,7 +5734,7 @@ describe("system prompt snapshot", () => {
         );
         // The turns kept before m7 replay without the thinking bound to the
         // prefix the rewrite changed; m8, after it, keeps its own.
-        const { messages, systemPrompt } = loopParams(deps);
+        const { messages, system: systemPrompt } = loopParams(deps).transcript;
         expect(systemPrompt).not.toBe("EPOCH PROMPT");
         expect(JSON.stringify(messages.slice(0, -2))).not.toContain('"thinking"');
         expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
@@ -5785,7 +5901,7 @@ describe("transcript head check", () => {
     await run(deps, mockStep());
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-    expect(loopParams(deps).systemPrompt).toBe(a.epoch.rendered);
+    expect(loopParams(deps).transcript.system).toBe(a.epoch.rendered);
   });
 
   it("keeps the check clean on the turn after a rejected attachment", async () => {
@@ -5819,7 +5935,7 @@ describe("transcript head check", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
     // The refused photo went out as its placeholder.
-    expect(JSON.stringify(loopParams(deps).messages[2]?.content)).toContain(
+    expect(JSON.stringify(loopParams(deps).transcript.messages[2]?.content)).toContain(
       "The model provider refused this file",
     );
 

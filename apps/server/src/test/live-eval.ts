@@ -51,7 +51,7 @@ import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { expectFinished } from "./assertions.js";
 import { type EvalFailure, type EvalMetric, summariseRates } from "./eval-checks.js";
-import { TEST_PREFIX_VIOLATION } from "./factories.js";
+import { TEST_PREFIX_VIOLATION, testTranscript } from "./factories.js";
 
 export type { EvalFailure, EvalMetric } from "./eval-checks.js";
 export { isFailure } from "./eval-checks.js";
@@ -285,8 +285,12 @@ export async function runEvalTurn(params: {
   const result = await runStreamingAgentLoop({
     provider: params.provider,
     model: EVAL_MODEL,
-    systemPrompt,
-    messages: [...params.history, userMessage],
+    transcript: testTranscript({
+      system: systemPrompt,
+      tools,
+      messages: [...params.history, userMessage],
+      log: logger,
+    }),
     tools,
     service: { memory: mock<Service["memory"]>(), files: mock<Service["files"]>(), coreMemory },
     maxTokens: resolveLimits(EVAL_MODEL).maxOutputTokens,

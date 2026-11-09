@@ -41,8 +41,8 @@ interface HeadedRow {
  * the history the turn loaded, before its own compaction and rendered as the
  * current epoch sends it, still has the head the epoch's latest headed
  * assistant row stored. The render is the epoch's: its snapshot's attachment
- * cutoff, the thinking strip before its opening row, and the loop's history
- * sanitization, chained from h₀ over the snapshot and the frozen tools.
+ * cutoff, the thinking strip before its opening row, and the transcript's
+ * history sanitization, chained from h₀ over the snapshot and the frozen tools.
  *
  * Only rows after the epoch's opening row are compared: those before it were
  * sent under an earlier epoch's render state, which the opening turn rewrote.
