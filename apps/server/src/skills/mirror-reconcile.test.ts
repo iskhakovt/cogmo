@@ -14,6 +14,7 @@ import {
   createSkillsMirrorReconcile,
   ensureSkillsMirror,
   reconcileMirror,
+  reconcileMirrorAtBoot,
 } from "./mirror-reconcile.js";
 import { DrizzleSkillStore } from "./store/index.js";
 
@@ -51,8 +52,13 @@ async function commitLocal(file: string): Promise<string> {
   return sha;
 }
 
-const reconcile = () =>
-  reconcileMirror({ runInTx: tx, secretsStore: mock<SecretsStore>(), store, repoPath: local });
+const reconcileDeps = () => ({
+  runInTx: tx,
+  secretsStore: mock<SecretsStore>(),
+  store,
+  repoPath: local,
+});
+const reconcile = () => reconcileMirror(reconcileDeps());
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "skills-reconcile-"));
@@ -276,6 +282,24 @@ describe("reconcileMirror", () => {
     await git(local, "remote", "set-url", "origin", join(root, "missing.git"));
 
     expect(await reconcile()).toEqual({ kind: "still_diverged" });
+  });
+});
+
+describe("reconcileMirrorAtBoot", () => {
+  it("pushes local main the boot left behind", async () => {
+    const sha = await commitLocal("a");
+    await ensureSkillsMirror({ runInTx: tx, store }, local);
+
+    await reconcileMirrorAtBoot(reconcileDeps());
+
+    expect(await git(remote, "rev-parse", "refs/heads/main")).toBe(sha);
+    expect(await tx((trx) => store.getMirror(trx))).toMatchObject({ status: "synced" });
+  });
+
+  it("resolves when the reconcile throws", async () => {
+    await expect(
+      reconcileMirrorAtBoot({ ...reconcileDeps(), repoPath: join(root, "not-a-repo") }),
+    ).resolves.toBeUndefined();
   });
 });
 

@@ -3,6 +3,7 @@ import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { fromStepTools } from "../inngest/durable.js";
 import { logger } from "../logger.js";
+import { describeError } from "../util/describe-error.js";
 import {
   type MirrorDeps,
   type MirrorPushOutcome,
@@ -88,6 +89,24 @@ export async function reconcileMirror(
       return { kind: "pushed", push: push.kind };
     })
     .exhaustive();
+}
+
+/**
+ * One reconcile in the background, for `cogmo serve`'s boot: a commit the
+ * boot made (the layout commit) reaches the remote before a draft on a
+ * git-remote backend branches from the remote's `main`. Never rejects; a
+ * failure is logged and the cron repeats the reconcile.
+ */
+export async function reconcileMirrorAtBoot(deps: SkillsMirrorReconcileDeps): Promise<void> {
+  try {
+    const outcome = await reconcileMirror(deps);
+    log.info({ outcome: outcome.kind }, "skills mirror reconciled at boot");
+  } catch (e) {
+    log.warn(
+      { error: describeError(e) },
+      "skills mirror reconcile at boot failed; the cron repeats it",
+    );
+  }
 }
 
 /**

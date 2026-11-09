@@ -9,7 +9,11 @@ import { logger } from "../logger.js";
 import { createSkillCronFireHandler } from "../skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "../skills/cron-ticker.js";
 import { createSkillDepsReaper } from "../skills/deps-reaper-function.js";
-import { createSkillsMirrorReconcile } from "../skills/mirror-reconcile.js";
+import {
+  createSkillsMirrorReconcile,
+  reconcileMirrorAtBoot,
+  type SkillsMirrorReconcileDeps,
+} from "../skills/mirror-reconcile.js";
 import { loadBundledPackages } from "../skills/pyodide-compat.js";
 import { resolveSkillRunAs } from "../skills/run-as.js";
 import { SkillRunnerImpl } from "../skills/runner.js";
@@ -88,6 +92,26 @@ export async function bootstrapSkillRunner(
   return { skillRunner };
 }
 
+/**
+ * Reconcile the skills remote once in the background, for `cogmo serve`. A
+ * coding task on a git-remote backend (Daytona) branches from the remote's
+ * `main`, so a commit this boot made, which only local `main` holds, would
+ * fail the draft's register as `non_fast_forward` until the cron's next tick
+ * (design/skills.md → Repo location → Mirror state).
+ */
+export function scheduleSkillsMirror(core: CoreDeps): void {
+  void reconcileMirrorAtBoot(skillsMirrorDeps(core));
+}
+
+function skillsMirrorDeps(core: CoreDeps): SkillsMirrorReconcileDeps {
+  return {
+    runInTx: core.runInTx,
+    secretsStore: core.secretsStore,
+    store: core.skillStore,
+    repoPath: env.COGMO_SKILLS_PATH,
+  };
+}
+
 export function createSkillFunctions(
   core: CoreDeps,
   sandbox: SandboxDeps,
@@ -143,15 +167,7 @@ export function createSkillFunctions(
 
   // Pushes skills `main` to its remote while it is behind, every 10 min.
   // See `src/skills/mirror-reconcile.ts`.
-  const skillsMirrorReconcile = createSkillsMirrorReconcile(
-    {
-      runInTx: core.runInTx,
-      secretsStore: core.secretsStore,
-      store: core.skillStore,
-      repoPath: env.COGMO_SKILLS_PATH,
-    },
-    inngest,
-  );
+  const skillsMirrorReconcile = createSkillsMirrorReconcile(skillsMirrorDeps(core), inngest);
 
   return {
     skillCronTicker,
