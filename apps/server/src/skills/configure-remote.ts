@@ -427,13 +427,15 @@ async function adoptOverBareLayout(
       await updateRef(deps.skillsRepoPath, "refs/heads/main", adopted.value, p.bareLayoutSha);
     } catch (e) {
       if (!(e instanceof RefMovedError)) throw e;
-      await relayout();
       return err({ kind: "remote_diverged" });
+    } finally {
+      // Whatever the swap did, the move records the layout again: the
+      // adopted main's, or the bare commit's still on main.
+      await relayout();
     }
   } finally {
     await deleteRef(deps.skillsRepoPath, adoptRef);
   }
-  await relayout();
   return ok(undefined);
 }
 

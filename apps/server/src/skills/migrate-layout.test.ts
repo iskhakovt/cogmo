@@ -218,6 +218,50 @@ describe("migrateSkillsLayout", () => {
     expect(await tx((trx) => store.getMirror(trx))).toMatchObject({ localSha: layout });
   });
 
+  /**
+   * alpha deployed at the repo root, the layout commit on top, then a deploy
+   * of beta from a draft cut before the move that merged `main`, so the
+   * layout commit is the merge's second parent. Returns both commits.
+   */
+  async function mergeDeployFromPreLayoutBase(): Promise<{ layout: string; merge: string }> {
+    const alpha = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", alpha, false);
+    const layout = await migrate();
+    await git(work, "checkout", "-q", "-b", "draft", alpha);
+    await mkdir(join(work, "skills", "beta"), { recursive: true });
+    await writeFile(join(work, "skills", "beta", "SKILL.md"), manifest("beta"));
+    await writeFile(join(work, "skills", "beta", "skill.py"), "b\n");
+    await git(work, "add", "-A");
+    await git(work, "commit", "-q", "-m", "add beta");
+    await git(work, "fetch", "-q", bare, "main");
+    await git(work, "merge", "-q", "--no-edit", "FETCH_HEAD");
+    const merge = await git(work, "rev-parse", "HEAD");
+    expect(await git(work, "rev-parse", `${merge}^2`)).toBe(layout);
+    await git(work, "push", "-q", bare, "HEAD:refs/heads/staging");
+    await git(bare, "update-ref", "refs/heads/main", merge);
+    return { layout, merge };
+  }
+
+  it("records a layout commit a merge deploy took off main's first-parent history", async () => {
+    const { layout, merge } = await mergeDeployFromPreLayoutBase();
+    await seedSkill("beta", merge, false);
+    await db.execute(sql`DELETE FROM skills_repo_layout`);
+
+    expect(await migrate()).toBe(layout);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(merge);
+  });
+
+  it("records that layout commit with no skills rows, as an adopt into a fresh database does", async () => {
+    const { layout, merge } = await mergeDeployFromPreLayoutBase();
+    await truncateAll(db);
+
+    expect(await migrate()).toBe(layout);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(merge);
+    expect(await git(bare, "ls-tree", "-r", "--name-only", "refs/heads/main")).toContain(
+      "skills/beta/skill.py",
+    );
+  });
+
   it("skips a commit carrying the layout trailer under another identity", async () => {
     const forged = await commitOnMain({ "README.md": "x\n" }, "c\n\nCogmo-Layout: v1");
 

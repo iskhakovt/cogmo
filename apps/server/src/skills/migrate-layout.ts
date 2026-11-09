@@ -93,9 +93,11 @@ export async function migrateSkillsLayout(
 }
 
 /**
- * The layout commit on `mainSha`'s first-parent history: the oldest commit
- * carrying the layout trailer under Cogmo's identity whose tree keeps no skill
- * file at the root and a `skills/<name>/` for each row at it or an ancestor.
+ * The layout commit in `mainSha`'s history, every parent followed, since a
+ * deploy merging `main` into a draft cut before the move makes it a second
+ * parent: the oldest commit carrying the layout trailer under Cogmo's
+ * identity whose tree keeps no skill file at the root and a `skills/<name>/`
+ * for each row at it or an ancestor.
  */
 async function findLayoutCommit(
   repoPath: string,
@@ -103,7 +105,6 @@ async function findLayoutCommit(
   rows: readonly SkillRow[],
 ): Promise<string | null> {
   const candidates = await logCommits(repoPath, [
-    "--first-parent",
     "--reverse",
     "--fixed-strings",
     `--grep=${LAYOUT_TRAILER}: ${LAYOUT_TRAILER_VALUE}`,
