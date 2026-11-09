@@ -9,6 +9,7 @@ import {
   SKILL_BODY_MAX_LINES,
 } from "./ast-rules.js";
 import { hostAllowed, parseHttpUrl } from "./http-destination.js";
+import type { CheckFinding } from "./protocol.js";
 import {
   callArgument,
   ctxCalls,
@@ -38,9 +39,12 @@ import { lintWasmCompat } from "./worker-wasm/wasm-lint.js";
 
 type SkillGateId = "size" | "syntax" | "entrypoint" | "dynamic_code" | "effects";
 
-/** A gate's or `wasm-lint`'s finding, terminal for the tip. */
+/**
+ * A gate's, `wasm-lint`'s or a CPython check's finding, terminal for the tip
+ * (design/skills.md → Register-time CPython checks).
+ */
 export interface SkillFinding {
-  id: SkillGateId | "wasm_lint";
+  id: SkillGateId | "wasm_lint" | CheckFinding["id"];
   /** `skills/<name>/skill.py`. */
   path: string;
   /** 1-based; null for a finding about the file. */

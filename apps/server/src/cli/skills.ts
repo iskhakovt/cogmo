@@ -23,6 +23,11 @@ export interface SkillsCliDeps {
   runner: SkillRunner;
   /** The install owner with the default profile — whom `run` runs as. */
   ownerRunAs(): Promise<SkillRunAs>;
+  /**
+   * Close what the dependencies hold open, the CLI sandbox's instance row,
+   * once the command ends, whether it returned or threw.
+   */
+  close(): Promise<void>;
 }
 
 /** The CLI is the operator's: a schedule it puts live runs as the owner. */
@@ -62,7 +67,7 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
         description:
           "List every skill, disabled ones included (name, tier, risk, disabled, git_sha, pending_deploy, pending_git_sha).",
         args: {},
-        handler: async () => listSkills(await loadDeps(), io),
+        handler: () => withDeps(loadDeps, (deps) => listSkills(deps, io)),
       }),
       run: command({
         name: "run",
@@ -76,7 +81,7 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
           }),
         },
         examples: [{ description: "Invoke echo", command: `cogmo skills run echo '{"x":1}'` }],
-        handler: async (args) => runSkill(args, await loadDeps(), io),
+        handler: (args) => withDeps(loadDeps, (deps) => runSkill(args, deps, io)),
       }),
       register: command({
         name: "register",
@@ -88,19 +93,19 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
             description: "The feature branch.",
           }),
         },
-        handler: async ({ branch }) => {
-          const { runner } = await loadDeps();
-          return printDeploy(await runner.register({ branch, origin: OWNER }), io);
-        },
+        handler: ({ branch }) =>
+          withDeps(loadDeps, async ({ runner }) =>
+            printDeploy(await runner.register({ branch, origin: OWNER }), io),
+          ),
       }),
       approve: command({
         name: "approve",
         description: "Approve a pending-approval deploy.",
         args: { pendingId: pendingId() },
-        handler: async ({ pendingId }) => {
-          const { runner } = await loadDeps();
-          return printDeploy(await runner.approveDeploy({ pendingId, origin: OWNER }), io);
-        },
+        handler: ({ pendingId }) =>
+          withDeps(loadDeps, async ({ runner }) =>
+            printDeploy(await runner.approveDeploy({ pendingId, origin: OWNER }), io),
+          ),
       }),
       deny: command({
         name: "deny",
@@ -113,7 +118,7 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
             description: "Why, as the remaining words.",
           }),
         },
-        handler: async (args) => denyDeploy(args, await loadDeps(), io),
+        handler: (args) => withDeps(loadDeps, (deps) => denyDeploy(args, deps, io)),
       }),
       rollback: command({
         name: "rollback",
@@ -126,19 +131,32 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
             description: "The commit whose version of the skill to restore.",
           }),
         },
-        handler: async ({ name, toGitSha }) => {
-          const { runner } = await loadDeps();
-          return printDeploy(await runner.rollback({ name, toGitSha, origin: OWNER }), io);
-        },
+        handler: ({ name, toGitSha }) =>
+          withDeps(loadDeps, async ({ runner }) =>
+            printDeploy(await runner.rollback({ name, toGitSha, origin: OWNER }), io),
+          ),
       }),
       deregister: command({
         name: "deregister",
         description: "Soft-disable a skill, keeping its audit history.",
         args: { name: skillName("The skill.") },
-        handler: async (args) => deregisterSkill(args, await loadDeps(), io),
+        handler: (args) => withDeps(loadDeps, (deps) => deregisterSkill(args, deps, io)),
       }),
     },
   });
+}
+
+/** Run `use` with the command's dependencies, closing what they hold open however it ends. */
+async function withDeps(
+  loadDeps: LoadDeps<SkillsCliDeps>,
+  use: (deps: SkillsCliDeps) => Promise<number>,
+): Promise<number> {
+  const deps = await loadDeps();
+  try {
+    return await use(deps);
+  } finally {
+    await deps.close();
+  }
 }
 
 /**

@@ -79,6 +79,7 @@ describe("ClassifierLogSchema", () => {
     validation_errors: [],
     reasons: ["wasm_unhardened" as const],
     declared_network: null,
+    toolchain_version: null,
   };
 
   it("round-trips a stub log", () => {
@@ -100,6 +101,20 @@ describe("ClassifierLogSchema", () => {
     expect(parsed.reasons).toEqual([]);
     expect(parsed.declared_network).toBeNull();
     expect(parsed.capabilities).toBeUndefined();
+  });
+
+  it("round-trips the toolchain version register's CPython checks ran", () => {
+    const log = { ...STUB, toolchain_version: "2.17.0" };
+    expect(ClassifierLogSchema.parse(JSON.parse(JSON.stringify(log)))).toEqual(log);
+  });
+
+  it("reads a log written before the CPython checks as having run none", () => {
+    const { toolchain_version: _version, ...legacy } = STUB;
+    expect(ClassifierLogSchema.parse(legacy).toolchain_version).toBeNull();
+  });
+
+  it("rejects an empty toolchain version", () => {
+    expect(() => ClassifierLogSchema.parse({ ...STUB, toolchain_version: "" })).toThrow();
   });
 
   it("reads a row written under the tier1/tier2 names as the wasm/container names", () => {

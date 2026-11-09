@@ -282,6 +282,7 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
     // The fetched branch is now visible to the skill runner. `register`
     // reads SKILL.md + skill.py at the branch tip and advances main.
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       store: skillStore,
       runInTx: tx,
       secretsStore: mock<SecretsStore>(),

@@ -109,6 +109,7 @@ const STUB_LOG: ClassifierLog = {
   validation_errors: [],
   reasons: [],
   declared_network: null,
+  toolchain_version: null,
 };
 
 const STUB_SCHEMAS: SkillSchemas = { inputs: { type: "object" }, outputs: null };

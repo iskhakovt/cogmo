@@ -12,6 +12,7 @@ import { expectDefined } from "../test/assertions.js";
 import { skillsRepoAt } from "../test/skills-repo.js";
 import {
   ensureVenvPopulated,
+  isLockfileContentRefusal,
   makeSandboxLockfileCompiler,
   parseLockfileEntries,
   parseLockfilePackageSpecs,
@@ -516,6 +517,29 @@ describe("makeSandboxLockfileCompiler", () => {
     expect(result.error.kind).toBe("transport_failed");
     expect(result.error.message).toMatch(/exceeded/);
     expect(disposeSpy).toHaveBeenCalled();
+  });
+});
+
+describe("isLockfileContentRefusal", () => {
+  // Each as uv 0.13.6 writes it from `uv pip sync --require-hashes --only-binary=:all:`;
+  // deps.sysbox.integration.test.ts reproduces them with the image's uv.
+  it.each([
+    "error: No solution found when resolving dependencies\n  cause: Because docopt==0.6.2 has no usable wheels and you require docopt==0.6.2, we can conclude that your requirements are unsatisfiable.",
+    "error: No solution found when resolving dependencies\n  cause: Because pywin32==306 has no wheels with a matching Python ABI tag (e.g., `cp314`) and you require pywin32==306, we can conclude that your requirements are unsatisfiable.",
+    "error: Failed to download `idna==3.10`\n  cause: Hash mismatch for `idna==3.10`\n\n         Expected:\n           sha256:00",
+    "error: In `--require-hashes` mode, all requirements must have a hash, but none were provided for: idna==3.10",
+  ])("reads uv refusing the lockfile's content: %s", (message) => {
+    expect(isLockfileContentRefusal(message)).toBe(true);
+  });
+
+  it.each([
+    "error: Failed to fetch: https://pypi.org/simple/idna/\n  cause: error sending request for url (https://pypi.org/simple/idna/)\n  cause: dns error",
+    "error: Request failed after 3 retries in 26.6s",
+    "populate_failed: rename /skill-venvs/x.tmp.1 → /skill-venvs/x failed and /skill-venvs/x is not ready: No space left on device",
+    "error: No solution found when resolving dependencies\n  cause: Because there is no version of idna==99.99 and you require idna==99.99, we can conclude that your requirements are unsatisfiable.",
+    "uv pip sync exited 1",
+  ])("leaves any other failure to a retry: %s", (message) => {
+    expect(isLockfileContentRefusal(message)).toBe(false);
   });
 });
 

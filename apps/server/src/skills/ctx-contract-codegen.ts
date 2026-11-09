@@ -2,6 +2,8 @@ import * as R from "remeda";
 import { z } from "zod";
 import { CTX_CONTRACT, CtxErrorKindSchema } from "./ctx-contract.js";
 import {
+  CheckReplySchema,
+  CheckRequestSchema,
   CtxCallSchema,
   CtxResultSchema,
   SchemaImportReplySchema,
@@ -55,6 +57,8 @@ export function renderContractSchema(): string {
     task_exited: TaskExitedSchema,
     supervisor_ready: SupervisorReadySchema,
     schema_import_reply: SchemaImportReplySchema,
+    check_request: CheckRequestSchema,
+    check_reply: CheckReplySchema,
   };
   const methods = R.entries(CTX_CONTRACT).flatMap(([method, { args, result }]) => [
     [`ctx.${method}.args`, schemaOf(args)] as const,

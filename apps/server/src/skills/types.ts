@@ -308,6 +308,13 @@ export const ClassifierLogSchema = z.object({
    * through `LEGACY_CAPABILITY_KEYS`.
    */
   capabilities: z.preprocess(readLegacyCapabilities, ClassifierLogCapabilitiesSchema).optional(),
+  /**
+   * The release version of the toolchain register's CPython checks ran, as
+   * the skills image baked it (design/skills.md → Register-time CPython
+   * checks); null where none ran: no sandbox backend configured, a rollback,
+   * and rows written before the checks.
+   */
+  toolchain_version: z.string().min(1).nullable().default(null),
 });
 export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
 

@@ -26,6 +26,7 @@ import { hashLockfileContents } from "./deps.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
+import { makeSandboxCpythonChecks } from "./worker-sysbox/check-session.js";
 import { makeSandboxSchemaImporter } from "./worker-sysbox/schema-import.js";
 
 function stubSecrets(): SecretsStore {
@@ -427,6 +428,7 @@ async def run(inputs, ctx):
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl container (sysbox runtime, GHA only)", () => {
   it("invokes a container skill end-to-end against cogmo-skills:test", async () => {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -461,6 +463,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl container (sysbox runtime, GHA onl
 
   it("kills a container skill that exceeds wall_clock_s", async () => {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -505,6 +508,7 @@ resources:
 
   it("two sequential invocations reuse the same warm worker", async () => {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -565,6 +569,7 @@ async def run(inputs, ctx):
     // files don't collide on a shared host docker daemon.
     const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -611,14 +616,27 @@ async def run(inputs, ctx):
     }
   }, 180_000);
 
-  it("imports a container skill's models in a session with no network, after installing its dependencies", async () => {
+  it("imports a container skill's models in a session with no network, from the venv register's install session populated", async () => {
     const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
+    const lockfile = { hash: hashLockfileContents(IDNA_LOCKFILE), contents: IDNA_LOCKFILE };
     const importer = makeSandboxSchemaImporter({
       sandbox,
       image: SKILLS_IMAGE,
       depsCacheVolumeName,
     });
     try {
+      // Register's install session, ahead of its check session, populates the venv.
+      const checked = await makeSandboxCpythonChecks({
+        sandbox,
+        image: SKILLS_IMAGE,
+        depsCacheVolumeName,
+      }).check({
+        body: 'import idna\n\nHOST = idna.encode("b\u00fccher.example")\n',
+        dependencies: ["idna==3.10"],
+        lockfile,
+        signal: undefined,
+      });
+      expect(checked._unsafeUnwrap().findings).toEqual([]);
       const imported = await importer.importSchemas({
         body: `
 import socket
@@ -636,7 +654,7 @@ class Input(BaseModel):
     host: str = idna.encode("bücher.example").decode("ascii")
     reached: str = reached
 `,
-        lockfile: { hash: hashLockfileContents(IDNA_LOCKFILE), contents: IDNA_LOCKFILE },
+        lockfile,
         resourceLimits: {},
         timeoutMs: 60_000,
       });
@@ -658,6 +676,7 @@ class Input(BaseModel):
 
   it("isolates module-level state between sequential tasks (fresh fork per task)", async () => {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -690,6 +709,7 @@ class Input(BaseModel):
 
   it("kills a process a skill leaves behind before the next skill runs on the worker", async () => {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -734,6 +754,7 @@ class Input(BaseModel):
 
   it("a skill cannot open its relay's or the supervisor's host channel through /proc", async () => {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -763,6 +784,7 @@ class Input(BaseModel):
 
   it("a module a task plants in $HOME never loads in a later task on the worker", async () => {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -808,6 +830,7 @@ class Input(BaseModel):
   it("a populate ignores uv configuration a task planted in $HOME", async () => {
     const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -855,6 +878,7 @@ class Input(BaseModel):
   it("a populate ignores a project a task planted in its working directory", async () => {
     const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
@@ -900,6 +924,7 @@ class Input(BaseModel):
 
   it("a task cannot replace the runtime venv's python3", async () => {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),

@@ -2,6 +2,7 @@ import type { Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { SkillsCapabilities } from "../capabilities.js";
+import type { CpythonChecks } from "../cpython-checks.js";
 import type { LockfileCompiler, LockfileSnapshot } from "../deps.js";
 import type { ImportedSchemas, SchemaImportError } from "../schema-import.js";
 import type { SkillsRepo } from "../skill-files.js";
@@ -30,6 +31,17 @@ export interface DeployDeps {
   scheduleNextRunAt(schedule: string | null): Date | null;
   /** What this deployment enforces; the classifier reads it for the tier. */
   capabilities: SkillsCapabilities;
+  /**
+   * Register's CPython checks, or undefined when no sandbox backend is
+   * configured: register then skips them (design/skills.md → Register-time
+   * CPython checks).
+   */
+  cpythonChecks: CpythonChecks | undefined;
+  /**
+   * The server's release version (`ReleaseToolchain.version`), which register
+   * compares the checks' toolchain version against.
+   */
+  releaseVersion: string;
   /**
    * The container tier's schema import at register, or undefined when the
    * backend creates no session with no network: every container skill then

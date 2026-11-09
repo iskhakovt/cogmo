@@ -23,7 +23,7 @@ import type { LlmProviderResolver } from "../llm/resolver.js";
 import type { McpRegistryImpl } from "../mcp/registry.js";
 import type { DrizzleMcpStore } from "../mcp/store/index.js";
 import type { HindsightMemoryProvider } from "../memory/hindsight.js";
-import type { SandboxClient } from "../sandbox/index.js";
+import type { SandboxClient, SessionSandbox } from "../sandbox/index.js";
 import type { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import type { DrizzleSecretsStore } from "../secrets/store/index.js";
 import type { SkillRunnerImpl, SkillRunnerOptions } from "../skills/runner.js";
@@ -214,13 +214,26 @@ export const NO_SANDBOX: SandboxDeps = {
 };
 
 /**
+ * The sandboxes `bootstrapSkillRunner` hands the runner. `cogmo serve` passes
+ * its client as both; `cogmo skills` passes `bootstrapCliSandbox`'s as
+ * `register` alone (design/skills.md → Register-time CPython checks → The
+ * CLI's sandbox).
+ */
+export interface SkillRunnerSandboxes {
+  /** Container-tier runs; null where none run here, which then throw at call time. */
+  invoke: SandboxClient | null;
+  /** Register's and approve's sessions; null when no backend is configured. */
+  register: SessionSandbox | null;
+}
+
+/**
  * Skill runner + its construction inputs. Returned by `bootstrapSkillRunner`.
  *
- * Container (sysbox / Daytona) only runs when `sandbox` is non-null. CLIs that
- * call `bootstrapSkillRunner(core, NO_SANDBOX, { reapWasmChildren: false })`
- * get a runner that supports wasm (Pyodide) skills + every admin subcommand
- * (list / register / approve / deny / rollback / deregister); container
- * invocations throw a clear "no sandbox configured" error at call time.
+ * Container (sysbox / Daytona) skills only run when its `invoke` sandbox is
+ * non-null. `cogmo skills` gets a runner that supports wasm (Pyodide) skills +
+ * every admin subcommand (list / register / approve / deny / rollback /
+ * deregister); container invocations throw a clear "no sandbox configured"
+ * error at call time.
  */
 export interface SkillRunnerHandle {
   skillRunner: SkillRunnerImpl;

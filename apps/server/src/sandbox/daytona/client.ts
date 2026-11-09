@@ -181,7 +181,8 @@ const SNAPSHOT_CREATE_RETRIES = 3;
 const SNAPSHOT_CREATE_MIN_BACKOFF_MS = 1_000;
 const SNAPSHOT_CREATE_MAX_BACKOFF_MS = 8_000;
 
-const CAPABILITIES: SandboxCapabilities = {
+/** What the backend advertises, known before a client is built. */
+export const DAYTONA_CAPABILITIES: Readonly<SandboxCapabilities> = Object.freeze({
   // Code inside the sandbox can spawn child containers, but they're
   // visible only to Daytona — Cogmo's host-proxy doesn't observe them.
   siblingContainers: "sandbox-internal",
@@ -198,7 +199,7 @@ const CAPABILITIES: SandboxCapabilities = {
   // omits SessionSpec.depsCacheVolume.
   depsCacheSharing: "per-sandbox",
   noNetworkSessions: false,
-};
+});
 
 export interface DaytonaSandboxClientOptions {
   /** Daytona API key. Read from the encrypted `secrets` table at bootstrap. */
@@ -253,7 +254,7 @@ interface CreateOptions extends DaytonaSandboxClientOptions {
  */
 export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> {
   readonly backendId = "daytona";
-  readonly capabilities = CAPABILITIES;
+  readonly capabilities = DAYTONA_CAPABILITIES;
 
   #daytona: Daytona;
   #instanceId: string;

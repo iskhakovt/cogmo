@@ -1,21 +1,71 @@
 /**
  * Stage 2: the sandbox client, its instance row, and the background passes
- * boot starts on it.
+ * boot starts on it; and the client `cogmo skills` builds without them.
  */
 
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import Docker from "dockerode";
+import { match } from "ts-pattern";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { DAYTONA_API_KEY_SECRET } from "../sandbox/daytona/auth.js";
-import { createSandboxBackend } from "../sandbox/factory.js";
-import { CogmoSocketProxy, type SandboxClient } from "../sandbox/index.js";
+import { DAYTONA_CAPABILITIES } from "../sandbox/daytona/client.js";
+import { createSandboxBackend, type SandboxBackendOptions } from "../sandbox/factory.js";
+import {
+  CogmoSocketProxy,
+  type SandboxCapabilities,
+  type SandboxClient,
+  type SessionSandbox,
+} from "../sandbox/index.js";
+import type { SandboxRuntime } from "../sandbox/runtime.js";
+import { LOCAL_DOCKER_CAPABILITIES } from "../sandbox/supervisor.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "../skills/worker-sysbox/host.js";
+import { describeError } from "../util/describe-error.js";
 import { checkDirWritable } from "./checks.js";
 import { DEFAULT_CODING_RESOURCE_LIMITS } from "./limits.js";
 import { scheduleSandboxImageWarm } from "./sandbox-image-warm.js";
 import { type BootstrapOptions, type CoreDeps, NO_SANDBOX, type SandboxDeps } from "./stages.js";
+
+/** The backend configuration stage 2 selects from: `env`'s. */
+type SandboxConfig = Pick<
+  typeof env,
+  "SANDBOX_BACKEND" | "SANDBOX_RUNTIME" | "DAYTONA_API_URL" | "DAYTONA_ORGANIZATION_ID"
+>;
+
+/** The backend stage 2's selection picks, or why it picks none. */
+type SandboxBackendChoice =
+  | { backend: "none"; reason: "runtime_unset" | "daytona_key_absent" }
+  | { backend: "local-docker"; runtime: SandboxRuntime }
+  | { backend: "daytona"; apiKey: string };
+
+/**
+ * Stage 2's backend selection, which `cogmo skills` shares. The sandbox is
+ * opt-in by backend: `local-docker` (the default) requires `SANDBOX_RUNTIME`,
+ * and `daytona` requires `daytona_api_key` in the encrypted secrets table.
+ * No silent fallback.
+ */
+async function selectSandboxBackend(
+  core: Pick<CoreDeps, "runInTx" | "secretsStore">,
+  config: SandboxConfig,
+): Promise<SandboxBackendChoice> {
+  return match(config.SANDBOX_BACKEND)
+    .returnType<Promise<SandboxBackendChoice>>()
+    .with("local-docker", async () =>
+      config.SANDBOX_RUNTIME
+        ? { backend: "local-docker", runtime: config.SANDBOX_RUNTIME }
+        : { backend: "none", reason: "runtime_unset" },
+    )
+    .with("daytona", async () => {
+      const apiKey = await core.runInTx((trx) =>
+        core.secretsStore.getSecret(trx, DAYTONA_API_KEY_SECRET),
+      );
+      return apiKey
+        ? { backend: "daytona", apiKey }
+        : { backend: "none", reason: "daytona_key_absent" };
+    })
+    .exhaustive();
+}
 
 /**
  * Fire-and-forget orphan reaping. The per-minute sandbox reaper (local-docker)
@@ -86,12 +136,6 @@ export async function bootstrapSandbox(
       sandboxDocker: null,
     };
   }
-  // Sandbox is opt-in by backend:
-  //   - `SANDBOX_BACKEND=local-docker` (default) requires `SANDBOX_RUNTIME`;
-  //     unset = sandbox disabled (coding-delegation features fail at call
-  //     time with a clear error). No silent fallback.
-  //   - `SANDBOX_BACKEND=daytona` requires `daytona_api_key` in the
-  //     encrypted secrets table; missing = sandbox disabled.
   // Both backends are coding-capable: local-docker via host-bind-mount
   // worktrees, daytona via git-as-transport (`cogmo/run/<task-id>` push
   // → sandbox-side clone). `codingSandbox` is the same handle as
@@ -99,106 +143,271 @@ export async function bootstrapSandbox(
   // branches on `capabilities.workingTreeTransport`, not backend
   // identity. The split exists because the reaper Inngest function
   // remains local-docker-specific (queries the Docker daemon).
-  if (env.SANDBOX_BACKEND === "local-docker") {
-    if (!env.SANDBOX_RUNTIME) {
-      logger.info(
-        "SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)",
-      );
+  return match(await selectSandboxBackend(core, env))
+    .returnType<Promise<SandboxDeps>>()
+    .with({ backend: "none" }, async ({ reason }) => {
+      match(reason)
+        .with("runtime_unset", () =>
+          logger.info(
+            "SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)",
+          ),
+        )
+        .with("daytona_key_absent", () =>
+          logger.warn(
+            `SANDBOX_BACKEND=daytona but \`${DAYTONA_API_KEY_SECRET}\` secret is absent — sandbox disabled. Run \`cogmo setup\` to add it.`,
+          ),
+        )
+        .exhaustive();
       return NO_SANDBOX;
-    }
-    // Fail-fast: both dirs receive per-task writes (proxy sockets,
-    // askpass material) and a permission problem on either surfaces as
-    // a generic EACCES on the first task otherwise. Askpass is also
-    // needed on the daytona backend (host-side `provisionAskpass` writes
-    // the files that `askpass-upload.ts` then uploads via the SDK), so
-    // that probe runs in both branches.
-    await Promise.all([
-      checkDirWritable(env.SANDBOX_PROXY_SOCKET_DIR, "SANDBOX_PROXY_SOCKET_DIR"),
-      checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR"),
-    ]);
-    const docker = new Docker();
-    const instance = await core.runInTx((trx) =>
-      core.sandboxStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
-    );
-    const proxy = await CogmoSocketProxy.create({
-      socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
-      hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
-    });
-    const localDocker = await createSandboxBackend({
-      backend: "local-docker",
-      docker,
-      store: core.sandboxStore,
-      runInTx: core.runInTx,
-      runtime: env.SANDBOX_RUNTIME,
+    })
+    .with({ backend: "local-docker" }, ({ runtime }) => bootstrapLocalDocker(core, runtime))
+    .with({ backend: "daytona" }, ({ apiKey }) => bootstrapDaytona(apiKey))
+    .exhaustive();
+}
+
+/** Stage 2 on Local-Docker: the instance row, the socket proxy, and the crash reconcile. */
+async function bootstrapLocalDocker(core: CoreDeps, runtime: SandboxRuntime): Promise<SandboxDeps> {
+  // Fail-fast: both dirs receive per-task writes (proxy sockets,
+  // askpass material) and a permission problem on either surfaces as
+  // a generic EACCES on the first task otherwise. Askpass is also
+  // needed on the daytona backend (host-side `provisionAskpass` writes
+  // the files that `askpass-upload.ts` then uploads via the SDK), so
+  // that probe runs in both branches.
+  await Promise.all([
+    checkDirWritable(env.SANDBOX_PROXY_SOCKET_DIR, "SANDBOX_PROXY_SOCKET_DIR"),
+    checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR"),
+  ]);
+  const docker = new Docker();
+  const instance = await core.runInTx((trx) =>
+    core.sandboxStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
+  );
+  const proxy = await CogmoSocketProxy.create({
+    socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+    hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
+  });
+  const localDocker = await createSandboxBackend({
+    backend: "local-docker",
+    docker,
+    store: core.sandboxStore,
+    runInTx: core.runInTx,
+    runtime,
+    instanceId: instance.id,
+    proxy,
+    askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
+  });
+  const codingSandbox = localDocker;
+  scheduleReconcileCrashedInstances(localDocker, instance.id);
+  logger.info(
+    {
+      runtime,
       instanceId: instance.id,
-      proxy,
-      askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
-    });
-    const codingSandbox = localDocker;
-    scheduleReconcileCrashedInstances(localDocker, instance.id);
-    logger.info(
-      {
-        runtime: env.SANDBOX_RUNTIME,
-        instanceId: instance.id,
-        proxySocketDir: env.SANDBOX_PROXY_SOCKET_DIR,
-      },
-      "local-docker sandbox initialized",
-    );
-    return {
-      sandbox: localDocker,
-      codingSandbox,
-      sandboxInstanceId: instance.id,
-      sandboxDocker: docker,
-    };
-  }
-  if (env.SANDBOX_BACKEND === "daytona") {
-    const apiKey = await core.runInTx((trx) =>
-      core.secretsStore.getSecret(trx, DAYTONA_API_KEY_SECRET),
-    );
-    if (!apiKey) {
-      logger.warn(
-        `SANDBOX_BACKEND=daytona but \`${DAYTONA_API_KEY_SECRET}\` secret is absent — sandbox disabled. Run \`cogmo setup\` to add it.`,
-      );
-      return NO_SANDBOX;
-    }
-    // Host-side: `provisionAskpass` writes the per-task files that
-    // `askpass-upload.ts` then ships into the daytona sandbox.
-    await checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR");
-    // Daytona needs a process-run id for label-stamping orphan
-    // detection in a future reconcile pass. We don't insert into
-    // sandbox_instances (that table FK's to local-docker
-    // `containers`) — just generate one for symmetry with the
-    // local-docker `cogmo.instance` label.
-    const sandboxInstanceId = randomUUID();
-    const sandbox = await createSandboxBackend({
-      backend: "daytona",
-      apiKey,
+      proxySocketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+    },
+    "local-docker sandbox initialized",
+  );
+  return {
+    sandbox: localDocker,
+    codingSandbox,
+    sandboxInstanceId: instance.id,
+    sandboxDocker: docker,
+  };
+}
+
+/** Stage 2 on Daytona: the client, the crash reconcile and the image warm. */
+async function bootstrapDaytona(apiKey: string): Promise<SandboxDeps> {
+  // Host-side: `provisionAskpass` writes the per-task files that
+  // `askpass-upload.ts` then ships into the daytona sandbox.
+  await checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR");
+  // Daytona needs a process-run id for label-stamping orphan
+  // detection in a future reconcile pass. We don't insert into
+  // sandbox_instances (that table FK's to local-docker
+  // `containers`) — just generate one for symmetry with the
+  // local-docker `cogmo.instance` label.
+  const sandboxInstanceId = randomUUID();
+  const sandbox = await createSandboxBackend({
+    backend: "daytona",
+    apiKey,
+    instanceId: sandboxInstanceId,
+    ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
+    ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
+  });
+  scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId);
+  // Fire-and-forget snapshot prewarm so the first coding-delegation /
+  // container skill task doesn't pay the multi-minute Daytona
+  // snapshot-build latency in its own request budget. Concurrent
+  // task arrivals share the in-flight promise via
+  // `ensureImagePresent`'s memoisation. Failures evict the cache so
+  // the task path retries on its own.
+  // Pair each image with its consumer's limits — baked into the
+  // snapshot at warm time; the `daytona.create({ snapshot })` path
+  // has no per-session override.
+  scheduleSandboxImageWarm(sandbox, [
+    { image: env.COGMO_DEVBASE_IMAGE, resourceLimits: DEFAULT_CODING_RESOURCE_LIMITS },
+    { image: env.COGMO_SKILLS_IMAGE, resourceLimits: SKILLS_DEFAULT_RESOURCE_LIMITS },
+  ]);
+  logger.info(
+    {
       instanceId: sandboxInstanceId,
-      ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
-      ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
-    });
-    scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId);
-    // Fire-and-forget snapshot prewarm so the first coding-delegation /
-    // container skill task doesn't pay the multi-minute Daytona
-    // snapshot-build latency in its own request budget. Concurrent
-    // task arrivals share the in-flight promise via
-    // `ensureImagePresent`'s memoisation. Failures evict the cache so
-    // the task path retries on its own.
-    // Pair each image with its consumer's limits — baked into the
-    // snapshot at warm time; the `daytona.create({ snapshot })` path
-    // has no per-session override.
-    scheduleSandboxImageWarm(sandbox, [
-      { image: env.COGMO_DEVBASE_IMAGE, resourceLimits: DEFAULT_CODING_RESOURCE_LIMITS },
-      { image: env.COGMO_SKILLS_IMAGE, resourceLimits: SKILLS_DEFAULT_RESOURCE_LIMITS },
-    ]);
-    logger.info(
-      {
-        instanceId: sandboxInstanceId,
-        apiUrl: env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
-      },
-      "daytona sandbox initialized",
+      apiUrl: env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
+    },
+    "daytona sandbox initialized",
+  );
+  return { sandbox, codingSandbox: sandbox, sandboxInstanceId, sandboxDocker: null };
+}
+
+/** The process whose `SIGINT` or `SIGTERM` closes the CLI sandbox's instance row. */
+interface CliExitSignals {
+  once(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+  exit(code: number): void;
+}
+
+/** What `bootstrapCliSandbox` reads and runs. */
+export interface CliSandboxOptions {
+  /** The backend configuration: `env`, which stage 2 selects from too. */
+  config: SandboxConfig;
+  /** Builds the backend's client: `createSandboxBackend`. */
+  createBackend(opts: SandboxBackendOptions): Promise<SandboxClient>;
+  signals: CliExitSignals;
+}
+
+/** The sandbox `cogmo skills` builds (design/skills.md → Register-time CPython checks → The CLI's sandbox). */
+export interface CliSandbox {
+  /**
+   * Where register's and approve's sessions run, built when the first of
+   * them starts; null when no backend is configured.
+   */
+  sandbox: SessionSandbox | null;
+  /** Close the instance row the client inserted, if it did. Idempotent; never rejects. */
+  close(): Promise<void>;
+}
+
+/**
+ * The sandbox client `cogmo skills` builds: stage 2's backend selection, and
+ * none of `bootstrapSandbox`'s serve-only work. It schedules no crash
+ * reconcile, which would close serve's instance row and reap serve's
+ * containers; registers no reaper; warms no image; and creates no Docker
+ * socket proxy or askpass directory, so its sessions mount no Docker socket.
+ * The client is built when register or approve first creates a session, so
+ * `list` and the other commands never touch a sandbox. On Local-Docker,
+ * building it inserts this process's own `cogmo_instances` row, which keeps
+ * serve's orphan pass off its sessions; `close` closes it when the command
+ * ends, and a `SIGINT` or `SIGTERM` closes it before the process exits.
+ */
+export async function bootstrapCliSandbox(
+  core: Pick<CoreDeps, "runInTx" | "secretsStore" | "sandboxStore">,
+  opts: CliSandboxOptions,
+): Promise<CliSandbox> {
+  return match(await selectSandboxBackend(core, opts.config))
+    .returnType<CliSandbox>()
+    .with({ backend: "none" }, () => ({ sandbox: null, close: async () => {} }))
+    .with({ backend: "local-docker" }, ({ runtime }) => localDockerCliSandbox(core, runtime, opts))
+    .with({ backend: "daytona" }, ({ apiKey }) => ({
+      sandbox: lazySessionSandbox("daytona", DAYTONA_CAPABILITIES, () =>
+        opts.createBackend({
+          backend: "daytona",
+          apiKey,
+          instanceId: randomUUID(),
+          ...(opts.config.DAYTONA_API_URL && { apiUrl: opts.config.DAYTONA_API_URL }),
+          ...(opts.config.DAYTONA_ORGANIZATION_ID && {
+            organizationId: opts.config.DAYTONA_ORGANIZATION_ID,
+          }),
+        }),
+      ),
+      close: async () => {},
+    }))
+    .exhaustive();
+}
+
+/**
+ * The CLI's Local-Docker client. Building it inserts the process's own
+ * records first: its `cogmo_instances` row, which labels every container the
+ * client creates. This is also the seam for the `[proposed]` `serve_instances`
+ * row (design/skills.md → Data model), which no table holds yet.
+ */
+function localDockerCliSandbox(
+  core: Pick<CoreDeps, "runInTx" | "sandboxStore">,
+  runtime: SandboxRuntime,
+  opts: CliSandboxOptions,
+): CliSandbox {
+  /** The open instance row, and the close every caller awaits once one starts. */
+  let row: { id: string; closing: Promise<void> | null } | null = null;
+  const closeRow = async (id: string): Promise<void> => {
+    try {
+      await core.runInTx((tx) => core.sandboxStore.closeInstance(tx, id));
+    } catch (e) {
+      logger.warn(
+        { instanceId: id, err: describeError(e) },
+        "cli sandbox: instance row not closed",
+      );
+    }
+  };
+  // A signal during the command's own close awaits the same transaction, so
+  // the process never exits with the row open.
+  const close = (): Promise<void> => {
+    if (row === null) return Promise.resolve();
+    row.closing ??= closeRow(row.id);
+    return row.closing;
+  };
+  let listening = false;
+  const closeOnSignals = (): void => {
+    if (listening) return;
+    listening = true;
+    for (const [signal, code] of [
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+    ] as const) {
+      opts.signals.once(signal, () => {
+        void close().finally(() => opts.signals.exit(code));
+      });
+    }
+  };
+  const sandbox = lazySessionSandbox("local-docker", LOCAL_DOCKER_CAPABILITIES, async () => {
+    const instance = await core.runInTx((tx) =>
+      core.sandboxStore.insertInstance(tx, { host: hostname(), pid: process.pid }),
     );
-    return { sandbox, codingSandbox: sandbox, sandboxInstanceId, sandboxDocker: null };
-  }
-  return NO_SANDBOX;
+    row = { id: instance.id, closing: null };
+    closeOnSignals();
+    try {
+      return await opts.createBackend({
+        backend: "local-docker",
+        docker: new Docker(),
+        store: core.sandboxStore,
+        runInTx: core.runInTx,
+        runtime,
+        instanceId: instance.id,
+      });
+    } catch (e) {
+      // No container carries the row's id yet; the next attempt inserts its own.
+      await close();
+      row = null;
+      throw e;
+    }
+  });
+  return { sandbox, close };
+}
+
+/**
+ * A {@link SessionSandbox} whose client `build` makes on first use; a build
+ * that fails is retried by the next call.
+ */
+function lazySessionSandbox(
+  backendId: string,
+  capabilities: Readonly<SandboxCapabilities>,
+  build: () => Promise<SandboxClient>,
+): SessionSandbox {
+  let client: Promise<SandboxClient> | undefined;
+  const built = (): Promise<SandboxClient> => {
+    client ??= build().catch((e: unknown) => {
+      client = undefined;
+      throw e;
+    });
+    return client;
+  };
+  return {
+    backendId,
+    capabilities,
+    ensureImagePresent: async (image, limits) => (await built()).ensureImagePresent(image, limits),
+    create: async (spec) => (await built()).create(spec),
+    delete: async (session) => (await built()).delete(session),
+  };
 }

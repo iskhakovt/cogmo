@@ -1,108 +1,16 @@
-import { PassThrough } from "node:stream";
-import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
-import { mock } from "vitest-mock-extended";
-import type { ExecFailure, ExecStreamingHandle } from "../../sandbox/exec.js";
-import type { SandboxClient, SandboxSession, SessionSpec } from "../../sandbox/index.js";
 import { expectDefined } from "../../test/assertions.js";
+import {
+  type ExecScript,
+  type SessionHarness,
+  sessionHarness,
+} from "../../test/session-harness.js";
 import { isUuid } from "../../util/uuid.js";
 import { makeSandboxSchemaImporter } from "./schema-import.js";
 
-/** What one exec does: write `stdout` and `stderr`, then exit or fail; or run until its signal aborts. */
-type ExecScript =
-  | { stdout?: string; stderr?: string; exitCode: number }
-  | { stdout?: string; stderr?: string; failure: ExecFailure }
-  | { hang: true }
-  | { streamError: string; exitCode: number };
-
-interface Harness {
-  sandbox: SandboxClient;
-  specs: SessionSpec[];
-  /** Each exec's command and the stdin it was sent, in order. */
-  execs: { cmd: readonly string[]; stdin: string }[];
-  deleted: number;
-}
-
-/** A sandbox whose sessions answer each exec with the next script. */
-function harness(...scripts: ExecScript[]): Harness {
-  const state: Harness = {
-    sandbox: mock<SandboxClient>(),
-    specs: [],
-    execs: [],
-    deleted: 0,
-  };
-  const sandbox = mock<SandboxClient>();
-  sandbox.ensureImagePresent.mockResolvedValue();
-  sandbox.create.mockImplementation(async (spec) => {
-    state.specs.push(spec);
-    const session = mock<SandboxSession>();
-    session.execStreaming.mockImplementation(async (cmd, opts) => {
-      const script = expectDefined(scripts.shift(), `a script for ${cmd.join(" ")}`);
-      const entry = { cmd, stdin: "" };
-      state.execs.push(entry);
-      return fakeExec(script, opts?.signal, (input) => {
-        entry.stdin = input;
-      });
-    });
-    return session;
-  });
-  sandbox.delete.mockImplementation(async () => {
-    state.deleted += 1;
-  });
-  state.sandbox = sandbox;
-  return state;
-}
-
-/** An exec that plays `script` once its stdin ends; a hanging one settles `disposed` on `signal`. */
-function fakeExec(
-  script: ExecScript,
-  signal: AbortSignal | undefined,
-  onStdin: (input: string) => void,
-): ExecStreamingHandle {
-  const stdin = new PassThrough();
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  const chunks: Buffer[] = [];
-  stdin.on("data", (c: Buffer) => chunks.push(c));
-  const exited = new Promise<Awaited<ExecStreamingHandle["exited"]>>((resolve) => {
-    stdin.on("end", () => {
-      onStdin(Buffer.concat(chunks).toString("utf-8"));
-      if ("streamError" in script) {
-        stdout.emit("error", new Error(script.streamError));
-        stdout.end();
-        stderr.end();
-        setImmediate(() => resolve(ok({ exitCode: script.exitCode })));
-        return;
-      }
-      if ("hang" in script) {
-        signal?.addEventListener("abort", () => {
-          stdout.end();
-          stderr.end();
-          resolve(err({ kind: "disposed" }));
-        });
-        return;
-      }
-      if (script.stdout) stdout.write(script.stdout);
-      if (script.stderr) stderr.write(script.stderr);
-      stdout.end();
-      stderr.end();
-      setImmediate(() =>
-        resolve("failure" in script ? err(script.failure) : ok({ exitCode: script.exitCode })),
-      );
-    });
-  });
-  return {
-    stdin,
-    stdout,
-    stderr,
-    exited,
-    wait: async () => {
-      const exit = await exited;
-      if (exit.isErr()) throw new Error(exit.error.kind);
-      return exit.value;
-    },
-    dispose: async () => {},
-  };
+/** A Local-Docker sandbox whose sessions answer each exec with the next script. */
+function harness(...scripts: ExecScript[]): SessionHarness {
+  return sessionHarness({}, ...scripts);
 }
 
 const VOLUME = "cogmo-skills-venvs";
@@ -114,7 +22,7 @@ const SCHEMAS_REPLY = `${JSON.stringify({
   outputs: null,
 })}\n`;
 
-function importer(h: Harness, depsCacheVolumeName: string | undefined) {
+function importer(h: SessionHarness, depsCacheVolumeName: string | undefined) {
   return makeSandboxSchemaImporter({
     sandbox: h.sandbox,
     image: "cogmo-skills:test",
@@ -150,8 +58,8 @@ describe("makeSandboxSchemaImporter", () => {
     expect(h.deleted).toBe(1);
   });
 
-  it("installs the dependencies in a session with network, then imports with their venv and none", async () => {
-    const h = harness({ exitCode: 0 }, { stdout: SCHEMAS_REPLY, exitCode: 0 });
+  it("imports a skill with dependencies in one session with no network, activating the venv on the shared volume", async () => {
+    const h = harness({ stdout: SCHEMAS_REPLY, exitCode: 0 });
 
     const imported = await importer(h, VOLUME).importSchemas({
       body: BODY,
@@ -161,24 +69,19 @@ describe("makeSandboxSchemaImporter", () => {
     });
 
     expect(imported.isOk()).toBe(true);
-    const volume = { volumeName: "cogmo-skills-venvs" };
+    // Register's install session populated the venv; the import installs nothing.
     expect(h.specs.map((s) => [s.network, s.depsCacheVolume])).toEqual([
-      ["bridge", volume],
-      ["none", volume],
+      ["none", { volumeName: "cogmo-skills-venvs" }],
     ]);
-    // The populate script, fed the lockfile, then the import naming its venv.
-    expect(h.execs[0]?.cmd.slice(0, 2)).toEqual(["sh", "-c"]);
-    expect(h.execs[0]?.stdin).toBe(LOCKFILE.contents);
-    expect(h.execs[1]).toEqual({
-      cmd: ["python3", "-I", "-m", "cogmo_skills_runtime.schema", LOCKFILE.hash],
-      stdin: BODY,
-    });
-    expect(h.deleted).toBe(2);
+    expect(h.execs).toEqual([
+      { cmd: ["python3", "-I", "-m", "cogmo_skills_runtime.schema", LOCKFILE.hash], stdin: BODY },
+    ]);
+    expect(h.deleted).toBe(1);
     // Local-Docker names each session's cgroup slice after its task id, which must be a UUID.
-    expect(h.specs.map((spec) => isUuid(spec.taskId))).toEqual([true, true]);
+    expect(isUuid(expectDefined(h.specs[0], "spec").taskId)).toBe(true);
   });
 
-  it("stops an install the register's signal aborts, and imports nothing", async () => {
+  it("stops an import the register's signal aborts", async () => {
     const h = harness({ hang: true });
     const controller = new AbortController();
 
@@ -193,7 +96,10 @@ describe("makeSandboxSchemaImporter", () => {
     controller.abort(new Error("register deadline"));
     const imported = await pending;
 
-    expect(imported._unsafeUnwrapErr()).toMatchObject({ kind: "unavailable" });
+    expect(imported._unsafeUnwrapErr()).toEqual({
+      kind: "unavailable",
+      message: "the import was stopped",
+    });
     expect(h.specs).toHaveLength(1);
     expect(h.deleted).toBe(1);
   });
@@ -210,37 +116,6 @@ describe("makeSandboxSchemaImporter", () => {
       }),
     ).rejects.toThrow("a lockfile needs the shared venv volume");
     expect(h.specs).toEqual([]);
-  });
-
-  it("refuses dependencies that do not install, and imports nothing", async () => {
-    const h = harness({ stderr: "error: no wheel for idna==3.10", exitCode: 1 });
-
-    const imported = await importer(h, VOLUME).importSchemas({
-      body: BODY,
-      lockfile: LOCKFILE,
-      resourceLimits: {},
-      timeoutMs: 60_000,
-    });
-
-    expect(imported._unsafeUnwrapErr()).toEqual({
-      kind: "refused",
-      message: "the skill's dependencies did not install: error: no wheel for idna==3.10",
-    });
-    expect(h.specs).toHaveLength(1);
-    expect(h.deleted).toBe(1);
-  });
-
-  it("reads the last line of stdout as the reply", async () => {
-    const h = harness({ stdout: `noise\n${SCHEMAS_REPLY}`, exitCode: 0 });
-
-    const imported = await importer(h, undefined).importSchemas({
-      body: BODY,
-      lockfile: null,
-      resourceLimits: {},
-      timeoutMs: 60_000,
-    });
-
-    expect(imported.isOk()).toBe(true);
   });
 
   it.each([
@@ -264,13 +139,6 @@ describe("makeSandboxSchemaImporter", () => {
       name: "an exit with no reply is unavailable, quoting stderr",
       script: { stderr: "Killed\n", exitCode: 137 },
       error: { kind: "unavailable", message: "the import exited 137 with no reply: Killed" },
-    },
-    {
-      name: "a timeout is unavailable",
-      script: {
-        failure: { kind: "timed_out", deadline: "total", timeoutMs: 60_000 },
-      },
-      error: { kind: "unavailable", message: "the import timed out after 60000ms" },
     },
   ] satisfies { name: string; script: ExecScript; error: unknown }[])(
     "$name",
@@ -303,130 +171,6 @@ describe("makeSandboxSchemaImporter", () => {
       kind: "refused",
       message: "the import wrote more than 1048576 bytes to stdout",
     });
-  });
-
-  it("reports an install whose exec fails in transport as unavailable", async () => {
-    const h = harness({ failure: { kind: "transport_failed", error: new Error("socket closed") } });
-
-    const imported = await importer(h, VOLUME).importSchemas({
-      body: BODY,
-      lockfile: LOCKFILE,
-      resourceLimits: {},
-      timeoutMs: 60_000,
-    });
-
-    expect(imported._unsafeUnwrapErr()).toEqual({
-      kind: "unavailable",
-      message: expect.stringMatching(/^the install did not finish: /),
-    });
-    expect(h.specs).toHaveLength(1);
-  });
-
-  it.each([
-    {
-      name: "an exec that does not start",
-      exec: (session: SandboxSession) =>
-        vi.mocked(session.execStreaming).mockRejectedValueOnce(new Error("exec create failed")),
-      message: "the import did not start: exec create failed",
-    },
-    {
-      name: "an exec with no stdin",
-      exec: (session: SandboxSession) =>
-        vi.mocked(session.execStreaming).mockImplementationOnce(async () => {
-          const { stdin: _stdin, ...withoutStdin } = fakeExec({ exitCode: 0 }, undefined, () => {});
-          return withoutStdin;
-        }),
-      message: "the import's exec has no stdin",
-    },
-  ])("reports $name as unavailable, and deletes the session", async ({ exec, message }) => {
-    const h = harness();
-    const session = mock<SandboxSession>();
-    exec(session);
-    vi.mocked(h.sandbox.create).mockResolvedValueOnce(session);
-
-    const imported = await importer(h, undefined).importSchemas({
-      body: BODY,
-      lockfile: null,
-      resourceLimits: {},
-      timeoutMs: 60_000,
-    });
-
-    expect(imported._unsafeUnwrapErr()).toEqual({ kind: "unavailable", message });
-    expect(h.deleted).toBe(1);
-  });
-
-  it("reports a stream that fails as unavailable", async () => {
-    const h = harness({ streamError: "pipe broke", exitCode: 0 });
-
-    const imported = await importer(h, undefined).importSchemas({
-      body: BODY,
-      lockfile: null,
-      resourceLimits: {},
-      timeoutMs: 60_000,
-    });
-
-    expect(imported._unsafeUnwrapErr()).toEqual({
-      kind: "unavailable",
-      message: "the import's streams failed: pipe broke",
-    });
-  });
-
-  it("returns the reply when deleting its session fails", async () => {
-    const h = harness({ stdout: SCHEMAS_REPLY, exitCode: 0 });
-    vi.mocked(h.sandbox.delete).mockRejectedValueOnce(new Error("already gone"));
-
-    const imported = await importer(h, undefined).importSchemas({
-      body: BODY,
-      lockfile: null,
-      resourceLimits: {},
-      timeoutMs: 60_000,
-    });
-
-    expect(imported.isOk()).toBe(true);
-    expect(h.sandbox.delete).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns the reply when disposing its exec fails", async () => {
-    const h = harness();
-    const session = mock<SandboxSession>();
-    session.execStreaming.mockImplementationOnce(async () => ({
-      ...fakeExec({ stdout: SCHEMAS_REPLY, exitCode: 0 }, undefined, () => {}),
-      dispose: async () => {
-        throw new Error("exec already gone");
-      },
-    }));
-    vi.mocked(h.sandbox.create).mockResolvedValueOnce(session);
-
-    const imported = await importer(h, undefined).importSchemas({
-      body: BODY,
-      lockfile: null,
-      resourceLimits: {},
-      timeoutMs: 60_000,
-    });
-
-    expect(imported.isOk()).toBe(true);
-    expect(h.deleted).toBe(1);
-  });
-
-  it("refuses a reply past its cap when disposing its exec fails", async () => {
-    const h = harness();
-    const session = mock<SandboxSession>();
-    session.execStreaming.mockImplementationOnce(async () => ({
-      ...fakeExec({ stdout: "x".repeat(1024 * 1024 + 1), exitCode: 0 }, undefined, () => {}),
-      dispose: async () => {
-        throw new Error("exec already gone");
-      },
-    }));
-    vi.mocked(h.sandbox.create).mockResolvedValueOnce(session);
-
-    const imported = await importer(h, undefined).importSchemas({
-      body: BODY,
-      lockfile: null,
-      resourceLimits: {},
-      timeoutMs: 60_000,
-    });
-
-    expect(imported._unsafeUnwrapErr()).toMatchObject({ kind: "refused" });
   });
 
   it("reports a session that does not start as unavailable", async () => {
