@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -421,7 +421,7 @@ describe("configureSkillsRemote", () => {
     }
   });
 
-  it("own + adopt over the bare layout commit fetches to a side ref no other adopt shares", {
+  it("own + adopt over the bare layout commit fetches to a side ref of its own", {
     timeout: 30_000,
   }, async () => {
     const { tx, close } = await createTestDatabase();
@@ -430,12 +430,13 @@ describe("configureSkillsRemote", () => {
       const skillsPath = join(workDir, "skills.git");
       await bootstrapSkillsRepo({ path: skillsPath });
       const bare = await migrateSkillsLayout({ runInTx: tx, store: skillStore }, skillsPath);
-      // Another adopt's fetch lands right after this one's, into the side
-      // ref name every adopt once shared.
+      // Another write under refs/cogmo/ lands right after this adopt's fetch
+      // commits its own ref; the hook logs every ref written there.
       const theirs = "refs/cogmo/adopt-main";
+      const written = join(workDir, "cogmo-refs.log");
       await writeFile(
         join(skillsPath, "hooks", "reference-transaction"),
-        `#!/bin/sh\n[ "$1" = committed ] || exit 0\nawk '$3 ~ /^refs\\/cogmo\\// && $2 != "${bare}" && $2 !~ /^0+$/ { f = 1 } END { exit !f }' && git update-ref ${theirs} ${bare}\nexit 0\n`,
+        `#!/bin/sh\n[ "$1" = committed ] || exit 0\nawk -v out=${written} '$3 ~ /^refs\\/cogmo\\// && $2 !~ /^0+$/ { print $3 >> out; if ($2 != "${bare}") f = 1 } END { exit !f }' && git update-ref ${theirs} ${bare}\nexit 0\n`,
         { mode: 0o755 },
       );
       const remoteUrl = await makePopulatedRemote();
@@ -450,7 +451,13 @@ describe("configureSkillsRemote", () => {
       const layout = await tx((trx) => skillStore.getLayoutCommitSha(trx));
       const { stdout } = await execFileP("git", ["-C", skillsPath, "rev-parse", `${layout}^`]);
       expect(stdout.trim()).toBe(remoteSha);
-      // The other adopt's ref is its own to resolve and delete.
+      // The adopt fetched to a ref of its own, named for it alone, and left
+      // the other write's ref for its writer to resolve and delete.
+      const [own, ...rest] = (await readFile(written, "utf8")).trim().split("\n");
+      expect(own).toMatch(
+        /^refs\/cogmo\/adopt-main-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+      expect(rest).toEqual([theirs]);
       expect(
         (
           await execFileP("git", [
