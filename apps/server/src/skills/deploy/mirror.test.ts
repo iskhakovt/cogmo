@@ -177,6 +177,39 @@ describe("mirrorMain", () => {
     expect(await git(remote, "rev-parse", "refs/heads/main")).toBe(newer);
   });
 
+  it("records nothing when an older git's remote reports the lost race as a ref it could not lock", async () => {
+    const base = await commitLocal("a");
+    const older = await commitLocal("b");
+    const newer = await commitLocal("c");
+    await git(local, "push", "-q", remote, `${newer}:refs/heads/main`);
+    // Pushes reach a remote that answers as git 2.44's receive-pack does when
+    // another push moved main first; reads reach the real remote.
+    vi.stubEnv("GIT_SSH_COMMAND", undefined);
+    vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+    await git(local, "config", "url.git@skills.invalid:o/skills.git.pushInsteadOf", remote);
+    await git(
+      local,
+      "config",
+      "core.sshCommand",
+      await script(
+        "ssh",
+        [
+          `echo "remote: error: cannot lock ref 'refs/heads/main': is at ${newer} but expected ${base}" >&2`,
+          "echo 'To git@skills.invalid:o/skills.git' >&2",
+          `echo ' ! [remote rejected] ${older} -> main (failed to update ref)' >&2`,
+          "exit 1",
+        ].join("\n"),
+      ),
+    );
+    const d = deps();
+
+    const outcome = await mirrorMain(d, local, older);
+
+    expect(outcome).toMatchObject({ kind: "failed", failure: "rejected" });
+    expect(d.store.recordMirrorFailed).not.toHaveBeenCalled();
+    expect(d.store.recordMirrorDiverged).not.toHaveBeenCalled();
+  });
+
   it("stops reading the remote after a rejected push once its signal aborts", async () => {
     const theirs = await commitLocal("theirs");
     await git(local, "push", "-q", remote, `${theirs}:refs/heads/main`);
@@ -400,6 +433,45 @@ describe("the push and the remote read", () => {
         args: expect.stringMatching(/^-o BatchMode=yes -o BatchMode=no /),
         tag: "tag=kept",
       });
+    });
+
+    it("read a command substitution in an assignment as one word", async () => {
+      const sha = await commitLocal("a");
+      const ssh = await recordingSsh(root);
+      await git(
+        local,
+        "config",
+        "core.sshCommand",
+        `SKILLS_SSH_TAG=$(printf kept) ${ssh} -o BatchMode=no`,
+      );
+
+      await mirrorMain(deps(), local, sha);
+
+      expect(await sshCall()).toEqual({
+        args: expect.stringMatching(/^-o BatchMode=yes -o BatchMode=no /),
+        tag: "tag=kept",
+      });
+    });
+
+    it.each([
+      ["an executable named by a substitution", "$(command -v ssh) -i key"],
+      ["a wrapper", "env SKILLS_SSH_TAG=kept ssh -i key"],
+      ["a list", "cd / && ssh -i key"],
+      ["a nested substitution", "$(printf %s $(command -v ssh)) -i key"],
+      [
+        "a nested substitution ahead of ssh",
+        "SKILLS_SSH_TAG=$(printf %s $(printf kept)) ssh -i key",
+      ],
+    ])("append BatchMode=yes to %s, which still runs", async (_, command) => {
+      const sha = await commitLocal("a");
+      const bin = join(root, "bin");
+      await recordingSsh(bin);
+      vi.stubEnv("PATH", `${bin}:${process.env.PATH ?? ""}`);
+      await git(local, "config", "core.sshCommand", command);
+
+      await mirrorMain(deps(), local, sha);
+
+      expect((await sshCall()).args).toMatch(/^-i key -o BatchMode=yes git@skills\.invalid /);
     });
 
     it("leave a GIT_SSH program to run with git's own options", async () => {

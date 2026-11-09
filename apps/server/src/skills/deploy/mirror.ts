@@ -126,9 +126,12 @@ function classifyPushFailure(e: unknown, signal: AbortSignal): SkillsMirrorFailu
   if (signal.aborted) return "timeout";
   const text = describeError(e);
   // The remote refused to update `main` because another push moved it
-  // first: a rejection, whose winner `lostToNewerPush` reads. A ref the remote
-  // cannot lock for another reason (permissions, I/O) is a failure to record.
-  if (/incorrect old value provided/i.test(text)) return "rejected";
+  // first, in git's words before 2.50 and after: a rejection, whose winner
+  // `lostToNewerPush` reads. A ref the remote cannot lock for another reason
+  // (permissions, I/O) prints neither, and is a failure to record.
+  if (/incorrect old value provided|is at [0-9a-f]+ but expected [0-9a-f]+/i.test(text)) {
+    return "rejected";
+  }
   if (
     /\[remote rejected\]|protected branch|Authentication failed|Permission denied|denied to|marked as read only|could not read Username|\b40[13]\b/i.test(
       text,
@@ -261,21 +264,49 @@ async function nonInteractiveEnv(repoPath: string): Promise<NodeJS.ProcessEnv> {
   };
 }
 
-/** One shell word: unquoted characters, backslash escapes, and quoted spans. */
-const SHELL_WORD = /(?:[^\s'"\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+/g;
-
-/** A shell word that sets a variable for the command after it. */
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** `$(…)`, `${…}` or a backtick span, none nested. */
+const SUBSTITUTION = /\$\([^()]*\)|\$\{[^{}]*\}|`[^`]*`/.source;
+/** A `$` that starts no substitution: a parameter such as `$HOME`. */
+const PARAMETER = /\$(?![({])/.source;
+const ESCAPE = /\\[\s\S]/.source;
+const DOUBLE_QUOTED = `"(?:[^"\\\\$\`]|${ESCAPE}|${SUBSTITUTION}|${PARAMETER})*"`;
+/**
+ * One part of a shell word. Operators (`;`, `&`, `|`, `<`, `>`, `(`, `{`, a
+ * newline) and nested or unbalanced quotes and substitutions are none.
+ */
+const WORD_PART = `[^\\s'"\\\\$\`;&|<>(){}]|${ESCAPE}|'[^']*'|${DOUBLE_QUOTED}|${SUBSTITUTION}|${PARAMETER}`;
+const NAME = /[A-Za-z_][A-Za-z0-9_]*/.source;
+/**
+ * A command read up to its executable, the first word past any variable
+ * assignments, with the executable as group 1. A part the reader can't
+ * follow, before the executable or right after it, leaves no match.
+ */
+const UP_TO_EXECUTABLE = new RegExp(
+  `^[ \\t]*(?:${NAME}=(?:${WORD_PART})*[ \\t]+)*(?!${NAME}=)((?:${WORD_PART})+)(?=[ \\t]|$)`,
+);
 
 /**
- * `command` with `-o BatchMode=yes` right after its executable, the first
- * shell word past any variable assignments, so it precedes the command's own
- * options: ssh keeps the first value it reads for an option.
+ * `command` with `-o BatchMode=yes` right after its executable, so it precedes
+ * the command's own options: ssh keeps the first value it reads for an option.
+ * Only a command read up to an executable named `ssh` takes it there; anything
+ * else (a wrapper, a list, an executable named by a substitution, a part the
+ * reader can't follow) gets it appended, as git appends its own arguments.
  */
 function withBatchMode(command: string): string {
-  const executable = command.matchAll(SHELL_WORD).find((word) => !ASSIGNMENT.test(word[0]));
-  const end = executable === undefined ? command.length : executable.index + executable[0].length;
+  const read = UP_TO_EXECUTABLE.exec(command);
+  if (read === null || !namesSsh(read[1] ?? "")) return `${command} -o BatchMode=yes`;
+  const end = read[0].length;
   return `${command.slice(0, end)} -o BatchMode=yes${command.slice(end)}`;
+}
+
+/** Whether a shell word's last path segment, its quotes dropped, is `ssh`. */
+function namesSsh(word: string): boolean {
+  return (
+    word
+      .replace(/['"\\]/g, "")
+      .split("/")
+      .at(-1) === "ssh"
+  );
 }
 
 /** `core.sshCommand` as git reads it for the repo, or null when it is unset. */
