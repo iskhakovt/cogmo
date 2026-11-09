@@ -27,6 +27,7 @@ Tables are documented in the design doc that owns their domain:
 | `turn_contexts` | [prompt-caching.md](prompt-caching.md) → Turn Context | The turn context each turn-starting user row was sent with: the exact rendered block and its structured inputs (`context`, `TurnContextSchema`: recalled memories, reply modality, delivery channels and announced core-memory blocks). One row per message (`UNIQUE message_id`), written by the `render-turn-context` step through `insertOrRecoverTurnContext`. Immutable; later turns re-send the stored text. |
 | `system_prompt_snapshots` | [prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed) → System Prompt Snapshot | The system prompt a conversation's chat turns send for one epoch: the exact rendered text, the configuration digest, the history start the epoch opened on, why it opened (`reason`), and its attachment cutoff. One row per opening turn (`UNIQUE (conversation_id, opened_by)`, also the latest-epoch read path), written by the `open-system-prompt-epoch` step through `insertOrRecoverSystemPromptSnapshot`; the current epoch is the one opened latest in the transcript. Immutable. |
 | `aliases` | [transport/sessions.md](transport/sessions.md) | Human-friendly conversation names ('work', 'shopping'). Scoped per user (`UNIQUE(user_id, alias)`). Set via `transport.conversations.setAlias` (`/name <alias>` in Telegram). |
+| `connectors` | [connectors.md](connectors.md#data-model-proposed) | Registered connectors: name, kind, the token's SHA-256, `status` (`active`, `revoked`). Name unique among active rows; a revoked row stays. |
 | `pipeline_definitions` | [pipelines.md](pipelines.md) | Versioned user-defined pipeline definitions (free-text source + compiled JSONB; immutable except `active`). |
 | `pipeline_runs` | [pipelines.md](pipelines.md) | Pipeline run state — pinned definition version, the run's own conversation, status, current stage and loop iteration, typed stage outputs, the latest gate's winning resolution, the `start_pipeline` call's idempotency key. |
 
@@ -59,7 +60,7 @@ Design sketches — added via Drizzle migrations when their phase begins.
 | `mcp_servers` | 2 | MCP server configs (transport, config blob, enabled, approval). See [integrations/mcp.md](integrations/mcp.md). |
 | `mcp_server_tools` | 2 | Per-tool schema hash + approval state. Cascades from `mcp_servers`. |
 | `skills` | 3 | Skill library metadata. Code on filesystem, descriptions for retrieval. |
-| `connectors` | — | Registered connectors: name, kind, token hash. Also `coding_repos.connector_id` and `coding_tasks.connector_id`. See [connectors.md](connectors.md). |
+| `coding_repos.connector_id`, `coding_tasks.connector_id` | — | Coding on a connector. See [connectors.md](connectors.md). |
 
 ## Hindsight Tables (Managed Externally) `[confirmed]`
 

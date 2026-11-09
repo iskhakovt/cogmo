@@ -69,8 +69,7 @@
 
 ### Connectors (design/connectors.md)
 
-- [ ] `p2` Connectors slice 1: `packages/connector-proto` (the `.proto`, generated TypeScript, `buf lint` / `buf breaking` / generate-drift CI), `src/connector/` (h2c server on `CONNECTOR_PORT`, bearer auth, session hub with leases, `connectors` store and migration, shutdown order), `cogmo connector add | rotate | revoke | list`, and the unit tier over `createRouterTransport`. Gated on approving the design.
-- [ ] `p2` Connectors slice 2: coding on a connector. `coding_repos.connector_id`, `coding_tasks.connector_id`, the `connector` worktree-assignment variant and its CHECKs, the dispatching steps, the four failure reasons, `release-ended-workspaces` and the release sweep, and the integration test against a fake connector.
+- [ ] `p2` Connectors slice 2: coding on a connector. `coding_repos.connector_id`, `coding_tasks.connector_id`, the `connector` worktree-assignment variant and its CHECKs, `cogmo connector revoke` refusing while a repo points at the connector, boot warning when a repo points at a connector and `CONNECTOR_PORT` is unset, the dispatching steps and the job-id digest, the four failure reasons, the session's held tasks (`held_task_ids`, which the hub reads but does not yet keep, plus the tasks it prepared), `release-ended-workspaces` and the release sweep, and the integration test against a fake connector. The hub (`src/connector/hub.ts`) is the `ConnectorJobs` port's implementation; boot builds it only with `CONNECTOR_PORT` set, so wire it into the coding deps there.
 - [ ] `p2` Connectors slice 3: the Paseo spike (plan-mode end state, `idempotencyKey` across reconnects, mode switch through the public SDK, agents across a daemon restart), then `connectors/paseo` and the contract suite.
 - [ ] `p3` Dispatch `CancelJob` when a coding task on a connector is cancelled mid-job, so the connector stops at once instead of at the next release sweep (up to 10 minutes).
 

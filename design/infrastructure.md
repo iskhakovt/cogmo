@@ -144,16 +144,17 @@ Keys don't close every route — see `deploy.md` → Securing internal services.
 On `SIGTERM` or `SIGINT`, the Inngest connection closes first, waiting for every request in flight with no deadline. Then `cogmo serve` tears down in this order (`src/boot/shutdown.ts`), each step finishing before the next starts:
 
 1. **Web server** (`close(drainMs)` in `src/web/server.ts`). End every chat stream cleanly: the browser reconnects to the next process either way, and a clean end avoids a network error. Then `close()`, which refuses new connections, while idle keep-alive connections are closed every 50 ms as their requests finish. A request still in flight after 3 s has its connection closed (`closeAllConnections()`, called after `close()` as Node's docs recommend). Last, wait for the session closes the ended streams started.
-2. **Channel adapters**, concurrently. Telegram confirms the update offset past every update it handled, so none is redelivered on restart.
-3. **Coding progress streams.** Stops the sweep timer ([coding-delegation.md → Progress stream](coding-delegation.md#progress-stream-confirmed)).
-4. **MCP** connection pool.
-5. **Skills pool.** Disposes the container-tier warm pool, tearing its containers down ([skills.md → Sizing](skills.md#sizing-confirmed)).
-6. **Sandbox.** On local-Docker this closes the socket proxy, which ends every connection a task opened through it, hijacked streams included.
-7. **Instance row.** Sets `cogmo_instances.stopped_at` ([sandbox.md → Data Model](sandbox.md#data-model-confirmed)). Skipped when the skills pool or sandbox step didn't finish: the next boot reaps the containers of instances never marked stopped, so it reaps what they left.
+2. **Connector server** (`close()` in `src/connector/server.ts`). Ends every connector session with `UNAVAILABLE`, then closes the server and every HTTP/2 connection. It runs after Inngest's drain, so a step that finished inside the stop grace has received its `FinishJob` ([connectors.md → Serving](connectors.md#wire-contract-confirmed)).
+3. **Channel adapters**, concurrently. Telegram confirms the update offset past every update it handled, so none is redelivered on restart.
+4. **Coding progress streams.** Stops the sweep timer ([coding-delegation.md → Progress stream](coding-delegation.md#progress-stream-confirmed)).
+5. **MCP** connection pool.
+6. **Skills pool.** Disposes the container-tier warm pool, tearing its containers down ([skills.md → Sizing](skills.md#sizing-confirmed)).
+7. **Sandbox.** On local-Docker this closes the socket proxy, which ends every connection a task opened through it, hijacked streams included.
+8. **Instance row.** Sets `cogmo_instances.stopped_at` ([sandbox.md → Data Model](sandbox.md#data-model-confirmed)). Skipped when the skills pool or sandbox step didn't finish: the next boot reaps the containers of instances never marked stopped, so it reaps what they left.
 
 The web server goes first so no request reaches a stopped dependency. It gets its 3 s drain plus 5 s; every other step is capped at 5 s. A step that overruns or throws doesn't stop the next, and `serve` logs each step's outcome and exits 0 regardless: the process did stop, and the log says what didn't.
 
-**Time budget.** After Inngest's drain, the teardown takes at most 33 s: 8 s for the web server and 5 s each for the adapters, MCP, the skills pool, the sandbox and the instance row; stopping the coding streams' sweep is synchronous. Docker's default stop grace is 10 s, after which it sends `SIGKILL`, so cogmo's container sets a longer one: `--stop-timeout 60` (`stop_grace_period: 60s` in compose), which leaves about 27 s for runs in flight ([deploy.md → Stopping](../deploy.md#stopping)).
+**Time budget.** After Inngest's drain, the teardown takes at most 38 s: 8 s for the web server and 5 s each for the connector server, the adapters, MCP, the skills pool, the sandbox and the instance row; stopping the coding streams' sweep is synchronous. Docker's default stop grace is 10 s, after which it sends `SIGKILL`, so cogmo's container sets a longer one: `--stop-timeout 60` (`stop_grace_period: 60s` in compose), which leaves about 22 s for runs in flight ([deploy.md → Stopping](../deploy.md#stopping)).
 
 ## Image processing `[confirmed]`
 

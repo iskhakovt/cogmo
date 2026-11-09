@@ -17,6 +17,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY packages/contracts/package.json packages/contracts/
+COPY packages/connector-proto/package.json packages/connector-proto/
 # `pmOnFail: ignore` lets pnpm run whatever version it is, so the install first
 # checks it against packageManager.
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
@@ -29,8 +30,9 @@ COPY apps/server/src/ apps/server/src/
 COPY apps/server/migrations/ apps/server/migrations/
 COPY apps/server/vendor/ apps/server/vendor/
 COPY apps/server/data/ apps/server/data/
-# Types-only package the backend re-imports; tsc needs its source present.
+# Workspace packages the backend bundles from source (tsup `noExternal`).
 COPY packages/contracts/ packages/contracts/
+COPY packages/connector-proto/ packages/connector-proto/
 # The skills' ctx package, which the wasm child bundle embeds.
 COPY images/skills/src/cogmo_ctx/ images/skills/src/cogmo_ctx/
 # Build-time guard: the resolver's LiteLLM snapshot loader expects this

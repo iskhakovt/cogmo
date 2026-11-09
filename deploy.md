@@ -192,6 +192,14 @@ Required by `serve`, which checks the bucket at boot. With `S3_ENDPOINT` unset t
 | `WEB_STATIC_ROOT` | `./apps/web/dist` | Built SPA directory. The image ships it at the default. |
 | `WEB_INSECURE_COOKIES`, `WEB_DEV_ALLOW_ORIGIN` | — | Local dev only: drop the `__Host-`/`Secure` cookie hardening and allow a cross-origin SPA. Leave unset in production. |
 
+#### Connector server
+
+| Variable | Default | Purpose |
+|-|-|-|
+| `CONNECTOR_PORT` | — | Port for the connector server (gRPC over h2c). Unset, none starts. See [Connectors](#connectors). |
+| `CONNECTOR_HOST` | `0.0.0.0` | Bind host for the connector server. Restrict at the publish layer, as for `WEB_HOST`; set `127.0.0.1` on a bare-metal run with no proxy. |
+| `CONNECTOR_LEASE_SECONDS` | `120` | How long a connector job waits for its connector to reconnect before the job is lost. |
+
 #### Sandbox backend
 
 | Variable | Default | Purpose |
@@ -363,6 +371,7 @@ The image entrypoint dispatches based on the first arg:
 | `provider`, `model` | Add, list, change and remove LLM providers and model routing rows without re-running the wizard ([`design/setup.md` → Post-setup CLI](design/setup.md#post-setup-cli)). |
 | `subagent`, `image-provider`, `image-model` | Manage sub-agents, image providers and image models. |
 | `skills` | Register, approve, deny, roll back, deregister, run and list skills. |
+| `connector` | Add a connector and print its token once, rotate or revoke its token, and list connectors. See [Connectors](#connectors). |
 | `migrate-memories`, `backfill`, `migrate-skills-remote` | One-off data migrations; run `cogmo <command> --help`. |
 
 `serve` logs to stdout. Every other command logs to stderr, so its stdout carries only its output.
@@ -373,13 +382,19 @@ The image entrypoint dispatches based on the first arg:
 
 The app's auth is defense in depth, not the boundary. Keep the port off the open network: publish it on loopback only (`-p 127.0.0.1:9090:9090`) and reach it only through a proxy on the same host or a sidecar. The session cookie is `__Host-`-prefixed and `Secure`, so serve the UI over HTTPS (a reverse proxy, `tailscale serve`, `cloudflared`). See [`design/web-ui.md`](design/web-ui.md).
 
+## Connectors
+
+A connector is a process outside cogmo that dials in to run part of its work elsewhere ([`design/connectors.md`](design/connectors.md)). Set `CONNECTOR_PORT` to serve them, then register each with `cogmo connector add <name> --kind coding`, which prints its bearer token once. `rotate` replaces the token and `revoke` retires the connector; either closes the connector's open stream within 30 s.
+
+The token crosses the connection in cleartext (h2c). As with the web UI, keep the port off the open network: publish it on loopback (`-p 127.0.0.1:<port>:<port>`) and reach it through a tailnet or a TLS-terminating proxy that speaks HTTP/2 to cogmo.
+
 ## Health check
 
 `GET /health` on port 9090 returns 200 with an `application/health+json` body (IETF draft schema: `status`, `version`, `description`, `notes`, and `releaseId` when `GIT_SHA` is set). Liveness only — a Postgres blip will not flap the container. Wire it to your supervisor (Docker `HEALTHCHECK`, k8s `livenessProbe`, systemd, etc.).
 
 ## Stopping
 
-On `SIGTERM`, `serve` first waits for the Inngest function runs in flight, with no deadline, then tears down its own connections in at most 33 s ([`design/infrastructure.md` → Shutdown](design/infrastructure.md#shutdown-confirmed)). Docker's default stop grace is 10 s before `SIGKILL`, which can cut that teardown short and have Telegram redeliver the last batch of messages. Give the container 60 s with `--stop-timeout 60` on `docker run`, `stop_grace_period: 60s` in compose, `terminationGracePeriodSeconds: 60` in Kubernetes, or `TimeoutStopSec=60` for a systemd unit.
+On `SIGTERM`, `serve` first waits for the Inngest function runs in flight, with no deadline, then tears down its own connections in at most 38 s ([`design/infrastructure.md` → Shutdown](design/infrastructure.md#shutdown-confirmed)). Docker's default stop grace is 10 s before `SIGKILL`, which can cut that teardown short and have Telegram redeliver the last batch of messages. Give the container 60 s with `--stop-timeout 60` on `docker run`, `stop_grace_period: 60s` in compose, `terminationGracePeriodSeconds: 60` in Kubernetes, or `TimeoutStopSec=60` for a systemd unit.
 
 A step that fails is logged and the rest still run; the exit code stays 0. When a container teardown doesn't finish, the instance row is left open so the next boot reaps what it left.
 

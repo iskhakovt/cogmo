@@ -7,22 +7,22 @@ A connector is a process outside cogmo that runs part of cogmo's work somewhere 
 | `coding` | the coding jobs below | this doc |
 | `channel` | the per-channel `Transport` that [operator-facade.md](operator-facade.md) splits out | after that split; see *Channel connectors* |
 
-## Decisions `[proposed]`
+## Decisions `[confirmed]`
 
 | Decision | Choice | Rejected |
 |-|-|-|
 | Wire protocol | gRPC over HTTP/2. Every mainstream language has a production gRPC library, and streaming is part of the protocol. | Connect protocol: its gains are browsers and HTTP/1.1, which no connector needs. oRPC: TypeScript only, other languages through generated OpenAPI. MCP Tasks: built for tools a model calls, and experimental in spec and SDK. REST: generated server stubs and SSE support vary by language. HTTP/3: neither Node nor grpc-go serves gRPC over it. |
 | Node library | `@connectrpc/connect-node` + `@bufbuild/protobuf`, speaking gRPC. ESM output, plain generated types, and an in-memory transport (`createRouterTransport`) for tests. | `@grpc/grpc-js`: `@grpc/proto-loader`'s generated types need hand edits, and `ts-proto` brings `long.js`. Connectors see only the `.proto`, so swapping the library touches none of them. |
 | Direction | Connectors dial in. One listening port, one auth model, connectors behind NAT work, and channel connectors share the session. | cogmo dialling each connector: a URL per connector, and no path to one cogmo cannot reach. |
-| Contract home | `packages/connector-proto/`: the `.proto`, `buf.yaml`, and the generated TypeScript, committed. Ships in cogmo's release. Package `cogmo.connector.v1`; a breaking change is a `v2` package. | A separate repo with its own versioning, until a connector outside this repo needs it. |
-| Contract CI | `buf lint`, `buf breaking` against `origin/main`, and a check that `buf generate` leaves the tree clean. | — |
+| Contract home | `packages/connector-proto/`: the `.proto` under `proto/`, `buf.yaml`, `buf.gen.yaml`, and the generated TypeScript under `src/gen/`, committed. Ships in cogmo's release. Package `cogmo.connector.v1`; a breaking change is a `v2` package. | A separate repo with its own versioning, until a connector outside this repo needs it. |
+| Contract CI | The `Connector contract` job: `buf lint`, `buf breaking` against `main`, and a check that `buf generate` leaves the tree clean. The generated code is excluded from Biome. | — |
 | Credentials | cogmo sends no secret to a connector. A connector pushes with its own git credentials; cogmo opens the PR with the repo's GitHub identity. `PrepareSpec.remote_url` is the repo's remote with any password removed, and with the whole userinfo removed from an http(s) remote, where a token can sit in either position. An SSH login name such as `git@` stays. | A PAT in a job: the identity would leave cogmo's custody for a process cogmo does not run. |
 | Process model | One cogmo process serves connectors. The hub is process memory: a second process, such as a rolling deploy's overlap, holds no session or job of the first. | — |
-| Runtime dependencies | `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf`; dev: `@bufbuild/buf`, `@bufbuild/protoc-gen-es`. Pinned at implementation under the 7-day release-age gate. | — |
+| Runtime dependencies | `@connectrpc/connect` and `@connectrpc/connect-node` 2.3, `@bufbuild/protobuf` 2.16; dev: `@bufbuild/buf` 1.75, `@bufbuild/protoc-gen-es` 2.16. | — |
 
-## Wire contract `[proposed]`
+## Wire contract `[confirmed]`
 
-One server-streaming call carries cogmo's messages to the connector; unary calls carry the connector's side back. Each unary call is acknowledged on its own and is idempotent, so a dropped stream loses nothing the connector already sent, and an error belongs to one call.
+One server-streaming call carries cogmo's messages to the connector; unary calls carry the connector's side back. Each unary call is acknowledged on its own and is idempotent, so a dropped stream loses nothing the connector already sent, and an error belongs to one call. The server speaks only the gRPC protocol; a Connect or gRPC-Web request gets HTTP 415.
 
 ```proto
 syntax = "proto3";
@@ -157,10 +157,12 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 
 **Auth.** Each call carries `authorization: Bearer <token>`.
 - `cogmo connector add <name> --kind coding` mints a 32-byte token, prints it once and stores its SHA-256, as `web_sessions` does. `rotate` replaces the token. `revoke` moves the connector to `revoked`, and refuses while a repo points at it; tasks running on it lose their jobs. `list` shows the connectors.
-- Each call checks its token against the hub's cache of active connectors. A 30 s hub timer refreshes the cache from the table, as does a token the cache does not recognise (at most once every 5 s), so a new token works within seconds and a revoke or rotate takes effect, closing the old token's stream, within 30 s.
+- Each call checks its token against the hub's cache of active connectors. A 30 s hub timer refreshes the cache from the table, as does a token the cache does not recognise (at most once every 5 s), so a new token works within seconds and a revoke or rotate takes effect, closing the old token's stream, within 30 s. A call whose refresh fails gets `UNAVAILABLE`.
 - Jobs are keyed on (connector, `job_id`). A call naming another connector's job fails with `PERMISSION_DENIED`, and one naming a job this process does not know fails with `NOT_FOUND`.
 
-**Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_HOST`:`CONNECTOR_PORT`. When `CONNECTOR_PORT` is unset, no server starts, and boot warns if a repo points at a connector. `CONNECTOR_HOST` defaults to `0.0.0.0`, the container convention `WEB_HOST` follows ([web-ui.md](web-ui.md) → Auth and bind). As there, the boundary is the publish layer: the token crosses h2c in cleartext, so the port is published on host loopback, or reached through a tailnet or a TLS proxy. A bare-metal run with no such layer sets `CONNECTOR_HOST=127.0.0.1`. cogmo sends a `Heartbeat` every 30 s and both sides send HTTP/2 keepalive pings. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
+**Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_HOST`:`CONNECTOR_PORT`. When `CONNECTOR_PORT` is unset, no server starts, and boot warns if a repo points at a connector. `CONNECTOR_HOST` defaults to `0.0.0.0`, the container convention `WEB_HOST` follows ([web-ui.md](web-ui.md) → Auth and bind). As there, the boundary is the publish layer: the token crosses h2c in cleartext, so the port is published on host loopback, or reached through a tailnet or a TLS proxy. A bare-metal run with no such layer sets `CONNECTOR_HOST=127.0.0.1`. cogmo sends a `Heartbeat` every 30 s and both sides send HTTP/2 keepalive pings; cogmo pings every 30 s and closes a connection that has not answered within 20 s. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
+
+When cogmo ends a session, the stream closes with a status that says why: `ABORTED` when a newer session for the connector replaced it, `UNAUTHENTICATED` when its token was rotated or revoked, and `UNAVAILABLE` on shutdown.
 
 ## Data model `[proposed]`
 
@@ -214,13 +216,15 @@ dispatched ──► accepted ──► completed | failed | cancelled
 | `dispatched → dispatched` | a new session whose `held_job_ids` omit the job | sent again: never persisted, so never started (rule 1) |
 | `dispatched → dispatched` | a new session whose `held_job_ids` name the job | not sent again; the connector's retried `AcceptJob` moves it on |
 | `dispatched → accepted` | `AcceptJob` | — |
-| `accepted → accepted` | `ReportEvents` | events with a new `seq` go to `onEvent`; resets the idle cap |
+| `dispatched / accepted → accepted` | `ReportEvents` (on `dispatched` it implies acceptance) | events with a new `seq` go to `onEvent`; resets the idle cap |
 | `timed_out / lost / unavailable → dispatched` | `run` on the same id | — |
 | `dispatched / accepted → completed / failed / cancelled` | `FinishJob` (on `dispatched` it implies acceptance) | the first one wins; a `last_seq` beyond the events received is logged as a gap |
+| `dispatched / accepted → failed` | `FinishJob(completed)` whose result case does not match the job's spec | failed with `UNSPECIFIED`; the call gets `INVALID_ARGUMENT` |
+| unchanged | `FinishJob` with no outcome | the call gets `INVALID_ARGUMENT` |
 | `dispatched → unavailable` | no session accepts it within `CONNECTOR_LEASE_SECONDS` (default 120) | — |
 | `accepted → lost` | the session closed and none holding the job opened within the lease, or a new session's `held_job_ids` omitted it | — |
 | `dispatched / accepted → timed_out` | the job kind's total or idle cap | `CancelJob` sent |
-| any terminal state | a late `FinishJob` or `ReportEvents` | acknowledged and dropped; the hub keeps the id until the task's `release` finishes |
+| any terminal state | a late `FinishJob` or `ReportEvents` | acknowledged and dropped; the hub keeps the id until a `release` of the task ends `completed` or `failed` |
 | any terminal state | a late `AcceptJob` | refused with `NOT_FOUND`; the connector drops the job unstarted (rule 1) |
 
 | Job | Total cap | Idle cap |
@@ -231,7 +235,7 @@ dispatched ──► accepted ──► completed | failed | cancelled
 | `publish` | 5 min | — |
 | `release` | 10 min | — |
 
-The connector enforces `token_budget` inside the turn. The hub also cancels a turn whose reported usage passes it, which resolves `timed_out` with `cap: "token_budget"`.
+The connector enforces `token_budget` inside the turn. The hub also cancels a turn whose reported input and output tokens together pass it, which resolves `timed_out` with `cap: "token_budget"`. A budget of 0 is none.
 
 **Session.** A session is one open `Connect` stream. When it closes, its jobs wait out the lease for a new session. A new `Connect` under the same name replaces the old session and closes its stream; its `held_job_ids` decide which jobs carry over.
 
@@ -331,8 +335,8 @@ A channel connector exposes the per-channel `Transport` from [operator-facade.md
 
 ## Slices `[proposed]`
 
-1. `packages/connector-proto` and its CI checks, with the generated code excluded from Biome and knip. `src/connector/`: the server, auth, hub, store and migration, plus its place in the shutdown order. `cogmo connector add | rotate | revoke | list`, and the unit tier. Docs: the AGENTS.md module table, `store-pattern.md`, and `infrastructure.md` → Shutdown.
-2. Coding on a connector: the columns, the CHECKs and the assignment variant; the dispatching steps; the four reasons; the release sweep; the integration test. Docs: `coding-delegation.md`'s schema block, step table and failure-reason table.
+1. `packages/connector-proto` and its CI checks, with the generated code excluded from Biome. `src/connector/`: the server, auth, hub, store and migration, plus its place in the shutdown order. `cogmo connector add | rotate | revoke | list`, and the unit tier. Docs: the AGENTS.md module table, `store-pattern.md`, and `infrastructure.md` → Shutdown.
+2. Coding on a connector: the columns, the CHECKs and the assignment variant; `revoke` refusing while a repo points at the connector; the dispatching steps; the four reasons; the session's held tasks and the release sweep; the integration test. Docs: `coding-delegation.md`'s schema block, step table and failure-reason table.
 3. The Paseo spike, then `connectors/paseo` and the contract suite.
 4. Channel connectors, after operator-facade slice 3.
 
