@@ -1896,7 +1896,8 @@ describe("OpenAICompatibleProvider", () => {
             model: "gpt-5.6-luna",
             system: "sys",
             messages: [{ role: "user", content: "hi" }],
-            tools: [],
+            tools: [GET_TIME],
+            toolChoice: "none",
             temperature: 0,
             maxTokens: 4096,
           },
@@ -1906,6 +1907,7 @@ describe("OpenAICompatibleProvider", () => {
         expect(body.reasoning_effort).toBe("none");
         expect(body.temperature).toBe(0);
         expect(body).not.toHaveProperty("tools");
+        expect(body).not.toHaveProperty("tool_choice");
         expect(body.max_completion_tokens).toBe(4096);
       });
 
@@ -1984,6 +1986,31 @@ describe("OpenAICompatibleProvider", () => {
       } finally {
         warnSpy.mockRestore();
       }
+    });
+  });
+
+  // A fork's request (agent/context.ts → summarizationRequest): these routes
+  // replay no reasoning, so its tools go nowhere and it reasons as it would
+  // without them.
+  describe.each(["chat", "chatStream"] as const)("tool choice none on %s", (path) => {
+    it("omits the tools and tool_choice, and reasons at the model's default", async () => {
+      const body = await sentBody(
+        path,
+        {
+          model: "gpt-5.6-luna",
+          system: "sys",
+          messages: [{ role: "user", content: "summarize" }],
+          tools: [GET_TIME],
+          toolChoice: "none",
+          maxTokens: 4096,
+        },
+        "openai",
+      );
+
+      expect(body).not.toHaveProperty("tools");
+      expect(body).not.toHaveProperty("tool_choice");
+      expect(body).not.toHaveProperty("reasoning_effort");
+      expect(body.max_completion_tokens).toBe(4096);
     });
   });
 

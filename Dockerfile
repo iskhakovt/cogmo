@@ -47,7 +47,15 @@ RUN pnpm --filter cogmo build
 # devDependency peers (TypeScript, PGlite) stay out under `--prod`. The optional
 # extras that come with them are inert: inngest's react peer, neverthrow's stray
 # rollup binary, and ssh2's cpu-features, which `allowBuilds` leaves unbuilt.
-RUN pnpm --filter cogmo deploy --prod /deploy
+#
+# inngest's `sandbox-tool/` holds `inngest-tool`, a static Go binary its
+# sandbox feature uploads into an Inngest Cloud sandbox for program shims.
+# Cogmo doesn't use the feature, so the binary goes, and with it the Go CVEs
+# image scans report against it; without it the SDK refuses only program
+# shims. The `rm` fails the build once inngest stops shipping the directory,
+# so the line goes then.
+RUN pnpm --filter cogmo deploy --prod /deploy \
+ && rm -r /deploy/node_modules/.pnpm/inngest@*/node_modules/inngest/sandbox-tool
 
 # Build the SPA last. Docker invalidates layers forward, so this keeps an
 # SPA-source edit from busting the expensive server build above. A server-source

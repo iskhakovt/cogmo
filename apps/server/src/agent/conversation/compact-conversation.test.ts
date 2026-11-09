@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { LlmProvider } from "../../llm/provider.js";
+import { constantResolver } from "../../llm/resolver.js";
 import type { Message } from "../../llm/types.js";
+import { promptServerMismatches } from "../../metrics.js";
 import { expectDefined } from "../../test/assertions.js";
 import {
   fakeRunInTx,
@@ -163,6 +165,68 @@ describe("compactConversation", () => {
       "turn 3",
       "turn 4",
     ]);
+  });
+
+  it("sends no tools and no thinking block, and clears at the fork's budget, counted under site fork", async () => {
+    const thinking = { type: "thinking", thinking: "", signature: "sig" } as const;
+    // `transcript(10)`, each reply carrying a thinking block.
+    const rows: Row[] = Array.from({ length: 10 }, (_, i) =>
+      i % 2 === 0
+        ? { id: `m${i + 1}`, role: "user", content: `turn ${i + 1}` }
+        : {
+            id: `m${i + 1}`,
+            role: "assistant",
+            content: [thinking, { type: "text", text: `turn ${i + 1}` }],
+          },
+    );
+    const agentStore = storeWith(rows);
+    const provider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "they discussed the schema" }],
+        stopReason: "end_turn",
+        model: "claude-haiku-4-5",
+        usage: { inputTokens: 10, outputTokens: 5 },
+        inputTransformations: [
+          {
+            type: "thinking_dropped",
+            reason: "model_binding_mismatch",
+            path: "messages.1.content.0",
+          },
+        ],
+      }),
+    });
+    const add = vi.spyOn(promptServerMismatches, "add");
+
+    try {
+      await compactConversation(CONVERSATION_ID, {
+        ...deps({ agentStore, provider }),
+        resolveProvider: constantResolver(provider, {
+          contextWindow: 200_000,
+          maxOutputTokens: 64_000,
+        }),
+      });
+
+      const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
+      expect(sent.tools).toEqual([]);
+      // Outside a turn no frozen tool table holds the thinking blocks bound.
+      expect(sent.messages.slice(0, 4).map((m) => m.content)).toEqual([
+        "turn 1",
+        [{ type: "text", text: "turn 2" }],
+        "turn 3",
+        [{ type: "text", text: "turn 4" }],
+      ]);
+      // 200,000 − the 16,000 output cap − the 10,000 safety buffer.
+      expect(sent.clearToolResults).toEqual({
+        triggerTokens: 174_000,
+        keep: 5,
+        clearAtLeastTokens: 17_400,
+      });
+      expect(add.mock.calls).toEqual([
+        [1, { type: "thinking_dropped", reason: "model_binding_mismatch", site: "fork" }],
+      ]);
+    } finally {
+      add.mockRestore();
+    }
   });
 
   it("falls back to the conversation model when no summarization model is set", async () => {

@@ -6,7 +6,15 @@ import { anthropicAttachmentLimits } from "../llm/attachment-limits.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
-import type { ContentBlock, LlmResponse, Message, ToolUseBlock } from "../llm/types.js";
+import type {
+  ContentBlock,
+  InputTransformation,
+  LlmResponse,
+  Message,
+  ToolDefinition,
+  ToolUseBlock,
+} from "../llm/types.js";
+import { promptServerMismatches } from "../metrics.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   CLASS_D_CONSECUTIVE_LIMIT,
@@ -941,6 +949,13 @@ describe("synthesizeDegradedReply", () => {
     };
   }
 
+  /** The instruction the synthesis call sent: the text of its last message. */
+  function instructionSent(chat: ReturnType<typeof vi.fn<LlmProvider["chat"]>>): string {
+    const { messages } = expectDefined(chat.mock.calls[0], "synthesis call")[0];
+    const last = expectDefined(messages.at(-1), "instruction message");
+    return typeof last.content === "string" ? last.content : "";
+  }
+
   /** A provider that answers only by rejecting with the reason, once the call's signal fires. */
   function hangingProvider(): LlmProvider {
     return providerThat(
@@ -952,8 +967,16 @@ describe("synthesizeDegradedReply", () => {
     );
   }
 
+  const DRAW: ToolDefinition = {
+    name: "draw",
+    description: "Draw a picture",
+    parameters: { type: "object" },
+  };
+
   const baseDeps = () => ({
     model: "test-model",
+    system: "the turn's system prompt",
+    tools: [DRAW],
     messages: [
       { role: "user" as const, content: "draw me a picture" },
       { role: "assistant" as const, content: [{ type: "text" as const, text: "trying..." }] },
@@ -975,20 +998,57 @@ describe("synthesizeDegradedReply", () => {
     expect(result.text).toMatch(/three times/);
   });
 
-  it("uses tools-disabled at the API level and temperature: 0", async () => {
+  it("sends the turn's system prompt and tools with tool calls disabled, and temperature: 0", async () => {
     const chatFn = vi.fn<LlmProvider["chat"]>(async () => textResponse("ok"));
-    const provider: LlmProvider = {
-      name: "synth-test",
-      chat: chatFn,
-      chatStream: vi.fn(),
-      countTokens: vi.fn(),
-      attachmentLimits: anthropicAttachmentLimits,
-    };
+    const provider = providerThat(chatFn);
+
     await synthesizeDegradedReply({ ...baseDeps(), provider });
+
     expect(chatFn).toHaveBeenCalledTimes(1);
-    const callArgs = chatFn.mock.calls[0]?.[0];
-    expect(callArgs?.tools).toEqual([]);
-    expect(callArgs?.temperature).toBe(0);
+    const params = expectDefined(chatFn.mock.calls[0], "synthesis call")[0];
+    expect(params).toMatchObject({
+      system: "the turn's system prompt",
+      tools: [DRAW],
+      toolChoice: "none",
+      temperature: 0,
+    });
+  });
+
+  it("appends its instruction after the history as a user message", async () => {
+    const chatFn = vi.fn<LlmProvider["chat"]>(async () => textResponse("ok"));
+    const provider = providerThat(chatFn);
+
+    await synthesizeDegradedReply({ ...baseDeps(), provider });
+
+    const { messages } = expectDefined(chatFn.mock.calls[0], "synthesis call")[0];
+    expect(messages.slice(0, -1)).toEqual(baseDeps().messages);
+    expect(messages.at(-1)).toEqual({
+      role: "user",
+      content: expect.stringContaining("Write a 1–3 sentence message to the user"),
+    });
+  });
+
+  it("counts the provider's input transformations once, under site fork", async () => {
+    const add = vi.spyOn(promptServerMismatches, "add");
+    const dropped: InputTransformation = {
+      type: "thinking_dropped",
+      reason: "prefix_binding_mismatch",
+      path: "messages.1.content.0",
+    };
+    const provider = providerThat(async () => ({
+      ...textResponse("ok"),
+      inputTransformations: [dropped],
+    }));
+
+    try {
+      await synthesizeDegradedReply({ ...baseDeps(), provider });
+
+      expect(add.mock.calls).toEqual([
+        [1, { type: "thinking_dropped", reason: "prefix_binding_mismatch", site: "fork" }],
+      ]);
+    } finally {
+      add.mockRestore();
+    }
   });
 
   it("carries the turn's Strategy 1 intent", async () => {
@@ -1022,7 +1082,7 @@ describe("synthesizeDegradedReply", () => {
     expect(result.text).toMatch(/trouble generating/i);
   });
 
-  it("names the context overflow in the synthesis prompt so the reply can explain it", async () => {
+  it("names the context overflow in the synthesis instruction so the reply can explain it", async () => {
     const chatFn = vi.fn<LlmProvider["chat"]>(async () => textResponse("ok"));
     const provider: LlmProvider = {
       name: "synth-test",
@@ -1037,7 +1097,7 @@ describe("synthesizeDegradedReply", () => {
       reason: "request exceeded the model's context window",
       provider,
     });
-    expect(chatFn.mock.calls[0]?.[0]?.system).toMatch(/context window/i);
+    expect(instructionSent(chatFn)).toMatch(/context window/i);
   });
 
   it("uses the overflow-specific fixed string when subtype is context_overflow and synthesis fails", async () => {
@@ -1136,9 +1196,9 @@ describe("synthesizeDegradedReply", () => {
   });
 
   it("tags the fallback reason as 'protocol' on a ProviderProtocolError", async () => {
-    // Unreachable in practice with `tools: []` (no streamed tool-arg
-    // JSON to fail parsing), but the telemetry contract maps the error
-    // class to this tag, so pin it.
+    // Unreachable in practice with tool calls disabled (no tool-arg JSON
+    // to fail parsing), but the telemetry contract maps the error class
+    // to this tag, so pin it.
     const log = fakeLogger();
     const provider = providerThat(async () => {
       throw new ProviderProtocolError("malformed tool-arg JSON", new SyntaxError("x"));
@@ -1184,7 +1244,7 @@ describe("synthesizeDegradedReply", () => {
     ).resolves.toEqual(expect.objectContaining({ ok: false }));
   });
 
-  it("renders subtype-specific reason text in the system prompt", async () => {
+  it("renders subtype-specific reason text in the instruction", async () => {
     const chatFn = vi.fn<LlmProvider["chat"]>(async () => textResponse("ok"));
     const provider: LlmProvider = {
       name: "synth-test",
@@ -1199,8 +1259,7 @@ describe("synthesizeDegradedReply", () => {
       reason: "streamed tool-call arguments could not be parsed",
       provider,
     });
-    const systemPrompt = chatFn.mock.calls[0]?.[0]?.system ?? "";
-    expect(systemPrompt).toMatch(/truncated/i);
+    expect(instructionSent(chatFn)).toMatch(/truncated/i);
   });
 
   it("renders the iteration-cap reason text for null subtype + iteration_cap reason", async () => {
@@ -1218,7 +1277,6 @@ describe("synthesizeDegradedReply", () => {
       reason: "iteration_cap",
       provider,
     });
-    const systemPrompt = chatFn.mock.calls[0]?.[0]?.system ?? "";
-    expect(systemPrompt).toMatch(/iteration-count limit/i);
+    expect(instructionSent(chatFn)).toMatch(/iteration-count limit/i);
   });
 });

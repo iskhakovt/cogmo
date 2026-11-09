@@ -41,7 +41,10 @@ export interface TurnModel {
   limits: FrozenLimits;
   /** The input budget compaction sizes the view against. */
   budget: number;
-  /** Strategy 1's edit intent, on every request of the turn. */
+  /**
+   * Strategy 1's edit intent, on the turn's counts, iterations and
+   * degraded-reply synthesis; its summarization fork carries its own.
+   */
   clearToolResults: ToolResultClearing;
   /**
    * What the view's attachments may weigh; null when the run's

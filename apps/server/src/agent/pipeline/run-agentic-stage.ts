@@ -47,6 +47,7 @@ import { renderForkSpan } from "../attachments/render-fork-span.js";
 import { renderStoredMessages } from "../attachments/render-stored-content.js";
 import type { CodingService } from "../coding/service.js";
 import {
+  compactedView,
   compactMessages,
   extractSummaryText,
   rewroteWithoutSummary,
@@ -74,12 +75,14 @@ import type {
 import type { PromptSource } from "../prompt.js";
 import { computeRetraction } from "../retraction.js";
 import { createSchedulingService } from "../scheduling/scheduling-service.js";
+import { countServerMismatches } from "../server-mismatches.js";
 import type { Service } from "../service.js";
 import type { AgentStore } from "../store/index.js";
 import { toStoredMessage } from "../stored-content.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
 import { historyStart, stripThinkingBefore } from "../system-prompt-snapshot.js";
 import type { ToolRegistry } from "../tools.js";
+import { openTranscript } from "../transcript.js";
 import { type HeadView, type PrefixViolationPolicy, rowHeads } from "../transcript-head.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import {
@@ -355,8 +358,8 @@ export async function runAgenticStage(
   const limits = await steps.stepRun("freeze-model-limits", async () =>
     freezeLimits(ctx.model, provider, rowLimits),
   );
-  // Strategy 1's intent is on every request of the stage turn: counts,
-  // iterations and the fork.
+  // Strategy 1's intent is on the stage turn's counts and iterations; its
+  // summarization fork carries its own.
   const { budget, clearToolResults, attachmentBudget, maxViewBytes } = limitsPolicy(limits);
 
   // Until one prefix per conversation, a stage's prefix is its own, so it
@@ -439,15 +442,18 @@ export async function runAgenticStage(
             limits: summarizationProvider.attachmentLimits(summarizationLimits.contextWindow),
             sent: msgs,
           });
+          // The stage's own prompt and tools, which its requests send.
           const response = await summarizationProvider.chat(
             summarizationRequest({
               model: ctx.summarizationModel,
+              limits: summarizationLimits,
               system,
+              tools: toolDefs,
               messages: span,
-              maxOutputTokens: summarizationLimits.maxOutputTokens,
-              clearToolResults,
             }),
           );
+          // Under `stage`, since the fork sends the stage's own prefix.
+          countServerMismatches(response.inputTransformations ?? [], "stage");
           return { text: extractSummaryText(response.content), stopReason: response.stopReason };
         });
         summaryText = summarized.text;
@@ -515,7 +521,16 @@ export async function runAgenticStage(
       },
     ),
   );
-  const messages = replaceTurnContext(compacted.messages, turnPosition, renderedTurnContext);
+  // A stage sends a prefix of its own, so a view its compaction rewrote may
+  // open its transcript.
+  const transcript = openTranscript(
+    { system: systemPrompt, tools: toolDefs, epoch: "opened" },
+    {
+      ...compactedView(compacted),
+      messages: replaceTurnContext(compacted.messages, turnPosition, renderedTurnContext),
+    },
+    log,
+  );
 
   // Broadcast, not source routing: a stage answers no inbound a session sent,
   // so it goes to every session on the run's (private) conversation.
@@ -538,8 +553,7 @@ export async function runAgenticStage(
     const looped = await deps.runStreamingAgentLoop({
       provider,
       model: ctx.model,
-      systemPrompt,
-      messages,
+      transcript,
       tools: stageTools,
       service,
       maxTokens: limits.maxOutputTokens,

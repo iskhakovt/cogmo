@@ -1,0 +1,3 @@
+**The `cogmo` image drops inngest's `inngest-tool` binary** (`sandbox-tool/dist/`). inngest 4.26.2 bundles it, built with Go 1.22.12, for its Inngest Cloud sandbox feature, which cogmo doesn't use. Nothing in the image runs it, but Trivy reports every Go standard-library advisory since 1.22.12 against it (66 alerts, one critical: [CVE-2025-68121](https://avd.aquasec.com/nvd/cve-2025-68121)).
+
+**`cogmo-devbase` takes npm 12.2.2 and uv 0.13.7, and `cogmo-skills` uv 0.13.7.** npm's bundled undici 6.29.1 and ip-address 10.7.5, and uv's rustls 0.23.46, close the images' alerts on those packages. npm's glob and minimatch stay flagged until npm takes their next majors.
