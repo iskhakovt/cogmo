@@ -224,6 +224,15 @@ describe("execForReply", () => {
     ]);
   });
 
+  it("reads the reply past a terminal's control bytes and carriage returns on its line", async () => {
+    // A PTY-backed exec (Daytona's, for stdin) echoes the typed command, and
+    // the shell turns bracketed paste off on the reply's own line.
+    const stdout = `$ exec bash -c '…'\r\n\u001b[?2004l\r${REPLY.replace("\n", "\r\n")}`;
+    const { session } = sessionPlaying({ stdout, exitCode: 0 });
+
+    expect((await reply(session))._unsafeUnwrap()).toEqual({ type: "done", n: 1 });
+  });
+
   it("tells a reply past its cap, which the code the exec ran wrote, from a failure", async () => {
     const { session } = sessionPlaying({ stdout: "x".repeat(1024 * 1024 + 1), exitCode: 0 });
 

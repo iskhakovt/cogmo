@@ -15,6 +15,13 @@ import { execForReply, type SkillsSessionHost, withOneShotSession } from "./one-
 /** The tools' budget in a check session. */
 const CHECK_TIMEOUT_MS = 120_000;
 
+/**
+ * The runtime virtualenv's interpreter, named by path: a backend's exec need
+ * not keep the image's `PATH`, and on Daytona a bare `python3` is the base
+ * image's interpreter, which has no `cogmo_skills_runtime`.
+ */
+const RUNTIME_PYTHON = "/opt/cogmo-skills/.venv/bin/python3";
+
 export interface SandboxCpythonChecksOptions extends SkillsSessionHost {
   /**
    * The shared venv volume, which carries the install session's venv to the
@@ -132,7 +139,7 @@ async function runChecks(
   signal: AbortSignal | undefined,
 ): Promise<Result<CpythonCheckOutcome, CpythonCheckError>> {
   const reply = await execForReply(session, {
-    argv: ["python3", "-I", "-m", "cogmo_skills_runtime.check"],
+    argv: [RUNTIME_PYTHON, "-I", "-m", "cogmo_skills_runtime.check"],
     stdin: JSON.stringify(request),
     schema: CheckReplySchema,
     timeoutMs: CHECK_TIMEOUT_MS,

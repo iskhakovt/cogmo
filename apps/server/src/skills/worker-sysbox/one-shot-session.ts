@@ -93,7 +93,7 @@ export type ReplyExecError =
 
 /**
  * Run `argv` in `session`, sending `stdin`, and read its one reply: the last
- * line of its stdout, parsed with `schema`. `label` names the exec in a
+ * line of its stdout, split at `\r` as well as `\n`, parsed with `schema`. `label` names the exec in a
  * failure (`the import`), which quotes the tail of its stderr.
  */
 export async function execForReply<R>(
@@ -159,7 +159,14 @@ export async function execForReply<R>(
     }
     if (exited.isErr()) return err(failed(describeExecFailure(label, exited.error, stderr)));
     if (streamError) return err(failed(`${label}'s streams failed: ${streamError.message}`));
-    const lastLine = Buffer.concat(stdout).toString("utf-8").trimEnd().split("\n").at(-1) ?? "";
+    // The reply is the last line, split at a carriage return too: a PTY-backed
+    // exec ends lines `\r\n` and can put control bytes ahead of the reply on
+    // its line, and a JSON reply holds no raw `\r`.
+    const lastLine =
+      Buffer.concat(stdout)
+        .toString("utf-8")
+        .split(/[\r\n]+/)
+        .findLast((line) => line.trim() !== "") ?? "";
     const reply = parseReply(params.schema, lastLine);
     if (reply !== undefined) return ok(reply);
     const tail = stderr.trim();
