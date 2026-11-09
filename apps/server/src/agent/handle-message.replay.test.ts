@@ -31,8 +31,14 @@ import { inngest } from "../inngest/client.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { openAICompatibleAttachmentLimits } from "../llm/attachment-limits.js";
 import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
-import type { ChatParams, ChatStreamFrame, ContentFrame, ToolDefinition } from "../llm/types.js";
-import { agentIterations, memoryRecallFailures } from "../metrics.js";
+import type {
+  ChatParams,
+  ChatStreamFrame,
+  ContentFrame,
+  InputTransformation,
+  ToolDefinition,
+} from "../llm/types.js";
+import { agentIterations, memoryRecallFailures, promptServerMismatches } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
@@ -157,6 +163,26 @@ const LOADED_SYSTEM_PROMPT = {
   channelTypes: [],
   coreMemoryChanges: [],
 };
+
+/** Eight alternating rows, the turn's own `msg-1` seventh: a prefix of two to summarize. */
+const EIGHT_ROWS = [
+  { id: "m1", role: "user", content: "m1" },
+  { id: "m2", role: "assistant", content: "r1" },
+  { id: "m3", role: "user", content: "m2" },
+  { id: "m4", role: "assistant", content: "r2" },
+  { id: "m5", role: "user", content: "m3" },
+  { id: "m6", role: "assistant", content: "r3" },
+  { id: "msg-1", role: "user", content: "m4" },
+  { id: "m8", role: "assistant", content: "r4" },
+];
+
+/** A thinking block the provider reports dropping from a fork, and how it is counted. */
+const DROPPED: InputTransformation = {
+  type: "thinking_dropped",
+  reason: "prefix_binding_mismatch",
+  path: "messages.1.content.0",
+};
+const DROPPED_FORK = { type: "thinking_dropped", reason: "prefix_binding_mismatch", site: "fork" };
 
 /** The system prompt the agent loop was given. */
 function loopSystemPrompt(deps: HandleMessageDeps): string {
@@ -311,6 +337,48 @@ describe("handle-message — crash recovery / step replay", () => {
         typeof m.content === "string" && m.content.includes("[cached summary from prior attempt]"),
     );
     expect(summaryMessage).toBeDefined();
+  });
+
+  it("counts the summarization fork's input transformations once under site fork, and not from a cached step", async () => {
+    const add = vi.spyOn(promptServerMismatches, "add");
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "fresh summary" }],
+      stopReason: "end_turn",
+      model: "mock-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+      inputTransformations: [DROPPED],
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(
+        mockProvider({ countTokens: vi.fn().mockResolvedValue(800_000), chat }),
+      ),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
+        listMessages: vi.fn().mockResolvedValue(EIGHT_ROWS),
+      }),
+    });
+    const fn = createHandleMessage(deps);
+
+    // The engine re-invokes the function at every step boundary after the
+    // fork's step, which replays from the step cache.
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+
+    expect(chat).toHaveBeenCalledOnce();
+    expect(add.mock.calls).toEqual([[1, DROPPED_FORK]]);
+
+    add.mockClear();
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [
+        {
+          id: "summarize-prefix-outcome",
+          handler: () => ({ text: "[cached summary]", stopReason: "end_turn" }),
+        },
+      ],
+    }).execute();
+
+    expect(add).not.toHaveBeenCalled();
   });
 
   it("does not re-insert the summary when persist-summary is cached", async () => {
@@ -756,6 +824,40 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(recall).not.toHaveBeenCalled();
     // Non-vacuity: the cached memories reached the turn's context.
     expect(turnContextSent(deps)).toContain("- cached homelab memory");
+  });
+
+  it("counts the degraded synthesis's input transformations once under site fork, and not from a cached step", async () => {
+    const add = vi.spyOn(promptServerMismatches, "add");
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "The model kept refusing; try rephrasing." }],
+      stopReason: "end_turn",
+      model: "mock-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+      inputTransformations: [DROPPED],
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ chat })),
+      runStreamingAgentLoop: vi
+        .fn<typeof runStreamingAgentLoop>()
+        .mockResolvedValue(
+          finishedLoop({ degraded: { reason: "model refused the request", subtype: "refusal" } }),
+        ),
+    });
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+
+    expect(chat).toHaveBeenCalledOnce();
+    expect(add.mock.calls).toEqual([[1, DROPPED_FORK]]);
+
+    add.mockClear();
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [{ id: "degraded-reply", handler: () => "cached apology from prior attempt" }],
+    }).execute();
+
+    expect(add).not.toHaveBeenCalled();
   });
 
   it("counts a failed auto-recall once per turn, not once per re-invocation", async () => {

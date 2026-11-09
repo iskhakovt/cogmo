@@ -15,6 +15,7 @@ import {
 } from "../context.js";
 import { summarizedSpan } from "../conversation/load-turn-history.js";
 import type { StepRunner } from "../loop.js";
+import { countServerMismatches } from "../server-mismatches.js";
 import type { AgentStore } from "../store/index.js";
 import type { StoredMessage } from "../stored-content.js";
 import { resolveOrFail, type TurnModel } from "./resolve-turn-model.js";
@@ -209,6 +210,7 @@ function prefixSummarizer(
     CompactTurnArgs,
     | "turnModel"
     | "summarizationModel"
+    | "toolDefs"
     | "delivery"
     | "turnLogger"
     | "storedMessages"
@@ -266,15 +268,19 @@ function prefixSummarizer(
         limits: summarizationProvider.attachmentLimits(summarizationLimits.contextWindow),
         sent: msgs,
       });
+      // The prompt and tools the view is counted with, which the turn sends.
       const response = await summarizationProvider.chat(
         summarizationRequest({
           model: summarizationModel,
+          limits: summarizationLimits,
           system,
+          tools: args.toolDefs,
           messages: span,
-          maxOutputTokens: summarizationLimits.maxOutputTokens,
-          clearToolResults: turnModel.clearToolResults,
         }),
       );
+      // Counted in the body, so a replay adds nothing. No later request
+      // replays a fork, so it changes no head.
+      countServerMismatches(response.inputTransformations ?? [], "fork");
       const text = extractSummaryText(response.content);
       if (response.stopReason === "max_tokens") {
         // Logged from the step body so replay suppresses it. In the

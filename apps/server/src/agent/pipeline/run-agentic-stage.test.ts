@@ -13,7 +13,7 @@ import type { LlmProvider } from "../../llm/provider.js";
 import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../../llm/request-size.js";
 import type { StopReason, ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
-import { promptPrefixViolations } from "../../metrics.js";
+import { promptPrefixViolations, promptServerMismatches } from "../../metrics.js";
 import type { SkillRunner } from "../../skills/runner.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
 import {
@@ -282,7 +282,8 @@ describe("runAgenticStage", () => {
     for (const [params] of counts) expect(params.clearToolResults).toEqual(clearing);
   });
 
-  it("sends the summarization fork the stage's intent", async () => {
+  it("sends the summarization fork the stage's prompt and tools with tool calls disabled and its own intent, counted under site stage", async () => {
+    const add = vi.spyOn(promptServerMismatches, "add");
     const h = await harness();
     vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
     vi.mocked(h.agentStore.listMessages).mockResolvedValue(
@@ -306,15 +307,46 @@ describe("runAgenticStage", () => {
       stopReason: "end_turn",
       model: "claude-sonnet-4-6",
       usage: { inputTokens: 1, outputTokens: 1 },
+      inputTransformations: [
+        {
+          type: "thinking_dropped",
+          reason: "prefix_binding_mismatch",
+          path: "messages.1.content.0",
+        },
+      ],
     });
     const { steps } = recordingSteps();
 
-    await runAgenticStage(h.deps, stageArgs(), steps, log);
+    try {
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
 
-    const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
-    const fork = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
-    expect(fork.clearToolResults).toEqual(loopParams.clearToolResults);
-    expect(fork.clearToolResults).toBeDefined();
+      const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+      const fork = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
+      // The summarization model is the stage's: the intent triggers at the
+      // fork's budget, with the fork's output cap, where the stage's triggers
+      // at 60% of the stage's budget.
+      const limits = resolveLimits(loopParams.model);
+      const budget = computeBudget({
+        ...limits,
+        maxOutputTokens: Math.min(16_000, limits.maxOutputTokens),
+      });
+      expect(fork).toMatchObject({
+        system: loopParams.systemPrompt,
+        tools: loopParams.tools.definitions(),
+        toolChoice: "none",
+        clearToolResults: {
+          triggerTokens: budget,
+          keep: 5,
+          clearAtLeastTokens: Math.floor(budget * 0.1),
+        },
+      });
+      expect(fork.tools?.map((t) => t.name)).toEqual(["web_search"]);
+      expect(add.mock.calls).toEqual([
+        [1, { type: "thinking_dropped", reason: "prefix_binding_mismatch", site: "stage" }],
+      ]);
+    } finally {
+      add.mockRestore();
+    }
   });
 
   describe("transcript heads", () => {

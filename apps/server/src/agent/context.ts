@@ -12,6 +12,7 @@
 
 import * as R from "remeda";
 import { isTurnRowContent } from "../llm/content.js";
+import { computeBudget, type ModelLimits } from "../llm/models.js";
 import type {
   ChatParams,
   ContentBlock,
@@ -132,11 +133,27 @@ const CLEAR_AT_LEAST = 0.1;
 /**
  * Strategy 1's edit intent for a turn with `budget` input tokens: once the
  * prompt passes 60% of the budget, clear every tool result but the last five,
- * provided they free a tenth of it. Every request of the turn carries it.
+ * provided they free a tenth of it. The turn's counts, iterations and
+ * degraded-reply synthesis carry it.
  */
 export function toolResultClearing(budget: number): ToolResultClearing {
   return {
     triggerTokens: Math.floor(budget * CLEAR_THRESHOLD),
+    keep: DEFAULT_KEEP_TOOL_RESULTS,
+    clearAtLeastTokens: Math.floor(budget * CLEAR_AT_LEAST),
+  };
+}
+
+/**
+ * Strategy 1's edit intent for a summarization fork with `budget` input
+ * tokens: it clears only once the prompt passes the budget, so a prefix that
+ * fits is summarized from the full tool results. What it keeps and frees
+ * follows {@link toolResultClearing} (design/context-management.md →
+ * Strategy 2 → Cleared results in the fork).
+ */
+function summarizationClearing(budget: number): ToolResultClearing {
+  return {
+    triggerTokens: budget,
     keep: DEFAULT_KEEP_TOOL_RESULTS,
     clearAtLeastTokens: Math.floor(budget * CLEAR_AT_LEAST),
   };
@@ -162,9 +179,14 @@ Focus on what the assistant needs to continue the conversation.
 Be specific — preserve names, paths, and values, not abstractions.`;
 
 /**
- * The summarization request both compaction paths send. Shared so the prompt,
- * the output cap and the message layout cannot drift between the turn-time
- * strategy and the manual `/compact` driver.
+ * The summarization request every compaction path sends: a chat or stage
+ * turn's Strategy 2 and the manual `/compact` driver. Shared so the fork's
+ * shape cannot drift between them (design/context-management.md → Strategy 2
+ * → Fork shape). It sends the `system` and `tools` the turn sends with
+ * `toolChoice: "none"`, so the thinking blocks the prefix replays stay valid,
+ * appends its instruction as a user message, and carries the summarization
+ * model's own Strategy 1 intent, triggered at the fork's budget: the model's
+ * budget with the request's output cap in place of the model's.
  *
  * The prefix is repaired first, through the same `validateHistory` the agent
  * loop applies to every request — so the summarizer reads the shape the model
@@ -185,15 +207,12 @@ Be specific — preserve names, paths, and values, not abstractions.`;
  */
 export function summarizationRequest(params: {
   model: string;
+  /** The summarization model's limits, which its output cap and its intent derive from. */
+  limits: ModelLimits;
   system: string;
+  /** The tool definitions the turn sends; none outside a turn. */
+  tools: ReadonlyArray<ToolDefinition>;
   messages: ReadonlyArray<Message>;
-  maxOutputTokens: number;
-  /**
-   * The turn's Strategy 1 intent, which applies to the fork as a request of
-   * its own (design/context-management.md → Strategy 1). `/compact`, outside
-   * a turn, sends none.
-   */
-  clearToolResults?: ToolResultClearing;
 }): ChatParams {
   const { messages: repaired, repairs } = validateHistory(params.messages);
   if (repairs.length > 0) {
@@ -203,12 +222,17 @@ export function summarizationRequest(params: {
     // silently — and folds them into a summary that is never re-derived.
     logger.warn({ repairCount: repairs.length, repairs }, "repaired summarization prefix");
   }
+  const maxTokens = Math.min(16_000, params.limits.maxOutputTokens);
   return {
     model: params.model,
     system: params.system,
     messages: [...repaired, { role: "user", content: SUMMARIZATION_PROMPT }],
-    maxTokens: Math.min(16_000, params.maxOutputTokens),
-    ...(params.clearToolResults && { clearToolResults: params.clearToolResults }),
+    tools: [...params.tools],
+    toolChoice: "none",
+    maxTokens,
+    clearToolResults: summarizationClearing(
+      computeBudget({ ...params.limits, maxOutputTokens: maxTokens }),
+    ),
   };
 }
 
@@ -222,14 +246,15 @@ export function summarizationRequest(params: {
  * the text — and this text is stored and replayed rather than recomputed, so a
  * fused sentence would be permanent. One block is the expected case
  * (`fromOpenAIMessage` emits at most one; Anthropic returns several only when
- * they are interleaved with `tool_use`, which a summarization request never
- * carries), which is why more than one is worth a log line.
+ * they are interleaved with `tool_use`, which a summarization request's
+ * `toolChoice: "none"` rules out), which is why more than one is worth a log
+ * line.
  */
 export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string {
   const text = content.filter((b) => b.type === "text");
   if (text.length > 1) {
-    // The request carries no tools, so more than one block means an assumption
-    // in the docblock above has moved.
+    // The request forbids tool calls, so more than one block means an
+    // assumption in the docblock above has moved.
     logger.warn(
       { blocks: text.length },
       "summarization returned multiple text blocks; joined on a paragraph break",

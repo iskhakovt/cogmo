@@ -1657,7 +1657,7 @@ describe("createHandleMessage", () => {
     expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
   });
 
-  it("sends the turn's Strategy 1 intent on every count and the summarization fork, and hands it to the loop", async () => {
+  it("sends the turn's Strategy 1 intent on every count and to the loop, and the summarization fork the turn's prefix with its own", async () => {
     // Over 80% of budget after clearing → summarization, then under.
     const countTokens = vi.fn().mockResolvedValueOnce(800_000).mockResolvedValueOnce(50_000);
     const chat = vi.fn().mockResolvedValue({
@@ -1666,9 +1666,17 @@ describe("createHandleMessage", () => {
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
+    const tools = new ToolRegistry();
+    tools.register(readFile);
+    const profile = expectDefined(
+      await mockAgentStore().getProfile(FAKE_TX, "profile-1"),
+      "default profile",
+    );
     const deps = mockDeps({
+      tools,
       resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
       agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({ ...profile, toolSet: ["*"] }),
         getLastTokens: vi.fn().mockResolvedValue(null),
         listMessages: vi.fn().mockResolvedValue([
           { id: "m1", role: "user", content: "m1" },
@@ -1699,9 +1707,18 @@ describe("createHandleMessage", () => {
     for (const [params] of countTokens.mock.calls) {
       expect(params.clearToolResults).toEqual(clearing);
     }
-    expect(expectDefined(chat.mock.calls[0], "summarization call")[0].clearToolResults).toEqual(
-      clearing,
-    );
+    // The system prompt and frozen tools the view was counted with, tool
+    // calls disabled, and the summarization model's intent: past the fork's
+    // budget, with its 16,000-token output cap, rather than 60% of the
+    // turn's budget.
+    const toolDefs = loopParams.tools.definitions();
+    expect(toolDefs.map((t) => t.name)).toContain("read_file");
+    expect(expectDefined(chat.mock.calls[0], "summarization call")[0]).toMatchObject({
+      system: "system prompt",
+      tools: toolDefs,
+      toolChoice: "none",
+      clearToolResults: { triggerTokens: 974_000, keep: 5, clearAtLeastTokens: 97_400 },
+    });
   });
 
   it("summarizes a view past 80% of the view cap on the fast path, without counting it", async () => {
@@ -2477,7 +2494,7 @@ describe("createHandleMessage", () => {
       expect(turnProvider.chat).not.toHaveBeenCalled();
     });
 
-    it("caps the summarization request at the summarization model's own output limit", async () => {
+    it("caps the summarization request and clears its tool results at the summarization model's own limits", async () => {
       // The cap has to come from this model's resolved limits, not the
       // turn model's: asking above a model's ceiling is a 400, and
       // compaction swallows that and falls through to truncation, so the
@@ -2546,7 +2563,14 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
-      expect(summaryChat).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 4096 }));
+      // 100,000 − 4,096 − the 10,000 safety buffer: the small model's
+      // budget, where the turn's would trigger at 60% of 926,000.
+      expect(summaryChat).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxTokens: 4096,
+          clearToolResults: { triggerTokens: 85_904, keep: 5, clearAtLeastTokens: 8_590 },
+        }),
+      );
     });
 
     it("does not resolve summarization_model when summarization is skipped", async () => {
@@ -3907,7 +3931,7 @@ describe("createHandleMessage", () => {
   // proceeds with the normal post-turn flow. Conversation stays `active`.
   // See design/agent-resilience.md → Degraded reply.
 
-  it("synthesizes the degraded apology via a tools-free LLM call and persists it", async () => {
+  it("synthesizes the degraded apology on the turn's prefix with tool calls disabled, and persists it", async () => {
     const handle = mockDeliveryHandle();
     const synthesisProvider = mockProvider({
       chat: vi.fn().mockResolvedValue({
@@ -3917,7 +3941,17 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 100, outputTokens: 12 },
       }),
     });
+    const tools = new ToolRegistry();
+    tools.register(readFile);
+    const profile = expectDefined(
+      await mockAgentStore().getProfile(FAKE_TX, "profile-1"),
+      "default profile",
+    );
     const deps = mockDeps({
+      tools,
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({ ...profile, toolSet: ["*"] }),
+      }),
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
@@ -3934,13 +3968,22 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // Synthesis call was made with tools disabled at the API level,
-    // temperature: 0 and the turn's Strategy 1 intent — pins the design
-    // constraints at the wiring layer.
+    // Synthesis call was made with the system prompt and tools the loop's
+    // requests sent, tool calls disabled at the API level, temperature: 0
+    // and the turn's Strategy 1 intent — pins the design constraints at the
+    // wiring layer.
+    const loopParams = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "loop call",
+    )[0];
+    const toolDefs = loopParams.tools.definitions();
+    expect(toolDefs.map((t) => t.name)).toContain("read_file");
     const chatCalls = vi.mocked(synthesisProvider.chat).mock.calls;
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]?.[0]).toMatchObject({
-      tools: [],
+      system: loopParams.systemPrompt,
+      tools: toolDefs,
+      toolChoice: "none",
       temperature: 0,
       clearToolResults: toolResultClearing(926_000),
     });
@@ -5573,6 +5616,40 @@ describe("system prompt snapshot", () => {
       expect(JSON.stringify(messages.slice(0, -2))).not.toContain('"thinking"');
       expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
     });
+
+    it.each([
+      {
+        turn: "continues its epoch",
+        digest: async () => defaultDigest(),
+        system: "EPOCH PROMPT",
+        thinking: true,
+      },
+      {
+        turn: "opens an epoch for its configuration",
+        digest: async () => "a rule has changed since",
+        system: "system prompt",
+        thinking: false,
+      },
+    ])(
+      "sends the summarization fork the prompt the view is counted with, tool calls disabled, and thinking only when the turn $turn",
+      async ({ digest, system, thinking: keepsThinking }) => {
+        const deps = summarizingDeps(await digest(), SUMMARIZED);
+
+        await run(deps);
+
+        // The summary covers m1 and m2, whose thinking is bound to the epoch
+        // m1 opened.
+        const { provider } = await deps.resolveProvider("claude-sonnet-4-6");
+        const fork = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
+        expect(fork).toMatchObject({ system, toolChoice: "none" });
+        expect(fork.messages[1]).toEqual({
+          role: "assistant",
+          content: keepsThinking
+            ? [thinking, { type: "text", text: "turn 2" }]
+            : [{ type: "text", text: "turn 2" }],
+        });
+      },
+    );
 
     it("opens an epoch rather than announce again a change its unstored summary took out of view", async () => {
       // m1's context announced `identity`; this turn's summary, cut at its

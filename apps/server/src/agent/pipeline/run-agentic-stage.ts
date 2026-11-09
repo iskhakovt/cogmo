@@ -74,6 +74,7 @@ import type {
 import type { PromptSource } from "../prompt.js";
 import { computeRetraction } from "../retraction.js";
 import { createSchedulingService } from "../scheduling/scheduling-service.js";
+import { countServerMismatches } from "../server-mismatches.js";
 import type { Service } from "../service.js";
 import type { AgentStore } from "../store/index.js";
 import { toStoredMessage } from "../stored-content.js";
@@ -355,8 +356,8 @@ export async function runAgenticStage(
   const limits = await steps.stepRun("freeze-model-limits", async () =>
     freezeLimits(ctx.model, provider, rowLimits),
   );
-  // Strategy 1's intent is on every request of the stage turn: counts,
-  // iterations and the fork.
+  // Strategy 1's intent is on the stage turn's counts and iterations; its
+  // summarization fork carries its own.
   const { budget, clearToolResults, attachmentBudget, maxViewBytes } = limitsPolicy(limits);
 
   // Until one prefix per conversation, a stage's prefix is its own, so it
@@ -439,15 +440,18 @@ export async function runAgenticStage(
             limits: summarizationProvider.attachmentLimits(summarizationLimits.contextWindow),
             sent: msgs,
           });
+          // The stage's own prompt and tools, which its requests send.
           const response = await summarizationProvider.chat(
             summarizationRequest({
               model: ctx.summarizationModel,
+              limits: summarizationLimits,
               system,
+              tools: toolDefs,
               messages: span,
-              maxOutputTokens: summarizationLimits.maxOutputTokens,
-              clearToolResults,
             }),
           );
+          // Under `stage`, since the fork sends the stage's own prefix.
+          countServerMismatches(response.inputTransformations ?? [], "stage");
           return { text: extractSummaryText(response.content), stopReason: response.stopReason };
         });
         summaryText = summarized.text;
