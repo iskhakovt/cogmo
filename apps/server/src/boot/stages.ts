@@ -16,6 +16,7 @@ import type {
 } from "../agent/pipeline/store/index.js";
 import type { Service } from "../agent/service.js";
 import type { DrizzleAgentStore } from "../agent/store/index.js";
+import type { DrizzleConnectorStore } from "../connector/store/index.js";
 import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Database, Transactor } from "../db/index.js";
 import type { LlmProvider } from "../llm/provider.js";
@@ -155,6 +156,7 @@ export interface CoreDeps {
   skillStore: DrizzleSkillStore;
   secretsStore: DrizzleSecretsStore;
   webSessionStore: DrizzleWebSessionStore;
+  connectorStore: DrizzleConnectorStore;
   /** Bootstrap login token, derived from the master key. Stored nowhere. */
   webLoginToken: string;
   s3Client: S3Client;

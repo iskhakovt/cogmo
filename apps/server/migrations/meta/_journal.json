@@ -607,8 +607,15 @@
     {
       "idx": 86,
       "version": "7",
-      "when": 1794179563039,
-      "tag": "0086_skills_layout_restores",
+      "when": 1794182290271,
+      "tag": "0086_connectors",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1794240073433,
+      "tag": "0087_skills_layout_restores",
       "breakpoints": true
     }
   ]

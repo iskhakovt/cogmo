@@ -3,6 +3,7 @@ export * from "../agent/coding/store/schema.js";
 export * from "../agent/model-catalog/store/schema.js";
 export * from "../agent/pipeline/store/schema.js";
 export * from "../agent/store/schema.js";
+export * from "../connector/store/schema.js";
 export * from "../mcp/store/schema.js";
 export * from "../sandbox/store/schema.js";
 export * from "../secrets/store/schema.js";

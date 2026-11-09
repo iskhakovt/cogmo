@@ -103,7 +103,7 @@ beforeEach(async () => {
   for (const [table, constraint] of CHECKS) {
     await db.execute(sql.raw(`ALTER TABLE ${table} DROP CONSTRAINT IF EXISTS ${constraint}`));
   }
-  // 0086's, which no row before it carries.
+  // 0087's, which no row before it carries.
   await db.execute(
     sql`ALTER TABLE skill_deploys DROP CONSTRAINT IF EXISTS chk_skill_deploys_restores_iff_rolled_back`,
   );

@@ -10,6 +10,7 @@
       "**",
       "!apps/server/test/fixtures",
       "!images/skills/contract",
+      "!packages/connector-proto/src/gen",
       "!design/web-ui/mockups",
       "!pnpm-lock.yaml",
       "!pnpm-workspace.yaml"
