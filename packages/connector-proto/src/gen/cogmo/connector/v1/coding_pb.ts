@@ -308,6 +308,8 @@ export const PlanResultSchema: GenMessage<PlanResult> = /*@__PURE__*/
  */
 export type Executed = Message<"cogmo.connector.v1.Executed"> & {
   /**
+   * absent when the runtime reports no usage
+   *
    * @generated from field: cogmo.connector.v1.Usage usage = 1;
    */
   usage?: Usage | undefined;

@@ -40,15 +40,18 @@ import type {
   JobRunError,
 } from "../agent/coding/connector-jobs.js";
 import { logger } from "../logger.js";
-import { AUTH_REFRESH_MS, type AuthError, type ConnectorAuthCache } from "./auth.js";
+import {
+  AUTH_REFRESH_MS,
+  type AuthError,
+  type ConnectorAuthCache,
+  STALE_CHECK_MS,
+} from "./auth.js";
 import { type JobCaps, type JobPhase, jobCaps } from "./caps.js";
 import { type ConnectorSession, type HubSession, Session } from "./session.js";
 import type { ActiveConnector } from "./store/index.js";
 import { completionOf, failureCodeOf, reportOf } from "./translate.js";
 
 const HEARTBEAT_MS = 30_000;
-/** How often open sessions are checked against a stale auth cache, whatever its refreshes do. */
-const STALE_CHECK_MS = 5_000;
 
 /** Why the hub refused a call naming a job. */
 export type JobCallError =
@@ -125,7 +128,7 @@ export class SessionHub implements ConnectorHub {
   }
 
   run(connectorId: string, job: Job, handlers: JobEventHandlers): Promise<RunResult> {
-    if (this.#closed) return Promise.resolve(err({ kind: "unavailable" }));
+    if (this.#closed) return Promise.resolve(deepFreeze(err({ kind: "unavailable" })));
     const existing = this.#jobs.get(job.jobId);
     if (existing) {
       if (existing.connectorId !== connectorId) {
@@ -314,23 +317,25 @@ export class SessionHub implements ConnectorHub {
     }
     entry.lastSeq = event.seq;
     const over = event.event.case === "usage" && overBudget(entry.job, event.event.value);
+    const handlers = entry.waiters.map((waiter) => waiter.handlers);
+    // The cap ends the job before any handler runs, so none can finish it first.
+    if (over) this.#timeOut(entry, "token_budget");
     const report = reportOf(event);
-    if (report !== null) deepFreeze(report);
     if (report === null) {
       logger.debug(
         { jobId: entry.job.jobId, seq: String(event.seq) },
         "connector job event of an unknown kind",
       );
     } else {
-      for (const { handlers } of entry.waiters) {
+      deepFreeze(report);
+      for (const handler of handlers) {
         try {
-          handlers.onEvent(report);
+          handler.onEvent(report);
         } catch (error) {
           logger.error({ err: error, jobId: entry.job.jobId }, "connector job event handler threw");
         }
       }
     }
-    if (over) this.#timeOut(entry, "token_budget");
   }
 
   #restartIdle(entry: JobEntry): void {
@@ -428,8 +433,7 @@ export class SessionHub implements ConnectorHub {
   }
 
   #sendHeartbeats(): void {
-    const heartbeat = create(ConnectResponseSchema, { message: { case: "heartbeat", value: {} } });
-    for (const session of this.#sessions.values()) session.heartbeat(heartbeat);
+    for (const session of this.#sessions.values()) session.heartbeat();
   }
 
   /** At most one at a time: a refresh still running when the next tick comes is not joined again. */
@@ -495,8 +499,9 @@ function releaseFreesTask(outcome: RunResult): boolean {
 }
 
 /**
- * Freezes `value` and every plain object or array it holds, so callers that
- * share an outcome or a report can't change it under each other.
+ * Freezes `value` and every object it holds, the neverthrow `Result` wrapper
+ * included, so callers that share an outcome or a report can't change it under
+ * each other. Applied only to the fresh, acyclic values `translate.ts` builds.
  */
 function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {

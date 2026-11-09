@@ -18,7 +18,10 @@ export const AUTH_REFRESH_MS = 30_000;
 const UNKNOWN_TOKEN_REFRESH_MS = 5_000;
 
 /** A cache not loaded for three refreshes in a row fails every call closed. */
-const STALE_MS = 3 * AUTH_REFRESH_MS;
+export const STALE_MS = 3 * AUTH_REFRESH_MS;
+
+/** How often the hub checks open sessions against a stale cache, whatever its refreshes do. */
+export const STALE_CHECK_MS = 5_000;
 
 /** How long after a refresh starts a call still waits on it before answering `UNAVAILABLE`. */
 const REFRESH_WAIT_MS = 5_000;

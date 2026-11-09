@@ -65,7 +65,7 @@ message PlanResult {
 }
 
 message Executed {
-  Usage usage = 1;
+  Usage usage = 1; // absent when the runtime reports no usage
 }
 
 message VerifyVerdict {

@@ -114,7 +114,9 @@ describe("connectorCli", () => {
       expect(token).toMatch(TOKEN_LINE);
       const guidance = rest.join("\n");
       expect(guidance).toContain("shown only once");
-      expect(guidance).toContain("The old token stops working within 30 s.");
+      expect(guidance).toContain(
+        "The old token stops working within 30 s (95 s while the server can't read its database).",
+      );
       expect(guidance).toContain("within the lease");
       expect(err).toEqual([]);
       expect(d.connectorStore.rotateToken).toHaveBeenCalledWith(expect.anything(), {
@@ -143,7 +145,9 @@ describe("connectorCli", () => {
 
       const text = out.join("\n");
       expect(text).toContain('Revoked connector "laptop".');
-      expect(text).toContain("stream closes within 30 s");
+      expect(text).toContain(
+        "stream closes within 30 s (95 s while the server can't read its database)",
+      );
       expect(text).toContain("jobs in flight are lost");
       expect(err).toEqual([]);
       expect(d.connectorStore.revoke).toHaveBeenCalledWith(expect.anything(), {

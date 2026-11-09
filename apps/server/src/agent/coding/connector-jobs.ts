@@ -1,8 +1,10 @@
 /**
  * The port coding stages run connector jobs through (design/connectors.md →
- * Data model). Boot wires it to the session hub in `src/connector/`, which
- * translates the wire messages into these plain, readonly values: a step can
- * return them as they are, and nothing here carries protobuf representation.
+ * Data model). Boot wires it to the session hub in `src/connector/`. It takes
+ * the protobuf `Job` a stage builds, whose spec the job id digests, and
+ * returns plain, readonly values the hub translates from the wire and freezes:
+ * they carry no protobuf representation, and a step can return them as they
+ * are.
  */
 
 import type { Job } from "@cogmo/connector-proto";
@@ -61,18 +63,18 @@ export type JobCompletion =
   | { readonly phase: "execute"; readonly usage: JobUsage | null }
   | {
       readonly phase: "verify";
-      readonly verdict: VerifyVerdict;
+      readonly outcome: VerifyOutcome;
       /** The end of the combined output, at most 8 KiB. */
       readonly outputTail: string;
     }
   | { readonly phase: "publish"; readonly headSha: string }
-  | { readonly phase: "release"; readonly released: Released };
+  | { readonly phase: "release"; readonly outcome: ReleaseOutcome };
 
-export type VerifyVerdict =
+export type VerifyOutcome =
   | { readonly kind: "exited"; readonly exitCode: number }
   | { readonly kind: "timed_out" };
 
-export type Released =
+export type ReleaseOutcome =
   | { readonly kind: "removed_clean" }
   | { readonly kind: "salvaged_and_removed"; readonly salvageRef: string; readonly sha: string }
   | { readonly kind: "kept"; readonly reason: string };

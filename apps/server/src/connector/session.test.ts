@@ -64,10 +64,10 @@ describe("messages", () => {
 describe("heartbeat", () => {
   it("queues a heartbeat only when nothing else is waiting", async () => {
     const session = new Session(CONNECTOR, () => {});
-    session.heartbeat(heartbeat());
-    session.heartbeat(heartbeat());
+    session.heartbeat();
+    session.heartbeat();
     session.send(cancel("a"));
-    session.heartbeat(heartbeat());
+    session.heartbeat();
     const iterator = session.messages(new AbortController().signal)[Symbol.asyncIterator]();
     expect(await nextOrPending(iterator)).toEqual(heartbeat());
     expect(await nextOrPending(iterator)).toEqual(cancel("a"));

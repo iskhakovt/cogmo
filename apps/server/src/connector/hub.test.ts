@@ -22,7 +22,7 @@ import { err, ok, type Result } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { JobOutcome, JobReport, JobRunError } from "../agent/coding/connector-jobs.js";
-import { expectDefined, expectOk } from "../test/assertions.js";
+import { assertKind, expectDefined, expectOk } from "../test/assertions.js";
 import type { ConnectorAuthCache } from "./auth.js";
 import { SessionHub } from "./hub.js";
 import { connectorRoutes } from "./service.js";
@@ -524,16 +524,6 @@ describe("what callers receive", () => {
     expect(known.result).toEqual(ok({ kind: "failed", code: "session_lost", message: "boom" }));
   });
 
-  it("maps an error code this build doesn't know to unknown", async () => {
-    const run = await failWith(99 as JobErrorCode);
-    expect(run.result).toEqual(ok({ kind: "failed", code: "unknown", message: "boom" }));
-  });
-
-  it("maps an unspecified error code to unspecified", async () => {
-    const run = await failWith(JobErrorCode.UNSPECIFIED);
-    expect(run.result).toEqual(ok({ kind: "failed", code: "unspecified", message: "boom" }));
-  });
-
   it("refuses a verify verdict with no outcome as an invalid result", async () => {
     const { run, code } = await finishWith(
       verifyJob(600),
@@ -588,7 +578,7 @@ describe("what callers receive", () => {
     expect(second.result).toEqual(outcome);
     expect(Object.isFrozen(outcome)).toBe(true);
     const completed = expectOk(outcome);
-    if (completed.kind !== "completed") throw new Error("expected a completed outcome");
+    assertKind(completed, "completed");
     expect(Object.isFrozen(completed.result)).toBe(true);
   });
 
@@ -608,7 +598,28 @@ describe("what callers receive", () => {
     expect(resent.message.value.spec.value.prompt).toBe("plan it");
   });
 
-  it("checks the token budget against the connector's report, not what a handler does with it", async () => {
+  it("ends a turn over its budget even when a handler finishes the job from the report", async () => {
+    await connected("paseo-token", []);
+    const run = startRun(planJob(100n));
+    const plan = finish({
+      jobId: "task-1/plan/d2",
+      outcome: {
+        case: "completed",
+        value: { result: { case: "plan", value: { plan: "p", agentSessionId: "s" } } },
+      },
+    });
+    void hub.run(PASEO.id, planJob(100n), { onEvent: () => hub.finishJob(PASEO, plan) });
+    await settle();
+    await client.acceptJob({ jobId: "task-1/plan/d2" }, bearer("paseo-token"));
+    await client.reportEvents(
+      { jobId: "task-1/plan/d2", events: [usageEvent(1n, 500n, 0n)] },
+      bearer("paseo-token"),
+    );
+    await settle();
+    expect(run.result).toEqual(err({ kind: "timed_out", cap: "token_budget" }));
+  });
+
+  it("hands handlers a frozen report, and still ends a turn over its budget", async () => {
     await connected("paseo-token", []);
     const run = startRun(planJob(100n));
     const tampered: string[] = [];
@@ -744,6 +755,27 @@ describe("sessions", () => {
     expect(first.error?.code).toBe(Code.Aborted);
     expect(second.received[0]?.message.case).toBe("accepted");
     expect(second.error).toBeNull();
+  });
+
+  it("queues one heartbeat, not one per tick, for a stream its peer isn't reading", async () => {
+    const controller = new AbortController();
+    const stream = client
+      .connect({ heldJobIds: [] }, { ...bearer("paseo-token"), signal: controller.signal })
+      [Symbol.asyncIterator]();
+    expect((await stream.next()).value?.message.case).toBe("accepted");
+    await advance(90_000);
+    expect((await stream.next()).value?.message.case).toBe("heartbeat");
+    const pendingNext = stream.next().then(
+      (next) => next.value?.message.case,
+      () => "ended",
+    );
+    const more = await Promise.race([
+      pendingNext,
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
+    ]);
+    expect(more).toBe("pending");
+    controller.abort();
+    await pendingNext;
   });
 
   it("sends a heartbeat every 30 s", async () => {

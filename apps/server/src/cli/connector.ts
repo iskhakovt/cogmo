@@ -11,7 +11,7 @@ import {
   addConnector,
   CONNECTOR_NAME_RE,
 } from "../connector/add-connector.js";
-import { AUTH_REFRESH_MS } from "../connector/auth.js";
+import { AUTH_REFRESH_MS, STALE_CHECK_MS, STALE_MS } from "../connector/auth.js";
 import { revokeConnector } from "../connector/revoke-connector.js";
 import { rotateConnectorToken } from "../connector/rotate-connector-token.js";
 import type { ConnectorKind, ConnectorStore } from "../connector/store/index.js";
@@ -25,8 +25,11 @@ export interface ConnectorCliDeps {
   connectorStore: ConnectorStore;
 }
 
-/** How soon a rotate or revoke reaches a running server: its auth cache's refresh interval. */
-const REFRESH_SECONDS = AUTH_REFRESH_MS / 1_000;
+/**
+ * How soon a rotate or revoke reaches a running server: its auth cache's next
+ * refresh, or, while the server can't read its database, the cache going stale.
+ */
+const REVOKE_WITHIN = `${AUTH_REFRESH_MS / 1_000} s (${(STALE_MS + STALE_CHECK_MS) / 1_000} s while the server can't read its database)`;
 
 const TOKEN_ONCE = "The token above is shown only once: put it in the connector's config.";
 
@@ -131,7 +134,7 @@ async function rotate(args: { name: string }, deps: ConnectorCliDeps, io: CliIo)
   io.out(rotated.value.token);
   io.out(`Rotated the token of connector "${args.name}". ${TOKEN_ONCE}`);
   io.out(
-    `The old token stops working within ${REFRESH_SECONDS} s. Reconnect the connector with the new one within the lease (CONNECTOR_LEASE_SECONDS), or its jobs in flight are lost.`,
+    `The old token stops working within ${REVOKE_WITHIN}. Reconnect the connector with the new one within the lease (CONNECTOR_LEASE_SECONDS), or its jobs in flight are lost.`,
   );
   return 0;
 }
@@ -143,7 +146,7 @@ async function revoke(args: { name: string }, deps: ConnectorCliDeps, io: CliIo)
     return 1;
   }
   io.out(
-    `Revoked connector "${args.name}". Its stream closes within ${REFRESH_SECONDS} s, and its jobs in flight are lost.`,
+    `Revoked connector "${args.name}". Its stream closes within ${REVOKE_WITHIN}, and its jobs in flight are lost.`,
   );
   return 0;
 }

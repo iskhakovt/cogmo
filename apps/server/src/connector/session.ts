@@ -3,7 +3,8 @@
  * the hub sends down it.
  */
 
-import type { ConnectResponse } from "@cogmo/connector-proto";
+import { create } from "@bufbuild/protobuf";
+import { type ConnectResponse, ConnectResponseSchema } from "@cogmo/connector-proto";
 import { match } from "ts-pattern";
 import type { ActiveConnector } from "./store/index.js";
 
@@ -31,7 +32,7 @@ export interface HubSession extends ConnectorSession {
   /** Queues a message; dropped once the session is over. */
   send(message: ConnectResponse): void;
   /** Queues a heartbeat unless messages are already waiting, which prove the stream alive once they arrive. */
-  heartbeat(message: ConnectResponse): void;
+  heartbeat(): void;
   /** Ends the session from the hub's side. Idempotent. */
   end(reason: SessionEnd): void;
 }
@@ -67,25 +68,25 @@ export class Session implements HubSession {
   }
 
   send(message: ConnectResponse): void {
-    if (this.#state.status !== "open") return;
+    if (!this.#isOpen()) return;
     this.#queue.push(message);
     this.#wake?.();
   }
 
-  heartbeat(message: ConnectResponse): void {
+  heartbeat(): void {
     if (this.#queue.length > 0) return;
-    this.send(message);
+    this.send(create(ConnectResponseSchema, { message: { case: "heartbeat", value: {} } }));
   }
 
   end(reason: SessionEnd): void {
-    if (this.#state.status !== "open") return;
+    if (!this.#isOpen()) return;
     this.#state = { status: "ended", reason };
     this.#ended.abort();
     this.#finish();
   }
 
   close(): void {
-    if (this.#state.status !== "open") return;
+    if (!this.#isOpen()) return;
     this.#state = { status: "closed" };
     this.#finish();
   }
@@ -95,7 +96,7 @@ export class Session implements HubSession {
     signal.addEventListener("abort", onAbort);
     try {
       for (;;) {
-        if (this.#state.status !== "open" || signal.aborted) return;
+        if (!this.#isOpen() || signal.aborted) return;
         const next = this.#queue.shift();
         if (next !== undefined) {
           yield next;
@@ -109,6 +110,13 @@ export class Session implements HubSession {
     } finally {
       signal.removeEventListener("abort", onAbort);
     }
+  }
+
+  #isOpen(): boolean {
+    return match(this.#state)
+      .with({ status: "open" }, () => true)
+      .with({ status: "ended" }, { status: "closed" }, () => false)
+      .exhaustive();
   }
 
   #finish(): void {

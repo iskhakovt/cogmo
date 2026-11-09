@@ -1,7 +1,7 @@
 /**
- * Wire messages into the `ConnectorJobs` port's values: fresh, plain and
- * readonly, with every open enum value and `oneof` case the connector may send
- * mapped to an explicit fallback (`.agents/rules/protobuf.md`).
+ * Wire messages into the `ConnectorJobs` port's values: fresh and plain, with
+ * every open enum value and `oneof` case the connector may send mapped to an
+ * explicit fallback (`.agents/rules/protobuf.md`). The hub freezes them.
  */
 
 import { JobErrorCode, type JobEvent, type JobResult, type Usage } from "@cogmo/connector-proto";
@@ -25,19 +25,19 @@ const RESULT_CASE = {
   release: "released",
 } as const satisfies Record<JobPhase, string>;
 
-/** The codes this build knows. proto3 enums are open, so a connector may send others. */
-const FAILURE_CODE: ReadonlyMap<number, JobFailureCode> = new Map([
-  [JobErrorCode.UNSPECIFIED, "unspecified"],
-  [JobErrorCode.AGENT_FAILED, "agent_failed"],
-  [JobErrorCode.NO_PLAN, "no_plan"],
-  [JobErrorCode.SESSION_LOST, "session_lost"],
-  [JobErrorCode.BRANCH_CONFLICT, "branch_conflict"],
-  [JobErrorCode.PUSH_AUTH_FAILED, "push_auth_failed"],
-  [JobErrorCode.PUSH_FAILED, "push_failed"],
-  [JobErrorCode.WORKSPACE_FAILED, "workspace_failed"],
-  [JobErrorCode.JOB_CONFLICT, "job_conflict"],
-  [JobErrorCode.UNSUPPORTED, "unsupported"],
-]);
+/** Every code this build knows; a new `JobErrorCode` fails to compile until it is mapped. */
+const FAILURE_CODE: Readonly<Record<JobErrorCode, JobFailureCode>> = {
+  [JobErrorCode.UNSPECIFIED]: "unspecified",
+  [JobErrorCode.AGENT_FAILED]: "agent_failed",
+  [JobErrorCode.NO_PLAN]: "no_plan",
+  [JobErrorCode.SESSION_LOST]: "session_lost",
+  [JobErrorCode.BRANCH_CONFLICT]: "branch_conflict",
+  [JobErrorCode.PUSH_AUTH_FAILED]: "push_auth_failed",
+  [JobErrorCode.PUSH_FAILED]: "push_failed",
+  [JobErrorCode.WORKSPACE_FAILED]: "workspace_failed",
+  [JobErrorCode.JOB_CONFLICT]: "job_conflict",
+  [JobErrorCode.UNSUPPORTED]: "unsupported",
+};
 
 /**
  * A completed job's result for `phase`. A result whose case doesn't match the
@@ -45,56 +45,50 @@ const FAILURE_CODE: ReadonlyMap<number, JobFailureCode> = new Map([
  */
 export function completionOf(phase: JobPhase, result: JobResult): Result<JobCompletion, string> {
   const expected = RESULT_CASE[phase];
-  const mismatch = `a ${phase} job completes with a ${expected} result, not ${result.result.case ?? "none"}`;
+  if (result.result.case !== expected) {
+    return err(
+      `a ${phase} job completes with a ${expected} result, not ${result.result.case ?? "none"}`,
+    );
+  }
   return match(result.result)
-    .with({ case: "prepared" }, () =>
-      phase === "prepare" ? ok({ phase: "prepare" as const }) : err(mismatch),
-    )
+    .with({ case: "prepared" }, () => ok({ phase: "prepare" as const }))
     .with({ case: "plan" }, ({ value }) =>
-      phase === "plan"
-        ? ok({ phase: "plan" as const, plan: value.plan, agentSessionId: value.agentSessionId })
-        : err(mismatch),
+      ok({ phase: "plan" as const, plan: value.plan, agentSessionId: value.agentSessionId }),
     )
     .with({ case: "executed" }, ({ value }) =>
-      phase === "execute"
-        ? ok({ phase: "execute" as const, usage: value.usage ? usageOf(value.usage) : null })
-        : err(mismatch),
+      ok({ phase: "execute" as const, usage: value.usage ? usageOf(value.usage) : null }),
     )
-    .with({ case: "verify" }, ({ value }) => {
-      if (phase !== "verify") return err(mismatch);
-      return match(value.outcome)
+    .with({ case: "verify" }, ({ value }) =>
+      match(value.outcome)
         .with({ case: "exitCode" }, ({ value: exitCode }) =>
           ok({
             phase: "verify" as const,
-            verdict: { kind: "exited" as const, exitCode },
+            outcome: { kind: "exited" as const, exitCode },
             outputTail: value.outputTail,
           }),
         )
         .with({ case: "timedOut" }, () =>
           ok({
             phase: "verify" as const,
-            verdict: { kind: "timed_out" as const },
+            outcome: { kind: "timed_out" as const },
             outputTail: value.outputTail,
           }),
         )
         .with({ case: undefined }, () => err("a verify verdict carries no outcome"))
-        .exhaustive();
-    })
-    .with({ case: "published" }, ({ value }) =>
-      phase === "publish"
-        ? ok({ phase: "publish" as const, headSha: value.headSha })
-        : err(mismatch),
+        .exhaustive(),
     )
-    .with({ case: "released" }, ({ value }) => {
-      if (phase !== "release") return err(mismatch);
-      return match(value.outcome)
+    .with({ case: "published" }, ({ value }) =>
+      ok({ phase: "publish" as const, headSha: value.headSha }),
+    )
+    .with({ case: "released" }, ({ value }) =>
+      match(value.outcome)
         .with({ case: "removedClean" }, () =>
-          ok({ phase: "release" as const, released: { kind: "removed_clean" as const } }),
+          ok({ phase: "release" as const, outcome: { kind: "removed_clean" as const } }),
         )
         .with({ case: "salvagedAndRemoved" }, ({ value: salvaged }) =>
           ok({
             phase: "release" as const,
-            released: {
+            outcome: {
               kind: "salvaged_and_removed" as const,
               salvageRef: salvaged.salvageRef,
               sha: salvaged.sha,
@@ -104,19 +98,18 @@ export function completionOf(phase: JobPhase, result: JobResult): Result<JobComp
         .with({ case: "kept" }, ({ value: kept }) =>
           ok({
             phase: "release" as const,
-            released: { kind: "kept" as const, reason: kept.reason },
+            outcome: { kind: "kept" as const, reason: kept.reason },
           }),
         )
         .with({ case: undefined }, () => err("a release result carries no outcome"))
-        .exhaustive();
-    })
-    .with({ case: undefined }, () => err(mismatch))
+        .exhaustive(),
+    )
     .exhaustive();
 }
 
 /** A connector's error code; a value this build does not know is `unknown`. */
 export function failureCodeOf(code: JobErrorCode): JobFailureCode {
-  return FAILURE_CODE.get(code) ?? "unknown";
+  return Object.hasOwn(FAILURE_CODE, code) ? FAILURE_CODE[code] : "unknown";
 }
 
 /** A reported event, or `null` for an event case this build does not know. */

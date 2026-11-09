@@ -95,7 +95,7 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 
 **Auth.** Each call carries `authorization: Bearer <token>`.
 - `cogmo connector add <name> --kind coding` mints a 32-byte token, prints it once and stores its SHA-256, as `web_sessions` does. `rotate` replaces the token. `revoke` moves the connector to `revoked`, and refuses while a repo points at it; tasks running on it lose their jobs. `list` shows the connectors.
-- Each call checks its token against the hub's cache of active connectors. A 30 s hub timer refreshes the cache from the table, as does a token the cache does not recognise (at most once every 5 s), so a new token works within seconds and a revoke or rotate takes effect, closing the old token's stream, within 30 s. A call that needs a refresh joins the one in flight, waiting at most until 5 s after it started, and an unknown token gets `UNAVAILABLE` while the last refresh failed. The hub runs at most one timer refresh at a time. Once three refreshes in a row have failed or stalled (90 s since the last good load started), the cache fails closed: every call gets `UNAVAILABLE` and, within 5 s, every open stream closes, so a revoke never outlives it.
+- Each call checks its token against the hub's cache of active connectors. A 30 s hub timer refreshes the cache from the table, as does a token the cache does not recognise (at most once every 5 s), so a new token works within seconds and a revoke or rotate takes effect, closing the old token's stream, within 30 s while the table can be read. A call that needs a refresh joins the one in flight, waiting at most until 5 s after it started, and an unknown token gets `UNAVAILABLE` while the last refresh failed. The hub runs at most one timer refresh at a time. Once three refreshes in a row have failed or stalled (90 s since the last good load started), the cache fails closed: every call gets `UNAVAILABLE` and, within 5 s, every open stream closes, so a revoke never outlives it by more than 95 s.
 - Jobs are keyed on (connector, `job_id`). A call naming another connector's job fails with `PERMISSION_DENIED`, and one naming a job this process does not know fails with `NOT_FOUND`.
 
 **Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_HOST`:`CONNECTOR_PORT`. When `CONNECTOR_PORT` is unset, no server starts, and boot warns if a repo points at a connector. `CONNECTOR_HOST` defaults to `0.0.0.0`, the container convention `WEB_HOST` follows ([web-ui.md](web-ui.md) → Auth and bind). As there, the boundary is the publish layer: the token crosses h2c in cleartext, so the port is published on host loopback, or reached through a tailnet or a TLS proxy. A bare-metal run with no such layer sets `CONNECTOR_HOST=127.0.0.1`. cogmo sends a `Heartbeat` down the stream every 30 s, which proves the stream alive end to end, since a proxy answers HTTP/2 pings for its own hop. Both sides also send HTTP/2 keepalive pings; cogmo pings every 30 s and closes a connection that has not answered within 20 s. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
@@ -245,7 +245,7 @@ Each dispatching step is durable for the reason its sandbox counterpart is: the 
 
 ## Paseo connector `[research]`
 
-`connectors/paseo/` is a TypeScript workspace member in cogmo's release, running on the Paseo host. It maps jobs onto `@getpaseo/client`, and runs `verify`, `publish` and the salvage push itself in the worktree, so it gets exit codes and uses the host's git credentials. Its config (cogmo URL and token, Paseo URL and password, a local checkout for each remote, and the Paseo provider for each `AgentTurnSpec.agent`) is the operator's.
+`connectors/paseo/` is a TypeScript workspace member in cogmo's release, running on the Paseo host. It maps jobs onto `@getpaseo/client`, and runs `verify`, `publish` and the salvage push itself in the worktree, so it gets exit codes and uses the host's git credentials. Its config (cogmo URL and token, Paseo URL and password, a local checkout for each remote, and the Paseo provider for each `agent` a `PlanSpec` or `ExecuteSpec` names) is the operator's.
 
 | Job | Paseo |
 |-|-|
@@ -267,8 +267,8 @@ A channel connector exposes the per-channel `Transport` from [operator-facade.md
 
 ## Testing `[proposed]`
 
-- **Unit:** the hub and server over `createRouterTransport` with a fake connector. Cover a matrix of the nine rules, the transition table, the caps, lease expiry, a session replaced under one name, revoke and rotate, and the mapping onto `TaskFailure`s.
-- **Contract suite:** a TypeScript kit that drives any connector over gRPC through the nine rules. The Paseo connector runs it in CI.
+- **Unit:** the hub and server over `createRouterTransport` with a fake connector. Cover a matrix of the ten rules, the transition table, the caps, lease expiry, a session replaced under one name, revoke and rotate, and the mapping onto `TaskFailure`s.
+- **Contract suite:** a TypeScript kit that drives any connector over gRPC through the ten rules. The Paseo connector runs it in CI.
 - **Integration:** one coding task end to end against the fake connector, over a real h2c socket bound to port 0.
 - **Paseo connector:** against the official Paseo image (a `dev/containers.ts` factory), with the Claude provider's `ANTHROPIC_BASE_URL` pointed at llmock. Whether replay holds across Paseo's provider launch is a spike item.
 
@@ -282,4 +282,4 @@ A channel connector exposes the per-channel `Transport` from [operator-facade.md
 ## Open questions
 
 - Should the Paseo connector ship as a subcommand of the cogmo image (`cogmo connector run paseo`), or as its own image?
-- `AgentTurnSpec.agent` carries `coding_tasks.backend` (`claude`, `codex`). Should a repo be able to name a model too, or is that the connector's config?
+- `PlanSpec.agent` and `ExecuteSpec.agent` carry `coding_tasks.backend` (`claude`, `codex`). Should a repo be able to name a model too, or is that the connector's config?

@@ -1,4 +1,4 @@
-import { connect as connectHttp2 } from "node:http2";
+import { connect as connectHttp2, constants } from "node:http2";
 import { create } from "@bufbuild/protobuf";
 import {
   ConnectorService,
@@ -134,7 +134,7 @@ it("refuses a message larger than 4 MiB", async () => {
 });
 
 it("resets a replaced session's stream that its peer stopped reading", async () => {
-  // A peer advertising a zero window leaves the server stuck writing SessionAccepted.
+  // A peer advertising a zero window takes no data, so the server's writes queue up.
   const stuck = connectHttp2(baseUrl, { settings: { initialWindowSize: 0 } });
   stuck.on("error", () => {});
   const request = stuck.request({
@@ -145,27 +145,44 @@ it("resets a replaced session's stream that its peer stopped reading", async () 
     authorization: "Bearer paseo-token",
   });
   request.on("error", () => {});
-  const closed = new Promise<void>((resolve) => request.on("close", () => resolve()));
+  let isClosed = false;
+  const closed = new Promise<void>((resolve) =>
+    request.on("close", () => {
+      isClosed = true;
+      resolve();
+    }),
+  );
+  // Headers aren't flow-controlled, so they arrive once the server has opened the session.
+  const responded = new Promise<void>((resolve) => request.once("response", () => resolve()));
   request.end(Buffer.from([0, 0, 0, 0, 0]));
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await resolvesWithin(responded, 4_000, "the stuck stream's response headers");
+  expect(isClosed).toBe(false);
 
   // A second session for the same connector replaces the first.
   const client = createClient(ConnectorService, createGrpcTransport({ baseUrl }));
   const controller = new AbortController();
+  let firstMessage: (message: ConnectResponse) => void = () => {};
+  const accepted = new Promise<ConnectResponse>((resolve) => {
+    firstMessage = resolve;
+  });
   const second = (async () => {
     try {
-      for await (const _ of client.connect(
+      for await (const message of client.connect(
         { heldJobIds: [] },
         { ...AUTH, signal: controller.signal },
       )) {
-        // Reading keeps this stream flowing.
+        firstMessage(message);
       }
     } catch {
       // Aborted below.
     }
   })();
+  expect(
+    (await resolvesWithin(accepted, 4_000, "the replacement's first message")).message.case,
+  ).toBe("accepted");
 
   await resolvesWithin(closed, 4_000, "the stuck stream's reset");
+  expect(request.rstCode).toBe(constants.NGHTTP2_CANCEL);
   controller.abort();
   await second;
   stuck.destroy();

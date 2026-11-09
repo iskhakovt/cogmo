@@ -113,6 +113,13 @@ it("answers unavailable at once once a stalled reload has outlived its wait", as
   expect(store.listActive).toHaveBeenCalledTimes(2);
 });
 
+it("ages the cache on the monotonic clock, so a wall-clock jump leaves it fresh", async () => {
+  const auth = await ConnectorAuth.create({ runInTx: fakeRunInTx, connectorStore: store });
+  vi.setSystemTime(Date.now() + 3_600_000);
+  expect(auth.isStale()).toBe(false);
+  expect(await auth.authenticate("paseo-token")).toEqual(ok(PASEO));
+});
+
 it("keeps the old cache when a reload fails", async () => {
   const auth = await ConnectorAuth.create({ runInTx: fakeRunInTx, connectorStore: store });
   store.listActive.mockRejectedValue(new Error("db down"));
