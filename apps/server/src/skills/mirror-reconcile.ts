@@ -92,9 +92,9 @@ export async function reconcileMirror(
 }
 
 /**
- * One reconcile in the background, for `cogmo serve`'s boot: a commit the
- * boot made (the layout commit) reaches the remote before a draft on a
- * git-remote backend branches from the remote's `main`. Never rejects; a
+ * One reconcile, for `cogmo serve`'s boot before its runtime starts: a commit
+ * the boot made (the layout commit) reaches the remote before a draft on a
+ * git-remote backend can branch from the remote's `main`. Never rejects; a
  * failure is logged and the cron repeats the reconcile.
  */
 export async function reconcileMirrorAtBoot(deps: SkillsMirrorReconcileDeps): Promise<void> {

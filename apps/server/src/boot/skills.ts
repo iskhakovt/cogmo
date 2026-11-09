@@ -93,14 +93,14 @@ export async function bootstrapSkillRunner(
 }
 
 /**
- * Reconcile the skills remote once in the background, for `cogmo serve`. A
- * coding task on a git-remote backend (Daytona) branches from the remote's
- * `main`, so a commit this boot made, which only local `main` holds, would
- * fail the draft's register as `non_fast_forward` until the cron's next tick
- * (design/skills.md → Repo location → Mirror state).
+ * Reconcile the skills remote once, for `cogmo serve`, before the runtime
+ * starts. A coding task on a git-remote backend (Daytona) branches from the
+ * remote's `main`, so a commit this boot made, which only local `main` holds,
+ * would fail the draft's register as `non_fast_forward` (design/skills.md →
+ * Repo location → Mirror state). Never rejects.
  */
-export function scheduleSkillsMirror(core: CoreDeps): void {
-  void reconcileMirrorAtBoot(skillsMirrorDeps(core));
+export function reconcileSkillsMirrorAtBoot(core: CoreDeps): Promise<void> {
+  return reconcileMirrorAtBoot(skillsMirrorDeps(core));
 }
 
 function skillsMirrorDeps(core: CoreDeps): SkillsMirrorReconcileDeps {
