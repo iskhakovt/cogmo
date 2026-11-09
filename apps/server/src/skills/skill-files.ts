@@ -1,5 +1,5 @@
 import type { Result } from "neverthrow";
-import { type GitShowError, gitShow, isAncestor, runGitIn } from "./git-ops.js";
+import { type GitShowError, gitShow, isAncestor, revParse, runGitIn } from "./git-ops.js";
 
 /**
  * The files a skill owns, the only ones register lets a branch change, in
@@ -102,6 +102,23 @@ export async function skillBlobsAt(
   sha: string,
 ): Promise<ReadonlyMap<SkillFile, TreeBlob>> {
   return skillBlobsUnder(repo.path, sha, await skillPrefixAt(repo, name, sha));
+}
+
+/**
+ * Whether `name`'s files at `sha` are `blobs`. A `sha` the repo lacks holds
+ * other files, as a live sha does once the repo is restored from a remote
+ * that lagged its deploy.
+ */
+export async function skillBlobsMatchAt(
+  repo: SkillsRepo,
+  name: string,
+  sha: string,
+  blobs: ReadonlyMap<SkillFile, TreeBlob>,
+): Promise<boolean> {
+  return (
+    (await revParse(repo.path, `${sha}^{commit}`)).isOk() &&
+    sameSkillBlobs(blobs, await skillBlobsAt(repo, name, sha))
+  );
 }
 
 /** Whether two sets of skill files hold the same files with the same contents and modes. */

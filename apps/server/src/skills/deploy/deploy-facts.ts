@@ -21,6 +21,18 @@ export interface DeployFacts {
   priorGitSha: string | null;
 }
 
+/**
+ * The live version `deploy` replaced when it is an edit, one that replaced a
+ * different version; null for a first deploy and for one that put the live
+ * sha back live (a disabled skill registered again at its own version).
+ */
+export function replacedGitSha(deploy: {
+  gitSha: string;
+  priorGitSha: string | null;
+}): string | null {
+  return deploy.priorGitSha === deploy.gitSha ? null : deploy.priorGitSha;
+}
+
 /** The facts of `deploy`, whose version `manifest` is the manifest of. */
 export function deployFacts(manifest: SkillManifest, deploy: SkillDeployRow): DeployFacts {
   const log = deploy.classifierLog;

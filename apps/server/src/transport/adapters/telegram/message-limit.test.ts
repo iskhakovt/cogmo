@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   fitTelegramMessage,
+  fitTelegramToast,
   packTelegramMessages,
   TELEGRAM_MAX_MESSAGE_LENGTH,
 } from "./message-limit.js";
@@ -22,6 +23,19 @@ describe("fitTelegramMessage", () => {
   it("cuts a longer message to the cap, ending in an ellipsis", () => {
     const fitted = fitTelegramMessage("x".repeat(TELEGRAM_MAX_MESSAGE_LENGTH + 1));
     expect(fitted).toHaveLength(TELEGRAM_MAX_MESSAGE_LENGTH);
+    expect(fitted.endsWith("…")).toBe(true);
+  });
+});
+
+describe("fitTelegramToast", () => {
+  it("leaves a toast at Telegram's 200-character cap unchanged", () => {
+    const text = "x".repeat(200);
+    expect(fitTelegramToast(text)).toBe(text);
+  });
+
+  it("cuts a longer toast to the cap, ending in an ellipsis", () => {
+    const fitted = fitTelegramToast("x".repeat(201));
+    expect(fitted).toHaveLength(200);
     expect(fitted.endsWith("…")).toBe(true);
   });
 });

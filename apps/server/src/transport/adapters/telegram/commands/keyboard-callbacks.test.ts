@@ -354,6 +354,36 @@ describe("handleSkillsDeployCallback", () => {
     });
   });
 
+  it("Roll back already made keeps the rolled-back text, so a second tap leaves the message as it is", async () => {
+    const deployId = "019d0000-0000-7000-8000-0000000000cd";
+    const rolledBack = {
+      skillName: "echo",
+      restoredGitSha: "abc1234".padEnd(40, "0"),
+      gitSha: "fed9876".padEnd(40, "0"),
+    };
+    const rollbackDeploy = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ kind: "restored", ...rolledBack }))
+      .mockResolvedValueOnce(ok({ kind: "already_rolled_back", ...rolledBack }));
+    const transport = transportWith({ skills: { rollbackDeploy } });
+    const tap = () =>
+      handleSkillsDeployCallback(
+        transport,
+        { deployId, action: "rollback" },
+        "user-tg-1",
+        "chat-1",
+      );
+
+    const first = await tap();
+    const second = await tap();
+
+    expect(second).toEqual({
+      editText: first.editText,
+      toast: "Already rolled back",
+      clearKeyboard: true,
+    });
+  });
+
   it("Roll back refused for a retryable reason keeps the keyboard", async () => {
     const deployId = "019d0000-0000-7000-8000-0000000000cd";
     const rollbackDeploy = vi.fn().mockResolvedValue(

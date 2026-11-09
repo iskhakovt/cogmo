@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
 import { PIPELINE_GATE_CALLBACK_REGEX } from "../../../agent/pipeline/gate-keyboard.js";
 import { SKILLS_DEPLOY_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
+import { expectDefined } from "../../../test/assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import { handlers, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
 import { createAdapter } from "../../../test/telegram/harness.js";
@@ -153,6 +154,45 @@ describe("registerCallbackQueries", () => {
       );
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Disabled" });
     });
+
+    // Telegram refuses an answer over 200 characters, leaving the button
+    // spinning; these refusals keep the keyboard, so the toast is all the
+    // tapper sees.
+    it.each([
+      {
+        action: "rollback",
+        method: "rollbackDeploy",
+        error: { code: "skill_rollback_failed", deployId: PENDING_ID, reason: "x".repeat(300) },
+        prefix: "Roll back failed: x",
+      },
+      {
+        action: "approve",
+        method: "approveDeploy",
+        error: {
+          code: "skill_deploy_register_failed",
+          pendingId: PENDING_ID,
+          reason: "x".repeat(300),
+        },
+        prefix: "Approve failed: x",
+      },
+    ] as const)(
+      "skill deploy: a $action refusal's long reason is cut to Telegram's toast cap",
+      async ({ action, method, error, prefix }) => {
+        const skills = { ...mockTransport().skills };
+        skills[method] = vi.fn().mockResolvedValue(err(error));
+        await createAdapter({ skills });
+        const ctx = makeCallbackCtx(`skill:${PENDING_ID}:${action}`);
+
+        const handler = handlers.get(`callbackQuery:${SKILLS_DEPLOY_CALLBACK_REGEX.source}`);
+        await handler(ctx);
+
+        expect(ctx.editMessageText).not.toHaveBeenCalled();
+        const text = expectDefined(ctx.answerCallbackQuery.mock.calls[0], "answer")[0].text;
+        expect(text).toHaveLength(200);
+        expect(text.startsWith(prefix)).toBe(true);
+        expect(text.endsWith("…")).toBe(true);
+      },
+    );
 
     it("pipeline gate: approve → pipelines.resolveGate with the token, edit clears keyboard, answers toast", async () => {
       const { transport } = await createAdapter();
