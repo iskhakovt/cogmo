@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,6 +41,27 @@ async function script(name: string, body: string): Promise<string> {
   const path = join(root, name);
   await writeFile(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
   return path;
+}
+
+/**
+ * A fake `ssh` at `<dir>/ssh` that writes its arguments, then `$SKILLS_SSH_TAG`,
+ * to `<root>/ssh-call` and fails the connection.
+ */
+async function recordingSsh(dir: string): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, "ssh");
+  await writeFile(
+    path,
+    `#!/bin/sh\nprintf '%s\\n' "$*" "tag=\${SKILLS_SSH_TAG-unset}" > '${join(root, "ssh-call")}'\nexit 1\n`,
+    { mode: 0o755 },
+  );
+  return path;
+}
+
+/** The arguments and tag the last `recordingSsh` connection wrote. */
+async function sshCall(): Promise<{ args: string; tag: string }> {
+  const [args = "", tag = ""] = (await readFile(join(root, "ssh-call"), "utf8")).split("\n");
+  return { args, tag };
 }
 
 /** Point origin at an SSH URL whose connections run `ssh` instead, through the repo's config. */
@@ -189,6 +210,28 @@ describe("mirrorMain", () => {
     expect(d.store.recordMirrorFailed).not.toHaveBeenCalled();
   }, 20_000);
 
+  it.skipIf(process.getuid?.() === 0)(
+    "records a remote that cannot write its main as a failure, not a lost race",
+    async () => {
+      const base = await commitLocal("a");
+      await git(local, "push", "-q", remote, `${base}:refs/heads/main`);
+      const sha = await commitLocal("b");
+      const heads = join(remote, "refs", "heads");
+      await chmod(heads, 0o555);
+      const d = deps();
+      try {
+        expect(await mirrorMain(d, local, sha)).toMatchObject({
+          kind: "failed",
+          failure: "auth",
+          detail: expect.stringMatching(/cannot lock ref.*Permission denied/),
+        });
+      } finally {
+        await chmod(heads, 0o755);
+      }
+      expect(d.store.recordMirrorFailed).toHaveBeenCalledWith(FAKE_TX, "auth");
+    },
+  );
+
   it("records a remote's refusal by its hook as an auth failure", async () => {
     const sha = await commitLocal("a");
     await writeFile(join(remote, "hooks", "pre-receive"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
@@ -312,6 +355,72 @@ describe("the push and the remote read", () => {
       expect(ran).toContain("-o BatchMode=yes");
       expect(ran).toContain("prompt=0");
     }
+  });
+
+  describe("over ssh", () => {
+    beforeEach(async () => {
+      vi.stubEnv("GIT_SSH_COMMAND", undefined);
+      vi.stubEnv("GIT_SSH", undefined);
+      // The machine's own config may name an ssh command; only the repo's counts here.
+      vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+      vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+      await git(local, "remote", "set-url", "origin", "git@skills.invalid:o/skills.git");
+    });
+
+    it("put BatchMode=yes ahead of the command's own BatchMode, since ssh keeps the first", async () => {
+      const sha = await commitLocal("a");
+      vi.stubEnv("GIT_SSH_COMMAND", `${await recordingSsh(root)} -o BatchMode=no`);
+
+      await mirrorMain(deps(), local, sha);
+
+      expect((await sshCall()).args).toMatch(/^-o BatchMode=yes -o BatchMode=no /);
+    });
+
+    it.each([
+      ["single", "'"],
+      ["double", '"'],
+    ])("keep a %s-quoted executable path whole", async (_, quote) => {
+      const sha = await commitLocal("a");
+      const ssh = await recordingSsh(join(root, "my ssh"));
+      await git(local, "config", "core.sshCommand", `${quote}${ssh}${quote} -o BatchMode=no`);
+
+      await mirrorMain(deps(), local, sha);
+
+      expect((await sshCall()).args).toMatch(/^-o BatchMode=yes -o BatchMode=no /);
+    });
+
+    it("put BatchMode after the variable assignments ahead of the executable", async () => {
+      const sha = await commitLocal("a");
+      const ssh = await recordingSsh(root);
+      await git(local, "config", "core.sshCommand", `SKILLS_SSH_TAG=kept ${ssh} -o BatchMode=no`);
+
+      await mirrorMain(deps(), local, sha);
+
+      expect(await sshCall()).toEqual({
+        args: expect.stringMatching(/^-o BatchMode=yes -o BatchMode=no /),
+        tag: "tag=kept",
+      });
+    });
+
+    it("leave a GIT_SSH program to run with git's own options", async () => {
+      const sha = await commitLocal("a");
+      vi.stubEnv("GIT_SSH", await recordingSsh(root));
+
+      await mirrorMain(deps(), local, sha);
+
+      expect((await sshCall()).args).not.toContain("BatchMode");
+    });
+
+    it("run plain ssh in batch mode when nothing names an ssh command", async () => {
+      const sha = await commitLocal("a");
+      const bin = join(root, "bin");
+      await recordingSsh(bin);
+      vi.stubEnv("PATH", `${bin}:${process.env.PATH ?? ""}`);
+
+      await mirrorMain(deps(), local, sha);
+
+      expect((await sshCall()).args).toMatch(/^-o BatchMode=yes git@skills\.invalid /);
+    });
   });
 
   it("push to an HTTPS remote without a GitHub identity with terminal prompts disabled", async () => {
