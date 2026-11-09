@@ -1,6 +1,7 @@
 /** Taps on the plan, pipeline-gate and skill deploy keyboards, as what the adapter writes back. */
 
 import { match, P } from "ts-pattern";
+import type { RolledBack } from "../../../../skills/deploy/rollback-deploy.js";
 import type { ParsedSkillsDeployCallback } from "../../../../skills/skills-keyboard.js";
 import type { Transport } from "../../../transport.js";
 import type { TransportError } from "../../../transport-error.js";
@@ -122,35 +123,53 @@ export interface SkillsDeployCallbackOutcome {
   /**
    * Whether the keyboard should go. Yes once the tap resolved the row or found
    * it gone; no while the row is still actionable: a rejected tapper, an
-   * approve the runner refused (the deploy stays pending, so Deny and a later
-   * Approve still apply) or an unwired skills runtime.
+   * approve or a rollback the runner refused (the deploy stays as it was, so
+   * the same taps still apply) or an unwired skills runtime.
    */
   clearKeyboard: boolean;
 }
 
 /**
- * Whether `error` leaves the deploy keyboard's buttons still usable. The
- * three codes name every failure that writes nothing: the row stays as it
- * was, so the same taps still apply. Every other code the skills namespace
- * returns resolved the row or found it gone. `TransportError` is the
+ * Whether `error` leaves the deploy keyboard's buttons still usable. These
+ * codes name every failure that writes nothing: the row stays as it was, so
+ * the same taps still apply. Every other code the skills namespace
+ * returns resolved the row, found it gone, or (`skill_deploy_superseded`)
+ * found its version replaced, which leaves the message stale; `/disable`
+ * still disables the skill. `TransportError` is the
  * transport-wide union, so the remainder is the other namespaces' codes,
  * which no skills tap can produce.
  */
 function keepsSkillsKeyboard(error: TransportError): boolean {
   return match(error)
     .with(
-      { code: P.union("identity_rejected", "skill_deploy_register_failed", "skills_disabled") },
+      {
+        code: P.union(
+          "identity_rejected",
+          "skill_deploy_register_failed",
+          "skill_rollback_failed",
+          "skills_disabled",
+        ),
+      },
       () => true,
     )
     .otherwise(() => false);
 }
 
 /**
+ * The message once the edit is rolled back, the same whether this tap or an
+ * earlier one did it, so a second tap leaves the message as it is.
+ */
+function rolledBackText(r: RolledBack): string {
+  return `↩️ Rolled back ${r.skillName} to ${r.restoredGitSha.slice(0, 7)} (now live at ${r.gitSha.slice(0, 7)}).`;
+}
+
+/**
  * Skill deploy-keyboard callback handler — translates a parsed Approve /
- * Deny tap on a pending deploy, or a Disable tap on a live skill, into a
- * `transport.skills` call and an outcome the adapter renders. The Transport
- * resolves the tapper's identity; an approval also takes the chat the tap
- * came from (`platformAddress`), whose conversation is its origin.
+ * Deny tap on a pending deploy, or a Disable or Roll back tap on a live one,
+ * into a `transport.skills` call and an outcome the adapter renders. The
+ * Transport resolves the tapper's identity; an approval or a rollback also
+ * takes the chat the tap came from (`platformAddress`), whose conversation is
+ * its origin.
  */
 export async function handleSkillsDeployCallback(
   transport: Transport,
@@ -192,6 +211,37 @@ export async function handleSkillsDeployCallback(
         toast: "Denied",
         clearKeyboard: true,
       };
+    })
+    .with({ action: "rollback" }, async ({ deployId }) => {
+      const res = await transport.skills.rollbackDeploy(
+        deployId,
+        tapperPlatformHandle,
+        platformAddress,
+      );
+      if (res.isErr()) {
+        return {
+          editText: errorMessage(res.error),
+          toast: errorMessage(res.error),
+          clearKeyboard: !keepsSkillsKeyboard(res.error),
+        };
+      }
+      return match(res.value)
+        .with({ kind: "restored" }, (rolledBack) => ({
+          editText: rolledBackText(rolledBack),
+          toast: "Rolled back",
+          clearKeyboard: true,
+        }))
+        .with({ kind: "already_rolled_back" }, (rolledBack) => ({
+          editText: rolledBackText(rolledBack),
+          toast: "Already rolled back",
+          clearKeyboard: true,
+        }))
+        .with({ kind: "unchanged" }, ({ skillName, restoredGitSha }) => ({
+          editText: `↩️ ${skillName} already runs ${restoredGitSha.slice(0, 7)}.`,
+          toast: "Already live",
+          clearKeyboard: true,
+        }))
+        .exhaustive();
     })
     .with({ action: "disable" }, async ({ skillId }) => {
       const res = await transport.skills.disableById(skillId, tapperPlatformHandle);

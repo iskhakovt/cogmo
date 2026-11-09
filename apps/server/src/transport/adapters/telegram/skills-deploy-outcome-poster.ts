@@ -2,6 +2,7 @@ import { match } from "ts-pattern";
 import type { Transactor } from "../../../db/index.js";
 import type { SkillsDeployOutcomeData } from "../../../inngest/events.js";
 import { logger } from "../../../logger.js";
+import { replacedGitSha } from "../../../skills/deploy/deploy-facts.js";
 import type { SkillRiskReason } from "../../../skills/risk-reasons.js";
 import {
   buildSkillsApprovalKeyboard,
@@ -49,18 +50,20 @@ const REASON_LABELS: Readonly<Record<SkillRiskReason, string>> = {
 function deployOutcomeText(event: SkillsDeployOutcomeData): string {
   return match(event)
     .with({ outcome: "live" }, (live) => {
+      const replaced = replacedGitSha(live);
       const headline =
-        live.priorGitSha !== null && live.priorGitSha !== live.gitSha
-          ? `✅ Skill ${live.skillName} updated ${shortSha(live.priorGitSha)} → ${shortSha(live.gitSha)}`
+        replaced !== null
+          ? `✅ Skill ${live.skillName} updated ${shortSha(replaced)} → ${shortSha(live.gitSha)}`
           : `✅ Skill ${live.skillName} is live`;
       return [headline, live.description, "", ...factLines(live, "whoever registered it")].join(
         "\n",
       );
     })
     .with({ outcome: "pending_approval" }, (pending) => {
+      const replaced = replacedGitSha(pending);
       const commit =
-        pending.priorGitSha !== null && pending.priorGitSha !== pending.gitSha
-          ? `Commit: ${shortSha(pending.gitSha)}, replacing ${shortSha(pending.priorGitSha)}`
+        replaced !== null
+          ? `Commit: ${shortSha(pending.gitSha)}, replacing ${shortSha(replaced)}`
           : `Commit: ${shortSha(pending.gitSha)}`;
       return [
         `🛡️ Skill deploy awaiting approval: ${pending.skillName}`,
@@ -114,7 +117,14 @@ function deployOutcomeKeyboard(
   event: SkillsDeployOutcomeData,
 ): SkillsInlineKeyboardMarkup | undefined {
   return match(event)
-    .with({ outcome: "live" }, (live) => buildSkillsLiveKeyboard(live.skillId))
+    .with({ outcome: "live" }, (live) =>
+      buildSkillsLiveKeyboard({
+        skillId: live.skillId,
+        // Roll back on an edit restores the version it replaced; a first
+        // deploy, or one that put its own version back live, has none.
+        rollbackDeployId: replacedGitSha(live) === null ? null : live.deployId,
+      }),
+    )
     .with({ outcome: "pending_approval" }, (pending) =>
       buildSkillsApprovalKeyboard(pending.deployId),
     )

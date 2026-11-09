@@ -66,6 +66,9 @@ export type TransportError =
   | { code: "skill_deploy_not_found"; pendingId: string }
   | { code: "skill_deploy_not_pending"; pendingId: string; status: string }
   | { code: "skill_deploy_register_failed"; pendingId: string; reason: string }
+  /** A Roll back tap on a deploy whose version a later deploy, or a rollback to another version, replaced. */
+  | { code: "skill_deploy_superseded"; deployId: string }
+  | { code: "skill_rollback_failed"; deployId: string; reason: string }
   | { code: "pipelines_disabled" }
   | { code: "pipeline_run_not_found"; runId: string }
   | { code: "pipeline_gate_not_pending"; runId: string; status: PipelineRunStatus }

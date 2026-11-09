@@ -1,4 +1,5 @@
 import { err, type Result, ResultAsync } from "neverthrow";
+import { match, P } from "ts-pattern";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
@@ -22,6 +23,11 @@ import type { SkillDeployOrigin } from "./deploy/origin.js";
 import { registerSkill } from "./deploy/register.js";
 import type { RegisterResult } from "./deploy/register-result.js";
 import { rollbackSkill } from "./deploy/rollback.js";
+import {
+  type RollbackDeployError,
+  type RolledBack,
+  rollbackDeploy,
+} from "./deploy/rollback-deploy.js";
 import type { LockfileSnapshot } from "./deps.js";
 import { type LockfileCompiler, makeSandboxLockfileCompiler } from "./deps.js";
 import { type InvokeDeps, invokeSkill } from "./invoke/invoke.js";
@@ -119,6 +125,14 @@ export interface SkillRunner {
     toGitSha: string;
     origin: SkillDeployOrigin;
   }): Promise<RegisterResult>;
+  /**
+   * Roll back the edit deploy `deployId` made, as its live message's Roll
+   * back button names it.
+   */
+  rollbackDeploy(opts: {
+    deployId: string;
+    origin: SkillDeployOrigin;
+  }): Promise<Result<RolledBack, RollbackDeployError>>;
   /**
    * Soft-disable a skill. Idempotent on already-disabled rows (returns
    * `kind: "deregistered"` either way — soft-disable already supports
@@ -489,12 +503,26 @@ export class SkillRunnerImpl implements SkillRunner {
     return denyDeploy(this.#deploy, opts);
   }
 
-  rollback(opts: {
+  async rollback(opts: {
     name: string;
     toGitSha: string;
     origin: SkillDeployOrigin;
   }): Promise<RegisterResult> {
-    return rollbackSkill(this.#deploy, opts);
+    const result = await rollbackSkill(this.#deploy, { ...opts, expectedLiveSha: null });
+    return match(result)
+      .returnType<RegisterResult>()
+      .with({ status: "live_version_moved" }, () => {
+        throw new Error("rollback: no expected live sha was given, so none can have moved");
+      })
+      .with({ status: P.union("live", "pending_approval", "no_op", "rejected") }, (r) => r)
+      .exhaustive();
+  }
+
+  rollbackDeploy(opts: {
+    deployId: string;
+    origin: SkillDeployOrigin;
+  }): Promise<Result<RolledBack, RollbackDeployError>> {
+    return rollbackDeploy(this.#deploy, opts);
   }
 
   deregister(opts: { name: string }): Promise<DeregisterResult> {

@@ -121,6 +121,10 @@ export function errorMessage(err: TransportError): string {
       return gateNotPendingMessage(err.status);
     case "skill_deploy_register_failed":
       return `Approve failed: ${err.reason}`;
+    case "skill_deploy_superseded":
+      return "A later deploy or rollback replaced this version; roll back with `cogmo skills rollback`, or from the newer deploy's message.";
+    case "skill_rollback_failed":
+      return `Roll back failed: ${err.reason}`;
     case "mcp_disabled":
       return "MCP integrations are unavailable in this deployment.";
     case "mcp_server_not_found":

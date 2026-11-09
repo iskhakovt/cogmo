@@ -295,6 +295,9 @@ export interface ExecuteRegisterParams {
   applyFilesystem(): Promise<void>;
 }
 
+/** {@link ExecuteRegisterResult}, or a rollback refused because the caller's expected live sha moved. */
+export type ExecuteRollbackResult = ExecuteRegisterResult | { kind: "live_version_moved" };
+
 export type ExecuteRegisterResult =
   | {
       kind: "live";
@@ -359,6 +362,11 @@ export interface ExecuteRollbackParams {
   restoringGitSha: string;
   /** The rollback's target, never itself a restoring commit: what the row's `restores_git_sha` records. */
   restoresGitSha: string;
+  /**
+   * The skill's live sha the caller acted on, checked inside the transaction
+   * (`live_version_moved` when it moved); null checks nothing.
+   */
+  expectedLiveSha: string | null;
   tier: SkillTier;
   riskTier: SkillRiskTier;
   effects: SkillEffects;
@@ -543,7 +551,7 @@ export interface SkillStore {
    * `prior_git_sha`, the version it replaced; `applyFilesystem` then moves
    * `main` onto a new restoring commit.
    */
-  executeRollback(tx: Transaction, params: ExecuteRollbackParams): Promise<ExecuteRegisterResult>;
+  executeRollback(tx: Transaction, params: ExecuteRollbackParams): Promise<ExecuteRollbackResult>;
   /**
    * The target a `rolled_back` row of skill `name` at `gitSha` restored, or
    * null when no such row exists: a rollback to a restoring commit restores
@@ -1183,7 +1191,7 @@ export class DrizzleSkillStore implements SkillStore {
   async executeRollback(
     tx: Transaction,
     params: ExecuteRollbackParams,
-  ): Promise<ExecuteRegisterResult> {
+  ): Promise<ExecuteRollbackResult> {
     assertScheduleInvariant(params.schedule, params.scheduleNextRunAt);
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${params.name}`})::bigint)`,
@@ -1195,6 +1203,11 @@ export class DrizzleSkillStore implements SkillStore {
       return { kind: "rejected", reason: "skill_not_found" } as const;
     }
     const existing = skillRowRaw;
+    // A deploy committed after this snapshot also updated the row, so the
+    // UPDATE below raises 40001 and the retry reads it here.
+    if (params.expectedLiveSha !== null && existing.gitSha !== params.expectedLiveSha) {
+      return { kind: "live_version_moved" } as const;
+    }
     if (existing.gitSha === params.restoringGitSha && !existing.disabled) {
       return { kind: "no_op", skill: existing } as const;
     }

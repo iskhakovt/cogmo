@@ -307,6 +307,7 @@ describe("DrizzleSkillStore", () => {
             ...executeRegisterParams({}),
             restoringGitSha: restoring,
             restoresGitSha: restores,
+            expectedLiveSha: null,
           }),
         );
       await tx((trx) =>
@@ -330,6 +331,28 @@ describe("DrizzleSkillStore", () => {
       expect(await guard(SHA_THIRD)).toBe(false);
     });
 
+    it("executeRollback refuses, writing nothing, when the skill is no longer at the expected live sha", async () => {
+      const row = await seedSkill({ name: "echo", gitSha: SHA_NEW });
+      let moved = false;
+
+      const result = await tx((trx) =>
+        store.executeRollback(trx, {
+          ...executeRegisterParams({}),
+          restoringGitSha: SHA_EDIT,
+          restoresGitSha: SHA,
+          expectedLiveSha: SHA,
+          applyFilesystem: async () => {
+            moved = true;
+          },
+        }),
+      );
+
+      expect(result).toEqual({ kind: "live_version_moved" });
+      expect(moved).toBe(false);
+      expect((await tx((trx) => store.getSkillById(trx, row.id)))?.gitSha).toBe(SHA_NEW);
+      expect(await tx((trx) => store.hasDeployAt(trx, SHA_EDIT))).toBe(false);
+    });
+
     it("restoredTargetAt names a rolled_back row's target, and hasDeployAt any row's sha", async () => {
       await seedSkill({ name: "echo", gitSha: SHA });
       await tx((trx) =>
@@ -337,6 +360,7 @@ describe("DrizzleSkillStore", () => {
           ...executeRegisterParams({}),
           restoringGitSha: SHA_EDIT,
           restoresGitSha: SHA_NEW,
+          expectedLiveSha: null,
         }),
       );
 
@@ -1897,6 +1921,7 @@ describe("DrizzleSkillStore", () => {
           name: "cron-skill",
           restoringGitSha: toGitSha,
           restoresGitSha: toGitSha,
+          expectedLiveSha: null,
           tier: "wasm",
           riskTier: "notify",
           effects: [],
@@ -2060,6 +2085,7 @@ describe("DrizzleSkillStore", () => {
           name: base.name,
           restoringGitSha: SHA_EDIT,
           restoresGitSha: SHA_EDIT,
+          expectedLiveSha: null,
           tier: base.tier,
           riskTier: base.riskTier,
           effects: base.effects,

@@ -10,11 +10,22 @@ import {
 
 const PENDING_ID = "019d0000-0000-7000-8000-000000000001";
 const SKILL_ID = "019d0000-0000-7000-8000-0000000000ab";
+const DEPLOY_ID = "019d0000-0000-7000-8000-0000000000cd";
 
 /** The `callback_data` the keyboards put on the button for `action`. */
 function callbackData(id: string, action: SkillsDeployAction): string {
   const button = match(action)
-    .with("disable", () => buildSkillsLiveKeyboard(id).inline_keyboard[0]?.[0])
+    .with(
+      "disable",
+      () =>
+        buildSkillsLiveKeyboard({ skillId: id, rollbackDeployId: null }).inline_keyboard[0]?.[0],
+    )
+    .with(
+      "rollback",
+      () =>
+        buildSkillsLiveKeyboard({ skillId: SKILL_ID, rollbackDeployId: id })
+          .inline_keyboard[0]?.[1],
+    )
     .with("approve", () => buildSkillsApprovalKeyboard(id).inline_keyboard[0]?.[0])
     .with("deny", () => buildSkillsApprovalKeyboard(id).inline_keyboard[0]?.[1])
     .exhaustive();
@@ -33,10 +44,20 @@ describe("skills-keyboard encoding", () => {
     expect(row?.[1]?.callback_data).toBe(`skill:${PENDING_ID}:deny`);
   });
 
-  it("buildSkillsLiveKeyboard returns one Disable button keyed by the skill id", () => {
-    const kb = buildSkillsLiveKeyboard(SKILL_ID);
+  it("buildSkillsLiveKeyboard returns one Disable button keyed by the skill id for a first deploy", () => {
+    const kb = buildSkillsLiveKeyboard({ skillId: SKILL_ID, rollbackDeployId: null });
     expect(kb.inline_keyboard).toEqual([
       [{ text: "🚫 Disable", callback_data: `skill:${SKILL_ID}:disable` }],
+    ]);
+  });
+
+  it("buildSkillsLiveKeyboard adds Roll back keyed by the deploy id for an edit", () => {
+    const kb = buildSkillsLiveKeyboard({ skillId: SKILL_ID, rollbackDeployId: DEPLOY_ID });
+    expect(kb.inline_keyboard).toEqual([
+      [
+        { text: "🚫 Disable", callback_data: `skill:${SKILL_ID}:disable` },
+        { text: "↩️ Roll back", callback_data: `skill:${DEPLOY_ID}:rollback` },
+      ],
     ]);
   });
 
@@ -44,6 +65,7 @@ describe("skills-keyboard encoding", () => {
     expect(Buffer.byteLength(callbackData(PENDING_ID, "approve"), "utf8")).toBeLessThanOrEqual(64);
     expect(Buffer.byteLength(callbackData(PENDING_ID, "deny"), "utf8")).toBeLessThanOrEqual(64);
     expect(Buffer.byteLength(callbackData(SKILL_ID, "disable"), "utf8")).toBeLessThanOrEqual(64);
+    expect(Buffer.byteLength(callbackData(DEPLOY_ID, "rollback"), "utf8")).toBeLessThanOrEqual(64);
   });
 });
 
@@ -56,6 +78,10 @@ describe("skills-keyboard parsing", () => {
     expect(parseSkillsDeployCallback(callbackData(SKILL_ID, "disable"))).toEqual({
       skillId: SKILL_ID,
       action: "disable",
+    });
+    expect(parseSkillsDeployCallback(callbackData(DEPLOY_ID, "rollback"))).toEqual({
+      deployId: DEPLOY_ID,
+      action: "rollback",
     });
   });
 
@@ -85,6 +111,7 @@ describe("skills-keyboard parsing", () => {
     expect(SKILLS_DEPLOY_CALLBACK_REGEX.test(`skill:${PENDING_ID}:approve`)).toBe(true);
     expect(SKILLS_DEPLOY_CALLBACK_REGEX.test(`skill:${PENDING_ID}:deny`)).toBe(true);
     expect(SKILLS_DEPLOY_CALLBACK_REGEX.test(`skill:${SKILL_ID}:disable`)).toBe(true);
+    expect(SKILLS_DEPLOY_CALLBACK_REGEX.test(`skill:${DEPLOY_ID}:rollback`)).toBe(true);
     expect(SKILLS_DEPLOY_CALLBACK_REGEX.test(`skill:${SKILL_ID}:enable`)).toBe(false);
     expect(SKILLS_DEPLOY_CALLBACK_REGEX.test("skill:bad:approve")).toBe(false);
   });

@@ -35,12 +35,19 @@ import { frontmatterSchemas } from "./schemas.js";
  * source, then commit its files to `skills/<name>/` on top of `main` (the
  * restoring commit) and put that commit live in one transaction, so `main`
  * only fast-forwards and no other skill's files move
- * (design/skills.md → Deploy lifecycle).
+ * (design/skills.md → Deploy lifecycle). `expectedLiveSha`, when not null,
+ * must still be the skill's live sha, else `live_version_moved`; checked
+ * here and again inside the transaction.
  */
 export async function rollbackSkill(
   deps: DeployDeps,
-  opts: { name: string; toGitSha: string; origin: SkillDeployOrigin },
-): Promise<RegisterResult> {
+  opts: {
+    name: string;
+    toGitSha: string;
+    origin: SkillDeployOrigin;
+    expectedLiveSha: string | null;
+  },
+): Promise<RegisterResult | LiveVersionMoved> {
   const repo = requireRepo(deps, "rollback");
   const repoPath = repo.path;
 
@@ -120,8 +127,11 @@ export async function rollbackSkill(
     targetSha,
     restores,
     mainSha,
+    expectedLiveSha: opts.expectedLiveSha,
   });
   return match(restoring)
+    .returnType<Promise<RegisterResult | LiveVersionMoved> | RegisterResult | LiveVersionMoved>()
+    .with({ kind: "moved" }, () => ({ status: "live_version_moved" as const }))
     .with(
       { kind: "unchanged" },
       ({ skill }): RegisterResult => ({
@@ -143,6 +153,7 @@ export async function rollbackSkill(
         lockfile,
         classifierLog,
         origin: opts.origin,
+        expectedLiveSha: opts.expectedLiveSha,
       }),
     )
     .exhaustive();
@@ -167,8 +178,9 @@ async function putRestoringLive(
     lockfile: LockfileSnapshot | null;
     classifierLog: ClassifierLog;
     origin: SkillDeployOrigin;
+    expectedLiveSha: string | null;
   },
-): Promise<RegisterResult> {
+): Promise<RegisterResult | LiveVersionMoved> {
   const { name, targetSha, restores, mainSha, restore, source, schemas, lockfile } = args;
   const { manifest } = source;
   const schedule = manifest.schedule ?? null;
@@ -177,6 +189,7 @@ async function putRestoringLive(
       name,
       restoringGitSha: restore.sha,
       restoresGitSha: restores,
+      expectedLiveSha: args.expectedLiveSha,
       tier: manifest.tier,
       riskTier: args.classifierLog.risk_tier,
       effects: manifest.effects,
@@ -197,34 +210,42 @@ async function putRestoringLive(
   if (executed.isErr()) {
     return rejectedResult(targetSha, "main_moved: main changed during the rollback; retry");
   }
-  const result = executed.value;
-
-  if (result.kind === "live") {
-    // Warm the source cache so the next invoke or listToolDefs read
-    // doesn't re-fetch from git.
-    deps.sourceCache.put(restore.sha, source, schemas, lockfile);
-    // A plain push of main, which only moved forward; a recovered restoring
-    // commit may not have reached the remote either.
-    await mirrorMainToRemote(deps, repoPath, restore.mainAfter);
-    return {
-      name: result.skill.name,
-      riskTier: result.skill.riskTier,
-      status: "live",
-      gitSha: result.skill.gitSha,
-      skillId: result.skill.id,
-      deployId: result.deploy.id,
-      facts: deployFacts(manifest, result.deploy),
-    };
-  }
-  if (result.kind === "no_op") {
-    return {
+  return match(executed.value)
+    .returnType<Promise<RegisterResult | LiveVersionMoved>>()
+    .with({ kind: "live" }, async (result) => {
+      // Warm the source cache so the next invoke or listToolDefs read
+      // doesn't re-fetch from git.
+      deps.sourceCache.put(restore.sha, source, schemas, lockfile);
+      // A plain push of main, which only moved forward; a recovered restoring
+      // commit may not have reached the remote either.
+      await mirrorMainToRemote(deps, repoPath, restore.mainAfter);
+      return {
+        name: result.skill.name,
+        riskTier: result.skill.riskTier,
+        status: "live",
+        gitSha: result.skill.gitSha,
+        skillId: result.skill.id,
+        deployId: result.deploy.id,
+        facts: deployFacts(manifest, result.deploy),
+      };
+    })
+    .with({ kind: "no_op" }, async (result) => ({
       name: result.skill.name,
       riskTier: result.skill.riskTier,
       status: "no_op",
       gitSha: result.skill.gitSha,
-    };
-  }
-  return rejectedResult(targetSha, result.kind === "rejected" ? result.reason : result.kind);
+    }))
+    .with({ kind: "live_version_moved" }, async () => ({ status: "live_version_moved" }))
+    .with({ kind: "rejected" }, async (result) => rejectedResult(targetSha, result.reason))
+    .with({ kind: "pending_approval" }, () => {
+      throw new Error("rollback: executeRollback never leaves a deploy pending");
+    })
+    .exhaustive();
+}
+
+/** A rollback refused because the caller's expected live sha is no longer the skill's. */
+export interface LiveVersionMoved {
+  status: "live_version_moved";
 }
 
 /**
@@ -232,7 +253,11 @@ async function putRestoringLive(
  * itself a restoring commit, the commit that one restored, so the value
  * always names a commit that had its own deploy.
  */
-async function restoredCommit(deps: DeployDeps, name: string, targetSha: string): Promise<string> {
+export async function restoredCommit(
+  deps: DeployDeps,
+  name: string,
+  targetSha: string,
+): Promise<string> {
   return (
     (await deps.runInTx((tx) => deps.store.restoredTargetAt(tx, { name, gitSha: targetSha }))) ??
     targetSha
@@ -243,6 +268,8 @@ async function restoredCommit(deps: DeployDeps, name: string, targetSha: string)
 type Restoring =
   /** The enabled skill already runs the target's files: nothing to do. */
   | { kind: "unchanged"; skill: { gitSha: string; riskTier: RegisterResult["riskTier"] } }
+  /** The caller's expected live sha is no longer the skill's. */
+  | { kind: "moved" }
   /**
    * `sha`, a commit whose `skills/<name>/` holds the target's files, with
    * `main` at `mainAfter` once it is live: a new restoring commit on top of
@@ -254,7 +281,13 @@ type Restoring =
 async function restoringCommit(
   deps: DeployDeps,
   repo: SkillsRepo,
-  args: { name: string; targetSha: string; restores: string; mainSha: string },
+  args: {
+    name: string;
+    targetSha: string;
+    restores: string;
+    mainSha: string;
+    expectedLiveSha: string | null;
+  },
 ): Promise<Restoring> {
   const { name, targetSha, restores, mainSha } = args;
   const target = await skillBlobsAt(repo, name, targetSha);
@@ -279,6 +312,11 @@ async function restoringCommit(
   }
 
   const skill = await deps.runInTx((tx) => deps.store.getSkillByName(tx, name));
+  // Checked again in the transaction; here it keeps a stale caller from the
+  // `unchanged` answer below, which never reaches the transaction.
+  if (args.expectedLiveSha !== null && skill?.gitSha !== args.expectedLiveSha) {
+    return { kind: "moved" };
+  }
   if (skill && !skill.disabled && (await skillBlobsMatchAt(repo, name, skill.gitSha, target))) {
     return { kind: "unchanged", skill };
   }
