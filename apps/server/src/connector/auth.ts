@@ -29,16 +29,21 @@ export interface ConnectorAuthCache {
   isCurrent(connector: ActiveConnector): boolean;
   /** Whether the last successful load is too old to trust, so revokes may be missing. */
   isStale(): boolean;
-  /** Reloads the cache from the table. Rejects when the read fails, keeping the old cache. */
-  refresh(): Promise<void>;
+  /**
+   * Reloads the cache from the table, or joins the reload in flight. Resolves
+   * `false`, logged, when the read fails, keeping the old cache.
+   */
+  refresh(): Promise<boolean>;
 }
 
 export class ConnectorAuth implements ConnectorAuthCache {
   readonly #deps: ConnectorAuthDeps;
   #byHash = new Map<string, ActiveConnector>();
   #attemptedAt = Number.NEGATIVE_INFINITY;
+  /** When the last successful load started. */
   #loadedAt = Number.NEGATIVE_INFINITY;
-  #refreshing: Promise<void> | null = null;
+  #lastLoadFailed = false;
+  #refreshing: Promise<boolean> | null = null;
 
   private constructor(deps: ConnectorAuthDeps) {
     this.#deps = deps;
@@ -46,26 +51,20 @@ export class ConnectorAuth implements ConnectorAuthCache {
 
   static async create(deps: ConnectorAuthDeps): Promise<ConnectorAuth> {
     const auth = new ConnectorAuth(deps);
-    await auth.refresh();
+    await auth.#load();
     return auth;
   }
 
   async authenticate(rawToken: string): Promise<Result<ActiveConnector, AuthError>> {
     const tokenHash = hashConnectorToken(rawToken);
-    let refreshFailed = false;
-    const wantsRefresh = !this.#byHash.has(tokenHash) || this.isStale();
-    if (wantsRefresh && Date.now() - this.#attemptedAt >= UNKNOWN_TOKEN_REFRESH_MS) {
-      try {
-        await this.refresh();
-      } catch (error) {
-        logger.warn({ err: error }, "connector auth: refreshing the connector cache failed");
-        refreshFailed = true;
-      }
+    if (!this.#byHash.has(tokenHash) || this.isStale()) {
+      if (this.#refreshing) await this.#refreshing;
+      else if (Date.now() - this.#attemptedAt >= UNKNOWN_TOKEN_REFRESH_MS) await this.refresh();
     }
     if (this.isStale()) return err({ kind: "unavailable" });
     const found = this.#byHash.get(tokenHash);
     if (found) return ok(found);
-    return err({ kind: refreshFailed ? "unavailable" : "unauthenticated" });
+    return err({ kind: this.#lastLoadFailed ? "unavailable" : "unauthenticated" });
   }
 
   isCurrent(connector: ActiveConnector): boolean {
@@ -76,18 +75,34 @@ export class ConnectorAuth implements ConnectorAuthCache {
     return Date.now() - this.#loadedAt >= STALE_MS;
   }
 
-  refresh(): Promise<void> {
-    this.#refreshing ??= this.#load().finally(() => {
-      this.#refreshing = null;
-    });
+  refresh(): Promise<boolean> {
+    this.#refreshing ??= this.#load()
+      .then(
+        () => true,
+        (error: unknown) => {
+          logger.warn({ err: error }, "connector auth: refreshing the connector cache failed");
+          return false;
+        },
+      )
+      .finally(() => {
+        this.#refreshing = null;
+      });
     return this.#refreshing;
   }
 
+  /** Loads the active connectors; rejects when the read fails. */
   async #load(): Promise<void> {
-    this.#attemptedAt = Date.now();
+    const startedAt = Date.now();
+    this.#attemptedAt = startedAt;
     const { runInTx, connectorStore } = this.#deps;
-    const active = await runInTx((tx) => connectorStore.listActive(tx));
-    this.#byHash = new Map(active.map((connector) => [connector.tokenHash, connector]));
-    this.#loadedAt = Date.now();
+    try {
+      const active = await runInTx((tx) => connectorStore.listActive(tx));
+      this.#byHash = new Map(active.map((connector) => [connector.tokenHash, connector]));
+      this.#loadedAt = startedAt;
+      this.#lastLoadFailed = false;
+    } catch (error) {
+      this.#lastLoadFailed = true;
+      throw error;
+    }
   }
 }

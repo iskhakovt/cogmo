@@ -123,7 +123,7 @@ export const env = createEnv({
      * Connector job lease: how long a dispatched job waits to be accepted, and
      * an accepted job for its connector to reconnect, before it is unavailable or lost.
      */
-    CONNECTOR_LEASE_SECONDS: z.coerce.number().int().positive().default(120),
+    CONNECTOR_LEASE_SECONDS: z.coerce.number().int().positive().max(2_147_483).default(120),
     /** Absolute web-session TTL (days). */
     WEB_SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
     /**

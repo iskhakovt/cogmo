@@ -267,6 +267,41 @@ describe("auth", () => {
     expect(stream.error?.code).toBe(Code.Unavailable);
   });
 
+  it("lets concurrent calls with a new token share the refresh the first one started", async () => {
+    const added: ActiveConnector = {
+      ...OTHER,
+      id: "conn-new",
+      tokenHash: hashConnectorToken("new"),
+    };
+    store.listActive.mockResolvedValue([PASEO, OTHER, added]);
+    await advance(5_000);
+    const codes = await Promise.all([
+      callError(client.acceptJob({ jobId: "x" }, bearer("new"))),
+      callError(client.acceptJob({ jobId: "y" }, bearer("new"))),
+    ]);
+    // Authenticated, so both fail on the unknown job.
+    expect(codes).toEqual([Code.NotFound, Code.NotFound]);
+  });
+
+  it("keeps answering UNAVAILABLE for an unknown token within 5 s of a failed refresh", async () => {
+    store.listActive.mockRejectedValue(new Error("db down"));
+    await advance(5_000);
+    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.Unavailable);
+    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.Unavailable);
+  });
+
+  it("dates staleness from when the last good load started", async () => {
+    const stream = await connected("paseo-token", []);
+    store.listActive.mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve([PASEO, OTHER]), 1_000)),
+    );
+    store.listActive.mockRejectedValue(new Error("db down"));
+    // A good load from 30 s to 31 s, then failures at 60, 90 and 120 s.
+    await advance(120_000);
+    await stream.done;
+    expect(stream.error?.code).toBe(Code.Unavailable);
+  });
+
   it("closes a revoked connector's stream at the next refresh, and its accepted job is lost", async () => {
     const stream = await connected("paseo-token", []);
     const run = startRun(prepareJob());
@@ -600,6 +635,19 @@ describe("sessions", () => {
     hub.close();
     await stream.done;
     expect(stream.error?.code).toBe(Code.Unavailable);
+  });
+
+  it("ends a session opened after close with UNAVAILABLE", async () => {
+    hub.close();
+    const stream = await connected("paseo-token", []);
+    expect(stream.error?.code).toBe(Code.Unavailable);
+  });
+
+  it("answers a run after close with unavailable", async () => {
+    hub.close();
+    const run = startRun(prepareJob());
+    await settle();
+    expect(run.result).toEqual(err({ kind: "unavailable" }));
   });
 });
 

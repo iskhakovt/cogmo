@@ -131,6 +131,7 @@ export class SessionHub implements ConnectorHub {
   }
 
   run(connectorId: string, job: Job, handlers: JobEventHandlers): Promise<RunResult> {
+    if (this.#closed) return Promise.resolve(err({ kind: "unavailable" }));
     const existing = this.#jobs.get(job.jobId);
     if (existing) {
       if (existing.connectorId !== connectorId) {
@@ -171,6 +172,10 @@ export class SessionHub implements ConnectorHub {
 
   openSession(connector: ActiveConnector, heldJobIds: ReadonlyArray<string>): ConnectorSession {
     const session = new Session(connector, (closed) => this.#sessionClosed(closed));
+    if (this.#closed) {
+      session.end("shutdown");
+      return session;
+    }
     const previous = this.#sessions.get(connector.id);
     this.#sessions.set(connector.id, session);
     previous?.end("replaced");
@@ -321,7 +326,7 @@ export class SessionHub implements ConnectorHub {
 
   #restartIdle(entry: JobEntry): void {
     const { idleMs } = entry.caps;
-    if (idleMs === null || entry.state.status === "ended") return;
+    if (idleMs === null || this.#closed || entry.state.status === "ended") return;
     clearTimer(entry.idleTimer);
     entry.idleTimer = setTimeout(() => this.#timeOut(entry, "idle"), idleMs);
   }
@@ -418,11 +423,7 @@ export class SessionHub implements ConnectorHub {
   }
 
   async #refreshAuth(): Promise<void> {
-    try {
-      await this.#auth.refresh();
-    } catch (error) {
-      logger.warn({ err: error }, "connector auth: refreshing the connector cache failed");
-    }
+    await this.#auth.refresh();
     const stale = this.#auth.isStale();
     for (const session of [...this.#sessions.values()]) {
       if (stale) session.end("auth_unavailable");

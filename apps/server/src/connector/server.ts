@@ -77,6 +77,7 @@ export async function startConnectorServer(params: {
 }
 
 function ping(session: Http2Session): void {
+  if (session.closed || session.destroyed) return;
   const deadline = setTimeout(() => session.destroy(), PING_TIMEOUT_MS);
   const sent = session.ping((error) => {
     clearTimeout(deadline);

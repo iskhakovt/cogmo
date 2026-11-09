@@ -7,6 +7,9 @@ import { match } from "ts-pattern";
 
 const MINUTE_MS = 60_000;
 
+/** The longest delay `setTimeout` honours; a longer one fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /** The spec cases of a `Job`, which name its phase. */
 export type JobPhase = NonNullable<Job["spec"]["case"]>;
 
@@ -25,7 +28,7 @@ export function jobCaps(spec: Job["spec"]): JobCaps {
       idleMs: 5 * MINUTE_MS,
     }))
     .with({ case: "verify" }, ({ value }) => ({
-      totalMs: (value.timeoutSeconds + 60) * 1_000,
+      totalMs: Math.min((value.timeoutSeconds + 60) * 1_000, MAX_TIMER_MS),
       idleMs: null,
     }))
     .with({ case: "publish" }, () => ({ totalMs: 5 * MINUTE_MS, idleMs: null }))
