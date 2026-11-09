@@ -20,6 +20,7 @@ const BOUNDS: ShutdownBounds = { webDrainMs: 100, stepMs: 300 };
 function resources(steps: Partial<ServeResources> = {}): ServeResources {
   return {
     web: { close: vi.fn(async () => {}) },
+    connectors: { close: vi.fn(async () => {}) },
     adapters: [channel("telegram", async () => {})],
     codingStreams: { close: vi.fn() },
     mcpRegistry: { stop: vi.fn(async () => {}) },
@@ -68,6 +69,7 @@ describe("shutdownServe", () => {
     await shutdownServe(
       resources({
         web: { close: step("web") },
+        connectors: { close: step("connectors") },
         adapters: [channel("telegram", step("telegram"))],
         codingStreams: { close: () => events.push("coding streams") },
         mcpRegistry: { stop: step("mcp") },
@@ -81,6 +83,8 @@ describe("shutdownServe", () => {
     expect(events).toEqual([
       "web start",
       "web end",
+      "connectors start",
+      "connectors end",
       "telegram start",
       "telegram end",
       "coding streams",
@@ -116,6 +120,7 @@ describe("shutdownServe", () => {
 
     expect(outcomes).toEqual([
       { step: "web server", outcome: "done" },
+      { step: "connector server", outcome: "done" },
       { step: "telegram adapter", outcome: "done" },
       { step: "web adapter", outcome: "done" },
       { step: "coding streams", outcome: "done" },
@@ -214,11 +219,18 @@ describe("shutdownServe", () => {
     });
   });
 
+  it("skips the connector server step when none runs", async () => {
+    const outcomes = await shutdownServe(resources({ connectors: null }), BOUNDS);
+
+    expect(outcomes.map(({ step }) => step)).not.toContain("connector server");
+  });
+
   it("skips the sandbox steps when there is no sandbox", async () => {
     const outcomes = await shutdownServe(resources({ sandbox: null, closeInstance: null }), BOUNDS);
 
     expect(outcomes.map(({ step }) => step)).toEqual([
       "web server",
+      "connector server",
       "telegram adapter",
       "coding streams",
       "mcp",
@@ -248,10 +260,11 @@ describe("serveResources", () => {
     const sandbox = mock<SandboxClient>();
     const adapters = [{ channelType: "telegram", adapter: mock<ChannelAdapter["adapter"]>() }];
     const deps = { ...boot("instance-1"), sandbox, adapters };
-    const web = resources().web;
+    const { web, connectors } = resources();
 
-    expect(serveResources(deps, web)).toMatchObject({
+    expect(serveResources(deps, web, connectors)).toMatchObject({
       web,
+      connectors,
       adapters,
       codingStreams: deps.codingStreams,
       mcpRegistry: deps.mcpRegistry,
@@ -263,13 +276,13 @@ describe("serveResources", () => {
   it("closes this process's instance row", async () => {
     const deps = boot("instance-1");
 
-    const { closeInstance } = serveResources(deps, resources().web);
+    const { closeInstance } = serveResources(deps, resources().web, null);
     await expectDefined(closeInstance, "closeInstance")();
 
     expect(deps.sandboxStore.closeInstance).toHaveBeenCalledWith(FAKE_TX, "instance-1");
   });
 
   it("has no instance row to close without a sandbox instance", () => {
-    expect(serveResources(boot(null), resources().web).closeInstance).toBeNull();
+    expect(serveResources(boot(null), resources().web, null).closeInstance).toBeNull();
   });
 });

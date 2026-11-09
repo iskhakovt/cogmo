@@ -1,5 +1,5 @@
 /**
- * Migration 0086 adds `skills_repo_layout` and `skill_deploys.restores_git_sha`,
+ * Migration 0087 adds `skills_repo_layout` and `skill_deploys.restores_git_sha`,
  * backfills the column on every `rolled_back` row with the row's own sha (the
  * commit an update-ref rollback restored), and installs the CHECK tying it to
  * that status. Runs the raw SQL against PGlite over deploy rows in every
@@ -18,7 +18,7 @@ import type { Database } from "./index.js";
 import { constraintNameOf, findPgErrorByCode } from "./pg-errors.js";
 
 const MIGRATION_SQL = await readFile(
-  fileURLToPath(new URL("../../migrations/0086_skills_layout_restores.sql", import.meta.url)),
+  fileURLToPath(new URL("../../migrations/0087_skills_layout_restores.sql", import.meta.url)),
   "utf8",
 );
 
@@ -48,7 +48,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await truncateAll(db);
-  // The tables as 0086 found them.
+  // The tables as 0087 found them.
   await db.execute(sql`DROP TABLE IF EXISTS skills_repo_layout`);
   await db.execute(
     sql`ALTER TABLE skill_deploys DROP CONSTRAINT IF EXISTS chk_skill_deploys_restores_iff_rolled_back`,
@@ -97,7 +97,7 @@ async function deploys(): Promise<z.infer<typeof DeployRowsSchema>["rows"]> {
   ).rows;
 }
 
-describe("migration 0086", () => {
+describe("migration 0087", () => {
   it("backfills restores_git_sha on rolled_back rows with their own sha, and only those", async () => {
     const skillId = await insertSkill();
     await insertDeploy(skillId, "live", "sha-a-live");

@@ -43,6 +43,12 @@ for (const name of [
 }
 
 /**
+ * Connector job lease in seconds, capped at 2,147,483: the longest delay
+ * `setTimeout` honours is 2^31 - 1 ms, and a longer one fires at once.
+ */
+export const ConnectorLeaseSecondsSchema = z.coerce.number().int().positive().max(2_147_483);
+
+/**
  * A service base URL without `user:password@` — credentials go in the
  * service's key variable. The issue message never echoes the value.
  */
@@ -110,6 +116,20 @@ export const env = createEnv({
     WEB_HOST: z.string().default("0.0.0.0"),
     /** Web UI port. The web server replaces the health server on this port. */
     WEB_PORT: z.coerce.number().int().positive().default(9090),
+    /**
+     * Connector server bind host. Same posture as `WEB_HOST`: the token crosses
+     * h2c in cleartext, so the boundary is the publish layer (host loopback, a
+     * tailnet or a TLS proxy). Set `127.0.0.1` for a bare-metal run without one.
+     * See design/connectors.md → Serving.
+     */
+    CONNECTOR_HOST: z.string().default("0.0.0.0"),
+    /** Connector server port (gRPC over h2c). Unset, no connector server starts. */
+    CONNECTOR_PORT: z.coerce.number().int().positive().optional(),
+    /**
+     * Connector job lease: how long a dispatched job waits to be accepted, and
+     * an accepted job for its connector to reconnect, before it is unavailable or lost.
+     */
+    CONNECTOR_LEASE_SECONDS: ConnectorLeaseSecondsSchema.default(120),
     /** Absolute web-session TTL (days). */
     WEB_SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
     /**
