@@ -300,6 +300,101 @@ describe("handleSkillsDeployCallback", () => {
     expect(outcome.editText).toMatch(/No skill named/);
     expect(outcome.toast).toBe(outcome.editText);
   });
+
+  it("Roll back dispatches to skills.rollbackDeploy with the deploy id and the chat", async () => {
+    const deployId = "019d0000-0000-7000-8000-0000000000cd";
+    const rollbackDeploy = vi.fn().mockResolvedValue(
+      ok({
+        kind: "restored",
+        skillName: "echo",
+        restoredGitSha: "abc1234".padEnd(40, "0"),
+        gitSha: "fed9876".padEnd(40, "0"),
+      }),
+    );
+    const transport = transportWith({ skills: { rollbackDeploy } });
+
+    const outcome = await handleSkillsDeployCallback(
+      transport,
+      { deployId, action: "rollback" },
+      "user-tg-1",
+      "chat-1",
+    );
+
+    expect(rollbackDeploy).toHaveBeenCalledWith(deployId, "user-tg-1", "chat-1");
+    expect(outcome).toEqual({
+      editText: "↩️ Rolled back echo to abc1234 (now live at fed9876).",
+      toast: "Rolled back",
+      clearKeyboard: true,
+    });
+  });
+
+  it("Roll back to the version the skill already runs says so", async () => {
+    const deployId = "019d0000-0000-7000-8000-0000000000cd";
+    const rollbackDeploy = vi.fn().mockResolvedValue(
+      ok({
+        kind: "unchanged",
+        skillName: "echo",
+        restoredGitSha: "abc1234".padEnd(40, "0"),
+        gitSha: "abc1234".padEnd(40, "0"),
+      }),
+    );
+    const transport = transportWith({ skills: { rollbackDeploy } });
+
+    const outcome = await handleSkillsDeployCallback(
+      transport,
+      { deployId, action: "rollback" },
+      "user-tg-1",
+      "chat-1",
+    );
+
+    expect(outcome).toEqual({
+      editText: "↩️ echo already runs abc1234.",
+      toast: "Already live",
+      clearKeyboard: true,
+    });
+  });
+
+  it("Roll back refused for a retryable reason keeps the keyboard", async () => {
+    const deployId = "019d0000-0000-7000-8000-0000000000cd";
+    const rollbackDeploy = vi.fn().mockResolvedValue(
+      err({
+        code: "skill_rollback_failed" as const,
+        deployId,
+        reason: "main_moved: main changed during the rollback; retry",
+      }),
+    );
+    const transport = transportWith({ skills: { rollbackDeploy } });
+
+    const outcome = await handleSkillsDeployCallback(
+      transport,
+      { deployId, action: "rollback" },
+      "user-tg-1",
+      "chat-1",
+    );
+
+    expect(outcome.editText).toBe(
+      "Roll back failed: main_moved: main changed during the rollback; retry",
+    );
+    expect(outcome.clearKeyboard).toBe(false);
+  });
+
+  it("Roll back of a superseded deploy says so and clears the keyboard", async () => {
+    const deployId = "019d0000-0000-7000-8000-0000000000cd";
+    const rollbackDeploy = vi
+      .fn()
+      .mockResolvedValue(err({ code: "skill_deploy_superseded" as const, deployId }));
+    const transport = transportWith({ skills: { rollbackDeploy } });
+
+    const outcome = await handleSkillsDeployCallback(
+      transport,
+      { deployId, action: "rollback" },
+      "user-tg-1",
+      "chat-1",
+    );
+
+    expect(outcome.editText).toMatch(/^A later deploy or rollback replaced this version/);
+    expect(outcome.clearKeyboard).toBe(true);
+  });
 });
 
 describe("handlePipelineGateCallback", () => {

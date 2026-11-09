@@ -685,3 +685,85 @@ describe("Transport.skills.denyDeploy", () => {
     });
   });
 });
+
+describe("Transport.skills.rollbackDeploy", () => {
+  const RESTORED = {
+    kind: "restored" as const,
+    skillName: "echo",
+    restoredGitSha: "1".repeat(40),
+    gitSha: "3".repeat(40),
+  };
+
+  it("rolls back as the tapper with the conversation of the chat the tap came from", async () => {
+    const runner = mock<SkillRunner>();
+    runner.rollbackDeploy.mockResolvedValue(ok(RESTORED));
+    const transportStore = makeTransportStore();
+    vi.mocked(transportStore.resolveSession).mockImplementation(async (_tx, _channelId, address) =>
+      address === CHAT ? chatSession("conv-9") : undefined,
+    );
+    const agentStore = mockAgentStore({
+      getConversation: vi
+        .fn()
+        .mockImplementation(async (_tx: unknown, id: string) =>
+          id === "conv-9" ? conversationOf(USER_ID, "profile-9") : undefined,
+        ),
+    });
+    const skills = makeSkills({ runner, store: mock<SkillStore>(), transportStore, agentStore });
+
+    const result = await skills.rollbackDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+
+    expect(result._unsafeUnwrap()).toEqual(RESTORED);
+    expect(runner.rollbackDeploy).toHaveBeenCalledWith({
+      deployId: PENDING_ID,
+      origin: {
+        kind: "user",
+        actor: { identityId: IDENTITY_ID, userId: USER_ID },
+        conversation: { userId: USER_ID, profileId: "profile-9" },
+      },
+    });
+  });
+
+  it.each([
+    [{ kind: "not_found" as const }, { code: "skill_deploy_not_found", pendingId: PENDING_ID }],
+    [{ kind: "superseded" as const }, { code: "skill_deploy_superseded", deployId: PENDING_ID }],
+    [
+      { kind: "not_an_edit" as const },
+      {
+        code: "skill_rollback_failed",
+        deployId: PENDING_ID,
+        reason: "the deploy did not go live, or replaced no live version",
+      },
+    ],
+    [
+      { kind: "refused" as const, reason: "main_moved: retry" },
+      { code: "skill_rollback_failed", deployId: PENDING_ID, reason: "main_moved: retry" },
+    ],
+  ])("maps the runner's %o onto its transport error", async (outcome, error) => {
+    const runner = mock<SkillRunner>();
+    runner.rollbackDeploy.mockResolvedValue(err(outcome));
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
+
+    expect(
+      (await skills.rollbackDeploy(PENDING_ID, KNOWN_HANDLE, CHAT))._unsafeUnwrapErr(),
+    ).toEqual(error);
+  });
+
+  it("returns skills_disabled when the runner is unwired", async () => {
+    const skills = makeSkills({ store: mock<SkillStore>() });
+    expect(
+      (await skills.rollbackDeploy(PENDING_ID, KNOWN_HANDLE, CHAT))._unsafeUnwrapErr(),
+    ).toEqual({
+      code: "skills_disabled",
+    });
+  });
+
+  it("rejects an unknown tapper before calling the runner", async () => {
+    const runner = mock<SkillRunner>();
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
+
+    expect(
+      (await skills.rollbackDeploy(PENDING_ID, UNKNOWN_HANDLE, CHAT))._unsafeUnwrapErr(),
+    ).toEqual({ code: "identity_rejected" });
+    expect(runner.rollbackDeploy).not.toHaveBeenCalled();
+  });
+});

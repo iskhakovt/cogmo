@@ -6,11 +6,12 @@ import { UUID_PATTERN } from "../util/uuid.js";
  * `src/agent/coding/plan-keyboard.ts` — pure, no grammY runtime dep, produces
  * the JSON shape Telegram expects on `reply_markup`. Posted by the
  * per-channel Telegram Inngest function on `skills/deploy/outcome`: Approve /
- * Deny on a pending deploy, keyed by its `skill_deploys.id`, and Disable on
- * a live one, keyed by its `skills.id`.
+ * Deny on a pending deploy, keyed by its `skill_deploys.id`; Disable on a live
+ * one, keyed by its `skills.id`, and, when the deploy is an edit, Roll back,
+ * keyed by its `skill_deploys.id`.
  */
 
-export type SkillsDeployAction = "approve" | "deny" | "disable";
+export type SkillsDeployAction = "approve" | "deny" | "disable" | "rollback";
 
 const PREFIX = "skill";
 const SEP = ":";
@@ -35,27 +36,45 @@ export function buildSkillsApprovalKeyboard(pendingId: string): SkillsInlineKeyb
   };
 }
 
-/** Disable for the live skill `skillId`. */
-export function buildSkillsLiveKeyboard(skillId: string): SkillsInlineKeyboardMarkup {
+/**
+ * Disable for the live skill `skillId`, and Roll back for the deploy
+ * `rollbackDeployId`, an edit whose prior version it restores; null for a
+ * first deploy, which has none.
+ */
+export function buildSkillsLiveKeyboard(args: {
+  skillId: string;
+  rollbackDeployId: string | null;
+}): SkillsInlineKeyboardMarkup {
   return {
     inline_keyboard: [
-      [{ text: "🚫 Disable", callback_data: encodeSkillsDeployCallback(skillId, "disable") }],
+      [
+        { text: "🚫 Disable", callback_data: encodeSkillsDeployCallback(args.skillId, "disable") },
+        ...(args.rollbackDeployId === null
+          ? []
+          : [
+              {
+                text: "↩️ Roll back",
+                callback_data: encodeSkillsDeployCallback(args.rollbackDeployId, "rollback"),
+              },
+            ]),
+      ],
     ],
   };
 }
 
-/** `id` is the pending deploy's id for approve and deny, the skill's for disable. */
+/** `id` is the deploy's id for approve, deny and rollback, the skill's for disable. */
 function encodeSkillsDeployCallback(id: string, action: SkillsDeployAction): string {
   // Telegram limit: callback_data ≤ 64 bytes. `skill:` (6) + UUID (36) + `:` (1)
-  // + longest action `disable` (7) = 50 bytes. Comfortable headroom.
+  // + longest action `rollback` (8) = 51 bytes. Comfortable headroom.
   return `${PREFIX}${SEP}${id}${SEP}${action}`;
 }
 
-const PARSE_REGEX = new RegExp(`^skill:(${UUID_PATTERN}):(approve|deny|disable)$`);
+const PARSE_REGEX = new RegExp(`^skill:(${UUID_PATTERN}):(approve|deny|disable|rollback)$`);
 
 export type ParsedSkillsDeployCallback =
   | { action: "approve" | "deny"; pendingId: string }
-  | { action: "disable"; skillId: string };
+  | { action: "disable"; skillId: string }
+  | { action: "rollback"; deployId: string };
 
 /** Returns null on malformed input — caller decides how to surface. */
 export function parseSkillsDeployCallback(data: string): ParsedSkillsDeployCallback | null {
@@ -66,10 +85,11 @@ export function parseSkillsDeployCallback(data: string): ParsedSkillsDeployCallb
     .returnType<ParsedSkillsDeployCallback | null>()
     .with("approve", "deny", (action) => ({ action, pendingId: id }))
     .with("disable", () => ({ action: "disable", skillId: id }))
+    .with("rollback", () => ({ action: "rollback", deployId: id }))
     .otherwise(() => null);
 }
 
 /** Regex for grammY's `bot.callbackQuery(REGEX, ...)` registration. */
 export const SKILLS_DEPLOY_CALLBACK_REGEX = new RegExp(
-  `^skill:${UUID_PATTERN}:(approve|deny|disable)$`,
+  `^skill:${UUID_PATTERN}:(approve|deny|disable|rollback)$`,
 );

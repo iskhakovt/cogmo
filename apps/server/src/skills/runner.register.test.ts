@@ -1774,6 +1774,131 @@ effects:
       expect(skill).toMatchObject({ gitSha: v1, disabled: false });
     });
 
+    describe("rollbackDeploy", () => {
+      async function deployed(
+        runner: Awaited<ReturnType<typeof makeRunner>>,
+        branch: string,
+        description: string,
+      ) {
+        await pushFeatureBranch({
+          work: repo.work,
+          branch,
+          manifest: ECHO_MANIFEST.replace("echoes one int field", description),
+          body: ECHO_BODY,
+        });
+        const result = await runner.register({ branch, origin: OWNER });
+        assertStatus(result, "live");
+        return result;
+      }
+
+      /** The skill row as it stands, with `gitSha` as a read that raced a deploy would see it. */
+      async function staleRow(gitSha: string) {
+        const row = expectDefined(await tx((trx) => store.getSkillByName(trx, "echo")), "echo");
+        return { ...row, gitSha };
+      }
+
+      it("restores the version an edit replaced, and refuses a first deploy, a stale one and an unknown id", async () => {
+        const runner = await makeRunner();
+        const first = await deployed(runner, "skill/echo-v1", "v1");
+        const edit = await deployed(runner, "skill/echo-v2", "v2");
+
+        expect(await runner.rollbackDeploy({ deployId: first.deployId, origin: OWNER })).toEqual(
+          err({ kind: "not_an_edit" }),
+        );
+        expect(
+          await runner.rollbackDeploy({
+            deployId: "019d0000-0000-7000-8000-0000000000ff",
+            origin: OWNER,
+          }),
+        ).toEqual(err({ kind: "not_found" }));
+
+        const restored = await runner.rollbackDeploy({ deployId: edit.deployId, origin: OWNER });
+
+        expect(restored._unsafeUnwrap()).toMatchObject({
+          kind: "restored",
+          skillName: "echo",
+          restoredGitSha: first.gitSha,
+        });
+        // The edit's message is stale now: its version no longer runs.
+        expect(await runner.rollbackDeploy({ deployId: edit.deployId, origin: OWNER })).toEqual(
+          err({ kind: "superseded" }),
+        );
+      });
+
+      it("refuses inside the transaction a deploy that landed after its reads, changing nothing", async () => {
+        const runner = await makeRunner();
+        await deployed(runner, "skill/echo-v1", "v1");
+        const edit = await deployed(runner, "skill/echo-v2", "v2");
+        const later = await deployed(runner, "skill/echo-v3", "v3");
+        // Both reads before the transaction raced v3's deploy and saw v2.
+        const stale = await staleRow(edit.gitSha);
+        const byId = vi.spyOn(store, "getSkillById").mockResolvedValueOnce(stale);
+        const byName = vi.spyOn(store, "getSkillByName").mockResolvedValueOnce(stale);
+
+        const result = await runner.rollbackDeploy({ deployId: edit.deployId, origin: OWNER });
+        byId.mockRestore();
+        byName.mockRestore();
+
+        expect(result).toEqual(err({ kind: "superseded" }));
+        expect(await getMainSha(repo.bare)).toBe(later.gitSha);
+        expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(later.gitSha);
+      });
+
+      it("refuses a stale deploy whose target files the live version already holds", async () => {
+        const runner = await makeRunner();
+        const first = await deployed(runner, "skill/echo-v1", "v1");
+        const edit = await deployed(runner, "skill/echo-v2", "v2");
+        // Another rollback put v1's files live; this tap's first read missed it.
+        assertStatus(
+          await runner.rollback({ name: "echo", toGitSha: first.gitSha, origin: OWNER }),
+          "live",
+        );
+        const byId = vi
+          .spyOn(store, "getSkillById")
+          .mockResolvedValueOnce(await staleRow(edit.gitSha));
+
+        expect(await runner.rollbackDeploy({ deployId: edit.deployId, origin: OWNER })).toEqual(
+          err({ kind: "superseded" }),
+        );
+        byId.mockRestore();
+      });
+
+      it("reports the rollback's refusal with its reason", async () => {
+        const runner = await makeRunner();
+        await deployed(runner, "skill/echo-v1", "v1");
+        const edit = await deployed(runner, "skill/echo-v2", "v2");
+        const real = DrizzleSkillStore.prototype.executeRollback.bind(store);
+        const execute = vi
+          .spyOn(store, "executeRollback")
+          .mockImplementationOnce(async (trx, params) => {
+            // Another skill's deploy moves main under the rollback.
+            const tree = await git(repo.bare, "rev-parse", "main^{tree}");
+            const moved = (
+              await execFileP(
+                "git",
+                ["-C", repo.bare, "commit-tree", tree, "-p", "main", "-m", "other"],
+                {
+                  env: {
+                    ...process.env,
+                    GIT_AUTHOR_NAME: "t",
+                    GIT_AUTHOR_EMAIL: "t@t",
+                    GIT_COMMITTER_NAME: "t",
+                    GIT_COMMITTER_EMAIL: "t@t",
+                  },
+                },
+              )
+            ).stdout.trim();
+            await git(repo.bare, "update-ref", "refs/heads/main", moved);
+            return real(trx, params);
+          });
+
+        expect(await runner.rollbackDeploy({ deployId: edit.deployId, origin: OWNER })).toEqual(
+          err({ kind: "refused", reason: "main_moved: main changed during the rollback; retry" }),
+        );
+        execute.mockRestore();
+      });
+    });
+
     it("a target whose files the live version already holds is a no-op", async () => {
       const runner = await makeRunner();
       const v1 = await pushFeatureBranch({

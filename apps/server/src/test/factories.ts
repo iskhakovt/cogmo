@@ -601,6 +601,14 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       list: vi.fn().mockResolvedValue(ok([])),
       disable: vi.fn().mockResolvedValue(ok({ name: "echo" })),
       disableById: vi.fn().mockResolvedValue(ok({ name: "echo" })),
+      rollbackDeploy: vi.fn().mockResolvedValue(
+        ok({
+          kind: "restored",
+          skillName: "echo",
+          restoredGitSha: "a".repeat(40),
+          gitSha: "b".repeat(40),
+        }),
+      ),
       enable: vi.fn().mockResolvedValue(ok({ name: "echo", alreadyEnabled: false })),
     },
     pipelines: {

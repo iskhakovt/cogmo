@@ -1,5 +1,6 @@
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
+import type { RolledBack } from "../../skills/deploy/rollback-deploy.js";
 import type { SkillDeployOrigin, SkillRunner } from "../../skills/runner.js";
 import type { SkillRiskTier, SkillStore, SkillTier } from "../../skills/store/index.js";
 import type { TransportError } from "../transport-error.js";
@@ -24,8 +25,8 @@ export interface SkillListEntry {
 }
 
 /**
- * Skills surface for the deploy message's keyboards (Approve, Deny, Disable)
- * and the `/skills` commands.
+ * Skills surface for the deploy message's keyboards (Approve, Deny, Disable,
+ * Roll back) and the `/skills` commands.
  * Mirrors the `coding` namespace shape: identity-checked, calls into the
  * existing `SkillRunner` RPCs, returns `Result` with skills-specific
  * error codes. Returns `skills_disabled` when the skills module isn't
@@ -84,6 +85,22 @@ export interface SkillsNamespace {
     skillId: string,
     tapperPlatformHandle: string,
   ): Promise<Result<{ name: string }, TransportError>>;
+  /**
+   * Roll back the edit `deployId`, as its live message's Roll back button
+   * names it: restore the version it replaced through the runner's forward
+   * rollback (design/skills.md → Notifications and undo). Refused with
+   * `skill_deploy_superseded` once the deploy is no longer the skill's live
+   * version, so a stale button cannot undo a later deploy;
+   * `skill_deploy_not_found` for an unknown id; `skill_rollback_failed` with
+   * the runner's reason, or when the deploy did not go live or replaced no
+   * live version. The tapper and the conversation in `platformAddress` are
+   * the origin a schedule it puts live runs as.
+   */
+  rollbackDeploy(
+    deployId: string,
+    tapperPlatformHandle: string,
+    platformAddress: string,
+  ): Promise<Result<RolledBack, TransportError>>;
   /**
    * Re-enable a previously-disabled skill. Refuses with
    * `skill_no_live_deploy` if the skill was never live at its current
@@ -219,6 +236,33 @@ export function createSkills(
         .exhaustive();
     },
 
+    async rollbackDeploy(deployId, tapperPlatformHandle, platformAddress) {
+      if (!skillRunner) return err({ code: "skills_disabled" as const });
+      const origin = await resolveSkillsActor(tapperPlatformHandle, platformAddress);
+      if (!origin) return err({ code: "identity_rejected" as const });
+      const result = await skillRunner.rollbackDeploy({ deployId, origin });
+      return result.mapErr((e) =>
+        match(e)
+          .returnType<TransportError>()
+          .with({ kind: "not_found" }, () => ({
+            code: "skill_deploy_not_found",
+            pendingId: deployId,
+          }))
+          .with({ kind: "not_an_edit" }, () => ({
+            code: "skill_rollback_failed",
+            deployId,
+            reason: "the deploy did not go live, or replaced no live version",
+          }))
+          .with({ kind: "superseded" }, () => ({ code: "skill_deploy_superseded", deployId }))
+          .with({ kind: "refused" }, ({ reason }) => ({
+            code: "skill_rollback_failed",
+            deployId,
+            reason,
+          }))
+          .exhaustive(),
+      );
+    },
+
     async enable(platformUserHandle, name, platformAddress) {
       const origin = await resolveSkillsActor(platformUserHandle, platformAddress);
       if (!origin) return err({ code: "identity_rejected" as const });
@@ -247,8 +291,8 @@ export function createSkills(
   };
 
   /**
-   * The origin of a skills action a user takes in a chat (an approval, an
-   * enable): their identity row, and the conversation the chat's active
+   * The origin of a skills action a user takes in a chat (an approval, a
+   * rollback, an enable): their identity row, and the conversation the chat's active
    * session points at. Undefined when the handle is not a known user.
    */
   async function resolveSkillsActor(

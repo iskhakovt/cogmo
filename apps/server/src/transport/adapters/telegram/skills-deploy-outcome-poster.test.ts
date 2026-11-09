@@ -218,6 +218,28 @@ describe("postSkillsDeployOutcome", () => {
     );
   });
 
+  it("live edit: adds Roll back keyed by the deploy id", async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    await postSkillsDeployOutcome({
+      event: deployed("live", { priorGitSha: "abc1234abc1234" }),
+      channelId: "ch-telegram",
+      runInTx: fakeRunInTx,
+      transportStore: telegramSessionStore(),
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(424242, expect.any(String), {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🚫 Disable", callback_data: `skill:${SKILL_ID}:disable` },
+            { text: "↩️ Roll back", callback_data: `skill:${DEPLOY_ID}:rollback` },
+          ],
+        ],
+      },
+    });
+  });
+
   it("pending: posts Approve / Deny keyed by the deploy id", async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
 

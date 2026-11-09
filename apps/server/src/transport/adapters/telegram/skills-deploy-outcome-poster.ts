@@ -114,7 +114,14 @@ function deployOutcomeKeyboard(
   event: SkillsDeployOutcomeData,
 ): SkillsInlineKeyboardMarkup | undefined {
   return match(event)
-    .with({ outcome: "live" }, (live) => buildSkillsLiveKeyboard(live.skillId))
+    .with({ outcome: "live" }, (live) =>
+      buildSkillsLiveKeyboard({
+        skillId: live.skillId,
+        // Roll back on an edit restores the version it replaced; a first
+        // deploy has none.
+        rollbackDeployId: live.priorGitSha === null ? null : live.deployId,
+      }),
+    )
     .with({ outcome: "pending_approval" }, (pending) =>
       buildSkillsApprovalKeyboard(pending.deployId),
     )

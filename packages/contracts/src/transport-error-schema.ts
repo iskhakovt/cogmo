@@ -64,6 +64,12 @@ export const TransportErrorSchema = z.discriminatedUnion("code", [
     pendingId: z.string(),
     reason: z.string(),
   }),
+  z.object({ code: z.literal("skill_deploy_superseded"), deployId: z.string() }),
+  z.object({
+    code: z.literal("skill_rollback_failed"),
+    deployId: z.string(),
+    reason: z.string(),
+  }),
   z.object({ code: z.literal("pipelines_disabled") }),
   z.object({ code: z.literal("pipeline_run_not_found"), runId: z.string() }),
   z.object({
