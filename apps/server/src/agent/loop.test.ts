@@ -26,6 +26,7 @@ import {
   mockFilesService,
   scriptedStream,
   TEST_PREFIX_VIOLATION,
+  testTranscript,
 } from "../test/factories.js";
 import type {
   AgentLoopParams,
@@ -93,35 +94,43 @@ function toolUseResponse(toolName: string, toolId: string, input: unknown): LlmR
 // `testRunStreamingAgentLoop` so each call only states what's behaviourally
 // relevant (provider, tools, messages, plus the variant onEvent / mock
 // turnLogger / etc.). Overriding any of them just means setting it in
-// the override object.
-type LoopDefaultable = "model" | "systemPrompt" | "service" | "turnLogger";
-type LoopOverrides = Omit<AgentLoopParams, LoopDefaultable> &
-  Partial<Pick<AgentLoopParams, LoopDefaultable>>;
+// the override object. The history is given as `messages`, which the helpers
+// open a transcript on under the system prompt "sys".
+type LoopDefaultable = "model" | "service" | "turnLogger";
+type LoopOverrides = Omit<AgentLoopParams, LoopDefaultable | "transcript"> &
+  Partial<Pick<AgentLoopParams, LoopDefaultable>> & { messages: Message[] };
 type StreamingLoopDefaultable = LoopDefaultable | "site" | "prefixViolation";
-type StreamingLoopOverrides = Omit<StreamingAgentLoopParams, StreamingLoopDefaultable> &
-  Partial<Pick<StreamingAgentLoopParams, StreamingLoopDefaultable>>;
+type StreamingLoopOverrides = Omit<
+  StreamingAgentLoopParams,
+  StreamingLoopDefaultable | "transcript"
+> &
+  Partial<Pick<StreamingAgentLoopParams, StreamingLoopDefaultable>> & { messages: Message[] };
 
 function testRunAgentLoop(overrides: LoopOverrides): Promise<AgentLoopResult> {
+  const { messages, ...params } = overrides;
+  const turnLogger = params.turnLogger ?? logger;
   return runAgentLoop({
     model: "test",
-    systemPrompt: "sys",
     service: stubService(),
-    turnLogger: logger,
-    ...overrides,
+    ...params,
+    turnLogger,
+    transcript: testTranscript({ system: "sys", tools: params.tools, messages, log: turnLogger }),
   });
 }
 
 function testStreamingLoopOutcome(
   overrides: StreamingLoopOverrides,
 ): Promise<StreamingLoopOutcome> {
+  const { messages, ...params } = overrides;
+  const turnLogger = params.turnLogger ?? logger;
   return runStreamingAgentLoop({
     site: "iteration",
     prefixViolation: TEST_PREFIX_VIOLATION,
     model: "test",
-    systemPrompt: "sys",
     service: stubService(),
-    turnLogger: logger,
-    ...overrides,
+    ...params,
+    turnLogger,
+    transcript: testTranscript({ system: "sys", tools: params.tools, messages, log: turnLogger }),
   });
 }
 
@@ -2886,14 +2895,15 @@ describe("thinking blocks in history", () => {
   });
 });
 
-// Pre-flight history sanitization runs validateHistory and emits a
-// warn-level repair log when the validator returns repairs. A user message
-// with a tool_result whose toolUseId has no matching prior tool_use is the
-// minimal repro — `validateHistory` flags it as `dropped_stray_tool_result`,
-// which routes through the `agent loop history invariants repaired` warn
-// emission. Tests below pin that the warn lands on the injected
-// per-invocation `turnLogger` across both loop variants and on the
-// iteration-limit path.
+// Pre-flight history sanitization runs validateHistory where the transcript
+// opens (`openTranscript`, which the helpers above call with the loop's
+// `turnLogger`) and emits a warn-level repair log when the validator returns
+// repairs. A user message with a tool_result whose toolUseId has no matching
+// prior tool_use is the minimal repro — `validateHistory` flags it as
+// `dropped_stray_tool_result`, which routes through the `agent loop history
+// invariants repaired` warn emission. Tests below pin that the warn lands on
+// the per-invocation `turnLogger` for both loop variants, and that the loop's
+// own iteration-limit warn does too.
 describe("turnLogger plumbing", () => {
   function historyWithStrayToolResult(): Message[] {
     return [
@@ -4190,12 +4200,11 @@ describe("volume-cluster trigger", () => {
     tools.register(budgetedTool("img", 2));
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
@@ -4254,12 +4263,11 @@ describe("volume-cluster trigger", () => {
     const tools = new ToolRegistry();
     tools.register(budgetedTool("img", 2)); // handler always succeeds
 
-    const result = await runStreamingAgentLoop({
+    const result = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
@@ -4292,12 +4300,11 @@ describe("volume-cluster trigger", () => {
     tools.register(budgetedTool("img", 2));
     tools.register(budgetedTool("search", 5));
 
-    const result = await runStreamingAgentLoop({
+    const result = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
@@ -4329,12 +4336,11 @@ describe("volume-cluster trigger", () => {
       toolUseTurn("img", "tb", { q: "b" }),
       { events: [{ type: "text_delta", text: "done1" }], stopReason: "end_turn" },
     ]);
-    const r1 = await runStreamingAgentLoop({
+    const r1 = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider: provider1,
       model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
@@ -4353,12 +4359,11 @@ describe("volume-cluster trigger", () => {
       toolUseTurn("img", "td", { q: "d" }),
       { events: [{ type: "text_delta", text: "done2" }], stopReason: "end_turn" },
     ]);
-    const r2 = await runStreamingAgentLoop({
+    const r2 = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider: provider2,
       model: "test",
-      systemPrompt: "sys",
       // Fresh turn — caller does NOT carry the prior turn's tool_use
       // history into the new invocation. (Production passes only the
       // persisted messages; the loop scope is per-invocation.)
@@ -4418,12 +4423,11 @@ describe("volume-cluster trigger", () => {
     const tools = new ToolRegistry();
     tools.register(budgetedTool("img", 2));
 
-    const result = await runStreamingAgentLoop({
+    const result = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
-      systemPrompt: "sys",
       messages: priorMessages,
       tools,
       service: stubService(),
@@ -4467,12 +4471,11 @@ describe("volume-cluster trigger", () => {
     tools.register(budgetedTool("img", 2));
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "generate 10 images" }],
       tools,
       service: stubService(),
@@ -4523,12 +4526,11 @@ describe("volume-cluster trigger", () => {
     tools.register(budgetedTool("img", 2));
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
@@ -4586,12 +4588,11 @@ describe("volume-cluster trigger", () => {
     // are isError: true → no side effect → fingerprint accumulates.
     tools.register(budgetedTool("img", 2, true));
 
-    const result = await runStreamingAgentLoop({
+    const result = await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
@@ -4617,12 +4618,11 @@ describe("volume-cluster trigger", () => {
     const tools = new ToolRegistry(); // empty
     const turnLogger = mock<Logger>();
 
-    await runStreamingAgentLoop({
+    await testStreamingLoopOutcome({
       site: "iteration",
       prefixViolation: TEST_PREFIX_VIOLATION,
       provider,
       model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),

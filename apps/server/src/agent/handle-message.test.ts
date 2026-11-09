@@ -973,7 +973,7 @@ describe("createHandleMessage", () => {
       vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
       "runStreamingAgentLoop call",
     )[0];
-    const lastMsg = expectDefined(callArgs.messages.at(-1), "last message");
+    const lastMsg = expectDefined(callArgs.transcript.messages.at(-1), "last message");
     expect(lastMsg.role).toBe("user");
     expect(lastMsg.content).toContainEqual({
       type: "document",
@@ -1021,7 +1021,7 @@ describe("createHandleMessage", () => {
       vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
       "runStreamingAgentLoop call",
     )[0];
-    const lastMsg = expectDefined(callArgs.messages.at(-1), "last message");
+    const lastMsg = expectDefined(callArgs.transcript.messages.at(-1), "last message");
     if (!Array.isArray(lastMsg.content)) throw new Error("expected ContentBlock[]");
     const docBlock = lastMsg.content.find((b) => b.type === "document");
     expect(docBlock).not.toHaveProperty("name");
@@ -2788,7 +2788,7 @@ describe("createHandleMessage", () => {
         "runStreamingAgentLoop call",
       )[0];
       // The transcript is the persisted row's text, after the turn context.
-      const last = expectDefined(callArgs.messages.at(-1), "turn message");
+      const last = expectDefined(callArgs.transcript.messages.at(-1), "turn message");
       expect(last.role).toBe("user");
       expect(last.content).toEqual([
         { type: "text", text: expect.stringMatching(/^<turn_context>\n/) },
@@ -3845,7 +3845,7 @@ describe("createHandleMessage", () => {
         vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
         "runStreamingAgentLoop call",
       );
-      const lastMsg = expectDefined(loopArgs.messages.at(-1), "last message");
+      const lastMsg = expectDefined(loopArgs.transcript.messages.at(-1), "last message");
       expect(lastMsg.content).toContainEqual({ type: "text", text: wrapped });
     });
   });
@@ -3889,7 +3889,7 @@ describe("createHandleMessage", () => {
         vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
         "runStreamingAgentLoop call",
       )[0];
-      expect(loopArgs.systemPrompt).toBe("system prompt");
+      expect(loopArgs.transcript.system).toBe("system prompt");
       expect(deps.agentStore.insertMessages).toHaveBeenCalled();
     });
 
@@ -3981,7 +3981,7 @@ describe("createHandleMessage", () => {
     const chatCalls = vi.mocked(synthesisProvider.chat).mock.calls;
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]?.[0]).toMatchObject({
-      system: loopParams.systemPrompt,
+      system: loopParams.transcript.system,
       tools: toolDefs,
       toolChoice: "none",
       temperature: 0,
@@ -4794,7 +4794,7 @@ describe("durable conversation summaries", () => {
 
     expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
     const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
-    const loopMessages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
+    const loopMessages = expectDefined(loopCalls[0], "agent loop call")[0].transcript.messages;
     expect(loopMessages[0]?.content).toContain("the earlier discussion");
   });
 
@@ -4841,7 +4841,7 @@ describe("durable conversation summaries", () => {
 
     expect(deps.agentStore.getHistoryAfter).toHaveBeenCalledWith(expect.anything(), "conv-1", "m4");
     const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
-    const messages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
+    const messages = expectDefined(loopCalls[0], "agent loop call")[0].transcript.messages;
     expect(messages[0]?.content).toContain("everything before this");
     // The covered span is gone — only the summary and what followed remain.
     expect(deps.agentStore.listMessages).not.toHaveBeenCalled();
@@ -5042,7 +5042,7 @@ describe("durable conversation summaries", () => {
       const { messages } = expectDefined(
         vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
         "agent loop call",
-      )[0];
+      )[0].transcript;
       expect(messages[6]).toEqual({
         role: "user",
         content: [
@@ -5124,7 +5124,7 @@ describe("system prompt snapshot", () => {
         reason: "first_turn",
       },
     );
-    expect(loopParams(deps).systemPrompt).toBe("FIRST PROMPT");
+    expect(loopParams(deps).transcript.system).toBe("FIRST PROMPT");
   });
 
   /** A normalized photo of `bytes` (base64 4/3 of it), stored under `path`. */
@@ -5175,7 +5175,7 @@ describe("system prompt snapshot", () => {
 
     await run(deps);
 
-    const [turn] = loopParams(deps).messages;
+    const [turn] = loopParams(deps).transcript.messages;
     expect(turn?.content).toEqual([
       expect.objectContaining({ type: "text" }),
       { type: "text", text: "Image 1: normalized/1.jpg", harness: "image_label" },
@@ -5207,7 +5207,7 @@ describe("system prompt snapshot", () => {
       expect.anything(),
       expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3", reason: "attachments" }),
     );
-    const { messages } = loopParams(deps);
+    const { messages } = loopParams(deps).transcript;
     expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
     expect(messages[2]?.content).toEqual([{ type: "text", text: CUT }]);
     expect(messages[4]?.content).toEqual([expect.objectContaining({ type: "image" })]);
@@ -5229,7 +5229,7 @@ describe("system prompt snapshot", () => {
     await run(deps);
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-    const { messages } = loopParams(deps);
+    const { messages } = loopParams(deps).transcript;
     expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
     expect(messages[2]?.content).toEqual([{ type: "text", text: CUT }]);
     expect(messages[3]?.content).toEqual([thinking, { type: "text", text: "three" }]);
@@ -5252,7 +5252,7 @@ describe("system prompt snapshot", () => {
     await run(deps);
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-    const { systemPrompt, messages } = loopParams(deps);
+    const { system: systemPrompt, messages } = loopParams(deps).transcript;
     expect(systemPrompt).toBe("EPOCH PROMPT");
     expect(messages[1]).toEqual({
       role: "assistant",
@@ -5403,7 +5403,7 @@ describe("system prompt snapshot", () => {
     await run(deps);
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-    const { systemPrompt, messages } = loopParams(deps);
+    const { system: systemPrompt, messages } = loopParams(deps).transcript;
     expect(systemPrompt).toBe("EPOCH PROMPT");
     expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "reply" }] });
   });
@@ -5438,8 +5438,8 @@ describe("system prompt snapshot", () => {
       expect.anything(),
       expect.objectContaining({ openedBy: "msg-1", reason: "configuration" }),
     );
-    expect(loopParams(next).systemPrompt).toContain("## identity\nName: Sam");
-    expect(loopParams(next).systemPrompt).not.toContain("You don't know your user yet.");
+    expect(loopParams(next).transcript.system).toContain("## identity\nName: Sam");
+    expect(loopParams(next).transcript.system).not.toContain("You don't know your user yet.");
   });
 
   it("names the delivery channels in the turn context", async () => {
@@ -5470,7 +5470,7 @@ describe("system prompt snapshot", () => {
       expect.anything(),
       expect.objectContaining({ openedBy: "msg-1", historyStart: "m1", reason: "configuration" }),
     );
-    const { systemPrompt, messages } = loopParams(deps);
+    const { system: systemPrompt, messages } = loopParams(deps).transcript;
     expect(systemPrompt).toBe("system prompt");
     expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "reply" }] });
   });
@@ -5544,7 +5544,7 @@ describe("system prompt snapshot", () => {
       expect.anything(),
       expect.objectContaining({ openedBy: "msg-1", historyStart: "m3", reason: "summary" }),
     );
-    expect(loopParams(deps).messages[2]).toEqual({
+    expect(loopParams(deps).transcript.messages[2]).toEqual({
       role: "assistant",
       content: [{ type: "text", text: "kept" }],
     });
@@ -5612,7 +5612,7 @@ describe("system prompt snapshot", () => {
       );
       // The retained turns before m7 replay without the thinking bound to the
       // old prefix; m8, after it, keeps its own.
-      const { messages } = loopParams(deps);
+      const { messages } = loopParams(deps).transcript;
       expect(JSON.stringify(messages.slice(0, -2))).not.toContain('"thinking"');
       expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
     });
@@ -5695,7 +5695,7 @@ describe("system prompt snapshot", () => {
         );
         // The turns kept before m7 replay without the thinking bound to the
         // prefix the rewrite changed; m8, after it, keeps its own.
-        const { messages, systemPrompt } = loopParams(deps);
+        const { messages, system: systemPrompt } = loopParams(deps).transcript;
         expect(systemPrompt).not.toBe("EPOCH PROMPT");
         expect(JSON.stringify(messages.slice(0, -2))).not.toContain('"thinking"');
         expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
@@ -5862,7 +5862,7 @@ describe("transcript head check", () => {
     await run(deps, mockStep());
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
-    expect(loopParams(deps).systemPrompt).toBe(a.epoch.rendered);
+    expect(loopParams(deps).transcript.system).toBe(a.epoch.rendered);
   });
 
   it("keeps the check clean on the turn after a rejected attachment", async () => {
@@ -5896,7 +5896,7 @@ describe("transcript head check", () => {
 
     expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
     // The refused photo went out as its placeholder.
-    expect(JSON.stringify(loopParams(deps).messages[2]?.content)).toContain(
+    expect(JSON.stringify(loopParams(deps).transcript.messages[2]?.content)).toContain(
       "The model provider refused this file",
     );
 

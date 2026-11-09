@@ -155,7 +155,6 @@
 - [ ] `p3` Consider moving `IDENTITY`/`ONBOARDING` constants (`src/agent/prompt.ts`) out of code — they're defaults that `profile.basePrompt` can override, but if evolution ever wants to tune the baseline identity/onboarding tone we'd need them in a table. Not urgent — profile override path already exists.
 - [ ] `p3` LLM-suggested conversation auto-naming — generate alias from first turn or on demand. User can accept/edit/reject. Aliases remain user-controlled; this is a suggestion path, not auto-apply.
 - [ ] `p3` Profile-switch tool-removal regression test — when `/profile switch` removes a tool whose `tool_use` blocks live in conversation history, verify the next turn still loads cleanly (Anthropic API accepts historical tool blocks even if not in current `tools`, but a regression test pins the contract).
-- [ ] `p3` Append-only step 9: the `Transcript` type — append, amend or discard unsent, and rewrite only on an epoch.
 - [ ] `p3` `[research]` Anthropic on-demand compaction (`compact-2026-09-04`, [design/context-management.md](design/context-management.md) → Strategy 2 → Server-side alternative) and Files API `file_id` for attachments.
 - [ ] `p3` Implement or remove the `llm` auto-recall mode; it behaves as `always` while the pgEnum accepts it. (deep review 2026-10-27, L2)
 - [ ] `p3` Redact a tool's error message before it reaches the model's `is_error` result and the `conversation/errored` payload, as logs and spans already do. (deep review 2026-10-27, L9)

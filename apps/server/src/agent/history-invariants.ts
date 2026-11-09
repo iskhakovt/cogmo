@@ -9,7 +9,9 @@
  *
  * Historical bugs in our agent loop have produced orphan `tool_use` rows in
  * the `messages` table, and any subsequent turn loaded that history and got a
- * 400 from Anthropic. This validator runs at agent-loop entry, repairs the
+ * 400 from Anthropic. This validator runs where a turn's transcript opens
+ * (`openTranscript`), in the head check's render and on every summarization
+ * prefix, repairs the
  * known violation classes, and returns a list of repairs so callers can log /
  * emit telemetry.
  *

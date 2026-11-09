@@ -187,7 +187,7 @@ const DROPPED_FORK = { type: "thinking_dropped", reason: "prefix_binding_mismatc
 /** The system prompt the agent loop was given. */
 function loopSystemPrompt(deps: HandleMessageDeps): string {
   return expectDefined(vi.mocked(deps.runStreamingAgentLoop).mock.calls[0], "agent loop call")[0]
-    .systemPrompt;
+    .transcript.system;
 }
 
 describe("handle-message — crash recovery / step replay", () => {
@@ -331,7 +331,7 @@ describe("handle-message — crash recovery / step replay", () => {
     // the agent loop, the cached step was hit.
     const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
     expect(loopCalls.length).toBeGreaterThanOrEqual(1);
-    const messages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
+    const messages = expectDefined(loopCalls[0], "agent loop call")[0].transcript.messages;
     const summaryMessage = messages.find(
       (m) =>
         typeof m.content === "string" && m.content.includes("[cached summary from prior attempt]"),
@@ -485,7 +485,7 @@ describe("handle-message — crash recovery / step replay", () => {
     const loopMessages = expectDefined(
       vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
       "agent loop call",
-    )[0].messages;
+    )[0].transcript.messages;
     expect(JSON.stringify(loopMessages)).toContain("[cached summary]");
     expect(JSON.stringify(loopMessages)).not.toContain(huge);
 

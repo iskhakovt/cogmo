@@ -7,6 +7,7 @@ import { expectDefined } from "../test/assertions.js";
 import {
   type CompactionEvent,
   type ContextManagerDeps,
+  compactedView,
   compactMessages,
   extractSummaryText,
   rewroteWithoutSummary,
@@ -1170,6 +1171,28 @@ describe("rewroteWithoutSummary", () => {
     },
   ])("is $rewrote for $name", ({ compacted, stored, rewrote }) => {
     expect(rewroteWithoutSummary(compacted, stored)).toBe(rewrote);
+  });
+});
+
+describe("compactedView", () => {
+  const messages = [msg("user", "hi")];
+
+  it("is unchanged when no strategy rewrote the view", () => {
+    expect(compactedView({ messages, didCompact: false })).toEqual({ kind: "unchanged", messages });
+  });
+
+  it("is rewritten when a strategy did, whether or not its summary is stored", () => {
+    const event: CompactionEvent = {
+      strategies: ["summarize"],
+      tokensBefore: 900,
+      tokensAfter: 500,
+      requestBytesBefore: 4000,
+      messagesSummarized: 4,
+    };
+    expect(compactedView({ messages, didCompact: true, event })).toEqual({
+      kind: "rewritten",
+      messages,
+    });
   });
 });
 

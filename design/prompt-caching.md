@@ -339,14 +339,18 @@ A request is the epoch's snapshot, the frozen tool table and durable rows, each 
 
 ### Transcript type `[confirmed]`
 
-The loop and the orchestrator pass around a `Transcript`, not a `Message[]`:
+The loop and the orchestrator pass around a `Transcript` (`src/agent/transcript.ts`), not a `Message[]`:
 
-- `openTranscript(epoch, rows)` renders the view.
+- `openTranscript(prefix, view)` opens it. The prefix is the `system` and frozen `tools` every request sends, and whether the turn `opened` its epoch (a stage turn sends a prefix of its own, so it always has) or `continued` an earlier turn's. The view is the turn's rendered history after compaction, `unchanged` or `rewritten`. Opening sanitizes the view as every request sends it.
 - `append(message)` adds a message.
-- `amendUnsent(…)` and `discardUnsent()` touch only the last message, and only before any request carried it: the truncation notice, an empty `end_turn`, a degraded iteration. Both throw once it has been sent.
+- `amendUnsent(blocks)` and `discardUnsent()` touch only the last message, and only before any request carried it: the truncation notice, an empty `end_turn`, a degraded iteration. Both throw once it has been sent.
 - `request()` returns the readonly `{ system, tools, messages }` and its head, and records what was sent.
 
-No method edits a sent message. Compaction returns the view unchanged or a rewrite, and only an epoch opening accepts a rewrite. A loader rendering a row differently from how a turn built it, and a replay rebuilding a request the step never sent, are the head check's.
+The opening takes the rendered view, not rows. The render has to come before the head check and compaction, and the epoch is settled only after compaction. A view that Strategy 3 or an unstored summary rewrote can't be rebuilt from rows. So the chat turn opens its transcript at the end of `finalizeTurnContext`, once the epoch is open or continued, the thinking strip is applied and the stored turn context is in place; a stage turn opens its own after its turn context.
+
+A message is sent once a `request()` carried it, and the opened view counts as sent: earlier turns' requests carried it, and the turn's own row renders to it. `request()` runs in the bare body before each `llm-iter<N>` step, so every invocation records the same requests, replays included, and an amendment or discard fails the same way on every invocation. Its head is the [Head check](#head-check-confirmed)'s chain over its messages from `base`, h₀ of the transcript's `system` and `tools`, extended from the previous request's head. That extension holds because no sent message changes. `llm-iter<N>` returns that head, and the in-turn check compares it with the request a later invocation rebuilds. The degraded reply's fork reads the transcript's `system` and `tools`, and the messages the loop returns, without recording a request; compaction's counts and summarization fork precede the opening. None of them is a request the transcript records.
+
+No method edits a sent message. Compaction returns the view unchanged or a rewrite, and only an epoch opening accepts a rewrite: a rewritten view under a continued epoch throws. A loader rendering a row differently from how a turn built it, and a replay rebuilding a request the step never sent, are the head check's.
 
 ### Head check `[confirmed]`
 
@@ -362,7 +366,7 @@ A digest chain runs over the provider-neutral request with `harness` removed, so
   - `status` is `intact`; `compacted` when the turn's own Strategy 3 or unstored summary rewrote its view; or `diverged` when the turn saw an in-turn difference or a server-reported mismatch. A turn that is both is `compacted`, as the epoch rule records `compaction` before `prefix_violation`; its divergence was already counted where it was seen. The adapter surfaces `input_transformations` on the response; `llm-iter<N>` counts them in its body and returns them in its outcome with the head, and `persist-new-messages` sets `diverged` from the outcomes.
 
   `load-turn-transcript` returns each row's head, aligned with its messages.
-- **What the check compares.** The turn renders the history it loaded, before its own compaction, under the current epoch's prompt and render state — its attachment cutoff, the thinking strip before its opening row and the loop's history sanitization — and the frozen tools (`check-turn-head.ts`). It compares the latest headed assistant row after the epoch's opening row: rows before it were sent under an earlier epoch's render state, and an opening row missing from the history, an epoch opened after the turn's load, leaves none. When the head's `base` and `historyStart` equal the turn's and its status is `intact`, the chain at position `length` must equal `digest`. The render is the turn's view; a turn that advanced its attachment cutoff opens an epoch anyway, so it compares no digest and renders no attachment it won't send.
+- **What the check compares.** The turn renders the history it loaded, before its own compaction, under the current epoch's prompt and render state — its attachment cutoff, the thinking strip before its opening row and the transcript's history sanitization — and the frozen tools (`check-turn-head.ts`). It compares the latest headed assistant row after the epoch's opening row: rows before it were sent under an earlier epoch's render state, and an opening row missing from the history, an epoch opened after the turn's load, leaves none. When the head's `base` and `historyStart` equal the turn's and its status is `intact`, the chain at position `length` must equal `digest`. The render is the turn's view; a turn that advanced its attachment cutoff opens an epoch anyway, so it compares no digest and renders no attachment it won't send.
 - **Explained changes.** Any other head opens an epoch under its explanation and counts nothing:
   - a different `base` is `configuration`;
   - a different `historyStart` is `summary`, a `/compact` between turns;
@@ -428,7 +432,7 @@ The adapter also reports what the provider sees, the last layer and the ground t
 6. **Compaction opens an epoch (b)** `[confirmed]`. A sequential run in flight past a compaction that rewrote its view opens the epoch at its next invocation, so its remaining iterations send the new prompt and the stripped history: an in-turn divergence from the requests it memoized, counted once. A rollback to 5b does the same in reverse. A run in flight that has planned a parallel group meets the `step-not-found` residual ([crash-recovery.md](crash-recovery.md#handle-message-durability-map-confirmed) → Turn inputs are frozen).
 7. **Forks keep the prefix (h)** `[confirmed]`, and summarization switches to its own intent at the fork's budget. Forks' `input_transformations` are counted with `site: "fork"`, a stage turn's under `stage`. No step is added: a run in flight sends the new shape from its next fork, a memoized fork result replays as before, and a rollback to step 6 sends the old shape again.
 8. **`drop_block` in production**, after a soak with no unexplained mismatch outside `site: "stage"`.
-9. **The `Transcript` type.**
+9. **The `Transcript` type** `[confirmed]`. No step, memo or wire change, so a run in flight replays unchanged into the new build and across a rollback.
 10. **Strict mode everywhere**, after [One Prefix per Conversation](#one-prefix-per-conversation-proposed): `throw` in the integration tier, no declared exceptions, and live scenario B extended.
 
 ## Cache Intent `[confirmed]`
