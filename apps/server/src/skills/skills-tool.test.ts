@@ -4,9 +4,11 @@ import { z } from "zod";
 import type { Service } from "../agent/service.js";
 import {
   FIXTURE_DEPLOY_ID,
+  gateGuidanceSignature,
   liveRegisterResult,
   pendingRegisterResult,
 } from "../test/skills-fixtures.js";
+import { ENTRYPOINT_RULE } from "./ast-rules.js";
 import type { SkillsService } from "./skills-service.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills-tool.js";
 
@@ -138,5 +140,10 @@ describe("SKILLS_PROMPT_GUIDANCE", () => {
     expect(SKILLS_PROMPT_GUIDANCE).toMatch(/Disable button/);
     expect(SKILLS_PROMPT_GUIDANCE).toMatch(/waits until the user taps Approve/);
     expect(SKILLS_PROMPT_GUIDANCE).not.toMatch(/stub|one-line notification/);
+  });
+
+  it("states the Entrypoint gate's rule, with a signature the gates accept", async () => {
+    expect(SKILLS_PROMPT_GUIDANCE).toContain(ENTRYPOINT_RULE);
+    expect(await gateGuidanceSignature(SKILLS_PROMPT_GUIDANCE)).toEqual([]);
   });
 });

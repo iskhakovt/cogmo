@@ -1,15 +1,20 @@
 import { match } from "ts-pattern";
 import { logger } from "../logger.js";
-import { AST_CLASSIFIER_VERSION, classifyWithAst, computeRiskTier } from "./ast-classifier.js";
+import {
+  AST_CLASSIFIER_VERSION,
+  classifyWithAstForRollback,
+  computeRiskTier,
+} from "./ast-classifier.js";
 import type { SkillsCapabilities } from "./capabilities.js";
 import type { ClassifierLog, SkillManifest } from "./types.js";
 
 /**
- * Skills risk classifier. Two paths:
+ * Rollback's risk classifier. Two paths:
  *
- *   - **Primary** — `classifyWithAst(manifest, body)` walks the
- *     Python source via tree-sitter, detects undeclared effects, and
- *     promotes/rejects based on what the body actually does. See
+ *   - **Primary** — `classifyWithAstForRollback` walks the Python source
+ *     via tree-sitter, detects undeclared effects, and promotes/rejects
+ *     based on what the body actually does; an effect only a ctx row
+ *     detected counts in the tier and rejects nothing. See
  *     `ast-classifier.ts` for the threat model and rule mechanics.
  *
  *   - **Fallback** — declaration-only stub that consults
@@ -17,21 +22,20 @@ import type { ClassifierLog, SkillManifest } from "./types.js";
  *     Fires when the AST path throws (parser load failure, walk
  *     panic, missing wasm at runtime). Surfaces a structured log line
  *     with `event: classifier_fallback` so an operator can spot the
- *     degradation; the deploy still completes with the conservative
+ *     degradation; the rollback still completes with the conservative
  *     stub tier.
  *
- * Public entry is `classifyManifest(manifest, body, capabilities)` — async because
- * the AST parser load is async. Tests that don't exercise body AST
- * may pass an empty body; the AST path will run, find nothing, and
- * return the same tier the declaration-only path would.
+ * Register calls `classifyWithAst` directly and never takes the stub: it
+ * deploys no body the AST path did not read (design/skills.md →
+ * Register-time gates).
  */
 
 const log = logger.child({ component: "skills.classifier" });
 
 /**
  * Stub classifier version. Used by the fallback path only. The AST
- * path stamps `AST_CLASSIFIER_VERSION` (`ast-2`) so audit-log
- * consumers can tell the two apart.
+ * path stamps `AST_CLASSIFIER_VERSION` so audit-log consumers can tell
+ * the two apart.
  */
 export const STUB_CLASSIFIER_VERSION = "stub-3-reasons";
 
@@ -48,7 +52,7 @@ export async function classifyManifest(
   capabilities: SkillsCapabilities,
 ): Promise<ClassifierLog> {
   try {
-    return await classifyWithAst(manifest, body, capabilities);
+    return await classifyWithAstForRollback(manifest, body, capabilities);
   } catch (err) {
     log.warn(
       { event: "classifier_fallback", err, skillName: manifest.name },
