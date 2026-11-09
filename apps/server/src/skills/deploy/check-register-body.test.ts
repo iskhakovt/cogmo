@@ -1,7 +1,10 @@
+import { err, ok, type Result } from "neverthrow";
+import * as R from "remeda";
 import { describe, expect, it, vi } from "vitest";
+import { classifyWithAst } from "../ast-classifier.js";
 import { BUILD_CAPABILITIES } from "../capabilities.js";
 import { classifyManifestStub } from "../classifier.js";
-import type { SkillFinding } from "../skill-gates.js";
+import { runSkillGates, type SkillFinding } from "../skill-gates.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
 import { checkRegisterBody } from "./check-register-body.js";
 
@@ -29,13 +32,20 @@ function classifierLog(validationErrors: string[]): ClassifierLog {
   };
 }
 
-/** Fakes for the gates and the classifier, each answering or throwing as given. */
-function checks(
-  gates: () => Promise<readonly SkillFinding[]>,
-  classify: () => Promise<ClassifierLog>,
-) {
+/** The tree the fake gates hand on; nothing reads into it. */
+const FAKE_TREE = { __mockTree: true } as never;
+
+type Gated = Result<ClassifierLog, readonly SkillFinding[]>;
+
+/**
+ * Fakes for the gates and the classifier, each answering or throwing as
+ * given. `gates` errs with findings, or passes by handing `FAKE_TREE` on.
+ */
+function checks(gates: (pass: () => Gated) => Promise<Gated>, classify: () => ClassifierLog) {
   return {
-    runGates: vi.fn<RegisterBodyChecks["runGates"]>(gates),
+    runGates: vi.fn<RegisterBodyChecks["runGates"]>((_skill, read) =>
+      gates(() => ok(read(FAKE_TREE))),
+    ),
     classify: vi.fn<RegisterBodyChecks["classify"]>(classify),
   };
 }
@@ -49,22 +59,22 @@ const FINDING: SkillFinding = {
 };
 
 describe("checkRegisterBody", () => {
-  it("returns the classifier's log once the gates pass", async () => {
+  it("returns the classifier's log on the tree the gates parsed, once they pass", async () => {
     const log = classifierLog([]);
     const fakes = checks(
-      async () => [],
-      async () => log,
+      async (pass) => pass(),
+      () => log,
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrap()).toBe(log);
-    expect(fakes.runGates).toHaveBeenCalledWith(SKILL);
-    expect(fakes.classify).toHaveBeenCalledWith(MANIFEST, SKILL.body, BUILD_CAPABILITIES);
+    expect(fakes.runGates).toHaveBeenCalledWith(SKILL, expect.any(Function));
+    expect(fakes.classify).toHaveBeenCalledWith(FAKE_TREE, MANIFEST, BUILD_CAPABILITIES);
   });
 
   it("rejects as lint_failed with the gates' findings, without running the classifier", async () => {
     const fakes = checks(
-      async () => [FINDING],
-      async () => classifierLog([]),
+      async () => err([FINDING]),
+      () => classifierLog([]),
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrapErr()).toEqual({
@@ -76,8 +86,8 @@ describe("checkRegisterBody", () => {
 
   it("rejects as classifier_rejected with the validation errors", async () => {
     const fakes = checks(
-      async () => [],
-      async () => classifierLog(["first", "second"]),
+      async (pass) => pass(),
+      () => classifierLog(["first", "second"]),
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrapErr()).toEqual({
@@ -89,7 +99,7 @@ describe("checkRegisterBody", () => {
   it("pauses when a gate's parse or walk throws", async () => {
     const fakes = checks(
       () => Promise.reject(new Error("tree-sitter-python.wasm: ENOENT")),
-      async () => classifierLog([]),
+      () => classifierLog([]),
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrapErr()).toEqual({
@@ -102,8 +112,10 @@ describe("checkRegisterBody", () => {
 
   it("pauses when the classifier throws after the gates passed, rather than taking the stub", async () => {
     const fakes = checks(
-      async () => [],
-      () => Promise.reject(new Error("walk panic")),
+      async (pass) => pass(),
+      () => {
+        throw new Error("walk panic");
+      },
     );
 
     expect((await checkRegisterBody(fakes, SKILL, BUILD_CAPABILITIES))._unsafeUnwrapErr()).toEqual({
@@ -111,5 +123,68 @@ describe("checkRegisterBody", () => {
       cause: "parser",
       detail: "walk panic",
     });
+  });
+});
+
+describe("checkRegisterBody with the gates and the classifier register wires", () => {
+  const WIRED = { runGates: runSkillGates, classify: classifyWithAst };
+  const NETWORK: SkillManifest = { ...MANIFEST, network: { allow: ["api.example.com"] } };
+
+  /** A valid `run` reading `lines - 3` response headers, each a call on a non-ctx receiver. */
+  const headers = (lines: number) =>
+    [
+      "import urllib.parse",
+      "async def run(inputs, ctx):",
+      '    resp = await ctx.http.get("https://api.example.com/")',
+      ...R.times(
+        lines - 3,
+        (i) => `    v${i} = urllib.parse.quote(resp.headers.get("x-${i}", ""))`,
+      ),
+      "",
+    ].join("\n");
+
+  async function timed(body: string) {
+    const started = performance.now();
+    const checked = await checkRegisterBody(
+      WIRED,
+      { ...SKILL, manifest: NETWORK, body },
+      BUILD_CAPABILITIES,
+    );
+    return { checked, ms: performance.now() - started };
+  }
+
+  it("checks a body at the line bound in under a second", { timeout: 120_000 }, async () => {
+    const body = headers(400);
+    expect(body.split("\n").length - 1).toBe(400);
+    expect(body.length).toBeLessThan(48_000);
+
+    const { checked, ms } = await timed(body);
+    expect(checked.isOk()).toBe(true);
+    expect(ms).toBeLessThan(1000);
+  });
+
+  it("checks four times the lines in well under sixteen times the time", {
+    timeout: 120_000,
+  }, async () => {
+    // Warm the parser and the JIT, then take each size's fastest of three runs.
+    await timed(headers(100));
+    const fastest = async (lines: number) => {
+      const runs: number[] = [];
+      for (const _ of R.range(0, 3)) runs.push((await timed(headers(lines))).ms);
+      return Math.min(...runs);
+    };
+    const short = await fastest(100);
+    const long = await fastest(400);
+    expect(long).toBeLessThan(8 * Math.max(short, 5));
+  });
+
+  it("classifies a 2000-term chain rather than pausing", { timeout: 120_000 }, async () => {
+    const names = R.times(2000, (i) => `a${i}`);
+    const rows = R.chunk(names, 21).map((row) => `    ${row.join(" + ")}`);
+    const body = `${SKILL.body}x = (\n${rows.join(" +\n")}\n)\n`;
+
+    const { checked, ms } = await timed(body);
+    expect(checked.isOk()).toBe(true);
+    expect(ms).toBeLessThan(1000);
   });
 });

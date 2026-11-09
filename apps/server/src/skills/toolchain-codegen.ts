@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { SKILL_BODY_MAX_CHARACTERS, SKILL_BODY_MAX_LINES } from "./ast-rules.js";
+import {
+  ENTRYPOINT_RULE,
+  ENTRYPOINT_SIGNATURE,
+  SKILL_BODY_MAX_CHARACTERS,
+  SKILL_BODY_MAX_LINES,
+} from "./ast-rules.js";
 import { RUNTIME_PACKAGES } from "./runtime-packages.js";
 import { SKILLS_VERIFY_COMMAND } from "./toolchain.js";
 import { SKILL_EFFECTS, SkillManifestSchema } from "./types.js";
@@ -273,7 +278,7 @@ export function renderToolchainClaudeMd(): string {
     "    summary: str",
     "",
     "",
-    "async def run(inputs: Input, ctx: Ctx) -> Output: ...",
+    `${ENTRYPOINT_SIGNATURE}: ...`,
     "```",
     "",
     "- `Input` and `Output` are the skill's contract: register derives the tool's schemas from them.",
@@ -283,7 +288,7 @@ export function renderToolchainClaudeMd(): string {
     "Register refuses a `skill.py` that breaks any of these:",
     "",
     `- At most ${SKILL_BODY_MAX_LINES} lines and ${SKILL_BODY_MAX_CHARACTERS} characters.`,
-    "- `run` bound once, as one undecorated `async def run` directly at module level, taking exactly two parameters, none `*args`, `**kwargs` or keyword-only. With an `Input` or `Output` class, annotate `inputs: Input` and `-> Output` by their bare names.",
+    `- ${ENTRYPOINT_RULE}`,
     "- No code built at run time: no `exec`, `eval`, `compile` or `__import__`, no `importlib.import_module`, and no `getattr` on an imported module by a computed name.",
     "- Each `ctx.memory` and `ctx.files` call's effect declared. A literal URL's host is in `network.allow`, and a literal secret name in `secrets`.",
     "",

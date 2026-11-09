@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { ENTRYPOINT_RULE } from "../../skills/ast-rules.js";
+import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
+import { gateGuidanceSignature } from "../../test/skills-fixtures.js";
 import { buildPlanPrompt } from "./prompt.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
@@ -73,5 +76,11 @@ describe("buildPlanPrompt", () => {
     const out = buildPlanPrompt(task(), repo());
     // No mention of the project's own CLAUDE.md content — Claude Code reads it natively.
     expect(out).not.toMatch(/CLAUDE\.md/);
+  });
+
+  it("states the Entrypoint gate's rule to the skills repo, with a signature the gates accept", async () => {
+    const out = buildPlanPrompt(task(), repo({ name: SKILLS_CODING_REPO_NAME }));
+    expect(out).toContain(ENTRYPOINT_RULE);
+    expect(await gateGuidanceSignature(out)).toEqual([]);
   });
 });

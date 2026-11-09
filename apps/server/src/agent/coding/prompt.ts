@@ -1,3 +1,4 @@
+import { ENTRYPOINT_RULE, ENTRYPOINT_SIGNATURE } from "../../skills/ast-rules.js";
 import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
@@ -15,7 +16,8 @@ const SKILLS_REPO_CONVENTION = [
   "  third-party package) requirements.lock. Change only those files of the one skill:",
   "  registration refuses skill files at the repo root, any other path, and a branch",
   "  that changes more than one skill.",
-  "- skill.py must export `async def run(inputs, ctx) -> dict`.",
+  `- skill.py's entrypoint, which register checks: ${ENTRYPOINT_RULE}`,
+  `  With pydantic models: \`${ENTRYPOINT_SIGNATURE}\`, \`Ctx\` imported from \`cogmo_ctx\`.`,
   "",
   "SKILL.md frontmatter contract — these are validated structurally, not free-form:",
   "  - The frontmatter is YAML. Any value containing `{`, `}`, `:`, `#`, `[`, or `]`",

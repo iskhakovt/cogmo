@@ -1,5 +1,7 @@
+import * as R from "remeda";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Node } from "web-tree-sitter";
+import type { SkillTree } from "./python-ast.js";
 import { formatSkillFinding, runSkillGates, type SkillFinding } from "./skill-gates.js";
 import type { SkillManifest } from "./types.js";
 
@@ -39,8 +41,13 @@ const RUN = "async def run(inputs, ctx):\n    return {}\n";
 /** The fixture skill on the wasm tier, with no effects, network or secrets. */
 const WASM = manifestWith();
 
-function gate(body: string, manifest: SkillManifest): Promise<readonly SkillFinding[]> {
-  return runSkillGates({ name: "echo", manifest, body });
+/** The gates' findings, none when they pass. */
+async function gate(body: string, manifest: SkillManifest): Promise<readonly SkillFinding[]> {
+  const gated = await runSkillGates({ name: "echo", manifest, body }, () => undefined);
+  return gated.match(
+    () => [],
+    (findings) => findings,
+  );
 }
 
 /** Each finding as `<id> <line>:<column> <message>`, for compact assertions. */
@@ -251,6 +258,12 @@ describe("entrypoint", () => {
   it("reads an Input class nested in a block as no model", async () => {
     expect(await findings(`if True:\n    class Input:\n        pass\n${RUN}`)).toEqual([]);
   });
+
+  it("refuses `run` bound by a type statement", async () => {
+    expect(await findings(`${RUN}type run = int\n`)).toEqual([
+      expect.stringMatching(/^entrypoint 3:6 `run` is rebound here/),
+    ]);
+  });
 });
 
 describe("dynamic_code", () => {
@@ -276,6 +289,14 @@ describe("dynamic_code", () => {
     ["__builtins__ subscripted, which passes", `x = __builtins__["e" + "val"]\n${RUN}`],
     ["a from-import of re.compile under an alias", `from re import compile as regex\n${RUN}`],
     ["an import aliased eval", `import os as eval\n${RUN}`],
+    [
+      "eval as a dotted value pattern's last name",
+      `${RUN}match x:\n    case enum.Mode.eval:\n        pass\n`,
+    ],
+    [
+      "compile as a keyword pattern's keyword",
+      `${RUN}match x:\n    case Foo(compile=1):\n        pass\n`,
+    ],
   ])("accepts %s", async (_label, body) => {
     expect(await findings(body)).toEqual([]);
   });
@@ -419,6 +440,51 @@ describe("effects", () => {
       "effects 2:27 secret 'a' is not declared in SKILL.md frontmatter",
       "effects 3:24 'evil.org' is not in this skill's network.allow list",
     ]);
+  });
+});
+
+describe("the stage after the gates", () => {
+  it("reads the tree the gates parsed, with its ctx calls", async () => {
+    const body = 'async def run(inputs, ctx):\n    await ctx.files.read("a")\n';
+    const read = vi.fn((tree: SkillTree) => tree.ctxCalls.map((c) => `${c.namespace}.${c.method}`));
+    const gated = await runSkillGates({ name: "echo", manifest: WASM, body }, read);
+    expect(gated._unsafeUnwrap()).toEqual(["files.read"]);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["a size finding", `${RUN}${"# pad\n".repeat(399)}`],
+    ["a syntax finding", `def f(:\n${RUN}`],
+    ["a third-stage finding", 'async def run(inputs, ctx):\n    eval("1")\n'],
+  ])("does not run after %s", async (_label, body) => {
+    const read = vi.fn();
+    const gated = await runSkillGates({ name: "echo", manifest: WASM, body }, read);
+    expect(gated.isErr()).toBe(true);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("does not run on a null tree", async () => {
+    parser.nullTree = true;
+    const read = vi.fn();
+    expect((await runSkillGates({ name: "echo", manifest: WASM, body: RUN }, read)).isErr()).toBe(
+      true,
+    );
+    expect(read).not.toHaveBeenCalled();
+  });
+});
+
+describe("deep and long bodies", () => {
+  /** `x = (a0 + a1 + …)` over `terms` terms, 21 to a line. */
+  const chain = (terms: number) => {
+    const names = Array.from({ length: terms }, (_, i) => `a${i}`);
+    const rows = R.chunk(names, 21).map((row) => `    ${row.join(" + ")}`);
+    return `${RUN}x = (\n${rows.join(" +\n")}\n)\n`;
+  };
+
+  it("gates a 2000-term chain without overflowing the stack", async () => {
+    const started = performance.now();
+    expect(await findings(chain(2000))).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 });
 

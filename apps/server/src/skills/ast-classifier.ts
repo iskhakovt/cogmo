@@ -37,7 +37,7 @@
 
 import * as R from "remeda";
 import { match } from "ts-pattern";
-import type { Node } from "web-tree-sitter";
+import type { Node, TreeCursor } from "web-tree-sitter";
 import {
   APPROVE_GATING_EFFECTS,
   APPROVE_SECRETS_THRESHOLD,
@@ -55,10 +55,11 @@ import { parseHttpUrl } from "./http-destination.js";
 import {
   type CtxRequest,
   callArgument,
-  ctxCalls,
   ctxRequest,
   literalText,
   literalUrl,
+  readSkillTree,
+  type SkillTree,
 } from "./python-ast.js";
 import { withPythonTree } from "./python-parser.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
@@ -80,62 +81,64 @@ interface DetectedHit {
  * specific labels in `validation_errors` ("undeclared effect:
  * sends_email — saw `smtplib`").
  */
-function detectHits(rootNode: Node, manifest: SkillManifest): DetectedHit[] {
-  return [...moduleHits(rootNode), ...ctxHits(rootNode, manifest)];
+function detectHits(tree: SkillTree, manifest: SkillManifest): DetectedHit[] {
+  return [...moduleHits(tree.root), ...ctxHits(tree, manifest)];
 }
 
 /** The import and call rows' hits, on any receiver but a ctx one. */
 function moduleHits(rootNode: Node): DetectedHit[] {
   const hits: DetectedHit[] = [];
 
-  // Walk via cursor — far cheaper than recursive `namedChild(i)` on
-  // large trees. We descend into every named child but skip token
-  // nodes (no children to look at). The cursor wraps a WASM heap
-  // allocation that the JS GC can't see; release it in a `finally`
+  // Walk via cursor — far cheaper than `namedChild(i)` on large trees — in
+  // a loop, so no depth of tree overflows the call stack. The cursor wraps a
+  // WASM heap allocation that the JS GC can't see; release it in a `finally`
   // so a thrown rule (or a future panic in a child) can't leak.
   const cursor = rootNode.walk();
   try {
-    function visit(): void {
-      const node = cursor.currentNode;
-      switch (node.type) {
-        case "import_statement":
-          for (const name of extractImportModules(node)) {
-            for (const rule of IMPORT_RULES) {
-              if (rule.module === name) {
-                hits.push({ effect: rule.effect, label: rule.label, ctx: false });
-              }
-            }
-          }
-          break;
-        case "import_from_statement": {
-          const module = extractImportFromModule(node);
-          if (module) {
-            for (const rule of IMPORT_RULES) {
-              if (rule.module === module) {
-                hits.push({ effect: rule.effect, label: rule.label, ctx: false });
-              }
-            }
-          }
-          break;
-        }
-        case "call":
-          matchCall(node, hits);
-          break;
-      }
-
-      if (cursor.gotoFirstChild()) {
-        do {
-          visit();
-        } while (cursor.gotoNextSibling());
-        cursor.gotoParent();
-      }
-    }
-
-    visit();
+    do {
+      visitNode(cursor.currentNode, hits);
+    } while (advancePreOrder(cursor));
   } finally {
     cursor.delete();
   }
   return hits;
+}
+
+/** Move the cursor to the next node in document order; false once the walk is done. */
+function advancePreOrder(cursor: TreeCursor): boolean {
+  if (cursor.gotoFirstChild()) return true;
+  do {
+    if (cursor.gotoNextSibling()) return true;
+  } while (cursor.gotoParent());
+  return false;
+}
+
+function visitNode(node: Node, hits: DetectedHit[]): void {
+  switch (node.type) {
+    case "import_statement":
+      for (const name of extractImportModules(node)) {
+        for (const rule of IMPORT_RULES) {
+          if (rule.module === name) {
+            hits.push({ effect: rule.effect, label: rule.label, ctx: false });
+          }
+        }
+      }
+      break;
+    case "import_from_statement": {
+      const module = extractImportFromModule(node);
+      if (module) {
+        for (const rule of IMPORT_RULES) {
+          if (rule.module === module) {
+            hits.push({ effect: rule.effect, label: rule.label, ctx: false });
+          }
+        }
+      }
+      break;
+    }
+    case "call":
+      matchCall(node, hits);
+      break;
+  }
 }
 
 /**
@@ -235,8 +238,8 @@ function matchCall(node: Node, hits: DetectedHit[]): void {
  * skill declaring no write effect (design/skills.md → Register-time gates →
  * ctx rows).
  */
-function ctxHits(rootNode: Node, manifest: SkillManifest): DetectedHit[] {
-  const calls = ctxCalls(rootNode);
+function ctxHits(tree: SkillTree, manifest: SkillManifest): DetectedHit[] {
+  const calls = tree.ctxCalls;
   const ruleHits = calls.flatMap((call) =>
     CALL_RULES.filter((rule) => "namespace" in rule)
       .filter((rule) => rule.namespace === call.namespace && rule.attr === call.method)
@@ -448,17 +451,17 @@ export function importRoots(body: string): Promise<ReadonlySet<string>> {
 }
 
 /**
- * The AST classifier as register runs it: every undeclared effect in
- * `REJECT_ON_UNDECLARED` rejects, whichever row detected it. Throws on a
- * parser-load or walk failure, and on a null tree, since register deploys no
- * body this path did not read.
+ * The AST classifier as register runs it, on the tree the register-time gates
+ * read: every undeclared effect in `REJECT_ON_UNDECLARED` rejects, whichever
+ * row detected it. Throws on a walk failure, since register deploys no body
+ * this path did not read.
  */
 export function classifyWithAst(
+  tree: SkillTree,
   manifest: SkillManifest,
-  body: string,
   capabilities: SkillsCapabilities,
-): Promise<ClassifierLog> {
-  return classify(manifest, body, capabilities, "register");
+): ClassifierLog {
+  return classify(detectHits(tree, manifest), manifest, capabilities, "register");
 }
 
 /**
@@ -468,32 +471,25 @@ export function classifyWithAst(
  * alone. Throws on a parser-load or walk failure, for `classifyManifest`'s
  * stub fallback.
  */
-export function classifyWithAstForRollback(
+export async function classifyWithAstForRollback(
   manifest: SkillManifest,
   body: string,
   capabilities: SkillsCapabilities,
-): Promise<ClassifierLog> {
-  return classify(manifest, body, capabilities, "rollback");
-}
-
-async function classify(
-  manifest: SkillManifest,
-  body: string,
-  capabilities: SkillsCapabilities,
-  occasion: "register" | "rollback",
 ): Promise<ClassifierLog> {
   const hits = await withPythonTree(body, (root) =>
-    root === null ? null : detectHits(root, manifest),
+    root === null ? null : detectHits(readSkillTree(root), manifest),
   );
-  if (hits === null) {
-    return match(occasion)
-      .with("register", () => {
-        throw new Error("tree-sitter returned no tree for the skill body");
-      })
-      .with("rollback", () => classifyFromDeclarationsOnly(manifest, capabilities))
-      .exhaustive();
-  }
+  return hits === null
+    ? classifyFromDeclarationsOnly(manifest, capabilities)
+    : classify(hits, manifest, capabilities, "rollback");
+}
 
+function classify(
+  hits: readonly DetectedHit[],
+  manifest: SkillManifest,
+  capabilities: SkillsCapabilities,
+  occasion: "register" | "rollback",
+): ClassifierLog {
   const detectedSet = new Set<SkillEffect>(hits.map((h) => h.effect));
   const declaredSet = new Set<SkillEffect>(manifest.effects);
   // At rollback, effects only ctx rows detected count in the tier and stay

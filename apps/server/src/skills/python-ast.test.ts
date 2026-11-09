@@ -3,7 +3,6 @@ import type { Node } from "web-tree-sitter";
 import { expectDefined } from "../test/assertions.js";
 import {
   callArgument,
-  ctxCalls,
   ctxRequest,
   fromImportStatementBindings,
   importStatementBindings,
@@ -11,6 +10,7 @@ import {
   literalText,
   literalUrl,
   parameterList,
+  readSkillTree,
 } from "./python-ast.js";
 import { withPythonTree } from "./python-parser.js";
 
@@ -26,10 +26,10 @@ function argumentOf<T>(argument: string, read: (node: Node | null) => T): Promis
   return firstOf(`f(${argument})\n`, "call", (call) => read(callArgument(call, 0, null)));
 }
 
-describe("ctxCalls", () => {
+describe("readSkillTree's ctx calls", () => {
   const calls = (source: string) =>
     withPythonTree(source, (root) =>
-      ctxCalls(expectDefined(root, "root")).map((c) => `${c.namespace}.${c.method}`),
+      readSkillTree(expectDefined(root, "root")).ctxCalls.map((c) => `${c.namespace}.${c.method}`),
     );
 
   it.each([
@@ -112,6 +112,10 @@ describe("ctxCalls", () => {
       "a method's first parameter shadowing an enclosing parameter",
       "def f(ctx):\n    class C:\n        def m(ctx):\n            ctx.files.read('a')\n",
     ],
+    [
+      "a nested function's type statement",
+      "def f(inputs, ctx):\n    def g():\n        type ctx = int\n        ctx.files.read('a')\n",
+    ],
   ])("does not read %s as a receiver", async (_label, source) => {
     expect(await calls(source)).toEqual([]);
   });
@@ -120,7 +124,7 @@ describe("ctxCalls", () => {
     const source =
       "def f(ctx):\n    ctx.http.get('g')\n    ctx.http.post(url='p')\n    ctx.http.request('PUT', 'r')\n    ctx.http.put('x')\n    ctx.files.read('a')\n";
     const urls = await withPythonTree(source, (root) =>
-      ctxCalls(expectDefined(root, "root")).map((c) => {
+      readSkillTree(expectDefined(root, "root")).ctxCalls.map((c) => {
         const request = ctxRequest(c);
         return request === null ? null : literalText(request.url);
       }),
@@ -181,6 +185,14 @@ describe("literals", () => {
     ['f"/a/{x}"', null],
     ['"https://h\\x2ecom/"', null],
     ['f"https://h.com/{x}\\n"', null],
+    // WHATWG reads `\` as `/`, and strips a tab, so it skips both slashes
+    // after `https://`, and the field extends the host it reads.
+    ['rf"https://\\/api.example.com{x}"', null],
+    ['f"https://\t/api.example.com{x}"', null],
+    [
+      'rf"https://\\/api.example.com/{x}"',
+      { head: "https://\\/api.example.com/", templatedPath: true },
+    ],
     ["url", null],
   ])("reads the URL %s", async (source, expected) => {
     expect(await argumentOf(source, literalUrl)).toEqual(expected);
