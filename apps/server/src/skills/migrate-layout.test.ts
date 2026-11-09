@@ -7,9 +7,12 @@ import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { migrateSkillsLayout } from "./migrate-layout.js";
+import { commitAsCogmo, writeEditedTree } from "./cogmo-commits.js";
+import { configurableMainSha, isCogmoOnlyMain, migrateSkillsLayout } from "./migrate-layout.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import { DrizzleSkillStore, type InsertSkillParams } from "./store/index.js";
+import { findSkillsImageDir, loadReleaseToolchain } from "./toolchain.js";
+import { commitToolchain } from "./toolchain-commit.js";
 
 const execFileP = promisify(execFile);
 
@@ -451,6 +454,20 @@ describe("migrateSkillsLayout", () => {
     expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
   });
 
+  it("moves again when main is unborn under a recorded layout commit", async () => {
+    await migrate();
+    // The operator deletes main, as remote_diverged advises before an adopt.
+    await git(bare, "update-ref", "-d", "refs/heads/main");
+
+    const layout = await migrate();
+
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(layout);
+    expect(await git(bare, "log", "-1", "--format=%P|%T", layout)).toBe(
+      "|4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    );
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
+  });
+
   it("moves again when the repo no longer has the recorded layout commit", async () => {
     await tx((trx) => store.recordLayoutCommit(trx, "f".repeat(40)));
 
@@ -496,5 +513,132 @@ describe("migrateSkillsLayout", () => {
     await expect(migrate()).rejects.toThrow(/skill 'ghost' at [0-9a-f]+ has no skill files/);
     expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(empty);
     expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBeNull();
+  });
+});
+
+describe("isCogmoOnlyMain", () => {
+  const head = () => git(bare, "rev-parse", "refs/heads/main");
+  const toolchain = async () =>
+    commitToolchain(
+      { runInTx: tx, store },
+      bare,
+      await loadReleaseToolchain(findSkillsImageDir(import.meta.url), "9.9.9"),
+    );
+
+  /** A commit under Cogmo's identity on top of main, carrying `trailers` and putting `files`. */
+  async function cogmoCommit(
+    trailers: Record<string, string>,
+    files: Record<string, string>,
+  ): Promise<string> {
+    const parent = await head();
+    const puts = [];
+    for (const [path, content] of Object.entries(files)) {
+      const file = join(root, "blob");
+      await writeFile(file, content);
+      puts.push({
+        kind: "put" as const,
+        path,
+        blob: { mode: "100644", sha: await git(bare, "hash-object", "-w", file) },
+      });
+    }
+    const tree = await writeEditedTree(bare, parent, puts);
+    const sha = await commitAsCogmo(bare, { tree, parent, subject: "c", trailers });
+    await git(bare, "update-ref", "refs/heads/main", sha);
+    return sha;
+  }
+
+  it("counts an unborn main as unborn", async () => {
+    expect(await configurableMainSha(bare)).toBeNull();
+  });
+
+  it("holds for the bare layout commit alone", async () => {
+    await migrate();
+
+    expect(await isCogmoOnlyMain(bare, await head())).toBe(true);
+    expect(await configurableMainSha(bare)).toBeNull();
+  });
+
+  it("holds for the bare layout commit and toolchain commits", async () => {
+    await migrate();
+    await toolchain();
+    await cogmoCommit({ "Cogmo-Toolchain": "9.9.10" }, { "pyproject.toml": "newer\n" });
+
+    expect(await isCogmoOnlyMain(bare, await head())).toBe(true);
+    expect(await configurableMainSha(bare)).toBeNull();
+  });
+
+  it("fails once a toolchain commit's tree has a skills/ entry", async () => {
+    await migrate();
+    await toolchain();
+    await cogmoCommit({ "Cogmo-Toolchain": "9.9.10" }, { "skills/echo/SKILL.md": "x\n" });
+
+    expect(await isCogmoOnlyMain(bare, await head())).toBe(false);
+    expect(await configurableMainSha(bare)).toBe(await head());
+  });
+
+  it.each([
+    ["a restoring commit", { "Cogmo-Restores": "f".repeat(40) }],
+    ["a reviewed commit", { "Cogmo-Toolchain": "9.9.10", "Cogmo-Reviewed": "abc" }],
+    ["a commit with no Cogmo trailer", {}],
+  ])("fails for %s on top", async (_label, trailers) => {
+    await migrate();
+    await toolchain();
+    await cogmoCommit(trailers, { "notes.md": "x\n" });
+
+    expect(await isCogmoOnlyMain(bare, await head())).toBe(false);
+  });
+
+  it("fails for an author's commit carrying the toolchain trailer", async () => {
+    await migrate();
+    await execFileP("git", ["-C", work, "fetch", "-q", bare, "main"]);
+    await execFileP("git", ["-C", work, "reset", "-q", "--hard", "FETCH_HEAD"]);
+    await commitOnMain({ "notes.md": "x\n" }, "c\n\nCogmo-Toolchain: 9.9.9");
+
+    expect(await isCogmoOnlyMain(bare, await head())).toBe(false);
+  });
+
+  it("fails for a merge carrying the toolchain trailer", async () => {
+    const layoutCommit = await migrate();
+    const side = await cogmoCommit({ "Cogmo-Toolchain": "1" }, { "a.txt": "a\n" });
+    const tree = await git(bare, "rev-parse", `${side}^{tree}`);
+    const merge = (
+      await execFileP(
+        "git",
+        [
+          "-C",
+          bare,
+          "commit-tree",
+          tree,
+          "-p",
+          layoutCommit,
+          "-p",
+          side,
+          "-m",
+          "c",
+          "-m",
+          "Cogmo-Toolchain: 1",
+        ],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Cogmo",
+            GIT_AUTHOR_EMAIL: "skills@cogmo.invalid",
+            GIT_COMMITTER_NAME: "Cogmo",
+            GIT_COMMITTER_EMAIL: "skills@cogmo.invalid",
+          },
+        },
+      )
+    ).stdout.trim();
+    await git(bare, "update-ref", "refs/heads/main", merge);
+
+    expect(await isCogmoOnlyMain(bare, merge)).toBe(false);
+  });
+
+  it("fails for toolchain commits on a main that began elsewhere", async () => {
+    await commitOnMain({ "README.md": "the library\n" }, "c");
+    await migrate();
+    await toolchain();
+
+    expect(await isCogmoOnlyMain(bare, await head())).toBe(false);
   });
 });

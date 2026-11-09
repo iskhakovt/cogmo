@@ -216,7 +216,7 @@ coding_tasks (
   trigger_source          coding_trigger_source NOT NULL,         -- determines gating (plan approval path)
   trigger_ref             TEXT,                                   -- optional pointer into the originating subsystem (evolution proposal id, signal batch id)
   backend                 coding_backend NOT NULL,
-  worktree_assignment     JSONB,                                  -- WorktreeAssignmentSchema — discriminated union: {type:"host-path",branch,worktreePath} (bind-mount) | {type:"git-remote",branch} (git clones inside the sandbox). Null until allocate-worktree runs. Atomic by Zod-on-read-and-write — no half-allocated state.
+  worktree_assignment     JSONB,                                  -- WorktreeAssignmentSchema — discriminated union: {type:"host-path",branch,worktreePath} (bind-mount) | {type:"git-remote",branch} (git clones inside the sandbox); [proposed] each with an optional baseSha (absent on rows from before it): allocate-worktree reads the base (local main, or the remote's freshly fetched main), saves it with the assignment and cuts the branch at exactly that sha, so a retry cuts again at the same sha; every session of the task receives it as COGMO_VERIFY_BASE (skills.md → The skills repo toolchain). Null until allocate-worktree runs. Atomic by Zod-on-read-and-write — no half-allocated state.
   session_id              TEXT,                                   -- CLI session for resume
   container_id            UUID REFERENCES containers(id),         -- sandbox.md
   allow_privileged_runc   BOOLEAN NOT NULL,                       -- compat escape hatch; explicit at insert (no default)

@@ -5,10 +5,12 @@ import { bootstrapLock } from "../db/bootstrap-lock.js";
 import { pinoNoticeHandler } from "../db/helpers.js";
 import * as schema from "../db/schemas.js";
 import { transactor } from "../db/transactor.js";
+import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { resolveEnvFile } from "../secrets/env-file.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { findSkillsImageDir, loadReleaseToolchain } from "../skills/toolchain.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import { migrateAndSeed } from "./migrate-and-seed.js";
 import {
@@ -82,7 +84,11 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
       return;
     }
 
-    await runWizard({ ...stores, bootstrapLock: lock, userId });
+    const releaseToolchain = await loadReleaseToolchain(
+      findSkillsImageDir(import.meta.url),
+      env.VERSION,
+    );
+    await runWizard({ ...stores, bootstrapLock: lock, releaseToolchain, userId });
   } catch (err) {
     if (err instanceof WizardCancelled) {
       logger.info("setup cancelled by user");

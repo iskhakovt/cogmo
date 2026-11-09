@@ -8,7 +8,7 @@ import type { TreeBlob } from "./skill-files.js";
 
 /**
  * The identity every commit Cogmo makes on the skills repo carries, as author
- * and committer: the layout commit and the restoring commits. Register
+ * and committer: the layout, toolchain and restoring commits. Register
  * refuses it on an author's commits (`layout_violation`), so a commit on
  * `main` carrying it is Cogmo's.
  */
@@ -20,6 +20,8 @@ export const LAYOUT_TRAILER = "Cogmo-Layout";
 export const LAYOUT_TRAILER_VALUE = "v1";
 /** The trailer a restoring commit carries, naming the commit whose skill files it restored. */
 export const RESTORES_TRAILER = "Cogmo-Restores";
+/** The trailer the toolchain commit carries, naming the release whose toolchain it set. */
+export const TOOLCHAIN_TRAILER = "Cogmo-Toolchain";
 
 /** One change to a tree: drop `path`, or put a blob there. */
 export type TreeEdit =
@@ -49,9 +51,10 @@ export async function writeEditedTree(
         .exhaustive(),
     );
     if (lines.length > 0) {
-      await runGitIn(repoPath, ["update-index", "--index-info"], {
+      // NUL-terminated, so a path carrying a newline stays one record.
+      await runGitIn(repoPath, ["update-index", "-z", "--index-info"], {
         env,
-        input: `${lines.join("\n")}\n`,
+        input: `${lines.join("\0")}\0`,
       });
     }
     return (await runGitIn(repoPath, ["write-tree"], { env })).trim();
@@ -96,6 +99,7 @@ export async function commitAsCogmo(
 /** A commit as the recovery checks and register's identity check read it. */
 export interface CommitIdentity {
   sha: string;
+  parents: readonly string[];
   authorEmail: string;
   committerEmail: string;
   /** Every trailer the commit carries, by key; a repeated key keeps its last value. */
@@ -122,14 +126,14 @@ export async function logCommits(
   repoPath: string,
   args: readonly string[],
 ): Promise<readonly CommitIdentity[]> {
-  const format = `%H%x1f%ae%x1f%ce%x1f%(trailers:only,unfold,separator=%x1d)%x1e`;
+  const format = `%H%x1f%P%x1f%ae%x1f%ce%x1f%(trailers:only,unfold,separator=%x1d)%x1e`;
   const stdout = await runGitIn(repoPath, ["log", `--format=${format}`, ...args]);
   return stdout
     .split(RECORD)
     .map((record) => record.trim())
     .filter((record) => record.length > 0)
     .map((record) => {
-      const [sha = "", authorEmail = "", committerEmail = "", trailerBlock = ""] =
+      const [sha = "", parents = "", authorEmail = "", committerEmail = "", trailerBlock = ""] =
         record.split(FIELD);
       const trailers = new Map(
         trailerBlock.split(TRAILER).flatMap((line) => {
@@ -139,12 +143,30 @@ export async function logCommits(
             : [];
         }),
       );
-      return { sha, authorEmail, committerEmail, trailers };
+      return {
+        sha,
+        parents: parents.split(" ").filter((parent) => parent.length > 0),
+        authorEmail,
+        committerEmail,
+        trailers,
+      };
     });
 }
 
-/** Every path under `dir` (a `skills/<name>/` prefix) in `sha`'s tree. */
+/**
+ * Every path at or under `dir` in `sha`'s tree: a `skills/<name>/` prefix, or a
+ * root entry, file or directory. `dir` is literal, never a glob.
+ */
 export async function pathsUnder(repoPath: string, sha: string, dir: string): Promise<string[]> {
-  const stdout = await runGitIn(repoPath, ["ls-tree", "-r", "-z", "--name-only", sha, "--", dir]);
+  const stdout = await runGitIn(repoPath, [
+    "--literal-pathspecs",
+    "ls-tree",
+    "-r",
+    "-z",
+    "--name-only",
+    sha,
+    "--",
+    dir,
+  ]);
   return stdout.split("\0").filter((path) => path.length > 0);
 }

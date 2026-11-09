@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Generated; do not edit.",
+  "title": "SKILL.md frontmatter",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 500
+    },
+    "tier": {
+      "type": "string",
+      "enum": [
+        "wasm",
+        "container"
+      ]
+    },
+    "isolation": {
+      "type": "string",
+      "enum": [
+        "subinterpreter",
+        "recycle"
+      ]
+    },
+    "triggers": {
+      "default": [
+        "manual"
+      ],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "cron",
+          "event"
+        ]
+      }
+    },
+    "schedule": {
+      "type": "string"
+    },
+    "inputs": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "object"
+        },
+        "properties": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema0"
+          }
+        },
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": {}
+    },
+    "outputs": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/__schema0"
+      }
+    },
+    "effects": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "reads_memory",
+          "writes_memory",
+          "reads_user_data",
+          "writes_user_data",
+          "sends_email",
+          "sends_message",
+          "posts_public",
+          "deletes_external",
+          "financial",
+          "reads_filesystem",
+          "writes_filesystem",
+          "spawns_subprocess"
+        ]
+      }
+    },
+    "secrets": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "binding": {
+                "type": "object",
+                "properties": {
+                  "destination": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "substitute": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "url"
+                      },
+                      {
+                        "type": "string",
+                        "format": "starts_with",
+                        "pattern": "^header:.*"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "destination"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
+        ]
+      }
+    },
+    "dependencies": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?==[a-zA-Z0-9.+!-]+$"
+      }
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "pattern": "^(\\*\\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+          }
+        }
+      },
+      "required": [
+        "allow"
+      ]
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "memory_mb": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 2048
+        },
+        "wall_clock_s": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 600
+        },
+        "cpu_shares": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 4
+        }
+      }
+    },
+    "cost_per_call_usd": {
+      "default": 0,
+      "type": "number",
+      "minimum": 0
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "daily_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "monthly_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "per_invocation_usd_cap": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  },
+  "required": [
+    "name",
+    "description",
+    "tier"
+  ],
+  "$defs": {
+    "__schema0": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema0"
+          }
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema0"
+          }
+        }
+      ]
+    }
+  }
+}

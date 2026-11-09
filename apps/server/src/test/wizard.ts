@@ -13,6 +13,7 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import type { ReleaseToolchain } from "../skills/toolchain.js";
 import type { TransportStore } from "../transport/store/index.js";
 
 export const FAKE_TX = { __mockTx: true } as never;
@@ -36,6 +37,7 @@ export interface WizardTestDeps {
   transportStore: MockProxy<TransportStore>;
   runInTx: Transactor;
   bootstrapLock: BootstrapLock;
+  releaseToolchain: ReleaseToolchain;
 }
 
 export function buildWizardDeps(bootstrapLock: BootstrapLock = (fn) => fn()): WizardTestDeps {
@@ -45,5 +47,12 @@ export function buildWizardDeps(bootstrapLock: BootstrapLock = (fn) => fn()): Wi
   secretsStore.putSecret.mockResolvedValue({ id: "s-1" });
   secretsStore.markValidated.mockResolvedValue(undefined);
   secretsStore.getSecretMeta.mockResolvedValue(undefined);
-  return { agentStore, secretsStore, transportStore, runInTx: fakeRunInTx, bootstrapLock };
+  return {
+    agentStore,
+    secretsStore,
+    transportStore,
+    runInTx: fakeRunInTx,
+    bootstrapLock,
+    releaseToolchain: { version: "test", entries: [] },
+  };
 }

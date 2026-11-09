@@ -4,8 +4,11 @@
  * per call — the caller picks `publish` or `adopt` at invocation:
  *
  *   - `own + direction:"adopt"` — fetch remote `main` into local. Refuses
- *     when remote is empty (`remote_empty`) or when local has commits
- *     that fetch would overwrite (`remote_diverged`).
+ *     when remote is empty (`remote_empty`), when local has commits
+ *     that fetch would overwrite (`remote_diverged`), or when the remote's
+ *     `.cogmo/paths` lists an entry Cogmo's toolchain may not own
+ *     (`remote_toolchain_invalid`). A Cogmo-only local `main` counts as
+ *     empty: the adopt replaces it.
  *   - `own + direction:"publish"` — push local `main` to remote. Refuses
  *     when local is empty (`local_empty`) or when remote has commits
  *     that push would overwrite (`local_diverged`).
@@ -34,13 +37,22 @@ import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { parseRemoteUrl } from "../agent/coding/open-pr.js";
 import type { CodingRepoRow, CodingStore } from "../agent/coding/store/index.js";
+import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import type { GitHubIdentity } from "../secrets/github.js";
 import { describeError } from "../util/describe-error.js";
-import { deleteRef, getMainSha, RefMovedError, revParse, updateRef } from "./git-ops.js";
-import { configurableMainSha, isBareLayoutCommit, migrateSkillsLayout } from "./migrate-layout.js";
+import { ZERO_SHA } from "./deploy/deploy-deps.js";
+import {
+  deleteRef,
+  getMainSha,
+  isAncestor,
+  RefMovedError,
+  revParse,
+  updateRef,
+} from "./git-ops.js";
+import { configurableMainSha, isCogmoOnlyMain, migrateSkillsLayout } from "./migrate-layout.js";
 import {
   type EnsureSkillsCodingRepoResult,
   ensureSkillsCodingRepo,
@@ -48,6 +60,8 @@ import {
   SKILLS_CODING_REPO_NAME,
 } from "./repo.js";
 import type { SkillStore } from "./store/index.js";
+import { type ReleaseToolchain, toolchainPathsAt } from "./toolchain.js";
+import { commitToolchain } from "./toolchain-commit.js";
 
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "skills.configure-remote" });
@@ -77,8 +91,12 @@ export type ConfigureSkillsRemoteMode =
 export interface ConfigureSkillsRemoteDeps {
   runInTx: Transactor;
   codingStore: CodingStore;
-  /** Re-records the layout after an adopt replaces the bare layout commit. */
+  /** Re-records the layout after an adopt replaces a Cogmo-only `main`. */
   skillStore: SkillStore;
+  /** Held by an adopt from its classification of `main` through its toolchain commit, after its fetch. */
+  bootstrapLock: BootstrapLock;
+  /** The release's toolchain, committed after an adopt replaces a Cogmo-only `main`. */
+  toolchain: ReleaseToolchain;
   /** Bare-repo path — usually `env.COGMO_SKILLS_PATH`. */
   skillsRepoPath: string;
   /** Octokit factory for tests. Production omits this so a real Octokit is
@@ -117,6 +135,10 @@ export type ConfigureSkillsRemoteError =
    * outside the helper (`git push origin main` first, then re-run; or wipe
    * local intentionally with `git update-ref -d refs/heads/main`). */
   | { kind: "remote_diverged"; remoteUrl: string; localSha: string; remoteSha: string }
+  /** `adopt` — the remote's `main` has a `.cogmo/paths` listing `entry`, which
+   * the toolchain may not own (design/skills.md → The skills repo toolchain).
+   * Local `main` is untouched; the operator fixes the list on the remote. */
+  | { kind: "remote_toolchain_invalid"; remoteUrl: string; entry: string }
   /** `publish` — fast-forward push rejected because the remote has commits
    * that aren't on local. Pushing would orphan them. Operator resolves
    * outside the helper (`git fetch` first, then re-run; or force-overwrite
@@ -167,73 +189,66 @@ export async function configureSkillsRemote(
     });
   }
 
-  // Probe remote + local state. We hold the SHAs so the diverged error
-  // can carry them, and so the post-transfer sync sees a coherent view.
+  // Probe remote state. We hold the SHA so the diverged error can carry it.
   const lsRemote = await runLsRemote(deps.skillsRepoPath, remoteUrl, pat);
   if (lsRemote.isErr()) return err(lsRemote.error);
   const remoteMainSha = parseRemoteMainSha(lsRemote.value.refs);
-  // A main holding only the bare layout commit counts as unborn: an adopt
-  // replaces it, then moves the adopted main (design/skills.md → Per-skill
-  // structure). One read, so the swap expects the commit classified.
-  const mainNow = await getMainSha(deps.skillsRepoPath);
-  const bareMain =
-    mainNow !== null && (await isBareLayoutCommit(deps.skillsRepoPath, mainNow)) ? mainNow : null;
-  const localMainSha = bareMain === null ? mainNow : null;
-  const bareLayoutSha = match(direction)
-    .with("adopt", () => bareMain)
-    .with("publish", () => null)
-    .exhaustive();
 
-  // Direction-specific preconditions. The transfer itself enforces
-  // fast-forward semantics; these checks turn the "empty source" cases
-  // into precise error variants instead of opaque git messages.
+  // The empty-source preconditions turn into precise error variants instead
+  // of opaque git messages; the transfer itself enforces fast-forward.
   if (direction === "adopt" && remoteMainSha === null) {
     return err({ kind: "remote_empty", remoteUrl });
   }
-  if (direction === "publish" && localMainSha === null) {
-    return err({ kind: "local_empty", remoteUrl });
-  }
 
-  // Transfer first (URL passed directly to git; no need to attach
-  // origin yet). If transfer fails, the bare repo's `origin` config is
+  // An adopt takes the bootstrap lock for its classification of local main
+  // through its toolchain commit, so a boot's layout move and toolchain
+  // commit never interleave with the adopt's; its fetch and list check run
+  // before it, so a remote that hangs holds no lock a boot waits on. A
+  // publish only reads main and takes no lock (design/skills.md → Cogmo-only
+  // `main`). If the transfer fails, the bare repo's `origin` config is
   // untouched and the next boot's `ensureSkillsCodingRepo` won't sync a
   // stale URL into the DB row.
-  //
-  // Fast-forward only (no `+` in the refspec); an adopt over the bare
-  // layout commit swaps `main` by compare-and-swap instead. git rejects on
-  // non-FF, which we map to `*_diverged` so operators see a structured error
-  // instead of a raw git message.
-  const transfer =
-    bareLayoutSha === null
-      ? await runTransfer({ cwd: deps.skillsRepoPath, url: remoteUrl, direction, pat })
-      : await adoptOverBareLayout(deps, { url: remoteUrl, pat, bareLayoutSha });
-  if (transfer.isErr()) {
+  const transferred = await match(direction)
+    .with("publish", () => publishLocalMain(deps.skillsRepoPath, { url: remoteUrl, pat }))
+    .with("adopt", () => adoptRemoteMain(deps, { url: remoteUrl, pat }))
+    .exhaustive();
+  if (transferred.isErr()) {
     // Branch on kind so the error variants stay clean — spreading
-    // `transfer.error` and tacking on SHAs would add fields the
-    // `remote_unreachable` variant doesn't declare.
-    if (transfer.error.kind === "remote_unreachable") {
-      return err({ kind: "remote_unreachable", remoteUrl, reason: transfer.error.reason });
-    }
-    // For *_diverged, both sides have main: the empty-source preconditions
-    // above guarantee the remote's for an adopt and the local one for a
-    // publish, and an adopt over the bare layout commit diverges only when a
-    // deploy moved local main meanwhile. A null probe here is a transient
-    // git failure — surface it as a boundary violation rather than
-    // rendering "localSha: " to the operator.
-    const localSha = localMainSha ?? (await getMainSha(deps.skillsRepoPath));
-    if (localSha === null || remoteMainSha === null) {
-      throw new Error(
-        `configureSkillsRemote: ${transfer.error.kind} fired but state probe returned null (localMainSha=${String(
-          localSha,
-        )}, remoteMainSha=${String(remoteMainSha)})`,
-      );
-    }
-    return err({
-      kind: transfer.error.kind,
-      remoteUrl,
-      localSha,
-      remoteSha: remoteMainSha,
-    });
+    // `transferred.error` and tacking on SHAs would add fields the other
+    // variants don't declare.
+    return err(
+      await match(transferred.error)
+        .returnType<Promise<ConfigureSkillsRemoteError>>()
+        .with({ kind: "local_empty" }, async () => ({ kind: "local_empty", remoteUrl }))
+        .with({ kind: "remote_unreachable" }, async (e) => ({
+          kind: "remote_unreachable",
+          remoteUrl,
+          reason: e.reason,
+        }))
+        .with({ kind: "remote_toolchain_invalid" }, async (e) => ({
+          kind: "remote_toolchain_invalid",
+          remoteUrl,
+          entry: e.entry,
+        }))
+        .with({ kind: "remote_diverged" }, { kind: "local_diverged" }, async (e) => {
+          // Both sides have main: the empty-source preconditions guarantee
+          // the remote's for an adopt and the local one for a publish, and an
+          // adopt over an unborn or Cogmo-only main diverges only when a
+          // deploy moved local main meanwhile. A null probe here is a
+          // transient git failure — surface it as a boundary violation
+          // rather than rendering "localSha: " to the operator.
+          const localSha = e.localSha ?? (await getMainSha(deps.skillsRepoPath));
+          if (localSha === null || remoteMainSha === null) {
+            throw new Error(
+              `configureSkillsRemote: ${e.kind} fired but state probe returned null (localMainSha=${String(
+                localSha,
+              )}, remoteMainSha=${String(remoteMainSha)})`,
+            );
+          }
+          return { kind: e.kind, remoteUrl, localSha, remoteSha: remoteMainSha };
+        })
+        .exhaustive(),
+    );
   }
 
   // Transfer succeeded — now persist the operator's intent by attaching
@@ -249,23 +264,21 @@ export async function configureSkillsRemote(
   }
   const originAction = attached.value;
 
-  if (bareLayoutSha !== null) {
-    // The remote lacks the layout commit the adopt just made, and a
-    // git-remote task branches from the remote's main. Best-effort, like a
-    // deploy's push.
-    const pushed = await runTransfer({
-      cwd: deps.skillsRepoPath,
-      url: remoteUrl,
-      direction: "publish",
-      pat,
-    });
-    if (pushed.isErr()) {
-      log.warn(
-        { remoteUrl, error: pushed.error },
-        "skills layout commit not pushed after adopt; the mirror reconcile pushes it within 10 minutes",
-      );
-    }
-  }
+  await match(transferred.value)
+    .with("replaced", async () => {
+      // The remote lacks the layout and toolchain commits the adopt just
+      // made, and a git-remote task branches from the remote's main.
+      // Best-effort, like a deploy's push.
+      const pushed = await runPush({ cwd: deps.skillsRepoPath, url: remoteUrl, pat });
+      if (pushed.isErr()) {
+        log.warn(
+          { remoteUrl, error: pushed.error },
+          "skills layout and toolchain commits not pushed after adopt; the mirror reconcile pushes them within 10 minutes",
+        );
+      }
+    })
+    .with("published", "fast_forward", async () => {})
+    .exhaustive();
 
   // Backup the current row (if any) before ensureSkillsCodingRepo
   // potentially updates `remote_url`. Operator-recoverable trace of the
@@ -376,35 +389,77 @@ async function attachOrigin(
   }
 }
 
-interface TransferParams {
-  cwd: string;
-  url: string;
-  direction: ConfigureSkillsRemoteDirection;
-  pat: string | null;
+/**
+ * Local `main` as configuring a remote sees it: a Cogmo-only `main` carries no
+ * skill to keep, so an adopt replaces it and a publish has nothing to push.
+ */
+type LocalMain =
+  | { kind: "unborn" }
+  | { kind: "cogmo_only"; sha: string }
+  | { kind: "populated"; sha: string };
+
+async function classifyLocalMain(repoPath: string): Promise<LocalMain> {
+  const sha = await getMainSha(repoPath);
+  if (sha === null) return { kind: "unborn" };
+  return (await isCogmoOnlyMain(repoPath, sha))
+    ? { kind: "cogmo_only", sha }
+    : { kind: "populated", sha };
 }
+
+/** How a transfer moved local `main`: not at all (a publish), forward, or replacing a Cogmo-only one. */
+type TransferOutcome = "published" | "fast_forward" | "replaced";
 
 /** Discriminator-only error (kind + reason) — `configureSkillsRemote`
  * attaches `remoteUrl`/`localSha`/`remoteSha` to the final error. */
 type TransferError =
-  | { kind: "remote_diverged" }
-  | { kind: "local_diverged" }
-  | { kind: "remote_unreachable"; reason: string };
+  | { kind: "local_empty" }
+  /** `localSha` is local `main` as classified, null when it was unborn or Cogmo-only. */
+  | { kind: "remote_diverged"; localSha: string | null }
+  | { kind: "local_diverged"; localSha: string }
+  | { kind: "remote_unreachable"; reason: string }
+  | { kind: "remote_toolchain_invalid"; entry: string };
 
-/** Where adopts over the bare layout commit fetch the remote's main, one ref each. */
+/**
+ * Publish local `main`: push it when it carries skills ({@link runPush}); an
+ * unborn or Cogmo-only one is `local_empty`. Takes no lock, since the push
+ * only reads `main`.
+ */
+async function publishLocalMain(
+  repoPath: string,
+  p: { url: string; pat: string | null },
+): Promise<Result<TransferOutcome, TransferError>> {
+  return match(await classifyLocalMain(repoPath))
+    .returnType<Promise<Result<TransferOutcome, TransferError>>>()
+    .with({ kind: "unborn" }, { kind: "cogmo_only" }, async () => err({ kind: "local_empty" }))
+    .with({ kind: "populated" }, async ({ sha }) =>
+      (await runPush({ cwd: repoPath, ...p }))
+        .map((): TransferOutcome => "published")
+        .mapErr(
+          (e): TransferError =>
+            match(e)
+              .returnType<TransferError>()
+              .with({ kind: "local_diverged" }, () => ({ kind: "local_diverged", localSha: sha }))
+              .with({ kind: "remote_unreachable" }, (unreachable) => unreachable)
+              .exhaustive(),
+        ),
+    )
+    .exhaustive();
+}
+
+/** Where adopts fetch the remote's main, one ref each. */
 const ADOPT_REF_PREFIX = "refs/cogmo/adopt-main-";
 
 /**
- * Adopt the remote's main over a local main that holds only the bare layout
- * commit, then move the adopted main: fetch it to a side ref, drop the
- * layout row, and replace `main` by compare-and-swap against the bare commit
- * (design/skills.md → Per-skill structure, failure modes).
+ * Adopt the remote's main: fetch it to a side ref and refuse a `.cogmo/paths`
+ * on it listing an entry the toolchain may not own, both before taking the
+ * bootstrap lock, so a remote that hangs holds no lock a boot waits on. Under
+ * the lock, it classifies local `main`: a Cogmo-only one is replaced
+ * ({@link replaceCogmoOnlyMain}); any other only fast-forwards.
  */
-async function adoptOverBareLayout(
+async function adoptRemoteMain(
   deps: ConfigureSkillsRemoteDeps,
-  p: { url: string; pat: string | null; bareLayoutSha: string },
-): Promise<Result<void, TransferError>> {
-  const relayout = () =>
-    migrateSkillsLayout({ runInTx: deps.runInTx, store: deps.skillStore }, deps.skillsRepoPath);
+  p: { url: string; pat: string | null },
+): Promise<Result<TransferOutcome, TransferError>> {
   // Its own ref, so a concurrent adopt neither resolves nor deletes it.
   const adoptRef = `${ADOPT_REF_PREFIX}${randomUUID()}`;
   const args = ["-C", deps.skillsRepoPath, "fetch", p.url, `+refs/heads/main:${adoptRef}`];
@@ -422,33 +477,117 @@ async function adoptOverBareLayout(
     if (adopted.isErr()) {
       throw new Error(`configureSkillsRemote: ${adoptRef} is missing right after its fetch`);
     }
-    await deps.runInTx((tx) => deps.skillStore.forgetLayoutCommit(tx));
-    try {
-      await updateRef(deps.skillsRepoPath, "refs/heads/main", adopted.value, p.bareLayoutSha);
-    } catch (e) {
-      if (!(e instanceof RefMovedError)) throw e;
-      return err({ kind: "remote_diverged" });
-    } finally {
-      // Whatever the swap did, the move records the layout again: the
-      // adopted main's, or the bare commit's still on main.
-      await relayout();
+    const listed = await toolchainPathsAt(deps.skillsRepoPath, adopted.value);
+    if (listed.isErr()) {
+      return err(
+        match(listed.error)
+          .returnType<TransferError>()
+          .with({ kind: "refused_entry" }, ({ entry }) => ({
+            kind: "remote_toolchain_invalid",
+            entry,
+          }))
+          .exhaustive(),
+      );
     }
+    return await deps.bootstrapLock(async () =>
+      // One read, so the swap expects the commit classified.
+      match(await classifyLocalMain(deps.skillsRepoPath))
+        .returnType<Promise<Result<TransferOutcome, TransferError>>>()
+        .with({ kind: "cogmo_only" }, ({ sha }) => replaceCogmoOnlyMain(deps, adopted.value, sha))
+        .with({ kind: "unborn" }, () => fastForwardMain(deps.skillsRepoPath, adopted.value, null))
+        .with({ kind: "populated" }, ({ sha }) =>
+          fastForwardMain(deps.skillsRepoPath, adopted.value, sha),
+        )
+        .exhaustive(),
+    );
   } finally {
     await deleteRef(deps.skillsRepoPath, adoptRef);
   }
-  return ok(undefined);
 }
 
-async function runTransfer(p: TransferParams): Promise<Result<void, TransferError>> {
-  // Fast-forward only — no `+` in the refspec. Git rejects non-FF with
-  // a stderr message containing "non-fast-forward" or "rejected"; we
-  // distinguish data-direction in the error variant by which side was
-  // about to be overwritten.
-  const refspec = "refs/heads/main:refs/heads/main";
-  const args =
-    p.direction === "publish"
-      ? ["-C", p.cwd, "push", p.url, refspec]
-      : ["-C", p.cwd, "fetch", p.url, refspec];
+/**
+ * Replace a Cogmo-only `main` at `mainSha` with `adopted`: drop the layout
+ * row, swap `main` by compare-and-swap against the commit classified, then
+ * run the layout move and the toolchain commit (design/skills.md → Per-skill
+ * structure, failure modes). The move runs whether the swap lands, loses or
+ * throws; a lost swap is `remote_diverged`.
+ */
+async function replaceCogmoOnlyMain(
+  deps: ConfigureSkillsRemoteDeps,
+  adopted: string,
+  mainSha: string,
+): Promise<Result<TransferOutcome, TransferError>> {
+  const relayout = () =>
+    migrateSkillsLayout({ runInTx: deps.runInTx, store: deps.skillStore }, deps.skillsRepoPath);
+  await deps.runInTx((tx) => deps.skillStore.forgetLayoutCommit(tx));
+  try {
+    await updateRef(deps.skillsRepoPath, "refs/heads/main", adopted, mainSha);
+  } catch (e) {
+    if (!(e instanceof RefMovedError)) throw e;
+    return err({ kind: "remote_diverged", localSha: null });
+  } finally {
+    // Whatever the swap did, the move records the layout again: the
+    // adopted main's, or that of the commit still on main.
+    await relayout();
+  }
+  const toolchain = await commitToolchain(
+    { runInTx: deps.runInTx, store: deps.skillStore },
+    deps.skillsRepoPath,
+    deps.toolchain,
+  );
+  if (toolchain.isErr()) {
+    // The adopt checked this main's list before the swap, and register
+    // refuses an author's change to it.
+    throw match(toolchain.error)
+      .with(
+        { kind: "refused_entry" },
+        ({ entry }) =>
+          new Error(
+            `configureSkillsRemote: the adopted main lists '${entry}' in its .cogmo/paths after its check passed`,
+          ),
+      )
+      .exhaustive();
+  }
+  return ok("replaced");
+}
+
+/**
+ * Move `main` to `adopted` when that only fast-forwards it: `main` unborn, or
+ * an ancestor of `adopted`. A `main` that is not, or moves before the
+ * compare-and-swap, has commits the remote lacks.
+ */
+async function fastForwardMain(
+  repoPath: string,
+  adopted: string,
+  mainSha: string | null,
+): Promise<Result<TransferOutcome, TransferError>> {
+  if (mainSha !== null && !(await isAncestor(repoPath, mainSha, adopted))) {
+    return err({ kind: "remote_diverged", localSha: mainSha });
+  }
+  try {
+    await updateRef(repoPath, "refs/heads/main", adopted, mainSha ?? ZERO_SHA);
+  } catch (e) {
+    if (!(e instanceof RefMovedError)) throw e;
+    return err({ kind: "remote_diverged", localSha: mainSha });
+  }
+  return ok("fast_forward");
+}
+
+/** Why a push of local `main` failed. */
+type PushError = { kind: "local_diverged" } | { kind: "remote_unreachable"; reason: string };
+
+/**
+ * Push local `main` to the remote, fast-forward only — no `+` in the refspec.
+ * Git rejects non-FF with a stderr message containing "non-fast-forward" or
+ * "rejected", which maps to `local_diverged`: the remote's side would be
+ * overwritten.
+ */
+async function runPush(p: {
+  cwd: string;
+  url: string;
+  pat: string | null;
+}): Promise<Result<void, PushError>> {
+  const args = ["-C", p.cwd, "push", p.url, "refs/heads/main:refs/heads/main"];
   try {
     if (p.pat) {
       await withGitAskpass(p.pat, (env) => runGit(args, env));
@@ -458,9 +597,7 @@ async function runTransfer(p: TransferParams): Promise<Result<void, TransferErro
     return ok(undefined);
   } catch (e) {
     const stderr = (e as Error).message ?? "";
-    if (isNonFastForwardError(stderr)) {
-      return err({ kind: p.direction === "publish" ? "local_diverged" : "remote_diverged" });
-    }
+    if (isNonFastForwardError(stderr)) return err({ kind: "local_diverged" });
     return err({ kind: "remote_unreachable", reason: stderr });
   }
 }

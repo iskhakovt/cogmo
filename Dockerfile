@@ -107,6 +107,13 @@ COPY --from=build --chown=node:node /deploy .
 # to this WORKDIR). `pnpm deploy` doesn't carry it, so copy the build output here.
 COPY --from=build --chown=node:node /app/apps/web/dist ./apps/web/dist
 
+# The skills repo toolchain the boot commits (design/skills.md → The skills
+# repo toolchain), under `images/skills/` as in the source tree, so
+# `loadReleaseToolchain` finds it the same way there. Root-owned: read-only to
+# the app.
+COPY images/skills/toolchain/ ./images/skills/toolchain/
+COPY images/skills/src/cogmo_ctx/ ./images/skills/src/cogmo_ctx/
+
 ARG VERSION
 ENV VERSION=$VERSION
 

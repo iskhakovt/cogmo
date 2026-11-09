@@ -1,12 +1,15 @@
 import type { Transaction, Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
+  COGMO_TRAILER_PREFIX,
+  type CommitIdentity,
   commitAsCogmo,
   LAYOUT_TRAILER,
   LAYOUT_TRAILER_VALUE,
   logCommits,
   madeByCogmo,
   pathsUnder,
+  TOOLCHAIN_TRAILER,
   type TreeEdit,
   writeEditedTree,
 } from "./cogmo-commits.js";
@@ -27,9 +30,9 @@ export interface MigrateSkillsLayoutDeps {
 
 /**
  * Move every skill to `skills/<name>/` in one layout commit on `main`, and
- * record it, once (design/skills.md → Per-skill structure). Runs at boot
- * under the bootstrap lock, and after an adopt replaces the bare layout
- * commit. Each attempt starts with the recovery check: a recorded commit is
+ * record it, once (design/skills.md → Per-skill structure). Runs under the
+ * bootstrap lock, which its caller holds: at boot, and after an adopt replaces
+ * a Cogmo-only `main`. Each attempt starts with the recovery check: a recorded commit is
  * returned as is unless it is stale (`isStaleLayout`), and a layout commit
  * already on `main` with no row is recorded instead of making a second.
  * Otherwise it copies the files of every `skills` row whose sha is on
@@ -219,17 +222,18 @@ async function onHistoryOf(repoPath: string, sha: string, head: string): Promise
 
 /**
  * Whether a recorded layout commit no longer describes the repo: the repo
- * was recreated without it, or it is a bare layout commit `main` no longer
- * descends from, as after an adopt replaced it. A bare one holds no skill, so
- * moving again reads every row as before.
+ * was recreated without it, `main` is unborn (the operator deleted it), or it
+ * is a bare layout commit `main` no longer descends from, as after an adopt
+ * replaced it. A bare one holds no skill, so moving again reads every row as
+ * before; moving onto an unborn `main` makes it Cogmo-only.
  */
 async function isStaleLayout(repoPath: string, recorded: string): Promise<boolean> {
   if ((await revParse(repoPath, `${recorded}^{commit}`)).isErr()) return true;
   const mainSha = await getMainSha(repoPath);
   return (
-    mainSha !== null &&
-    !(await isAncestor(repoPath, recorded, mainSha)) &&
-    (await isBareLayoutCommit(repoPath, recorded))
+    mainSha === null ||
+    (!(await isAncestor(repoPath, recorded, mainSha)) &&
+      (await isBareLayoutCommit(repoPath, recorded)))
   );
 }
 
@@ -238,16 +242,53 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /**
  * The skills repo's `main` as configuring a remote sees it: null when it is
- * unborn or holds only the bare layout commit the boot makes on an unborn
- * `main` (no parent, the empty tree), which carries no skill to keep.
+ * unborn or Cogmo-only ({@link isCogmoOnlyMain}), since it carries no skill
+ * to keep.
  */
 export async function configurableMainSha(repoPath: string): Promise<string | null> {
   const mainSha = await getMainSha(repoPath);
-  return mainSha === null || (await isBareLayoutCommit(repoPath, mainSha)) ? null : mainSha;
+  return mainSha === null || (await isCogmoOnlyMain(repoPath, mainSha)) ? null : mainSha;
+}
+
+/**
+ * Whether `mainSha` is a Cogmo-only `main` (design/skills.md → Verify stage →
+ * Cogmo-only `main`): the bare layout commit the boot makes on an unborn
+ * `main`, then only single-parent commits under Cogmo's identity carrying the
+ * toolchain trailer and no other Cogmo trailer, with no `skills/` entry in its
+ * tree. A restoring or reviewed commit is never Cogmo-only.
+ */
+export async function isCogmoOnlyMain(repoPath: string, mainSha: string): Promise<boolean> {
+  const skillsEntry = await runGitIn(repoPath, [
+    "--literal-pathspecs",
+    "ls-tree",
+    mainSha,
+    "--",
+    SKILLS_DIR,
+  ]);
+  if (skillsEntry.trim() !== "") return false;
+  const commits = await logCommits(repoPath, ["--first-parent", mainSha]);
+  const root = commits.at(-1);
+  return (
+    root !== undefined &&
+    commits.slice(0, -1).every(isToolchainCommit) &&
+    (await isBareLayoutCommit(repoPath, root.sha))
+  );
+}
+
+/** Whether `commit` is a toolchain commit: one parent, Cogmo's identity, and only the toolchain's Cogmo trailer. */
+function isToolchainCommit(commit: CommitIdentity): boolean {
+  return (
+    commit.parents.length === 1 &&
+    madeByCogmo(commit) &&
+    commit.trailers.has(TOOLCHAIN_TRAILER) &&
+    [...commit.trailers.keys()].every(
+      (key) => key === TOOLCHAIN_TRAILER || !key.startsWith(COGMO_TRAILER_PREFIX),
+    )
+  );
 }
 
 /** Whether `sha` is the bare layout commit: Cogmo's, with no parent and the empty tree. */
-export async function isBareLayoutCommit(repoPath: string, sha: string): Promise<boolean> {
+async function isBareLayoutCommit(repoPath: string, sha: string): Promise<boolean> {
   const [commit] = await logCommits(repoPath, ["-1", sha]);
   if (
     commit === undefined ||

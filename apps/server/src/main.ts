@@ -160,8 +160,17 @@ async function loadSkillsRemoteDeps(): Promise<MigrateSkillsRemoteCliDeps> {
   const { env } = await import("./env.js");
   // The orchestrator re-reads `coding_repos` per delegation, so a running
   // `cogmo serve` picks up a new `remote_url` on its next task.
-  const { runInTx, codingStore, skillStore, secretsStore } = await loadCore();
-  return { runInTx, codingStore, skillStore, secretsStore, skillsRepoPath: env.COGMO_SKILLS_PATH };
+  const { runInTx, codingStore, skillStore, secretsStore, bootstrapLock } = await loadCore();
+  const { findSkillsImageDir, loadReleaseToolchain } = await import("./skills/toolchain.js");
+  return {
+    runInTx,
+    codingStore,
+    skillStore,
+    secretsStore,
+    bootstrapLock,
+    toolchain: await loadReleaseToolchain(findSkillsImageDir(import.meta.url), env.VERSION),
+    skillsRepoPath: env.COGMO_SKILLS_PATH,
+  };
 }
 
 async function seedDefaults(): Promise<number> {

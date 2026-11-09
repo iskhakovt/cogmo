@@ -232,6 +232,11 @@ describe("renderConfigureError", () => {
     ["remote_empty", { kind: "remote_empty", remoteUrl: "x" } as const, /no `refs\/heads\/main`/],
     ["local_empty", { kind: "local_empty", remoteUrl: "x" } as const, /no commits to publish/],
     [
+      "remote_toolchain_invalid",
+      { kind: "remote_toolchain_invalid", remoteUrl: "x", entry: "skills" } as const,
+      /lists `skills` in `\.cogmo\/paths`.*Local main is unchanged/,
+    ],
+    [
       "origin_attach_failed",
       { kind: "origin_attach_failed", remoteUrl: "x", reason: "EACCES" } as const,
       /git remote add` failed: EACCES/,
@@ -325,6 +330,34 @@ describe("readLocalMainSha", () => {
       trailers: { "Cogmo-Layout": "v1" },
     });
     await execFileP("git", ["-C", repo, "update-ref", "refs/heads/main", commit]);
+
+    expect(await readLocalMainSha(repo)).toBeNull();
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("returns null when main holds the bare layout commit and a toolchain commit", async () => {
+    const repo = join(tmpRoot, "toolchain.git");
+    await execFileP("git", ["init", "--bare", "--initial-branch=main", repo]);
+    const empty = await writeEditedTree(repo, null, []);
+    const layout = await commitAsCogmo(repo, {
+      tree: empty,
+      parent: null,
+      subject: "chore(skills): move each skill to skills/<name>/",
+      trailers: { "Cogmo-Layout": "v1" },
+    });
+    const blob = join(tmpRoot, "pyproject.toml");
+    await writeFile(blob, "[project]\n");
+    const sha = (await execFileP("git", ["-C", repo, "hash-object", "-w", blob])).stdout.trim();
+    const tree = await writeEditedTree(repo, layout, [
+      { kind: "put", path: "pyproject.toml", blob: { mode: "100644", sha } },
+    ]);
+    const toolchain = await commitAsCogmo(repo, {
+      tree,
+      parent: layout,
+      subject: "chore(skills): set Cogmo's toolchain to 9.9.9",
+      trailers: { "Cogmo-Toolchain": "9.9.9" },
+    });
+    await execFileP("git", ["-C", repo, "update-ref", "refs/heads/main", toolchain]);
 
     expect(await readLocalMainSha(repo)).toBeNull();
     await rm(tmpRoot, { recursive: true, force: true });

@@ -5,6 +5,7 @@ import type { AgentStore } from "../../agent/store/index.js";
 import type { BootstrapLock } from "../../db/bootstrap-lock.js";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import type { ReleaseToolchain } from "../../skills/toolchain.js";
 import type { TransportStore } from "../../transport/store/index.js";
 
 // Sentinel-tx token — fakeRunInTx passes it through to every store call so
@@ -57,6 +58,7 @@ interface TestDeps {
   transportStore: ReturnType<typeof mock<TransportStore>>;
   runInTx: Transactor;
   bootstrapLock: BootstrapLock;
+  releaseToolchain: ReleaseToolchain;
 }
 
 function buildDeps(): TestDeps {
@@ -76,6 +78,7 @@ function buildDeps(): TestDeps {
     transportStore,
     runInTx: fakeRunInTx,
     bootstrapLock: (fn) => fn(),
+    releaseToolchain: { version: "test", entries: [] },
   };
 }
 

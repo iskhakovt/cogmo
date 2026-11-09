@@ -64,7 +64,14 @@ export async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void>
     throw new WizardCancelled();
   });
   const result = await configureSkillsRemote(
-    { runInTx: deps.runInTx, codingStore, skillStore: new DrizzleSkillStore(), skillsRepoPath },
+    {
+      runInTx: deps.runInTx,
+      codingStore,
+      skillStore: new DrizzleSkillStore(),
+      bootstrapLock: deps.bootstrapLock,
+      toolchain: deps.releaseToolchain,
+      skillsRepoPath,
+    },
     mode,
   );
   if (result.isErr()) {
