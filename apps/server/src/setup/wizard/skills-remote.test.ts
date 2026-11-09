@@ -135,7 +135,15 @@ describe("stepConfigureSkillsRemote", () => {
 
     await stepConfigureSkillsRemote(deps);
 
-    expect(configureSkillsRemoteSpy).toHaveBeenCalled();
+    // configureSkillsRemote takes the wizard's lock itself, from its own
+    // classification of main.
+    expect(configureSkillsRemoteSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bootstrapLock: recordingLock,
+        toolchain: deps.releaseToolchain,
+      }),
+      expect.anything(),
+    );
   });
 
   it("warns and returns when configureSkillsRemote yields {kind:'skipped'}", async () => {

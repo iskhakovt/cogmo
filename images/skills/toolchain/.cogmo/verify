@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Check the skills this branch changes, with Cogmo's toolchain.
+
+Run from the skills repo as `uv run --locked --group dev .cogmo/verify`.
+`COGMO_VERIFY_BASE` names the commit the branch was cut from. A skill is
+checked when a path under `skills/<name>/` differs from that commit in the
+working tree: tracked, or untracked and not ignored. Each is checked with
+ruff, then pyrefly with the skill's directory on its search path, then
+pytest of its `test_skill.py`; pyrefly and pytest run with the skill's
+`requirements.lock` installed when it has one. Exits 0 when every check
+passes or no skill changed, 1 when a check fails, 2 when the base is
+missing or unknown.
+
+Part of Cogmo's toolchain, which Cogmo replaces on each release.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+BASE_VARIABLE = "COGMO_VERIFY_BASE"
+SKILLS_DIR = "skills"
+
+
+def git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=False)
+
+
+def resolve_base() -> str | None:
+    """The commit `COGMO_VERIFY_BASE` names, or None after saying why it names none."""
+    base = os.environ.get(BASE_VARIABLE, "")
+    if not base:
+        print(f"verify: {BASE_VARIABLE} is not set; it names the commit this branch was cut from", file=sys.stderr)
+        return None
+    resolved = git("rev-parse", "--verify", "--quiet", "--end-of-options", f"{base}^{{commit}}")
+    if resolved.returncode != 0:
+        print(f"verify: {BASE_VARIABLE}={base} names no commit in this repo", file=sys.stderr)
+        return None
+    return resolved.stdout.strip()
+
+
+def listed(*args: str) -> list[str]:
+    result = git(*args)
+    if result.returncode != 0:
+        raise SystemExit(f"verify: git {args[0]} failed: {result.stderr.strip()}")
+    return [path for path in result.stdout.split("\0") if path]
+
+
+def changed_skills(base: str) -> list[str]:
+    """The skills with a path differing from `base` in the working tree, tracked or untracked and not ignored."""
+    paths = listed("diff", "--name-only", "--no-renames", "-z", base, "--", f"{SKILLS_DIR}/") + listed(
+        "ls-files", "--others", "--exclude-standard", "-z", "--", f"{SKILLS_DIR}/"
+    )
+    names = {parts[1] for parts in (path.split("/") for path in paths) if len(parts) >= 3}
+    return sorted(name for name in names if (ROOT / SKILLS_DIR / name).is_dir())
+
+
+def with_requirements(skill: Path, command: list[str]) -> list[str]:
+    """`command`, run with the skill's dependencies installed when it has a lockfile."""
+    lockfile = skill / "requirements.lock"
+    if (ROOT / lockfile).is_file():
+        return ["uv", "run", "--no-build", "--with-requirements", str(lockfile), *command]
+    return command
+
+
+def check(name: str) -> list[str]:
+    """Run each check on skill `name`, returning the ones that failed."""
+    skill = Path(SKILLS_DIR) / name
+    checks = [
+        ("ruff", ["ruff", "check", str(skill)]),
+        (
+            "pyrefly",
+            with_requirements(skill, ["pyrefly", "check", "--search-path", str(skill), str(skill)]),
+        ),
+        # Through the interpreter first on PATH, which sees the skill's
+        # dependencies; the `pytest` script runs the project's alone.
+        ("pytest", with_requirements(skill, ["python", "-m", "pytest", "-q", str(skill / "test_skill.py")])),
+    ]
+    failed = []
+    for label, command in checks:
+        print(f"verify: {name}: {label}", flush=True)
+        if subprocess.run(command, cwd=ROOT, check=False).returncode != 0:
+            failed.append(label)
+    return failed
+
+
+def main() -> int:
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+    base = resolve_base()
+    if base is None:
+        return 2
+    skills = changed_skills(base)
+    if not skills:
+        print("verify: no skill changed")
+        return 0
+    failures = {name: failed for name in skills if (failed := check(name))}
+    for name, failed in failures.items():
+        print(f"verify: {name} failed {', '.join(failed)}", file=sys.stderr)
+    if failures:
+        return 1
+    print(f"verify: {', '.join(skills)} passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

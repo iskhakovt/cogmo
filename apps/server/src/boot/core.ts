@@ -12,6 +12,7 @@ import { db, type Transactor, transactor } from "../db/index.js";
 import { env } from "../env.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { findSkillsImageDir, loadReleaseToolchain } from "../skills/toolchain.js";
 import { deriveWebLoginToken } from "../web/auth/login-token.js";
 import { createProviderResolver } from "./llm.js";
 import { prepareDataLayer } from "./locked-bootstrap.js";
@@ -43,7 +44,10 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
       codingStore: stores.codingStore,
       skillStore: stores.skillStore,
     },
-    { skillsRepoPath: env.COGMO_SKILLS_PATH },
+    {
+      skillsRepoPath: env.COGMO_SKILLS_PATH,
+      toolchain: await loadReleaseToolchain(findSkillsImageDir(import.meta.url), env.VERSION),
+    },
   );
 
   if (!env.COGMO_MASTER_KEY) {

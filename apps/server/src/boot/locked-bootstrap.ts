@@ -4,6 +4,7 @@
  * one at a time.
  */
 
+import { match } from "ts-pattern";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { BootstrapLock } from "../db/bootstrap-lock.js";
@@ -16,6 +17,8 @@ import { migrateSkillsLayout } from "../skills/migrate-layout.js";
 import { ensureSkillsMirror } from "../skills/mirror-reconcile.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "../skills/repo.js";
 import type { SkillStore } from "../skills/store/index.js";
+import type { ReleaseToolchain } from "../skills/toolchain.js";
+import { commitToolchain } from "../skills/toolchain-commit.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { checkUuidv7 } from "./checks.js";
 
@@ -29,12 +32,12 @@ export interface PrepareDataLayerDeps {
 
 /**
  * `bootstrapCore`'s locked step: apply migrations, check `uuidv7()`, and bring
- * the skills bare repo, its mirror state, its layout and its `coding_repos`
- * row to their expected state.
+ * the skills bare repo, its mirror state, its layout, its toolchain and its
+ * `coding_repos` row to their expected state.
  */
 export async function prepareDataLayer(
   deps: PrepareDataLayerDeps,
-  args: { skillsRepoPath: string },
+  args: { skillsRepoPath: string; toolchain: ReleaseToolchain },
 ): Promise<void> {
   await deps.bootstrapLock(async () => {
     await migratePerFile(deps.db, { migrationsFolder: "./migrations" });
@@ -62,6 +65,26 @@ export async function prepareDataLayer(
     // that finds it recorded does nothing (design/skills.md → Per-skill
     // structure).
     await migrateSkillsLayout({ runInTx: deps.runInTx, store: deps.skillStore }, skillsRepo.path);
+
+    // The release's toolchain at the repo root; a boot that finds every entry
+    // equal writes nothing (design/skills.md → The skills repo toolchain).
+    // After the layout move, which leaves main born.
+    const toolchain = await commitToolchain(
+      { runInTx: deps.runInTx, store: deps.skillStore },
+      skillsRepo.path,
+      args.toolchain,
+    );
+    if (toolchain.isErr()) {
+      throw match(toolchain.error)
+        .with(
+          { kind: "refused_entry" },
+          ({ entry }) =>
+            new Error(
+              `the skills repo's main lists '${entry}' in its .cogmo/paths, an entry Cogmo's toolchain may not own; remove it from the list on main`,
+            ),
+        )
+        .exhaustive();
+    }
 
     // DB half of the skills-repo bootstrap: keep `coding_repos.skills.remote_url`
     // in sync with the bare repo's `origin`. Idempotent — inserts on first run,

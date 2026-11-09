@@ -25,6 +25,7 @@
 import * as p from "@clack/prompts";
 import { command } from "cmd-ts";
 import type { CodingStore } from "../agent/coding/store/index.js";
+import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { configureSkillsRemote } from "../skills/configure-remote.js";
@@ -35,6 +36,7 @@ import {
 } from "../skills/configure-remote-prompts.js";
 import { bootstrapSkillsRepo, readOriginUrl, SKILLS_CODING_REPO_NAME } from "../skills/repo.js";
 import type { SkillStore } from "../skills/store/index.js";
+import type { ReleaseToolchain } from "../skills/toolchain.js";
 import type { LoadDeps } from "./run.js";
 
 export interface MigrateSkillsRemoteCliDeps {
@@ -42,6 +44,10 @@ export interface MigrateSkillsRemoteCliDeps {
   codingStore: CodingStore;
   skillStore: SkillStore;
   secretsStore: SecretsStore;
+  /** Held by `configureSkillsRemote` from its classification of `main` through an adopt's toolchain commit. */
+  bootstrapLock: BootstrapLock;
+  /** The release's toolchain, committed after an adopt replaces a Cogmo-only `main`. */
+  toolchain: ReleaseToolchain;
   /** Bare-repo path — usually `env.COGMO_SKILLS_PATH`. */
   skillsRepoPath: string;
 }

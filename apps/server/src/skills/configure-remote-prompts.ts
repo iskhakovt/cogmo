@@ -25,7 +25,7 @@ import {
   resolveGitHubIdentity,
 } from "../secrets/github.js";
 import type { ConfigureSkillsRemoteError, ConfigureSkillsRemoteMode } from "./configure-remote.js";
-import { isBareLayoutCommit } from "./migrate-layout.js";
+import { isCogmoOnlyMain } from "./migrate-layout.js";
 
 const execFileP = promisify(execFile);
 
@@ -148,6 +148,13 @@ export function renderConfigureError(error: ConfigureSkillsRemoteError): void {
           `or delete local main intentionally (\`git update-ref -d refs/heads/main\`) and re-run.`,
       );
     })
+    .with({ kind: "remote_toolchain_invalid" }, (e) => {
+      p.log.error(
+        `The remote's main lists \`${e.entry}\` in \`.cogmo/paths\`, an entry Cogmo's toolchain may not own: ` +
+          `only a single top-level name other than \`skills\`, a skill file, \`.\`, \`..\` or \`.git\`. ` +
+          `Local main is unchanged. Remove the entry from the list on the remote's main, then re-run.`,
+      );
+    })
     .with({ kind: "local_diverged" }, (e) => {
       p.log.error(
         `Publish would orphan remote commits. Local main is ${e.localSha.slice(0, 7)}; ` +
@@ -177,10 +184,11 @@ export function renderConfigureError(error: ConfigureSkillsRemoteError): void {
 }
 
 /** Read local `refs/heads/main` sha — returns null when main is unborn
- * (fresh `git init --bare` state) or holds only the boot's bare layout
- * commit, which an adopt replaces. Used by `stepConfigureSkillsRemote`
- * and `runMigrateSkillsRemoteCli` to pick the adopt-vs-publish direction
- * without inferring inside `configureSkillsRemote`. */
+ * (fresh `git init --bare` state) or Cogmo-only (the boot's bare layout
+ * commit and toolchain commits), which an adopt replaces. Used by
+ * `stepConfigureSkillsRemote` and `runMigrateSkillsRemoteCli` to pick the
+ * adopt-vs-publish direction without inferring inside
+ * `configureSkillsRemote`; for display only, so it reads unlocked. */
 export async function readLocalMainSha(repoPath: string): Promise<string | null> {
   let sha: string;
   try {
@@ -195,5 +203,5 @@ export async function readLocalMainSha(repoPath: string): Promise<string | null>
   } catch {
     return null;
   }
-  return (await isBareLayoutCommit(repoPath, sha)) ? null : sha;
+  return (await isCogmoOnlyMain(repoPath, sha)) ? null : sha;
 }

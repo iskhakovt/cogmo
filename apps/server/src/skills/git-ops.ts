@@ -184,7 +184,7 @@ export async function getMainSha(repoPath: string): Promise<string | null> {
 export async function runGitIn(
   repoPath: string,
   args: readonly string[],
-  opts: { env?: NodeJS.ProcessEnv; input?: string } = {},
+  opts: { env?: NodeJS.ProcessEnv; input?: string | Uint8Array } = {},
 ): Promise<string> {
   try {
     const child = execFileP("git", ["-C", repoPath, ...args], {

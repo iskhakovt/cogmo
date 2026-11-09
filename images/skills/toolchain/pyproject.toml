@@ -1,0 +1,43 @@
+# Generated; do not edit.
+
+[project]
+name = "cogmo-skills"
+version = "0"
+requires-python = "==3.14.*"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pydantic==2.12.5",
+    "pyrefly==1.4.0",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1",
+    "ruff==0.17.3",
+]
+
+[tool.uv]
+package = false
+required-version = "==0.13.6"
+
+[tool.uv.pip]
+python-version = "3.14"
+generate-hashes = true
+no-header = true
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [".cogmo"]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "BLE", "S", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/test_skill.py" = ["S101"]
+
+[tool.pyrefly]
+search-path = [".cogmo"]
+
+[tool.pytest.ini_options]
+pythonpath = [".cogmo"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

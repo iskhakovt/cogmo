@@ -1,20 +1,24 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CodingRepoRow, CodingStore, InsertRepoParams } from "../agent/coding/store/index.js";
+import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Transactor } from "../db/index.js";
 import type { GitHubIdentity } from "../secrets/github.js";
+import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { makeEmptyBareRepo, makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { configureSkillsRemote } from "./configure-remote.js";
 import { migrateSkillsLayout } from "./migrate-layout.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import { DrizzleSkillStore, type SkillStore } from "./store/index.js";
+import { findSkillsImageDir, loadReleaseToolchain, type ReleaseToolchain } from "./toolchain.js";
+import { commitToolchain } from "./toolchain-commit.js";
 
 const execFileP = promisify(execFile);
 
@@ -28,6 +32,15 @@ const FAKE_IDENTITY: GitHubIdentity = {
   login: "test-user",
   id: "1",
 };
+
+/** A bootstrap lock that only runs its body; tests that watch the lock pass their own. */
+const passLock: BootstrapLock = (fn) => fn();
+
+let toolchain: ReleaseToolchain;
+
+beforeAll(async () => {
+  toolchain = await loadReleaseToolchain(findSkillsImageDir(import.meta.url), "9.9.9");
+});
 
 let workDir: string;
 
@@ -113,6 +126,35 @@ async function readMainSha(repoPath: string): Promise<string | null> {
   }
 }
 
+async function git(repo: string, ...args: string[]): Promise<string> {
+  return (await execFileP("git", ["-C", repo, ...args])).stdout.trim();
+}
+
+/**
+ * A remote whose `main` holds `files`, committed on top of the populated
+ * remote's seed commit.
+ */
+async function makeRemoteWith(files: Record<string, string>): Promise<string> {
+  const { path, url } = await makePopulatedBareRepo(workDir, "owner");
+  const work = await mkdtemp(join(tmpdir(), "configure-remote-remote-"));
+  try {
+    await execFileP("git", ["clone", "-q", path, work]);
+    await git(work, "config", "user.email", "t@t");
+    await git(work, "config", "user.name", "t");
+    await git(work, "config", "commit.gpgsign", "false");
+    for (const [file, content] of Object.entries(files)) {
+      await mkdir(dirname(join(work, file)), { recursive: true });
+      await writeFile(join(work, file), content);
+    }
+    await git(work, "add", "-A");
+    await git(work, "commit", "-q", "-m", "remote files");
+    await git(work, "push", "-q", "origin", "HEAD:refs/heads/main");
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+  return url;
+}
+
 function rowFromParams(params: InsertRepoParams): CodingRepoRow {
   return {
     id: "00000000-0000-0000-0000-000000000001",
@@ -151,6 +193,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: join(workDir, "skills"),
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "skip" },
     );
@@ -170,6 +214,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore: setupStoreWithNoRow(),
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "adopt", remoteUrl: "   " },
     );
@@ -189,6 +235,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore: setupStoreWithNoRow(),
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "adopt", remoteUrl: "not-a-git-url" },
     );
@@ -209,6 +257,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore: setupStoreWithNoRow(),
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "adopt", remoteUrl },
     );
@@ -229,6 +279,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore: setupStoreWithNoRow(),
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "publish", remoteUrl },
     );
@@ -250,6 +302,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "adopt", remoteUrl },
     );
@@ -283,18 +337,34 @@ describe("configureSkillsRemote", () => {
       const remoteSha = await readMainSha(remoteUrl.replace("file://", ""));
 
       const result = await configureSkillsRemote(
-        { runInTx: tx, codingStore: setupStoreWithNoRow(), skillStore, skillsRepoPath: skillsPath },
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
+        },
         { kind: "own", direction: "adopt", remoteUrl },
       );
 
       expect(result.isOk()).toBe(true);
       const layout = await tx((trx) => skillStore.getLayoutCommitSha(trx));
       expect(layout).not.toBe(bare);
-      expect(await readMainSha(skillsPath)).toBe(layout);
-      const { stdout } = await execFileP("git", ["-C", skillsPath, "rev-parse", `${layout}^`]);
-      expect(stdout.trim()).toBe(remoteSha);
-      // The remote gets the layout commit a git-remote task branches from.
-      expect(await readMainSha(remoteUrl.replace("file://", ""))).toBe(layout);
+      const main = await readMainSha(skillsPath);
+      // The toolchain commit on top of the adopted main's layout commit.
+      expect(
+        await git(
+          skillsPath,
+          "log",
+          "-1",
+          "--format=%P %(trailers:key=Cogmo-Toolchain,valueonly)",
+          expectDefined(main, "main"),
+        ),
+      ).toBe(`${layout} 9.9.9`);
+      expect(await git(skillsPath, "rev-parse", `${layout}^`)).toBe(remoteSha);
+      // The remote gets the commits a git-remote task branches from.
+      expect(await readMainSha(remoteUrl.replace("file://", ""))).toBe(main);
     } finally {
       await close();
     }
@@ -339,7 +409,14 @@ describe("configureSkillsRemote", () => {
       const remoteUrl = await makePopulatedRemote();
 
       const result = await configureSkillsRemote(
-        { runInTx: tx, codingStore: setupStoreWithNoRow(), skillStore, skillsRepoPath: skillsPath },
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
+        },
         { kind: "own", direction: "adopt", remoteUrl },
       );
 
@@ -373,12 +450,19 @@ describe("configureSkillsRemote", () => {
       });
 
       const result = await configureSkillsRemote(
-        { runInTx: tx, codingStore: setupStoreWithNoRow(), skillStore, skillsRepoPath: skillsPath },
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
+        },
         { kind: "own", direction: "adopt", remoteUrl },
       );
 
       expect(result.isOk()).toBe(true);
-      expect(await readMainSha(skillsPath)).toBe(
+      expect(await git(skillsPath, "rev-parse", "refs/heads/main^")).toBe(
         await tx((trx) => skillStore.getLayoutCommitSha(trx)),
       );
       expect(await readMainSha(remotePath)).toBe(remoteSha);
@@ -405,7 +489,14 @@ describe("configureSkillsRemote", () => {
       const remoteUrl = await makePopulatedRemote();
 
       const result = await configureSkillsRemote(
-        { runInTx: tx, codingStore: setupStoreWithNoRow(), skillStore, skillsRepoPath: skillsPath },
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
+        },
         { kind: "own", direction: "adopt", remoteUrl },
       );
 
@@ -443,14 +534,20 @@ describe("configureSkillsRemote", () => {
       const remoteSha = await readMainSha(remoteUrl.replace("file://", ""));
 
       const result = await configureSkillsRemote(
-        { runInTx: tx, codingStore: setupStoreWithNoRow(), skillStore, skillsRepoPath: skillsPath },
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
+        },
         { kind: "own", direction: "adopt", remoteUrl },
       );
 
       expect(result.isOk()).toBe(true);
       const layout = await tx((trx) => skillStore.getLayoutCommitSha(trx));
-      const { stdout } = await execFileP("git", ["-C", skillsPath, "rev-parse", `${layout}^`]);
-      expect(stdout.trim()).toBe(remoteSha);
+      expect(await git(skillsPath, "rev-parse", `${layout}^`)).toBe(remoteSha);
       // The adopt fetched to a ref of its own, named for it alone, and left
       // the other write's ref for its writer to resolve and delete.
       const [own, ...rest] = (await readFile(written, "utf8")).trim().split("\n");
@@ -474,6 +571,299 @@ describe("configureSkillsRemote", () => {
     }
   });
 
+  it("own + adopt replaces a main holding the bare layout and toolchain commits", {
+    timeout: 30_000,
+  }, async () => {
+    const { tx, close } = await createTestDatabase();
+    try {
+      const skillStore = new DrizzleSkillStore();
+      const skillsPath = join(workDir, "skills.git");
+      await bootstrapSkillsRepo({ path: skillsPath });
+      // The boot on an unborn main: the layout move, then the toolchain commit.
+      const bare = await migrateSkillsLayout({ runInTx: tx, store: skillStore }, skillsPath);
+      await commitToolchain({ runInTx: tx, store: skillStore }, skillsPath, toolchain);
+      const remoteUrl = await makePopulatedRemote();
+      const remoteSha = await readMainSha(remoteUrl.replace("file://", ""));
+
+      const result = await configureSkillsRemote(
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
+        },
+        { kind: "own", direction: "adopt", remoteUrl },
+      );
+
+      expect(result.isOk()).toBe(true);
+      const layout = await tx((trx) => skillStore.getLayoutCommitSha(trx));
+      expect(layout).not.toBe(bare);
+      expect(await git(skillsPath, "rev-parse", `${layout}^`)).toBe(remoteSha);
+      expect(await git(skillsPath, "rev-parse", "refs/heads/main^")).toBe(layout);
+      expect(await readMainSha(remoteUrl.replace("file://", ""))).toBe(
+        await readMainSha(skillsPath),
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("own + adopt classifies main under the bootstrap lock and holds it through the toolchain commit", {
+    timeout: 30_000,
+  }, async () => {
+    const { tx, close } = await createTestDatabase();
+    try {
+      const skillStore = new DrizzleSkillStore();
+      const skillsPath = join(workDir, "skills.git");
+      await bootstrapSkillsRepo({ path: skillsPath });
+      const remoteUrl = await makePopulatedRemote();
+      const remoteSha = await readMainSha(remoteUrl.replace("file://", ""));
+      // A boot holds the lock first and leaves main Cogmo-only; read unlocked,
+      // main would still be unborn and the adopt a fast-forward that loses.
+      let taken = 0;
+      let mainAtRelease: string | null = null;
+      const bootFirst: BootstrapLock = async (fn) => {
+        taken += 1;
+        await migrateSkillsLayout({ runInTx: tx, store: skillStore }, skillsPath);
+        await commitToolchain({ runInTx: tx, store: skillStore }, skillsPath, toolchain);
+        try {
+          return await fn();
+        } finally {
+          mainAtRelease = await readMainSha(skillsPath);
+        }
+      };
+
+      const result = await configureSkillsRemote(
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: bootFirst,
+          toolchain,
+        },
+        { kind: "own", direction: "adopt", remoteUrl },
+      );
+
+      expect(result.isOk()).toBe(true);
+      expect(taken).toBe(1);
+      const main = await readMainSha(skillsPath);
+      expect(mainAtRelease).toBe(main);
+      expect(
+        await git(
+          skillsPath,
+          "log",
+          "-1",
+          "--format=%(trailers:key=Cogmo-Toolchain,valueonly)",
+          expectDefined(main, "main"),
+        ),
+      ).toBe("9.9.9");
+      expect(await git(skillsPath, "rev-parse", "refs/heads/main^^")).toBe(remoteSha);
+    } finally {
+      await close();
+    }
+  });
+
+  it("own + adopt over a Cogmo-only main refuses a remote list naming an entry the toolchain may not own", {
+    timeout: 30_000,
+  }, async () => {
+    const { tx, close } = await createTestDatabase();
+    try {
+      const skillStore = new DrizzleSkillStore();
+      const skillsPath = join(workDir, "skills.git");
+      await bootstrapSkillsRepo({ path: skillsPath });
+      const bare = await migrateSkillsLayout({ runInTx: tx, store: skillStore }, skillsPath);
+      await commitToolchain({ runInTx: tx, store: skillStore }, skillsPath, toolchain);
+      const before = await readMainSha(skillsPath);
+      const remoteUrl = await makeRemoteWith({ ".cogmo/paths": "pyproject.toml\nskills\n" });
+
+      const result = await configureSkillsRemote(
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
+        },
+        { kind: "own", direction: "adopt", remoteUrl },
+      );
+
+      expect(result._unsafeUnwrapErr()).toEqual({
+        kind: "remote_toolchain_invalid",
+        remoteUrl,
+        entry: "skills",
+      });
+      expect(await readMainSha(skillsPath)).toBe(before);
+      expect(await tx((trx) => skillStore.getLayoutCommitSha(trx))).toBe(bare);
+      expect(await readOrigin(skillsPath)).toBeNull();
+      expect(await git(skillsPath, "for-each-ref", "refs/cogmo/")).toBe("");
+    } finally {
+      await close();
+    }
+  });
+
+  it("own + adopt refuses, before main moves, a fast-forward to a remote list naming a skill file", async () => {
+    const skillsPath = join(workDir, "skills.git");
+    await bootstrapSkillsRepo({ path: skillsPath });
+    const remoteUrl = await makeRemoteWith({
+      ".cogmo/paths": "pyproject.toml\nskill.py\n.cogmo\n",
+    });
+
+    const result = await configureSkillsRemote(
+      {
+        runInTx: fakeRunInTx,
+        skillStore: mock<SkillStore>(),
+        codingStore: setupStoreWithNoRow(),
+        skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
+      },
+      { kind: "own", direction: "adopt", remoteUrl },
+    );
+
+    expect(result._unsafeUnwrapErr()).toEqual({
+      kind: "remote_toolchain_invalid",
+      remoteUrl,
+      entry: "skill.py",
+    });
+    expect(await readMainSha(skillsPath)).toBeNull();
+    expect(await readOrigin(skillsPath)).toBeNull();
+    expect(await git(skillsPath, "for-each-ref", "refs/cogmo/")).toBe("");
+  });
+
+  it("own + adopt fast-forwards a populated local main to the remote's descendant", async () => {
+    const skillsPath = join(workDir, "skills.git");
+    await bootstrapSkillsRepo({ path: skillsPath });
+    const remoteUrl = await makeRemoteWith({ "README.md": "v1\n" });
+    const remotePath = remoteUrl.replace("file://", "");
+    const deps = {
+      runInTx: fakeRunInTx,
+      skillStore: mock<SkillStore>(),
+      codingStore: setupStoreWithNoRow(),
+      skillsRepoPath: skillsPath,
+      bootstrapLock: passLock,
+      toolchain,
+    };
+    expect(
+      (await configureSkillsRemote(deps, { kind: "own", direction: "adopt", remoteUrl })).isOk(),
+    ).toBe(true);
+    const first = await readMainSha(skillsPath);
+    // The remote moves on from what local main holds.
+    const work = await mkdtemp(join(tmpdir(), "configure-remote-advance-"));
+    try {
+      await execFileP("git", ["clone", "-q", remotePath, work]);
+      await writeFile(join(work, "README.md"), "v2\n");
+      await execFileP("git", [
+        "-C",
+        work,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qam",
+        "v2",
+      ]);
+      await git(work, "push", "-q", "origin", "HEAD:refs/heads/main");
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+
+    const result = await configureSkillsRemote(deps, {
+      kind: "own",
+      direction: "adopt",
+      remoteUrl,
+    });
+
+    expect(result.isOk()).toBe(true);
+    const main = await readMainSha(skillsPath);
+    expect(main).toBe(await readMainSha(remotePath));
+    expect(await git(skillsPath, "rev-parse", `${main}^`)).toBe(first);
+  });
+
+  it("own + adopt is remote_diverged when local main moves before its fast-forward", async () => {
+    const skillsPath = join(workDir, "skills.git");
+    await bootstrapSkillsRepo({ path: skillsPath });
+    const remoteUrl = await makeRemoteWith({ "README.md": "v1\n" });
+    const deps = {
+      runInTx: fakeRunInTx,
+      skillStore: mock<SkillStore>(),
+      codingStore: setupStoreWithNoRow(),
+      skillsRepoPath: skillsPath,
+      bootstrapLock: passLock,
+      toolchain,
+    };
+    expect(
+      (await configureSkillsRemote(deps, { kind: "own", direction: "adopt", remoteUrl })).isOk(),
+    ).toBe(true);
+    const adopted = expectDefined(await readMainSha(skillsPath), "main");
+    // A deploy lands once the second adopt has fetched: the hook moves main
+    // when the fetch commits its side ref, after the classification.
+    const tree = await git(skillsPath, "rev-parse", `${adopted}^{tree}`);
+    const deploy = (
+      await execFileP(
+        "git",
+        ["-C", skillsPath, "commit-tree", tree, "-p", adopted, "-m", "deploy"],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@t",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@t",
+          },
+        },
+      )
+    ).stdout.trim();
+    await writeFile(
+      join(skillsPath, "hooks", "reference-transaction"),
+      `#!/bin/sh\n[ "$1" = committed ] || exit 0\ngrep -q ' refs/cogmo/adopt-main-' && git update-ref refs/heads/main ${deploy}\nexit 0\n`,
+      { mode: 0o755 },
+    );
+
+    const result = await configureSkillsRemote(deps, {
+      kind: "own",
+      direction: "adopt",
+      remoteUrl,
+    });
+
+    expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "remote_diverged", localSha: adopted });
+    expect(await readMainSha(skillsPath)).toBe(deploy);
+    expect(await git(skillsPath, "for-each-ref", "refs/cogmo/")).toBe("");
+  });
+
+  it("own + publish counts a Cogmo-only main as empty", { timeout: 30_000 }, async () => {
+    const { tx, close } = await createTestDatabase();
+    try {
+      const skillStore = new DrizzleSkillStore();
+      const skillsPath = join(workDir, "skills.git");
+      await bootstrapSkillsRepo({ path: skillsPath });
+      await migrateSkillsLayout({ runInTx: tx, store: skillStore }, skillsPath);
+      await commitToolchain({ runInTx: tx, store: skillStore }, skillsPath, toolchain);
+      const remoteUrl = await makeEmptyRemote();
+
+      const result = await configureSkillsRemote(
+        {
+          runInTx: tx,
+          codingStore: setupStoreWithNoRow(),
+          skillStore,
+          skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
+        },
+        { kind: "own", direction: "publish", remoteUrl },
+      );
+
+      expect(result._unsafeUnwrapErr()).toEqual({ kind: "local_empty", remoteUrl });
+      expect(await readMainSha(remoteUrl.replace("file://", ""))).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
   it("own + publish pushes a populated local to an empty remote", async () => {
     // Operator has local skills + fresh empty remote: publish must push
     // local to remote, not fetch. Asserts the data-loss-free direction
@@ -491,6 +881,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "publish", remoteUrl },
     );
@@ -525,6 +917,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "adopt", remoteUrl },
     );
@@ -554,6 +948,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "publish", remoteUrl },
     );
@@ -575,6 +971,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore: setupStoreWithNoRow(),
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "adopt", remoteUrl: nonexistent },
     );
@@ -604,6 +1002,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "adopt", remoteUrl },
     );
@@ -621,6 +1021,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
       },
       { kind: "own", direction: "adopt", remoteUrl },
     );
@@ -650,6 +1052,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
         octokitFactory: () => fakeOctokit as unknown as Octokit,
       },
       { kind: "auto-provision", identity: FAKE_IDENTITY },
@@ -684,6 +1088,8 @@ describe("configureSkillsRemote", () => {
           skillStore,
           codingStore: setupStoreWithNoRow(),
           skillsRepoPath: skillsPath,
+          bootstrapLock: passLock,
+          toolchain,
           octokitFactory: () =>
             ({ repos: { createForAuthenticatedUser: createSpy } }) as unknown as Octokit,
         },
@@ -722,6 +1128,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore,
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
         octokitFactory: () => fakeOctokit as unknown as Octokit,
       },
       { kind: "auto-provision", identity: FAKE_IDENTITY },
@@ -766,6 +1174,8 @@ describe("configureSkillsRemote", () => {
         skillStore: mock<SkillStore>(),
         codingStore: setupStoreWithNoRow(),
         skillsRepoPath: skillsPath,
+        bootstrapLock: passLock,
+        toolchain,
         // Partial Octokit stub — only `createForAuthenticatedUser` is exercised.
         octokitFactory: () => fakeOctokit as unknown as Octokit,
       },

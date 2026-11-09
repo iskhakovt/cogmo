@@ -35,7 +35,8 @@ apps/web/*
 !packages/
 packages/*
 !packages/contracts/
-# The ctx package both skill tiers ship; the wasm child bundle embeds it.
+# The ctx package both skill tiers ship; the wasm child bundle embeds it, and
+# the skills repo toolchain joins it with `images/skills/toolchain/`.
 !images/
 images/*
 !images/skills/
@@ -43,9 +44,17 @@ images/skills/*
 !images/skills/src/
 images/skills/src/*
 !images/skills/src/cogmo_ctx/
+!images/skills/toolchain/
 
 # Trim what the build doesn't need from the allowed trees.
 apps/server/src/test/
 apps/server/src/**/*.test.ts
 **/node_modules/
 **/dist/
+# What Python and uv write beside tracked files, which the toolchain's bytes
+# must not carry.
+**/__pycache__/
+**/*.py[co]
+images/skills/toolchain/.venv/
+images/skills/toolchain/.ruff_cache/
+images/skills/toolchain/.pytest_cache/
