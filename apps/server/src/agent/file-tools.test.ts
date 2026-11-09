@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { LlmProvider } from "../llm/provider.js";
 import type { LlmResponse } from "../llm/types.js";
-import { mockFilesService } from "../test/factories.js";
+import { mockFilesService, testTranscript } from "../test/factories.js";
 import { editFile, listFiles, readFile, writeFile } from "./file-tools.js";
 import { createFileService } from "./files.js";
 import { runAgentLoop } from "./loop.js";
@@ -204,11 +204,15 @@ describe("file tools in the loop", () => {
     const result = await runAgentLoop({
       provider,
       model: "test",
-      systemPrompt: "sys",
       service,
       turnLogger,
       tools,
-      messages: [{ role: "user", content: "edit it" }],
+      transcript: testTranscript({
+        system: "sys",
+        tools,
+        messages: [{ role: "user", content: "edit it" }],
+        log: turnLogger,
+      }),
     });
 
     expect(result.messages[4]?.content).toEqual([

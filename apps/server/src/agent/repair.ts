@@ -32,10 +32,12 @@ import type {
   ContentBlock,
   Message,
   StopReason,
+  ToolDefinition,
   ToolResultClearing,
   ToolUseBlock,
 } from "../llm/types.js";
 import { canonicalJson, sha256 } from "../util/canonical-json.js";
+import { countServerMismatches } from "./server-mismatches.js";
 
 /**
  * Subtypes the in-loop classifier emits on the degraded off-ramp.
@@ -503,6 +505,10 @@ function synthesisMaxTokens(subtype: DegradeSubtype | null): number {
 export interface SynthesizeDegradedReplyDeps {
   provider: LlmProvider;
   model: string;
+  /** The system prompt the loop's requests sent. */
+  system: string;
+  /** The tool definitions the loop's requests sent, in their order. */
+  tools: ReadonlyArray<ToolDefinition>;
   messages: ReadonlyArray<Message>;
   reason: string;
   subtype: DegradeSubtype | null;
@@ -521,16 +527,21 @@ export interface SynthesizeDegradedReplyResult {
 }
 
 /**
- * One-shot, tools-free LLM call that produces a user-facing explanation
- * of why the turn degraded. Replaces the fixed {@link degradedReplyText}
- * baseline with a model-generated 1–3 sentence reply naming what was
- * attempted, what went wrong, and one concrete next step.
+ * One-shot LLM call, with tools disabled, that produces a user-facing
+ * explanation of why the turn degraded. Replaces the fixed
+ * {@link degradedReplyText} baseline with a model-generated 1–3 sentence
+ * reply naming what was attempted, what went wrong, and one concrete next
+ * step.
  *
  * Constraints (all enforced at the callsite; see
  * `design/agent-resilience.md` → Tools-free synthesis on degrade):
  *
- * - `tools: []` at the API level — defends against the model trying to
- *   call a tool from a stale system instruction.
+ * - The turn's `system` and `tools`, which the replayed thinking blocks are
+ *   bound to, with `toolChoice: "none"` — tools disabled at the API level,
+ *   against a model trying to call one from a stale instruction. The
+ *   instruction goes in a user message after the history.
+ * - The turn's Strategy 1 intent, so the history is cleared as the loop's
+ *   requests were.
  * - `temperature: 0` — predictability matters more than variety on a
  *   failure reply. Best-effort: dropped by the Anthropic adapter (the
  *   Messages API rejects sampling parameters) and for OpenAI's reasoning
@@ -550,21 +561,24 @@ export interface SynthesizeDegradedReplyResult {
  * string. A `synthesis ok: false` spike correlated with provider-outage
  * events is an upstream symptom, not a synthesis-logic bug.
  *
+ * The provider's `input_transformations` count under `site: "fork"`, so the
+ * caller runs this inside the step that owns the reply, and a replay counts
+ * nothing.
+ *
  * The `context_overflow` subtype still attempts synthesis. The call is not
- * a re-run of the failed turn: it drops the tool definitions and keeps the
- * output cap tight (see {@link synthesisMaxTokens}), which is often enough
- * headroom for the same history to fit. When it isn't, the provider answers
- * with an overflow and no content, which lands on the empty-text fallback
- * below.
+ * a re-run of the failed turn: it keeps the output cap tight (see
+ * {@link synthesisMaxTokens}), which is sometimes enough headroom for the
+ * same history to fit. When it isn't, the provider answers with an overflow
+ * and no content, which lands on the empty-text fallback below.
  */
 export async function synthesizeDegradedReply(
   deps: SynthesizeDegradedReplyDeps,
 ): Promise<SynthesizeDegradedReplyResult> {
-  const { provider, model, messages, reason, subtype, clearToolResults, log } = deps;
+  const { provider, model, system, tools, messages, reason, subtype, clearToolResults, log } = deps;
   const timeoutMs = deps.timeoutMs ?? DEGRADED_SYNTHESIS_TIMEOUT_MS;
 
   const reasonHuman = humanReasonForDegrade(subtype, reason);
-  const systemPrompt =
+  const instruction =
     `You hit a stopping condition before completing the user's most recent request: ${reasonHuman}.\n\n` +
     "Tools are disabled for this reply. Write a 1–3 sentence message to the user covering: " +
     "(1) what you were trying to do, (2) what went wrong, " +
@@ -579,15 +593,17 @@ export async function synthesizeDegradedReply(
     const response = await provider.chat(
       {
         model,
-        system: systemPrompt,
-        messages: [...messages],
-        tools: [],
+        system,
+        messages: [...messages, { role: "user", content: instruction }],
+        tools: [...tools],
+        toolChoice: "none",
         temperature: 0,
         maxTokens: synthesisMaxTokens(subtype),
         clearToolResults,
       },
       { signal },
     );
+    countServerMismatches(response.inputTransformations ?? [], "fork");
 
     const text = extractText(response.content).trim();
 
@@ -646,7 +662,7 @@ export async function synthesizeDegradedReply(
 
 /**
  * Human-readable rendering of a degrade `(subtype, reason)` pair for
- * the synthesis system prompt. The loop's `reason` string is internal
+ * the synthesis instruction. The loop's `reason` string is internal
  * (e.g. `"stuck_loop"`, `"iteration_cap"`); the model gets a sentence
  * it can quote back to the user.
  */
@@ -670,7 +686,7 @@ function humanReasonForDegrade(subtype: DegradeSubtype | null, reason: string): 
       // Iteration-cap backstop. `reason: "iteration_cap"` is the only
       // null-subtype path today; enumerate explicitly rather than
       // interpolating `reason` so a future caller passing user-derived
-      // text can't slip prompt content into the system message.
+      // text can't slip prompt content into the instruction.
       if (reason === "iteration_cap") {
         return "the conversation hit its iteration-count limit before producing a final reply";
       }

@@ -144,11 +144,13 @@ export const attachmentPlaceholders = {
 
 /**
  * Input transformations the provider reported on a request (Anthropic's
- * `input_transformations`), labeled by `type`, `reason` and `site`
- * (`iteration` for a chat turn's request, `stage` for a pipeline stage's).
- * Counted inside the `llm-iter<N>` step body, so a replay adds nothing.
- * Which ones mark the transcript head `diverged`: design/prompt-caching.md →
- * Head check.
+ * `input_transformations`), labeled by `type`, `reason` and `site`:
+ * `iteration` for a chat turn's request, `stage` for a pipeline stage's, its
+ * summarization included, and `fork` for a chat turn's summarization and
+ * degraded-reply synthesis and `/compact`. Counted inside the step body that
+ * sends the request, so a replay adds nothing; `/compact`, outside Inngest,
+ * counts as it sends. Which ones mark the transcript head `diverged`:
+ * design/prompt-caching.md → Head check.
  */
 export const promptServerMismatches = {
   add(value: number, attrs?: MetricAttributes): void {

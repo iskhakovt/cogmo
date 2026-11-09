@@ -2,7 +2,7 @@ import type { Logger } from "pino";
 import { match } from "ts-pattern";
 import type { Durable } from "../../inngest/durable.js";
 import { isRetriableProviderError } from "../../llm/fallback.js";
-import type { Message, StreamEvent } from "../../llm/types.js";
+import type { StreamEvent } from "../../llm/types.js";
 import { type DeliveryHandle, pushOrThrow } from "../../transport/delivery-router.js";
 import type {
   AgentLoopResult,
@@ -14,6 +14,7 @@ import { synthesizeDegradedReply } from "../repair.js";
 import { computeRetraction } from "../retraction.js";
 import type { Service } from "../service.js";
 import type { ToolRegistry } from "../tools.js";
+import type { Transcript } from "../transcript.js";
 import type { PrefixViolationPolicy } from "../transcript-head.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import { asNonRetriable } from "../turn-step-runner.js";
@@ -22,8 +23,9 @@ import type { TurnModel } from "./resolve-turn-model.js";
 export interface RunTurnLoopArgs {
   conversationId: string;
   turnModel: TurnModel;
-  systemPrompt: string;
-  messages: Message[];
+  /** The turn's opened transcript, which the loop sends and appends to. */
+  transcript: Transcript;
+  /** The registry the loop dispatches on, whose definitions the transcript holds. */
   tools: ToolRegistry;
   service: Service;
   delivery: DeliveryHandle;
@@ -74,8 +76,7 @@ export async function runTurnLoop(
     const looped = await runStreamingAgentLoop({
       provider: turnModel.provider,
       model: turnModel.model,
-      systemPrompt: args.systemPrompt,
-      messages: args.messages,
+      transcript: args.transcript,
       tools: args.tools,
       service: args.service,
       // The number `computeBudget` reserved for output when it sized
@@ -185,7 +186,7 @@ async function withDegradedReply(
   step: Durable,
   result: AgentLoopResult,
   degraded: NonNullable<AgentLoopResult["degraded"]>,
-  args: Pick<RunTurnLoopArgs, "turnModel" | "delivery" | "turnLogger">,
+  args: Pick<RunTurnLoopArgs, "turnModel" | "transcript" | "delivery" | "turnLogger">,
 ): Promise<AgentLoopResult> {
   const { turnModel, delivery, turnLogger } = args;
   // Retraction computed OUTSIDE the step from `result.streamed` —
@@ -194,12 +195,12 @@ async function withDegradedReply(
   // live emissions would be empty on a replay whose iterations all
   // came from the step cache).
   const retraction = computeRetraction(result.streamed, result.newMessages, turnLogger);
-  // One step owns the whole user-visible off-ramp: the tools-free
-  // synthesis LLM call plus the retract/apology pushes. The
-  // synthesis is billable and the pushes append to the user's live
-  // message, so both must fire exactly once across the persist /
-  // delivery / notify boundaries that follow — in the bare body
-  // they would re-fire on every subsequent re-invocation. The
+  // One step owns the whole user-visible off-ramp: the synthesis LLM
+  // call plus the retract/apology pushes. The synthesis is billable
+  // and the pushes append to the user's live message, so both must
+  // fire exactly once across the persist / delivery / notify
+  // boundaries that follow — in the bare body they would re-fire on
+  // every subsequent re-invocation. The
   // step returns the apology text, so replays persist the same
   // words the user saw. Plain `step.run`, not the `stepRun`
   // wrapper: synthesizeDegradedReply swallows provider failures
@@ -207,7 +208,7 @@ async function withDegradedReply(
   // escape this body — the only escapable errors are delivery
   // pushes, which should keep normal step-retry semantics.
   const apology = await step.run("degraded-reply", async () => {
-    // One tools-free LLM call summarizes the failure in
+    // One LLM call, tools disabled, summarizes the failure in
     // user-facing terms (what was attempted, what went wrong, one
     // next step). Falls through to the fixed string on any
     // synthesis failure (timeout, refusal, provider outage). See
@@ -216,6 +217,10 @@ async function withDegradedReply(
     const { text } = await synthesizeDegradedReply({
       provider: turnModel.provider,
       model: result.model,
+      // The prefix the loop's requests sent, read from the transcript
+      // without recording a request.
+      system: args.transcript.system,
+      tools: args.transcript.tools,
       messages: result.messages,
       reason: degraded.reason,
       subtype: degraded.subtype,
