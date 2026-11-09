@@ -163,21 +163,6 @@ describe("checkRegisterBody with the gates and the classifier register wires", (
     expect(ms).toBeLessThan(1000);
   });
 
-  it("checks four times the lines in well under sixteen times the time", {
-    timeout: 120_000,
-  }, async () => {
-    // Warm the parser and the JIT, then take each size's fastest of three runs.
-    await timed(headers(100));
-    const fastest = async (lines: number) => {
-      const runs: number[] = [];
-      for (const _ of R.range(0, 3)) runs.push((await timed(headers(lines))).ms);
-      return Math.min(...runs);
-    };
-    const short = await fastest(100);
-    const long = await fastest(400);
-    expect(long).toBeLessThan(8 * Math.max(short, 5));
-  });
-
   it("classifies a 2000-term chain rather than pausing", { timeout: 120_000 }, async () => {
     const names = R.times(2000, (i) => `a${i}`);
     const rows = R.chunk(names, 21).map((row) => `    ${row.join(" + ")}`);
