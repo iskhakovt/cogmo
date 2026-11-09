@@ -509,8 +509,8 @@ async function adoptRemoteMain(
  * Replace a Cogmo-only `main` at `mainSha` with `adopted`: drop the layout
  * row, swap `main` by compare-and-swap against the commit classified, then
  * run the layout move and the toolchain commit (design/skills.md → Per-skill
- * structure, failure modes). A lost swap records the layout again and is
- * `remote_diverged`.
+ * structure, failure modes). The move runs whether the swap lands, loses or
+ * throws; a lost swap is `remote_diverged`.
  */
 async function replaceCogmoOnlyMain(
   deps: ConfigureSkillsRemoteDeps,
@@ -524,10 +524,12 @@ async function replaceCogmoOnlyMain(
     await updateRef(deps.skillsRepoPath, "refs/heads/main", adopted, mainSha);
   } catch (e) {
     if (!(e instanceof RefMovedError)) throw e;
-    await relayout();
     return err({ kind: "remote_diverged", localSha: null });
+  } finally {
+    // Whatever the swap did, the move records the layout again: the
+    // adopted main's, or that of the commit still on main.
+    await relayout();
   }
-  await relayout();
   const toolchain = await commitToolchain(
     { runInTx: deps.runInTx, store: deps.skillStore },
     deps.skillsRepoPath,

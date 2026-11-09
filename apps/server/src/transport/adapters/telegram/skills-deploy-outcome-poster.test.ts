@@ -240,6 +240,28 @@ describe("postSkillsDeployOutcome", () => {
     });
   });
 
+  it("live at the version it replaced: says it is live, with Disable alone", async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    await postSkillsDeployOutcome({
+      // The default deploy's own sha.
+      event: deployed("live", { priorGitSha: "def5678def5678def5678" }),
+      channelId: "ch-telegram",
+      runInTx: fakeRunInTx,
+      transportStore: telegramSessionStore(),
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      424242,
+      expect.stringMatching(/^✅ Skill briefing is live\n/),
+      {
+        reply_markup: {
+          inline_keyboard: [[{ text: "🚫 Disable", callback_data: `skill:${SKILL_ID}:disable` }]],
+        },
+      },
+    );
+  });
+
   it("pending: posts Approve / Deny keyed by the deploy id", async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
 

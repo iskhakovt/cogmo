@@ -1,6 +1,6 @@
 /** Inline-keyboard taps: the boundary prompt, `/sessions`, and the plan, pipeline-gate and skill deploy keyboards. */
 
-import type { Bot } from "grammy";
+import type { Bot, Context } from "grammy";
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
 import {
   PIPELINE_GATE_CALLBACK_REGEX,
@@ -19,6 +19,7 @@ import {
 } from "./commands/keyboard-callbacks.js";
 import { toCmdCtx } from "./commands/reply.js";
 import { handleResumeCallback } from "./commands/sessions.js";
+import { fitTelegramToast } from "./message-limit.js";
 
 /**
  * Regex matched against `callback_data` for boundary prompt taps. UUIDv7
@@ -58,6 +59,14 @@ async function editTappedMessage(edit: () => Promise<unknown>, what: string): Pr
   }
 }
 
+/**
+ * Answer the tap with `text` as its toast, cut to Telegram's cap: an answer
+ * over it fails, and a refusal that keeps the keyboard has no other feedback.
+ */
+async function answerTap(ctx: Pick<Context, "answerCallbackQuery">, text: string): Promise<void> {
+  await ctx.answerCallbackQuery({ text: fitTelegramToast(text) });
+}
+
 export function registerCallbackQueries(bot: Bot, transport: Transport): void {
   // Boundary prompt taps — callback_data = "boundary:<boundaryId>:<resume|fresh>"
   bot.callbackQuery(BOUNDARY_CALLBACK_REGEX, async (ctx) => {
@@ -82,13 +91,11 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
     if (result.isErr()) {
       const code = result.error.code;
       const toast = code === "boundary_not_found" ? "Already resolved" : "Resolution failed";
-      await ctx.answerCallbackQuery({ text: toast });
+      await answerTap(ctx, toast);
       return;
     }
 
-    await ctx.answerCallbackQuery({
-      text: isResume ? "Picking up where we left off." : "Starting fresh.",
-    });
+    await answerTap(ctx, isResume ? "Picking up where we left off." : "Starting fresh.");
   });
 
   // Inline keyboard taps from /sessions list — callback_data = "resume:<alias|conversationId>"
@@ -118,7 +125,7 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
     if (outcome.followUp) {
       await ctx.reply(outcome.followUp);
     }
-    await ctx.answerCallbackQuery({ text: outcome.toast });
+    await answerTap(ctx, outcome.toast);
   });
 
   // Pipeline gate keyboard: Approve / Cancel — callback_data = "pipe:<runId>:<action>:<token>"
@@ -136,12 +143,12 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
         "edit pipeline gate message",
       );
     }
-    await ctx.answerCallbackQuery({ text: outcome.toast });
+    await answerTap(ctx, outcome.toast);
   });
 
-  // Skill deploy keyboards: Approve / Deny on a pending deploy, Disable on a
-  // live one — callback_data = "skill:<pendingId>:<approve|deny>" or
-  // "skill:<skillId>:disable"
+  // Skill deploy keyboards: Approve / Deny on a pending deploy, Disable and
+  // Roll back on a live one — callback_data = "skill:<pendingId>:<approve|deny>",
+  // "skill:<skillId>:disable" or "skill:<deployId>:rollback"
   bot.callbackQuery(SKILLS_DEPLOY_CALLBACK_REGEX, async (ctx) => {
     const data = ctx.callbackQuery?.data;
     const fromId = ctx.from?.id;
@@ -151,7 +158,7 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
     const chatId = ctx.chat?.id;
     if (chatId === undefined) {
       // No chat, no conversation to act from; answer so the button stops spinning.
-      await ctx.answerCallbackQuery({ text: "Open this message in its chat." });
+      await answerTap(ctx, "Open this message in its chat.");
       return;
     }
 
@@ -167,6 +174,6 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
         "edit skill deploy message",
       );
     }
-    await ctx.answerCallbackQuery({ text: outcome.toast });
+    await answerTap(ctx, outcome.toast);
   });
 }

@@ -523,6 +523,46 @@ describe("configureSkillsRemote", () => {
     }
   });
 
+  it("own + adopt over the bare layout commit records the layout again when its swap fails", {
+    timeout: 30_000,
+  }, async () => {
+    const { tx, close } = await createTestDatabase();
+    try {
+      const skillStore = new DrizzleSkillStore();
+      const skillsPath = join(workDir, "skills.git");
+      await bootstrapSkillsRepo({ path: skillsPath });
+      const bare = await migrateSkillsLayout({ runInTx: tx, store: skillStore }, skillsPath);
+      // git refuses the swap of main for a reason other than a moved ref.
+      await writeFile(
+        join(skillsPath, "hooks", "reference-transaction"),
+        '#!/bin/sh\n[ "$1" = prepared ] || exit 0\nexec awk \'$3 == "refs/heads/main" { f = 1 } END { exit f }\'\n',
+        { mode: 0o755 },
+      );
+      const remoteUrl = await makePopulatedRemote();
+
+      await expect(
+        configureSkillsRemote(
+          {
+            runInTx: tx,
+            codingStore: setupStoreWithNoRow(),
+            skillStore,
+            skillsRepoPath: skillsPath,
+            bootstrapLock: passLock,
+            toolchain,
+          },
+          { kind: "own", direction: "adopt", remoteUrl },
+        ),
+      ).rejects.toThrow(/update-ref failed/);
+      expect(await readMainSha(skillsPath)).toBe(bare);
+      expect(await tx((trx) => skillStore.getLayoutCommitSha(trx))).toBe(bare);
+      expect(
+        (await execFileP("git", ["-C", skillsPath, "for-each-ref", "refs/cogmo/"])).stdout,
+      ).toBe("");
+    } finally {
+      await close();
+    }
+  });
+
   it("own + adopt over the bare layout commit fetches to a side ref of its own", {
     timeout: 30_000,
   }, async () => {
