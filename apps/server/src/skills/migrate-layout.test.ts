@@ -341,6 +341,20 @@ describe("migrateSkillsLayout", () => {
     expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
   });
 
+  it("moves again when main is unborn under a recorded layout commit", async () => {
+    await migrate();
+    // The operator deletes main, as remote_diverged advises before an adopt.
+    await git(bare, "update-ref", "-d", "refs/heads/main");
+
+    const layout = await migrate();
+
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(layout);
+    expect(await git(bare, "log", "-1", "--format=%P|%T", layout)).toBe(
+      "|4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    );
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
+  });
+
   it("moves again when the repo no longer has the recorded layout commit", async () => {
     await tx((trx) => store.recordLayoutCommit(trx, "f".repeat(40)));
 

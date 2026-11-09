@@ -195,17 +195,18 @@ async function onHistoryOf(repoPath: string, sha: string, head: string): Promise
 
 /**
  * Whether a recorded layout commit no longer describes the repo: the repo
- * was recreated without it, or it is a bare layout commit `main` no longer
- * descends from, as after an adopt replaced it. A bare one holds no skill, so
- * moving again reads every row as before.
+ * was recreated without it, `main` is unborn (the operator deleted it), or it
+ * is a bare layout commit `main` no longer descends from, as after an adopt
+ * replaced it. A bare one holds no skill, so moving again reads every row as
+ * before; moving onto an unborn `main` makes it Cogmo-only.
  */
 async function isStaleLayout(repoPath: string, recorded: string): Promise<boolean> {
   if ((await revParse(repoPath, `${recorded}^{commit}`)).isErr()) return true;
   const mainSha = await getMainSha(repoPath);
   return (
-    mainSha !== null &&
-    !(await isAncestor(repoPath, recorded, mainSha)) &&
-    (await isBareLayoutCommit(repoPath, recorded))
+    mainSha === null ||
+    (!(await isAncestor(repoPath, recorded, mainSha)) &&
+      (await isBareLayoutCommit(repoPath, recorded)))
   );
 }
 
