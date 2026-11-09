@@ -1,12 +1,16 @@
-// The contract between cogmo and its connectors: processes outside cogmo that
-// dial in, take jobs, and report their events and outcomes. The rules a
-// connector follows are in design/connectors.md → Wire contract.
+// The session between cogmo and a connector: a process outside cogmo that
+// dials in, takes jobs, and reports their events and outcomes. This file holds
+// what every kind of connector shares; each kind's job payloads have a file of
+// their own (coding.proto). The rules a connector follows are in
+// design/connectors.md → Wire contract.
 //
 // Every call carries `authorization: Bearer <token>`, the token
 // `cogmo connector add` printed.
 syntax = "proto3";
 
 package cogmo.connector.v1;
+
+import "cogmo/connector/v1/coding.proto";
 
 service ConnectorService {
   // The connector's session: cogmo sends jobs and cancels down it while it is open.
@@ -41,6 +45,8 @@ message CancelJob {
   string job_id = 1;
 }
 
+// Sent every 30 s on the stream itself, so it proves this stream is alive end
+// to end: a proxy answers HTTP/2 pings for its own hop.
 message Heartbeat {}
 
 message Job {
@@ -54,33 +60,6 @@ message Job {
     PublishSpec publish = 14;
     ReleaseSpec release = 15;
   }
-}
-
-message PrepareSpec {
-  string remote_url = 1; // carries no password, and no userinfo for http(s)
-  string base_branch = 2;
-  string work_branch = 3;
-}
-
-message AgentTurnSpec {
-  string prompt = 1;
-  string agent = 2;
-  uint64 token_budget = 3;
-  optional string session_id = 4; // the plan's session handle, on execute
-}
-
-message VerifySpec {
-  string command = 1;
-  uint32 timeout_seconds = 2;
-}
-
-message PublishSpec {
-  string commit_message = 1;
-  string remote_ref = 2;
-}
-
-message ReleaseSpec {
-  optional string salvage_ref = 1;
 }
 
 message AcceptJobRequest {
@@ -104,24 +83,6 @@ message JobEvent {
     ToolResult tool_result = 4;
     Usage usage = 5;
   }
-}
-
-message ToolCall {
-  string name = 1;
-  string summary = 2;
-}
-
-message ToolResult {
-  string name = 1;
-  bool ok = 2;
-  string summary = 3;
-}
-
-// Cumulative for the job.
-message Usage {
-  uint64 input_tokens = 1;
-  uint64 output_tokens = 2;
-  double cost_usd = 3;
 }
 
 message FinishJobRequest {
@@ -149,46 +110,6 @@ message JobResult {
     Published published = 5;
     Released released = 6;
   }
-}
-
-message Prepared {}
-
-message PlanResult {
-  string plan = 1;
-  string session_id = 2;
-}
-
-message Executed {
-  Usage usage = 1;
-}
-
-message VerifyVerdict {
-  int32 exit_code = 1;
-  bool timed_out = 2;
-  string output_tail = 3;
-}
-
-message Published {
-  string head_sha = 1;
-}
-
-message Released {
-  oneof outcome {
-    RemovedClean removed_clean = 1;
-    SalvagedAndRemoved salvaged_and_removed = 2;
-    Kept kept = 3;
-  }
-}
-
-message RemovedClean {}
-
-message SalvagedAndRemoved {
-  string salvage_ref = 1;
-  string sha = 2;
-}
-
-message Kept {
-  string reason = 1;
 }
 
 message JobError {

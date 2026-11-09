@@ -1,0 +1,91 @@
+// Payloads of coding jobs (design/connectors.md → Coding on a connector): the
+// spec each phase's `Job` carries, the events an agent turn reports, and each
+// phase's result. The session that carries them is session.proto.
+syntax = "proto3";
+
+package cogmo.connector.v1;
+
+message PrepareSpec {
+  string remote_url = 1; // carries no password, and no userinfo for http(s)
+  string base_branch = 2;
+  string work_branch = 3;
+}
+
+message AgentTurnSpec {
+  string prompt = 1;
+  string agent = 2;
+  uint64 token_budget = 3;
+  optional string session_id = 4; // the plan's session handle, on execute
+}
+
+message VerifySpec {
+  string command = 1;
+  uint32 timeout_seconds = 2;
+}
+
+message PublishSpec {
+  string commit_message = 1;
+  string remote_ref = 2;
+}
+
+message ReleaseSpec {
+  optional string salvage_ref = 1;
+}
+
+message ToolCall {
+  string name = 1;
+  string summary = 2;
+}
+
+message ToolResult {
+  string name = 1;
+  bool ok = 2;
+  string summary = 3;
+}
+
+// Cumulative for the job.
+message Usage {
+  uint64 input_tokens = 1;
+  uint64 output_tokens = 2;
+  double cost_usd = 3;
+}
+
+message Prepared {}
+
+message PlanResult {
+  string plan = 1;
+  string session_id = 2;
+}
+
+message Executed {
+  Usage usage = 1;
+}
+
+message VerifyVerdict {
+  int32 exit_code = 1;
+  bool timed_out = 2;
+  string output_tail = 3;
+}
+
+message Published {
+  string head_sha = 1;
+}
+
+message Released {
+  oneof outcome {
+    RemovedClean removed_clean = 1;
+    SalvagedAndRemoved salvaged_and_removed = 2;
+    Kept kept = 3;
+  }
+}
+
+message RemovedClean {}
+
+message SalvagedAndRemoved {
+  string salvage_ref = 1;
+  string sha = 2;
+}
+
+message Kept {
+  string reason = 1;
+}

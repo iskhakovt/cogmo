@@ -14,7 +14,7 @@ A connector is a process outside cogmo that runs part of cogmo's work somewhere 
 | Wire protocol | gRPC over HTTP/2. Every mainstream language has a production gRPC library, and streaming is part of the protocol. | Connect protocol: its gains are browsers and HTTP/1.1, which no connector needs. oRPC: TypeScript only, other languages through generated OpenAPI. MCP Tasks: built for tools a model calls, and experimental in spec and SDK. REST: generated server stubs and SSE support vary by language. HTTP/3: neither Node nor grpc-go serves gRPC over it. |
 | Node library | `@connectrpc/connect-node` + `@bufbuild/protobuf`, speaking gRPC. ESM output, plain generated types, and an in-memory transport (`createRouterTransport`) for tests. | `@grpc/grpc-js`: `@grpc/proto-loader`'s generated types need hand edits, and `ts-proto` brings `long.js`. Connectors see only the `.proto`, so swapping the library touches none of them. |
 | Direction | Connectors dial in. One listening port, one auth model, connectors behind NAT work, and channel connectors share the session. | cogmo dialling each connector: a URL per connector, and no path to one cogmo cannot reach. |
-| Contract home | `packages/connector-proto/`: the `.proto` under `proto/`, `buf.yaml`, `buf.gen.yaml`, and the generated TypeScript under `src/gen/`, committed. Ships in cogmo's release. Package `cogmo.connector.v1`; a breaking change is a `v2` package. | A separate repo with its own versioning, until a connector outside this repo needs it. |
+| Contract home | `packages/connector-proto/`: `session.proto` and `coding.proto` under `proto/`, `buf.yaml`, `buf.gen.yaml`, and the generated TypeScript under `src/gen/`, committed. Ships in cogmo's release. Package `cogmo.connector.v1`; a breaking change is a `v2` package. | A separate repo with its own versioning, until a connector outside this repo needs it. |
 | Contract CI | The `Connector contract` job: `buf lint`, `buf breaking` against `main`, and a check that `buf generate` leaves the tree clean. The generated code is excluded from Biome. | — |
 | Credentials | cogmo sends no secret to a connector. A connector pushes with its own git credentials; cogmo opens the PR with the repo's GitHub identity. `PrepareSpec.remote_url` is the repo's remote with any password removed, and with the whole userinfo removed from an http(s) remote, where a token can sit in either position. An SSH login name such as `git@` stays. | A PAT in a job: the identity would leave cogmo's custody for a process cogmo does not run. |
 | Process model | One cogmo process serves connectors. The hub is process memory: a second process, such as a rolling deploy's overlap, holds no session or job of the first. | — |
@@ -24,10 +24,14 @@ A connector is a process outside cogmo that runs part of cogmo's work somewhere 
 
 One server-streaming call carries cogmo's messages to the connector; unary calls carry the connector's side back. Each unary call is acknowledged on its own and is idempotent, so a dropped stream loses nothing the connector already sent, and an error belongs to one call. The server speaks only the gRPC protocol; a Connect or gRPC-Web request gets HTTP 415.
 
-```proto
-syntax = "proto3";
-package cogmo.connector.v1;
+The contract is two files in package `cogmo.connector.v1`, under [`packages/connector-proto/proto/cogmo/connector/v1/`](../packages/connector-proto/proto/cogmo/connector/v1/), which are its source of truth:
 
+- **`session.proto`** holds what every kind of connector shares: the service, the session's messages, and the job envelopes (`Job`, `JobEvent`, `JobResult`, `JobError` and its codes).
+- **`coding.proto`** holds the coding jobs' payloads: each phase's spec, an agent turn's events, and each phase's result.
+
+A channel connector's messages go in a `channel.proto` of their own. The service, from `session.proto`:
+
+```proto
 service ConnectorService {
   // The connector's session: cogmo sends jobs and cancels down it while it is open.
   rpc Connect(ConnectRequest) returns (stream ConnectResponse);
@@ -35,11 +39,6 @@ service ConnectorService {
   rpc AcceptJob(AcceptJobRequest) returns (AcceptJobResponse);           // idempotent on job_id
   rpc ReportEvents(ReportEventsRequest) returns (ReportEventsResponse);  // idempotent on (job_id, seq)
   rpc FinishJob(FinishJobRequest) returns (FinishJobResponse);           // idempotent on job_id
-}
-
-message ConnectRequest {
-  repeated string held_job_ids = 1;   // jobs it has persisted and still holds
-  repeated string held_task_ids = 2;  // tasks whose workspaces it holds
 }
 
 message ConnectResponse {
@@ -50,14 +49,11 @@ message ConnectResponse {
     Heartbeat heartbeat = 4;
   }
 }
-message SessionAccepted { repeated string awaited_job_ids = 1; }
-message CancelJob { string job_id = 1; }
-message Heartbeat {}
 
 message Job {
   string job_id = 1;                  // "<task_id>/<phase>/<spec digest>"
   string task_id = 2;
-  oneof spec {
+  oneof spec {                        // the specs are in coding.proto
     PrepareSpec prepare = 10;
     AgentTurnSpec plan = 11;
     AgentTurnSpec execute = 12;
@@ -66,28 +62,6 @@ message Job {
     ReleaseSpec release = 15;
   }
 }
-message PrepareSpec   { string remote_url = 1; string base_branch = 2; string work_branch = 3; }
-message AgentTurnSpec { string prompt = 1; string agent = 2; uint64 token_budget = 3; optional string session_id = 4; }
-message VerifySpec    { string command = 1; uint32 timeout_seconds = 2; }
-message PublishSpec   { string commit_message = 1; string remote_ref = 2; }
-message ReleaseSpec   { optional string salvage_ref = 1; }
-
-message AcceptJobRequest { string job_id = 1; }
-message AcceptJobResponse {}
-message ReportEventsRequest { string job_id = 1; repeated JobEvent events = 2; }
-message ReportEventsResponse {}
-message JobEvent {
-  uint64 seq = 1;                     // strictly increasing per job, from 1
-  oneof event {
-    string text_delta = 2;
-    ToolCall tool_call = 3;
-    ToolResult tool_result = 4;
-    Usage usage = 5;
-  }
-}
-message ToolCall { string name = 1; string summary = 2; }
-message ToolResult { string name = 1; bool ok = 2; string summary = 3; }
-message Usage { uint64 input_tokens = 1; uint64 output_tokens = 2; double cost_usd = 3; }  // cumulative for the job
 
 message FinishJobRequest {
   string job_id = 1;
@@ -97,46 +71,6 @@ message FinishJobRequest {
     Cancelled cancelled = 4;
   }
   uint64 last_seq = 5;                // the last event seq it reported; 0 if none
-}
-message FinishJobResponse {}
-message Cancelled {}
-message JobResult {
-  oneof result {
-    Prepared prepared = 1;
-    PlanResult plan = 2;
-    Executed executed = 3;
-    VerifyVerdict verify = 4;
-    Published published = 5;
-    Released released = 6;
-  }
-}
-message Prepared {}
-message PlanResult { string plan = 1; string session_id = 2; }
-message Executed { Usage usage = 1; }
-message VerifyVerdict { int32 exit_code = 1; bool timed_out = 2; string output_tail = 3; }
-message Published { string head_sha = 1; }
-message Released {
-  oneof outcome {
-    RemovedClean removed_clean = 1;
-    SalvagedAndRemoved salvaged_and_removed = 2;
-    Kept kept = 3;
-  }
-}
-message RemovedClean {}
-message SalvagedAndRemoved { string salvage_ref = 1; string sha = 2; }
-message Kept { string reason = 1; }
-message JobError { JobErrorCode code = 1; string message = 2; }
-enum JobErrorCode {
-  JOB_ERROR_CODE_UNSPECIFIED = 0;
-  JOB_ERROR_CODE_AGENT_FAILED = 1;
-  JOB_ERROR_CODE_NO_PLAN = 2;
-  JOB_ERROR_CODE_SESSION_LOST = 3;
-  JOB_ERROR_CODE_BRANCH_CONFLICT = 4;
-  JOB_ERROR_CODE_PUSH_AUTH_FAILED = 5;
-  JOB_ERROR_CODE_PUSH_FAILED = 6;
-  JOB_ERROR_CODE_WORKSPACE_FAILED = 7;
-  JOB_ERROR_CODE_JOB_CONFLICT = 8;
-  JOB_ERROR_CODE_UNSUPPORTED = 9;
 }
 ```
 
@@ -160,7 +94,7 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 - Each call checks its token against the hub's cache of active connectors. A 30 s hub timer refreshes the cache from the table, as does a token the cache does not recognise (at most once every 5 s), so a new token works within seconds and a revoke or rotate takes effect, closing the old token's stream, within 30 s. A call that needs a refresh joins the one in flight and waits at most 5 s for it, and an unknown token gets `UNAVAILABLE` while the last refresh failed. Once three refreshes in a row have failed or stalled (90 s since the last good load started), the cache fails closed: every call gets `UNAVAILABLE` and, within 5 s, every open stream closes, so a revoke never outlives it.
 - Jobs are keyed on (connector, `job_id`). A call naming another connector's job fails with `PERMISSION_DENIED`, and one naming a job this process does not know fails with `NOT_FOUND`.
 
-**Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_HOST`:`CONNECTOR_PORT`. When `CONNECTOR_PORT` is unset, no server starts, and boot warns if a repo points at a connector. `CONNECTOR_HOST` defaults to `0.0.0.0`, the container convention `WEB_HOST` follows ([web-ui.md](web-ui.md) → Auth and bind). As there, the boundary is the publish layer: the token crosses h2c in cleartext, so the port is published on host loopback, or reached through a tailnet or a TLS proxy. A bare-metal run with no such layer sets `CONNECTOR_HOST=127.0.0.1`. cogmo sends a `Heartbeat` every 30 s and both sides send HTTP/2 keepalive pings; cogmo pings every 30 s and closes a connection that has not answered within 20 s. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
+**Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_HOST`:`CONNECTOR_PORT`. When `CONNECTOR_PORT` is unset, no server starts, and boot warns if a repo points at a connector. `CONNECTOR_HOST` defaults to `0.0.0.0`, the container convention `WEB_HOST` follows ([web-ui.md](web-ui.md) → Auth and bind). As there, the boundary is the publish layer: the token crosses h2c in cleartext, so the port is published on host loopback, or reached through a tailnet or a TLS proxy. A bare-metal run with no such layer sets `CONNECTOR_HOST=127.0.0.1`. cogmo sends a `Heartbeat` down the stream every 30 s, which proves the stream alive end to end, since a proxy answers HTTP/2 pings for its own hop. Both sides also send HTTP/2 keepalive pings; cogmo pings every 30 s and closes a connection that has not answered within 20 s. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
 
 When cogmo ends a session, the stream closes with a status that says why: `ABORTED` when a newer session for the connector replaced it, `UNAUTHENTICATED` when its token was rotated or revoked, and `UNAVAILABLE` on shutdown or a stale cache. Closing the server destroys any connection whose streams are still open after 2 s.
 
@@ -324,7 +258,7 @@ Check in a spike before building:
 
 ## Channel connectors `[proposed]`
 
-A channel connector exposes the per-channel `Transport` from [operator-facade.md](operator-facade.md) on the same session. Inbound messages arrive as a unary `Receive`, idempotent on the platform's message id; deliveries and edits go down the `Connect` stream. Its design follows that doc's split slice.
+A channel connector exposes the per-channel `Transport` from [operator-facade.md](operator-facade.md) on the same session, with its messages in `channel.proto`. Inbound messages arrive as a unary `Receive`, idempotent on the platform's message id; deliveries and edits go down the `Connect` stream. Its design follows that doc's split slice.
 
 ## Testing `[proposed]`
 
