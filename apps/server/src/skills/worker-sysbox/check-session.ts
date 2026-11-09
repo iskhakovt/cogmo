@@ -8,19 +8,13 @@ import {
   INSTALL_TIMEOUT_MS,
   isLockfileContentRefusal,
   type LockfileSnapshot,
+  RUNTIME_PYTHON,
 } from "../deps.js";
 import { CheckReplySchema, type CheckRequest } from "../protocol.js";
 import { execForReply, type SkillsSessionHost, withOneShotSession } from "./one-shot-session.js";
 
 /** The tools' budget in a check session. */
 const CHECK_TIMEOUT_MS = 120_000;
-
-/**
- * The runtime virtualenv's interpreter, named by path: a backend's exec need
- * not keep the image's `PATH`, and on Daytona a bare `python3` is the base
- * image's interpreter, which has no `cogmo_skills_runtime`.
- */
-const RUNTIME_PYTHON = "/opt/cogmo-skills/.venv/bin/python3";
 
 export interface SandboxCpythonChecksOptions extends SkillsSessionHost {
   /**

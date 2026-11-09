@@ -350,6 +350,13 @@ export function isLockfileContentRefusal(message: string): boolean {
 const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
 
 /**
+ * The skills image's runtime interpreter, named by path: a backend's exec need
+ * not keep the image's `PATH`, and on Daytona a bare `python3` is the base
+ * image's interpreter, which has no `cogmo_skills_runtime`.
+ */
+export const RUNTIME_PYTHON = "/opt/cogmo-skills/.venv/bin/python3";
+
+/**
  * Prints the image's `py<major>.<minor>` tag, which names skill venvs. The
  * populate script and the reaper's both run it, so the two always agree on
  * which venvs are live. `-I` keeps the cwd off `sys.path` and ignores
@@ -357,7 +364,7 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
  * the script runs in; without it, a `cogmo_skills_runtime` in the cwd would
  * run instead.
  */
-export const PYTHON_ABI_TAG_COMMAND = "python3 -I -m cogmo_skills_runtime.abi";
+export const PYTHON_ABI_TAG_COMMAND = `${RUNTIME_PYTHON} -I -m cogmo_skills_runtime.abi`;
 
 /**
  * Shell program that the populator invokes inside the worker

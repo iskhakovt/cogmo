@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
 import { expectDefined } from "../test/assertions.js";
+import { repoRoot } from "../test/repo-root.js";
 import { skillsRepoAt } from "../test/skills-repo.js";
 import {
   ensureVenvPopulated,
@@ -20,6 +22,16 @@ import {
   readLockfileAtSha,
 } from "./deps.js";
 import { bootstrapSkillsRepo } from "./repo.js";
+
+/** The runtime virtualenv, as `images/skills/Dockerfile` declares it. */
+function dockerfileRuntimeVenv(): string {
+  const dockerfile = readFileSync(join(repoRoot(), "images/skills/Dockerfile"), "utf8");
+  return expectDefined(
+    /^ENV VIRTUAL_ENV="([^"]+)"$/m.exec(dockerfile)?.[1],
+    "images/skills/Dockerfile's ENV VIRTUAL_ENV",
+  );
+}
+
 import type { SkillsRepo } from "./skill-files.js";
 
 const execFileP = promisify(execFile);
@@ -704,8 +716,8 @@ describe("ensureVenvPopulated", () => {
     expect(call[1]?.attachStdin).toBe(true);
   });
 
-  it("reads the ABI tag with the exec's cwd off sys.path", async () => {
-    // Why `-I`: see `PYTHON_ABI_TAG_COMMAND`.
+  it("reads the ABI tag with the runtime interpreter and the exec's cwd off sys.path", async () => {
+    // Why the path and `-I`: see `RUNTIME_PYTHON` and `PYTHON_ABI_TAG_COMMAND`.
     const exec = makeFakeExec();
     const session = mock<SandboxSession>();
     session.execStreaming.mockResolvedValue(exec.handle);
@@ -722,7 +734,9 @@ describe("ensureVenvPopulated", () => {
 
     const [argv] = expectDefined(session.execStreaming.mock.calls[0], "populate exec");
     const script = expectDefined(argv[2], "populate script");
-    expect(/^PY_ABI=\$\((.*)\)$/m.exec(script)?.[1]).toBe("python3 -I -m cogmo_skills_runtime.abi");
+    expect(/^PY_ABI=\$\((.*)\)$/m.exec(script)?.[1]).toBe(
+      `${dockerfileRuntimeVenv()}/bin/python3 -I -m cogmo_skills_runtime.abi`,
+    );
   });
 
   it("runs from / with uv's config discovery off, so uv ignores config a task planted in $HOME", async () => {

@@ -1,16 +1,13 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SandboxCapabilities } from "../../sandbox/index.js";
 import { expectDefined } from "../../test/assertions.js";
-import { repoRoot } from "../../test/repo-root.js";
 import {
   type ExecScript,
   type SessionHarness,
   sessionHarness,
 } from "../../test/session-harness.js";
 import { isUuid } from "../../util/uuid.js";
-import { DEFAULT_DEPENDENCY_SESSION_LIMITS } from "../deps.js";
+import { DEFAULT_DEPENDENCY_SESSION_LIMITS, RUNTIME_PYTHON } from "../deps.js";
 import { makeSandboxCpythonChecks } from "./check-session.js";
 
 const VOLUME = "cogmo-skills-venvs";
@@ -24,14 +21,8 @@ const FINDINGS_REPLY = `${JSON.stringify({
   suppressions: [SUPPRESSION],
   toolchainVersion: "2.17.0",
 })}\n`;
-/** The runtime virtualenv's interpreter, as the skills image declares it. */
-const RUNTIME_VENV = expectDefined(
-  /^ENV VIRTUAL_ENV="([^"]+)"$/m.exec(
-    readFileSync(join(repoRoot(), "images/skills/Dockerfile"), "utf8"),
-  )?.[1],
-  "images/skills/Dockerfile's ENV VIRTUAL_ENV",
-);
-const CHECK_RUNNER = [`${RUNTIME_VENV}/bin/python3`, "-I", "-m", "cogmo_skills_runtime.check"];
+/** The runtime interpreter, which `deps.test.ts` pins against the skills image. */
+const CHECK_RUNNER = [RUNTIME_PYTHON, "-I", "-m", "cogmo_skills_runtime.check"];
 /** The populate script's command: `sh -c <script> populate <hash> <worker id>`. */
 const POPULATE = ["sh", "-c"];
 const DAYTONA: Partial<SandboxCapabilities> = {

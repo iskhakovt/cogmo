@@ -93,8 +93,9 @@ export type ReplyExecError =
 
 /**
  * Run `argv` in `session`, sending `stdin`, and read its one reply: the last
- * line of its stdout, split at `\r` as well as `\n`, parsed with `schema`. `label` names the exec in a
- * failure (`the import`), which quotes the tail of its stderr.
+ * line of its stdout, split at `\r` as well as `\n`, parsed with `schema`.
+ * `label` names the exec in a failure (`the import`), which quotes the tail of
+ * its stderr.
  */
 export async function execForReply<R>(
   session: SandboxSession,

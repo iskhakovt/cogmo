@@ -43,8 +43,8 @@
  *   2. `gh auth status` — the PAT comes from gh CLI's keyring. Scope
  *      requirements: `repo` (push branches, open + close PRs).
  *   3. `RECORD=1 pnpm test:integration src/test/skill-authoring.integration.test.ts`
- *   4. Copy `SKILL.md` and `skill.py` from the recorded PR's head commit
- *      into `test/fixtures/skill-authoring-branch/`. `afterAll` deletes
+ *   4. Copy every file under the recorded PR's `skills/<name>/` (`SKILL.md`,
+ *      `skill.py`, `test_skill.py`) into `test/fixtures/skill-authoring-branch/`. `afterAll` deletes
  *      the branch, so fetch `pull/<n>/head`; `<n>` is in the `closed PR`
  *      log line.
  *   5. Re-run without `RECORD=1` to confirm replay is byte-stable.
