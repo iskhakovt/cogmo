@@ -46,6 +46,12 @@ for (const name of [
  * A service base URL without `user:password@` — credentials go in the
  * service's key variable. The issue message never echoes the value.
  */
+/**
+ * Connector job lease in seconds, capped at 2,147,483: the longest delay
+ * `setTimeout` honours is 2^31 - 1 ms, and a longer one fires at once.
+ */
+export const ConnectorLeaseSecondsSchema = z.coerce.number().int().positive().max(2_147_483);
+
 export const ServiceUrlSchema = z
   .string()
   .url()
@@ -123,7 +129,7 @@ export const env = createEnv({
      * Connector job lease: how long a dispatched job waits to be accepted, and
      * an accepted job for its connector to reconnect, before it is unavailable or lost.
      */
-    CONNECTOR_LEASE_SECONDS: z.coerce.number().int().positive().max(2_147_483).default(120),
+    CONNECTOR_LEASE_SECONDS: ConnectorLeaseSecondsSchema.default(120),
     /** Absolute web-session TTL (days). */
     WEB_SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
     /**

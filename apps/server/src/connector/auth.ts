@@ -34,10 +34,10 @@ export interface ConnectorAuthCache {
   /** Whether the last successful load is too old to trust, so revokes may be missing. */
   isStale(): boolean;
   /**
-   * Reloads the cache from the table, or joins the reload in flight. Resolves
-   * `false`, logged, when the read fails, keeping the old cache.
+   * Reloads the cache from the table, or joins the reload in flight. Never
+   * rejects: a failed read is logged and keeps the old cache.
    */
-  refresh(): Promise<boolean>;
+  refresh(): Promise<void>;
 }
 
 export class ConnectorAuth implements ConnectorAuthCache {
@@ -47,7 +47,7 @@ export class ConnectorAuth implements ConnectorAuthCache {
   /** When the last successful load started. */
   #loadedAt = Number.NEGATIVE_INFINITY;
   #lastLoadFailed = false;
-  #refreshing: Promise<boolean> | null = null;
+  #refreshing: Promise<void> | null = null;
 
   private constructor(deps: ConnectorAuthDeps) {
     this.#deps = deps;
@@ -82,15 +82,11 @@ export class ConnectorAuth implements ConnectorAuthCache {
     return Date.now() - this.#loadedAt >= STALE_MS;
   }
 
-  refresh(): Promise<boolean> {
+  refresh(): Promise<void> {
     this.#refreshing ??= this.#load()
-      .then(
-        () => true,
-        (error: unknown) => {
-          logger.warn({ err: error }, "connector auth: refreshing the connector cache failed");
-          return false;
-        },
-      )
+      .catch((error: unknown) => {
+        logger.warn({ err: error }, "connector auth: refreshing the connector cache failed");
+      })
       .finally(() => {
         this.#refreshing = null;
       });

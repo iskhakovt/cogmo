@@ -222,7 +222,7 @@ dispatched ──► accepted ──► completed | failed | cancelled
 | `dispatched / accepted → failed` | `FinishJob(completed)` whose result case does not match the job's spec | failed with `UNSPECIFIED`; the call gets `INVALID_ARGUMENT` |
 | unchanged | `FinishJob` with no outcome | the call gets `INVALID_ARGUMENT` |
 | `dispatched → unavailable` | no session accepts it within `CONNECTOR_LEASE_SECONDS` (default 120) of its dispatch | a reconnect does not restart the lease |
-| `accepted → lost` | the session closed and none holding the job opened within the lease, or a new session's `held_job_ids` omitted it | — |
+| `accepted → lost` | no session holding the job opened within the lease of its session closing, or of an `AcceptJob` that arrived with none open; or a new session's `held_job_ids` omitted it | — |
 | `dispatched / accepted → timed_out` | the job kind's total or idle cap | `CancelJob` sent |
 | any terminal state | a late `FinishJob` or `ReportEvents` | acknowledged and dropped; the hub keeps the id until a `release` of the task ends `completed` or `failed`, and keeps that release's id, so a retried `FinishJob` or `run` on it gets its outcome |
 | any terminal state | a late `AcceptJob` | refused with `NOT_FOUND`; the connector drops the job unstarted (rule 1) |

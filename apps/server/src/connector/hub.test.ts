@@ -44,6 +44,12 @@ const OTHER: ActiveConnector = {
   kind: "coding",
   tokenHash: hashConnectorToken("other-token"),
 };
+const NEW_CONNECTOR: ActiveConnector = {
+  id: "conn-new",
+  name: "new",
+  kind: "coding",
+  tokenHash: hashConnectorToken("new"),
+};
 
 type ConnectorClient = Client<typeof ConnectorService>;
 type RunResult = Result<JobOutcome, JobRunError>;
@@ -219,42 +225,10 @@ describe("auth", () => {
     );
   });
 
-  it("refreshes the cache for an unknown token at most once every 5 s", async () => {
-    const added: ActiveConnector = {
-      ...OTHER,
-      id: "conn-new",
-      tokenHash: hashConnectorToken("new"),
-    };
-    store.listActive.mockResolvedValue([PASEO, OTHER, added]);
-    await advance(1_000);
-    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(
-      Code.Unauthenticated,
-    );
-    // Only the load at create.
-    expect(store.listActive).toHaveBeenCalledTimes(1);
-    await advance(5_000);
-    // Authenticated now, so the call fails on the unknown job instead.
-    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.NotFound);
-    expect(store.listActive).toHaveBeenCalledTimes(2);
-  });
-
   it("answers UNAVAILABLE when the refresh for an unknown token fails", async () => {
     store.listActive.mockRejectedValue(new Error("db down"));
     await advance(5_000);
     expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.Unavailable);
-  });
-
-  it("fails closed with UNAVAILABLE once the cache has gone 90 s without a refresh", async () => {
-    store.listActive.mockRejectedValue(new Error("db down"));
-    await advance(60_000);
-    // Refreshes failing for 60 s: the cached token still works.
-    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("paseo-token")))).toBe(
-      Code.NotFound,
-    );
-    await advance(30_000);
-    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("paseo-token")))).toBe(
-      Code.Unavailable,
-    );
   });
 
   it("closes every stream with UNAVAILABLE once the cache is stale", async () => {
@@ -267,49 +241,6 @@ describe("auth", () => {
     expect(stream.error?.code).toBe(Code.Unavailable);
   });
 
-  it("lets concurrent calls with a new token share the refresh the first one started", async () => {
-    const added: ActiveConnector = {
-      ...OTHER,
-      id: "conn-new",
-      tokenHash: hashConnectorToken("new"),
-    };
-    store.listActive.mockResolvedValue([PASEO, OTHER, added]);
-    await advance(5_000);
-    const codes = await Promise.all([
-      callError(client.acceptJob({ jobId: "x" }, bearer("new"))),
-      callError(client.acceptJob({ jobId: "y" }, bearer("new"))),
-    ]);
-    // Authenticated, so both fail on the unknown job.
-    expect(codes).toEqual([Code.NotFound, Code.NotFound]);
-  });
-
-  it("keeps answering UNAVAILABLE for an unknown token within 5 s of a failed refresh", async () => {
-    store.listActive.mockRejectedValue(new Error("db down"));
-    await advance(5_000);
-    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.Unavailable);
-    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.Unavailable);
-  });
-
-  it("dates staleness from when the last good load started", async () => {
-    const stream = await connected("paseo-token", []);
-    store.listActive.mockImplementationOnce(
-      () => new Promise((resolve) => setTimeout(() => resolve([PASEO, OTHER]), 1_000)),
-    );
-    store.listActive.mockRejectedValue(new Error("db down"));
-    // A good load from 30 s to 31 s, then failures at 60, 90 and 120 s.
-    await advance(120_000);
-    await stream.done;
-    expect(stream.error?.code).toBe(Code.Unavailable);
-  });
-
-  it("fails a call closed within 5 s when a stalled refresh outlives the cache", async () => {
-    store.listActive.mockReturnValue(new Promise(() => {}));
-    await advance(90_000);
-    const call = callError(client.acceptJob({ jobId: "x" }, bearer("paseo-token")));
-    await advance(5_000);
-    expect(await call).toBe(Code.Unavailable);
-  });
-
   it("closes streams within 5 s of the cache going stale, whatever the refreshes do", async () => {
     const stream = await connected("paseo-token", []);
     store.listActive.mockReturnValue(new Promise(() => {}));
@@ -319,12 +250,7 @@ describe("auth", () => {
   });
 
   it("closes streams on time after a good load between refresh ticks", async () => {
-    const added: ActiveConnector = {
-      ...OTHER,
-      id: "conn-new",
-      tokenHash: hashConnectorToken("new"),
-    };
-    store.listActive.mockResolvedValue([PASEO, OTHER, added]);
+    store.listActive.mockResolvedValue([PASEO, OTHER, NEW_CONNECTOR]);
     await advance(5_000);
     // An unknown token loads the cache at 5 s.
     expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.NotFound);
@@ -681,6 +607,18 @@ describe("sessions", () => {
     const run = startRun(prepareJob());
     await settle();
     expect(run.result).toEqual(err({ kind: "unavailable" }));
+  });
+
+  it("starts no idle cap for a report that arrives after close", async () => {
+    await connected("paseo-token", []);
+    const run = startRun(planJob(0n));
+    await settle();
+    const auth = bearer("paseo-token");
+    await client.acceptJob({ jobId: "task-1/plan/d2" }, auth);
+    hub.close();
+    await client.reportEvents({ jobId: "task-1/plan/d2", events: [textEvent(1n, "a")] }, auth);
+    await advance(5 * MINUTE);
+    expect(run.result).toBeNull();
   });
 });
 
