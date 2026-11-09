@@ -24,6 +24,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -389,8 +390,8 @@ type TransferError =
   | { kind: "local_diverged" }
   | { kind: "remote_unreachable"; reason: string };
 
-/** Where an adopt over the bare layout commit fetches the remote's main. */
-const ADOPT_REF = "refs/cogmo/adopt-main";
+/** Where adopts over the bare layout commit fetch the remote's main, one ref each. */
+const ADOPT_REF_PREFIX = "refs/cogmo/adopt-main-";
 
 /**
  * Adopt the remote's main over a local main that holds only the bare layout
@@ -404,7 +405,9 @@ async function adoptOverBareLayout(
 ): Promise<Result<void, TransferError>> {
   const relayout = () =>
     migrateSkillsLayout({ runInTx: deps.runInTx, store: deps.skillStore }, deps.skillsRepoPath);
-  const args = ["-C", deps.skillsRepoPath, "fetch", p.url, `+refs/heads/main:${ADOPT_REF}`];
+  // Its own ref, so a concurrent adopt neither resolves nor deletes it.
+  const adoptRef = `${ADOPT_REF_PREFIX}${randomUUID()}`;
+  const args = ["-C", deps.skillsRepoPath, "fetch", p.url, `+refs/heads/main:${adoptRef}`];
   try {
     try {
       if (p.pat) {
@@ -415,9 +418,9 @@ async function adoptOverBareLayout(
     } catch (e) {
       return err({ kind: "remote_unreachable", reason: describeError(e) });
     }
-    const adopted = await revParse(deps.skillsRepoPath, ADOPT_REF);
+    const adopted = await revParse(deps.skillsRepoPath, adoptRef);
     if (adopted.isErr()) {
-      throw new Error(`configureSkillsRemote: ${ADOPT_REF} is missing right after its fetch`);
+      throw new Error(`configureSkillsRemote: ${adoptRef} is missing right after its fetch`);
     }
     await deps.runInTx((tx) => deps.skillStore.forgetLayoutCommit(tx));
     try {
@@ -428,7 +431,7 @@ async function adoptOverBareLayout(
       return err({ kind: "remote_diverged" });
     }
   } finally {
-    await deleteRef(deps.skillsRepoPath, ADOPT_REF);
+    await deleteRef(deps.skillsRepoPath, adoptRef);
   }
   await relayout();
   return ok(undefined);

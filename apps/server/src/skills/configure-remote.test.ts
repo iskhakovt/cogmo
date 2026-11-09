@@ -333,7 +333,7 @@ describe("configureSkillsRemote", () => {
       const hook = join(skillsPath, "hooks", "reference-transaction");
       await writeFile(
         hook,
-        `#!/bin/sh\n[ "$1" = committed ] || exit 0\ngrep -q ' refs/cogmo/adopt-main$' && git update-ref refs/heads/main ${deploy}\nexit 0\n`,
+        `#!/bin/sh\n[ "$1" = committed ] || exit 0\ngrep -q ' refs/cogmo/adopt-main-' && git update-ref refs/heads/main ${deploy}\nexit 0\n`,
         { mode: 0o755 },
       );
       const remoteUrl = await makePopulatedRemote();
@@ -348,9 +348,9 @@ describe("configureSkillsRemote", () => {
       expect(await readMainSha(skillsPath)).toBe(deploy);
       // The bare layout commit, still on main's history, is recorded again.
       expect(await tx((trx) => skillStore.getLayoutCommitSha(trx))).toBe(bare);
-      await expect(
-        execFileP("git", ["-C", skillsPath, "rev-parse", "--verify", "refs/cogmo/adopt-main"]),
-      ).rejects.toThrow();
+      expect(
+        (await execFileP("git", ["-C", skillsPath, "for-each-ref", "refs/cogmo/"])).stdout,
+      ).toBe("");
     } finally {
       await close();
     }
@@ -399,7 +399,7 @@ describe("configureSkillsRemote", () => {
       // The fetch's update of the side ref is aborted; its deletion passes.
       await writeFile(
         join(skillsPath, "hooks", "reference-transaction"),
-        '#!/bin/sh\n[ "$1" = prepared ] || exit 0\nexec awk \'$3 == "refs/cogmo/adopt-main" && $2 !~ /^0+$/ { f = 1 } END { exit f }\'\n',
+        "#!/bin/sh\n[ \"$1\" = prepared ] || exit 0\nexec awk '$3 ~ /^refs\\/cogmo\\/adopt-main-/ && $2 !~ /^0+$/ { f = 1 } END { exit f }'\n",
         { mode: 0o755 },
       );
       const remoteUrl = await makePopulatedRemote();
@@ -413,9 +413,55 @@ describe("configureSkillsRemote", () => {
       if (result.isErr()) expect(result.error.kind).toBe("remote_unreachable");
       expect(await readMainSha(skillsPath)).toBe(bare);
       expect(await tx((trx) => skillStore.getLayoutCommitSha(trx))).toBe(bare);
-      await expect(
-        execFileP("git", ["-C", skillsPath, "rev-parse", "--verify", "refs/cogmo/adopt-main"]),
-      ).rejects.toThrow();
+      expect(
+        (await execFileP("git", ["-C", skillsPath, "for-each-ref", "refs/cogmo/"])).stdout,
+      ).toBe("");
+    } finally {
+      await close();
+    }
+  });
+
+  it("own + adopt over the bare layout commit fetches to a side ref no other adopt shares", {
+    timeout: 30_000,
+  }, async () => {
+    const { tx, close } = await createTestDatabase();
+    try {
+      const skillStore = new DrizzleSkillStore();
+      const skillsPath = join(workDir, "skills.git");
+      await bootstrapSkillsRepo({ path: skillsPath });
+      const bare = await migrateSkillsLayout({ runInTx: tx, store: skillStore }, skillsPath);
+      // Another adopt's fetch lands right after this one's, into the side
+      // ref name every adopt once shared.
+      const theirs = "refs/cogmo/adopt-main";
+      await writeFile(
+        join(skillsPath, "hooks", "reference-transaction"),
+        `#!/bin/sh\n[ "$1" = committed ] || exit 0\nawk '$3 ~ /^refs\\/cogmo\\// && $2 != "${bare}" && $2 !~ /^0+$/ { f = 1 } END { exit !f }' && git update-ref ${theirs} ${bare}\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const remoteUrl = await makePopulatedRemote();
+      const remoteSha = await readMainSha(remoteUrl.replace("file://", ""));
+
+      const result = await configureSkillsRemote(
+        { runInTx: tx, codingStore: setupStoreWithNoRow(), skillStore, skillsRepoPath: skillsPath },
+        { kind: "own", direction: "adopt", remoteUrl },
+      );
+
+      expect(result.isOk()).toBe(true);
+      const layout = await tx((trx) => skillStore.getLayoutCommitSha(trx));
+      const { stdout } = await execFileP("git", ["-C", skillsPath, "rev-parse", `${layout}^`]);
+      expect(stdout.trim()).toBe(remoteSha);
+      // The other adopt's ref is its own to resolve and delete.
+      expect(
+        (
+          await execFileP("git", [
+            "-C",
+            skillsPath,
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/cogmo/",
+          ])
+        ).stdout.trim(),
+      ).toBe(theirs);
     } finally {
       await close();
     }
