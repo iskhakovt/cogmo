@@ -198,7 +198,7 @@ Required by `serve`, which checks the bucket at boot. With `S3_ENDPOINT` unset t
 |-|-|-|
 | `CONNECTOR_PORT` | — | Port for the connector server (gRPC over h2c). Unset, none starts. See [Connectors](#connectors). |
 | `CONNECTOR_HOST` | `0.0.0.0` | Bind host for the connector server. Restrict at the publish layer, as for `WEB_HOST`; set `127.0.0.1` on a bare-metal run with no proxy. |
-| `CONNECTOR_LEASE_SECONDS` | `120` | How long a connector job waits for its connector to reconnect before the job is lost. |
+| `CONNECTOR_LEASE_SECONDS` | `120` | How long a connector job waits to be accepted, and once accepted for its connector to reconnect, before it fails. |
 
 #### Sandbox backend
 

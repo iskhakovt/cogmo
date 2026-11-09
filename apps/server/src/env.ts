@@ -119,7 +119,10 @@ export const env = createEnv({
     CONNECTOR_HOST: z.string().default("0.0.0.0"),
     /** Connector server port (gRPC over h2c). Unset, no connector server starts. */
     CONNECTOR_PORT: z.coerce.number().int().positive().optional(),
-    /** How long a connector job waits for a session to carry it before it is lost or unavailable. */
+    /**
+     * Connector job lease: how long a dispatched job waits to be accepted, and
+     * an accepted job for its connector to reconnect, before it is unavailable or lost.
+     */
     CONNECTOR_LEASE_SECONDS: z.coerce.number().int().positive().default(120),
     /** Absolute web-session TTL (days). */
     WEB_SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),

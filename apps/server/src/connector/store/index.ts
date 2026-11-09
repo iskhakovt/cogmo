@@ -13,10 +13,10 @@ export type ConnectorStatus = (typeof connectorStatus.enumValues)[number];
 
 /** What the hub's auth cache holds for each active connector. */
 export interface ActiveConnector {
-  id: string;
-  name: string;
-  kind: ConnectorKind;
-  tokenHash: string;
+  readonly id: string;
+  readonly name: string;
+  readonly kind: ConnectorKind;
+  readonly tokenHash: string;
 }
 
 /** A connector as `cogmo connector list` shows it. */

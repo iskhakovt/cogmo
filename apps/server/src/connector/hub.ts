@@ -10,7 +10,9 @@
  *       ├──────────────────────► unavailable
  *       └──────────────────────► timed_out
  *
- * The job's durable state is the connector's (rule 4). This view lives inside
+ * An ended job's state is its outcome: the connector's `completed`, `failed`
+ * or `cancelled`, or the hub's `lost`, `timed_out` or `unavailable`. The job's
+ * durable state is the connector's (rule 4). This view lives inside
  * the step that awaits the job, so a process that loses it also loses the run.
  */
 
@@ -68,32 +70,25 @@ export interface ConnectorHub extends ConnectorJobs {
 }
 
 export interface ConnectorHubOptions {
-  /** How long a job waits for a session to carry it. */
+  /** How long a dispatched job waits to be accepted, and an accepted job for a session. */
   leaseMs: number;
 }
 
 type RunResult = Result<JobOutcome, JobRunError>;
 
-type JobStatus =
-  | "dispatched"
-  | "accepted"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "lost"
-  | "timed_out"
-  | "unavailable";
+type JobState =
+  | { status: "dispatched" }
+  | { status: "accepted" }
+  | { status: "ended"; outcome: RunResult };
 
 interface JobEntry {
   readonly connectorId: string;
   readonly job: Job;
   readonly phase: JobPhase;
   readonly caps: JobCaps;
-  status: JobStatus;
+  state: JobState;
   /** The highest event `seq` delivered. */
   lastSeq: bigint;
-  /** Set once the job is terminal. */
-  outcome: RunResult | null;
   waiters: Array<{ handlers: JobEventHandlers; resolve: (result: RunResult) => void }>;
   totalTimer: NodeJS.Timeout | null;
   idleTimer: NodeJS.Timeout | null;
@@ -137,11 +132,20 @@ export class SessionHub implements ConnectorHub {
 
   run(connectorId: string, job: Job, handlers: JobEventHandlers): Promise<RunResult> {
     const existing = this.#jobs.get(job.jobId);
-    if (existing && existing.connectorId !== connectorId) {
-      throw new Error(`job ${job.jobId} belongs to another connector`);
+    if (existing) {
+      if (existing.connectorId !== connectorId) {
+        throw new Error(`job ${job.jobId} belongs to another connector`);
+      }
+      const held = match(existing.state)
+        .with({ status: "dispatched" }, { status: "accepted" }, () =>
+          this.#join(existing, handlers),
+        )
+        .with({ status: "ended" }, ({ outcome }) =>
+          outcome.isOk() ? Promise.resolve(outcome) : null,
+        )
+        .exhaustive();
+      if (held) return held;
     }
-    if (existing && existing.outcome === null) return this.#join(existing, handlers);
-    if (existing?.outcome?.isOk()) return Promise.resolve(existing.outcome);
 
     const phase = job.spec.case;
     if (phase === undefined) throw new Error(`job ${job.jobId} has no spec`);
@@ -151,9 +155,8 @@ export class SessionHub implements ConnectorHub {
       job,
       phase,
       caps,
-      status: "dispatched",
+      state: { status: "dispatched" },
       lastSeq: 0n,
-      outcome: null,
       waiters: [],
       totalTimer: setTimeout(() => this.#timeOut(entry, "total"), caps.totalMs),
       idleTimer: null,
@@ -174,16 +177,17 @@ export class SessionHub implements ConnectorHub {
 
     const held = new Set(heldJobIds);
     const resend: Job[] = [];
-    for (const entry of this.#openJobsOf(connector.id)) {
+    for (const entry of this.#jobsOf(connector.id)) {
       const isHeld = held.has(entry.job.jobId);
-      if (entry.status === "dispatched") {
-        if (!isHeld) resend.push(entry.job);
-      } else if (isHeld) {
-        clearTimer(entry.leaseTimer);
-        entry.leaseTimer = null;
-      } else {
-        this.#end(entry, "lost", err({ kind: "lost" }));
-      }
+      match(entry.state.status)
+        .with("dispatched", () => {
+          if (!isHeld) resend.push(entry.job);
+        })
+        .with("accepted", () =>
+          isHeld ? this.#clearLease(entry) : this.#end(entry, err({ kind: "lost" })),
+        )
+        .with("ended", () => {})
+        .exhaustive();
     }
     const awaited = this.#openJobsOf(connector.id).map((entry) => entry.job.jobId);
     session.send(
@@ -201,7 +205,7 @@ export class SessionHub implements ConnectorHub {
 
   acceptJob(connector: ActiveConnector, jobId: string): Result<void, JobCallError> {
     return this.#lookup(connector, jobId).andThen((entry) => {
-      if (entry.outcome !== null) return err({ kind: "not_found" as const });
+      if (entry.state.status === "ended") return err({ kind: "not_found" as const });
       this.#accept(entry);
       return ok(undefined);
     });
@@ -217,7 +221,7 @@ export class SessionHub implements ConnectorHub {
 
   finishJob(connector: ActiveConnector, request: FinishJobRequest): Result<void, JobCallError> {
     return this.#lookup(connector, request.jobId).andThen((entry) => {
-      if (entry.outcome !== null) return ok(undefined);
+      if (entry.state.status === "ended") return ok(undefined);
       if (request.lastSeq > entry.lastSeq) {
         logger.warn(
           {
@@ -233,18 +237,18 @@ export class SessionHub implements ConnectorHub {
           const expected = RESULT_CASE[entry.phase];
           if (value.result.case !== expected) {
             const message = `a ${entry.phase} job completes with a ${expected} result, not ${value.result.case ?? "none"}`;
-            this.#end(entry, "failed", ok({ kind: "failed", error: unspecifiedError(message) }));
+            this.#end(entry, ok({ kind: "failed", error: unspecifiedError(message) }));
             return err({ kind: "invalid_argument" as const, message });
           }
-          this.#end(entry, "completed", ok({ kind: "completed", result: value }));
+          this.#end(entry, ok({ kind: "completed", result: value }));
           return ok(undefined);
         })
         .with({ case: "failed" }, ({ value }) => {
-          this.#end(entry, "failed", ok({ kind: "failed", error: value }));
+          this.#end(entry, ok({ kind: "failed", error: value }));
           return ok(undefined);
         })
         .with({ case: "cancelled" }, () => {
-          this.#end(entry, "cancelled", ok({ kind: "cancelled" }));
+          this.#end(entry, ok({ kind: "cancelled" }));
           return ok(undefined);
         })
         .with({ case: undefined }, () =>
@@ -273,28 +277,29 @@ export class SessionHub implements ConnectorHub {
     return ok(entry);
   }
 
+  /** Moves a dispatched job to accepted; its lease now runs only while no session is open. */
   #accept(entry: JobEntry): void {
-    if (entry.status !== "dispatched") return;
-    entry.status = "accepted";
-    clearTimer(entry.leaseTimer);
-    entry.leaseTimer = null;
-    if (!this.#sessions.has(entry.connectorId)) this.#startLease(entry);
-    this.#restartIdle(entry);
+    match(entry.state.status)
+      .with("dispatched", () => {
+        entry.state = { status: "accepted" };
+        this.#clearLease(entry);
+        if (!this.#sessions.has(entry.connectorId)) this.#startLease(entry);
+        this.#restartIdle(entry);
+      })
+      .with("accepted", "ended", () => {})
+      .exhaustive();
   }
 
   /** Delivers the events past the last `seq`; a report on an ended job is dropped. */
   #report(entry: JobEntry, events: ReadonlyArray<JobEvent>): void {
-    if (entry.outcome !== null) return;
+    if (entry.state.status === "ended") return;
     this.#accept(entry);
-    for (const event of events) {
-      if (entry.outcome !== null) return;
-      this.#deliver(entry, event);
-    }
+    for (const event of events) this.#deliver(entry, event);
     this.#restartIdle(entry);
   }
 
   #deliver(entry: JobEntry, event: JobEvent): void {
-    if (event.seq <= entry.lastSeq) return;
+    if (entry.state.status === "ended" || event.seq <= entry.lastSeq) return;
     if (event.seq > entry.lastSeq + 1n) {
       logger.warn(
         { jobId: entry.job.jobId, seq: String(event.seq), received: String(entry.lastSeq) },
@@ -316,7 +321,7 @@ export class SessionHub implements ConnectorHub {
 
   #restartIdle(entry: JobEntry): void {
     const { idleMs } = entry.caps;
-    if (idleMs === null || entry.outcome !== null) return;
+    if (idleMs === null || entry.state.status === "ended") return;
     clearTimer(entry.idleTimer);
     entry.idleTimer = setTimeout(() => this.#timeOut(entry, "idle"), idleMs);
   }
@@ -330,16 +335,23 @@ export class SessionHub implements ConnectorHub {
     clearTimer(entry.leaseTimer);
     entry.leaseTimer = setTimeout(
       () =>
-        entry.status === "accepted"
-          ? this.#end(entry, "lost", err({ kind: "lost" }))
-          : this.#end(entry, "unavailable", err({ kind: "unavailable" })),
+        match(entry.state.status)
+          .with("dispatched", () => this.#end(entry, err({ kind: "unavailable" })))
+          .with("accepted", () => this.#end(entry, err({ kind: "lost" })))
+          .with("ended", () => {})
+          .exhaustive(),
       this.#leaseMs,
     );
   }
 
+  #clearLease(entry: JobEntry): void {
+    clearTimer(entry.leaseTimer);
+    entry.leaseTimer = null;
+  }
+
   #timeOut(entry: JobEntry, cap: JobCap): void {
-    if (entry.outcome !== null) return;
-    this.#end(entry, "timed_out", err({ kind: "timed_out", cap }));
+    if (entry.state.status === "ended") return;
+    this.#end(entry, err({ kind: "timed_out", cap }));
     this.#sessions.get(entry.connectorId)?.send(
       create(ConnectResponseSchema, {
         message: { case: "cancel", value: { jobId: entry.job.jobId } },
@@ -348,19 +360,22 @@ export class SessionHub implements ConnectorHub {
   }
 
   /** Moves a job to a terminal state, once, and resolves everyone waiting on it. */
-  #end(entry: JobEntry, status: JobStatus, outcome: RunResult): void {
-    if (entry.outcome !== null) return;
-    entry.status = status;
-    entry.outcome = outcome;
+  #end(entry: JobEntry, outcome: RunResult): void {
+    if (entry.state.status === "ended") return;
+    entry.state = { status: "ended", outcome };
     clearJobTimers(entry);
     const waiters = entry.waiters;
     entry.waiters = [];
     for (const { resolve } of waiters) resolve(outcome);
+    const ended = outcome.match(
+      (value) => value.kind,
+      (error) => error.kind,
+    );
     logger.info(
-      { connectorId: entry.connectorId, jobId: entry.job.jobId, phase: entry.phase, status },
+      { connectorId: entry.connectorId, jobId: entry.job.jobId, phase: entry.phase, ended },
       "connector job ended",
     );
-    if (entry.phase === "release" && outcome.isOk()) this.#forgetTask(entry);
+    if (entry.phase === "release" && releaseFreesTask(outcome)) this.#forgetTask(entry);
   }
 
   /**
@@ -370,15 +385,18 @@ export class SessionHub implements ConnectorHub {
   #forgetTask(release: JobEntry): void {
     for (const [jobId, entry] of this.#jobs) {
       if (entry === release || entry.job.taskId !== release.job.taskId) continue;
-      if (entry.outcome !== null) this.#jobs.delete(jobId);
+      if (entry.state.status === "ended") this.#jobs.delete(jobId);
     }
   }
 
   #sessionClosed(session: Session): void {
     if (this.#sessions.get(session.connector.id) !== session) return;
     this.#sessions.delete(session.connector.id);
-    for (const entry of this.#openJobsOf(session.connector.id)) {
-      if (entry.status === "accepted") this.#startLease(entry);
+    for (const entry of this.#jobsOf(session.connector.id)) {
+      match(entry.state.status)
+        .with("accepted", () => this.#startLease(entry))
+        .with("dispatched", "ended", () => {})
+        .exhaustive();
     }
     logger.info(
       { connectorId: session.connector.id, connector: session.connector.name },
@@ -386,10 +404,12 @@ export class SessionHub implements ConnectorHub {
     );
   }
 
+  #jobsOf(connectorId: string): JobEntry[] {
+    return [...this.#jobs.values()].filter((entry) => entry.connectorId === connectorId);
+  }
+
   #openJobsOf(connectorId: string): JobEntry[] {
-    return [...this.#jobs.values()].filter(
-      (entry) => entry.connectorId === connectorId && entry.outcome === null,
-    );
+    return this.#jobsOf(connectorId).filter((entry) => entry.state.status !== "ended");
   }
 
   #sendHeartbeats(): void {
@@ -423,8 +443,28 @@ function unspecifiedError(message: string): JobError {
 function overBudget(job: Job, usage: { inputTokens: bigint; outputTokens: bigint }): boolean {
   const budget = match(job.spec)
     .with({ case: "plan" }, { case: "execute" }, ({ value }) => value.tokenBudget)
-    .otherwise(() => 0n);
+    .with(
+      { case: "prepare" },
+      { case: "verify" },
+      { case: "publish" },
+      { case: "release" },
+      { case: undefined },
+      () => 0n,
+    )
+    .exhaustive();
   return budget > 0n && usage.inputTokens + usage.outputTokens > budget;
+}
+
+/** A release the connector completed or failed ends the task's time on it; a cancelled one does not. */
+function releaseFreesTask(outcome: RunResult): boolean {
+  return outcome.match(
+    (value) =>
+      match(value.kind)
+        .with("completed", "failed", () => true)
+        .with("cancelled", () => false)
+        .exhaustive(),
+    () => false,
+  );
 }
 
 function clearJobTimers(entry: JobEntry): void {

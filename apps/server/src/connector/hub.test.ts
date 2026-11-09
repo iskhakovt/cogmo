@@ -85,7 +85,7 @@ function bearer(token: string) {
 }
 
 /** A fake connector's `Connect` stream, recording what cogmo sends. */
-function openStream(token: string, heldJobIds: string[] = []) {
+function openStream(token: string, heldJobIds: string[]) {
   const controller = new AbortController();
   const received: ConnectResponse[] = [];
   const state: { error: ConnectError | null } = { error: null };
@@ -123,16 +123,16 @@ function openStream(token: string, heldJobIds: string[] = []) {
   };
 }
 
-async function connected(token: string, heldJobIds: string[] = []) {
+async function connected(token: string, heldJobIds: string[]) {
   const stream = openStream(token, heldJobIds);
   await settle();
   return stream;
 }
 
-function prepareJob(taskId = "task-1"): Job {
+function prepareJob(): Job {
   return create(JobSchema, {
-    jobId: `${taskId}/prepare/d1`,
-    taskId,
+    jobId: "task-1/prepare/d1",
+    taskId: "task-1",
     spec: {
       case: "prepare",
       value: { remoteUrl: "git@github.com:o/r.git", baseBranch: "main", workBranch: "cogmo/t" },
@@ -140,10 +140,10 @@ function prepareJob(taskId = "task-1"): Job {
   });
 }
 
-function planJob(taskId = "task-1", tokenBudget = 0n): Job {
+function planJob(tokenBudget: bigint): Job {
   return create(JobSchema, {
-    jobId: `${taskId}/plan/d2`,
-    taskId,
+    jobId: "task-1/plan/d2",
+    taskId: "task-1",
     spec: { case: "plan", value: { prompt: "plan it", agent: "claude", tokenBudget } },
   });
 }
@@ -156,10 +156,10 @@ function verifyJob(timeoutSeconds: number): Job {
   });
 }
 
-function releaseJob(taskId = "task-1"): Job {
+function releaseJob(): Job {
   return create(JobSchema, {
-    jobId: `${taskId}/release/d4`,
-    taskId,
+    jobId: "task-1/release/d4",
+    taskId: "task-1",
     spec: { case: "release", value: {} },
   });
 }
@@ -185,10 +185,10 @@ const PREPARED = finish({
 });
 
 /** Starts `run` and records its outcome once it settles. */
-function startRun(job: Job, connectorId = PASEO.id) {
+function startRun(job: Job) {
   const events: JobEvent[] = [];
   const state: { result: RunResult | null } = { result: null };
-  void hub.run(connectorId, job, { onEvent: (event) => events.push(event) }).then((result) => {
+  void hub.run(PASEO.id, job, { onEvent: (event) => events.push(event) }).then((result) => {
     state.result = result;
   });
   return {
@@ -258,7 +258,7 @@ describe("auth", () => {
   });
 
   it("closes every stream with UNAVAILABLE once the cache is stale", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     store.listActive.mockRejectedValue(new Error("db down"));
     await advance(60_000);
     expect(stream.error).toBeNull();
@@ -268,7 +268,7 @@ describe("auth", () => {
   });
 
   it("closes a revoked connector's stream at the next refresh, and its accepted job is lost", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
@@ -286,7 +286,7 @@ describe("auth", () => {
   });
 
   it("carries a job over when a rotated connector reconnects with its new token within the lease", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
@@ -307,8 +307,8 @@ describe("auth", () => {
 
 describe("a job's life", () => {
   it("sends the job after SessionAccepted, delivers new events in order, and resolves on FinishJob", async () => {
-    const stream = await connected("paseo-token");
-    const run = startRun(planJob());
+    const stream = await connected("paseo-token", []);
+    const run = startRun(planJob(0n));
     await settle();
     expect(stream.received[0]?.message.case).toBe("accepted");
     expect(stream.jobs()).toEqual(["task-1/plan/d2"]);
@@ -347,7 +347,7 @@ describe("a job's life", () => {
   it("waits for a session when none is open, then sends the job", async () => {
     const run = startRun(prepareJob());
     await advance(LEASE_MS - 1_000);
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     expect(stream.awaited()).toEqual(["task-1/prepare/d1"]);
     expect(stream.jobs()).toEqual(["task-1/prepare/d1"]);
     await client.finishJob(PREPARED, bearer("paseo-token"));
@@ -362,14 +362,14 @@ describe("a job's life", () => {
   });
 
   it("is unavailable when an open session does not accept it within the lease", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await advance(LEASE_MS);
     expect(run.result).toEqual(err({ kind: "unavailable" }));
   });
 
   it("does not restart the acceptance lease on a reconnect", async () => {
-    const first = await connected("paseo-token");
+    const first = await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await advance(LEASE_MS - 1_000);
     await first.disconnect();
@@ -379,7 +379,7 @@ describe("a job's life", () => {
   });
 
   it("treats FinishJob on a dispatched job as accepted", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     await client.finishJob(PREPARED, bearer("paseo-token"));
@@ -388,7 +388,7 @@ describe("a job's life", () => {
   });
 
   it("keeps the first outcome and acknowledges a later FinishJob or report", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     const auth = bearer("paseo-token");
@@ -406,14 +406,14 @@ describe("a job's life", () => {
   it("refuses a late AcceptJob with NOT_FOUND", async () => {
     startRun(prepareJob());
     await advance(LEASE_MS);
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     expect(
       await callError(client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"))),
     ).toBe(Code.NotFound);
   });
 
   it("refuses calls naming an unknown job, or another connector's", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     startRun(prepareJob());
     await settle();
     const other = bearer("other-token");
@@ -428,7 +428,7 @@ describe("a job's life", () => {
   });
 
   it("fails the job and answers INVALID_ARGUMENT when the result does not match the job", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     const mismatched = finish({
@@ -446,7 +446,7 @@ describe("a job's life", () => {
   });
 
   it("answers INVALID_ARGUMENT for a FinishJob without an outcome, leaving the job open", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     const empty = finish({ jobId: "task-1/prepare/d1" });
@@ -459,14 +459,14 @@ describe("a job's life", () => {
   });
 
   it("keeps delivering events when a handler throws", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const seen: bigint[] = [];
-    void hub.run(PASEO.id, planJob(), {
+    void hub.run(PASEO.id, planJob(0n), {
       onEvent: () => {
         throw new Error("handler bug");
       },
     });
-    void hub.run(PASEO.id, planJob(), { onEvent: (event) => seen.push(event.seq) });
+    void hub.run(PASEO.id, planJob(0n), { onEvent: (event) => seen.push(event.seq) });
     await settle();
     await client.reportEvents(
       { jobId: "task-1/plan/d2", events: [textEvent(1n, "a"), textEvent(2n, "b")] },
@@ -478,7 +478,7 @@ describe("a job's life", () => {
 
 describe("run on a held job_id", () => {
   it("joins a job in flight without sending it again", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     const first = startRun(prepareJob());
     const second = startRun(prepareJob());
     await settle();
@@ -490,7 +490,7 @@ describe("run on a held job_id", () => {
   });
 
   it("returns a stored completed outcome without sending anything", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     startRun(prepareJob());
     await settle();
     await client.finishJob(PREPARED, bearer("paseo-token"));
@@ -501,10 +501,10 @@ describe("run on a held job_id", () => {
     expect(stream.jobs()).toEqual(["task-1/prepare/d1"]);
   });
 
-  it("dispatches again after a timed_out, lost or unavailable end", async () => {
+  it("dispatches again after an unavailable end", async () => {
     startRun(prepareJob());
     await advance(LEASE_MS);
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     expect(stream.jobs()).toEqual([]);
     const again = startRun(prepareJob());
     await settle();
@@ -517,7 +517,7 @@ describe("run on a held job_id", () => {
 
 describe("sessions", () => {
   it("carries an accepted job over a reconnect within the lease that holds it", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
@@ -535,7 +535,7 @@ describe("sessions", () => {
   });
 
   it("loses an accepted job a new session does not hold", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
@@ -547,7 +547,7 @@ describe("sessions", () => {
   });
 
   it("loses an accepted job when no session returns within the lease", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
@@ -556,8 +556,15 @@ describe("sessions", () => {
     expect(run.result).toEqual(err({ kind: "lost" }));
   });
 
+  it("loses a job accepted while no session is open when none opens within the lease", async () => {
+    const run = startRun(prepareJob());
+    await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
+    await advance(LEASE_MS);
+    expect(run.result).toEqual(err({ kind: "lost" }));
+  });
+
   it("sends a dispatched job again to a session that does not hold it, and not to one that does", async () => {
-    const first = await connected("paseo-token");
+    const first = await connected("paseo-token", []);
     startRun(prepareJob());
     await settle();
     await first.disconnect();
@@ -573,8 +580,8 @@ describe("sessions", () => {
   });
 
   it("replaces an open session under the same connector", async () => {
-    const first = await connected("paseo-token");
-    const second = await connected("paseo-token");
+    const first = await connected("paseo-token", []);
+    const second = await connected("paseo-token", []);
     await first.done;
     expect(first.error?.code).toBe(Code.Aborted);
     expect(second.received[0]?.message.case).toBe("accepted");
@@ -582,14 +589,14 @@ describe("sessions", () => {
   });
 
   it("sends a heartbeat every 30 s", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     await advance(30_000);
     await advance(30_000);
     expect(stream.received.filter((m) => m.message.case === "heartbeat")).toHaveLength(2);
   });
 
   it("ends every stream with UNAVAILABLE on close", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     hub.close();
     await stream.done;
     expect(stream.error?.code).toBe(Code.Unavailable);
@@ -598,7 +605,7 @@ describe("sessions", () => {
 
 describe("caps", () => {
   it("times out on the total cap and sends CancelJob", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     const run = startRun(prepareJob());
     await settle();
     await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
@@ -608,8 +615,8 @@ describe("caps", () => {
   });
 
   it("times out an agent turn idle for 5 minutes, and a report resets the idle cap", async () => {
-    await connected("paseo-token");
-    const run = startRun(planJob());
+    await connected("paseo-token", []);
+    const run = startRun(planJob(0n));
     await settle();
     const auth = bearer("paseo-token");
     await client.acceptJob({ jobId: "task-1/plan/d2" }, auth);
@@ -622,7 +629,7 @@ describe("caps", () => {
   });
 
   it("caps verify at its timeout plus 60 s", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const run = startRun(verifyJob(600));
     await settle();
     await client.acceptJob({ jobId: "task-1/verify/d3" }, bearer("paseo-token"));
@@ -633,8 +640,8 @@ describe("caps", () => {
   });
 
   it("cancels a turn whose reported usage passes its token budget", async () => {
-    const stream = await connected("paseo-token");
-    const run = startRun(planJob("task-1", 1_000n));
+    const stream = await connected("paseo-token", []);
+    const run = startRun(planJob(1_000n));
     await settle();
     const auth = bearer("paseo-token");
     await client.acceptJob({ jobId: "task-1/plan/d2" }, auth);
@@ -656,7 +663,7 @@ describe("caps", () => {
 
 describe("release", () => {
   it("forgets the task's ended jobs once its release completes", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const auth = bearer("paseo-token");
     startRun(prepareJob());
     await settle();
@@ -684,7 +691,7 @@ describe("release", () => {
   });
 
   it("keeps the release itself: a retried FinishJob is acknowledged and run returns its outcome", async () => {
-    const stream = await connected("paseo-token");
+    const stream = await connected("paseo-token", []);
     const auth = bearer("paseo-token");
     startRun(releaseJob());
     await settle();
@@ -705,8 +712,25 @@ describe("release", () => {
     expect(stream.jobs()).toEqual(["task-1/release/d4"]);
   });
 
+  it("keeps the task's jobs when the connector cancels the release", async () => {
+    await connected("paseo-token", []);
+    const auth = bearer("paseo-token");
+    startRun(prepareJob());
+    await settle();
+    await client.finishJob(PREPARED, auth);
+    const release = startRun(releaseJob());
+    await settle();
+    await client.finishJob(
+      finish({ jobId: "task-1/release/d4", outcome: { case: "cancelled", value: {} } }),
+      auth,
+    );
+    await settle();
+    expect(release.result).toEqual(ok({ kind: "cancelled" }));
+    await client.finishJob(PREPARED, auth);
+  });
+
   it("keeps the task's jobs when the release ends in a hub error", async () => {
-    await connected("paseo-token");
+    await connected("paseo-token", []);
     const auth = bearer("paseo-token");
     startRun(prepareJob());
     await settle();
