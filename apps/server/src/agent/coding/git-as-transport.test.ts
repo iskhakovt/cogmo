@@ -8,6 +8,7 @@ import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import {
   fetchDefaultBranchTip,
   fetchFeatureBranch,
@@ -245,12 +246,40 @@ describe("pushTaskBranchToRemote", () => {
   });
 
   it("rejects when listing the remote's default branch fails, fetching nothing more", async () => {
-    gitMocks.runGit
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
-      .mockRejectedValueOnce(new Error("ls-remote: Authentication failed"));
+    gitMocks.runGit.mockImplementation(async (args) => {
+      if (args.includes("ls-remote")) throw new Error("ls-remote: Authentication failed");
+      return { stdout: "", stderr: "" };
+    });
 
     await expect(push(BASE_SHA)).rejects.toThrow(/Authentication failed/);
-    expect(gitMocks.runGit).toHaveBeenCalledTimes(2);
+    expect(gitMocks.runGit.mock.calls.map(([args]) => args)).toEqual([
+      [
+        "-C",
+        mirror,
+        "fetch",
+        "https://github.com/owner/example.git",
+        `+refs/heads/cogmo/run/${TASK_ID}*:refs/remotes/origin/cogmo/run/${TASK_ID}*`,
+      ],
+      ["-C", mirror, "ls-remote", "https://github.com/owner/example.git", "refs/heads/main"],
+    ]);
+  });
+
+  it("rethrows a failed default-branch fetch when the remote still lists the branch", async () => {
+    gitMocks.runGit.mockImplementation(async (args) => {
+      if (args.includes("ls-remote")) return { stdout: `${held}\trefs/heads/main\n`, stderr: "" };
+      if (args.includes("+main:refs/remotes/origin/main")) {
+        throw new Error("fetch: connection reset");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    await expect(push(BASE_SHA)).rejects.toThrow(/connection reset/);
+    expect(gitMocks.runGit.mock.calls.map(([args]) => args[2])).toEqual([
+      "fetch",
+      "ls-remote",
+      "fetch",
+      "ls-remote",
+    ]);
   });
 
   it("rejects when the presence check fails for another reason than a missing commit", async () => {
@@ -401,6 +430,34 @@ describe("fetchDefaultBranchTip then pushTaskBranchToRemote, against real reposi
     const pushed = await push(base);
 
     expect(pushed._unsafeUnwrapErr()).toEqual({ kind: "base_missing", baseSha: base });
+    await expect(
+      git(remote, "rev-parse", "--verify", `refs/heads/cogmo/run/${taskId}`),
+    ).rejects.toThrow();
+  });
+
+  it("errs naming a saved base the mirror lacks when the remote's default branch is deleted between listing and fetching it", async () => {
+    const base = await commitAndPush(author, "first");
+    await git(dir, "init", "--bare", "--initial-branch=main", mirror);
+    const realRunGit = expectDefined(gitMocks.runGit.getMockImplementation(), "real runGit");
+    let deleted = false;
+    gitMocks.runGit.mockImplementation(async (...params) => {
+      const result = await realRunGit(...params);
+      if (params[0].includes("ls-remote") && !deleted) {
+        deleted = true;
+        await git(remote, "update-ref", "-d", "refs/heads/main");
+      }
+      return result;
+    });
+
+    const pushed = await push(base);
+
+    expect(pushed._unsafeUnwrapErr()).toEqual({ kind: "base_missing", baseSha: base });
+    expect(gitMocks.runGit.mock.calls.map(([args]) => args[2])).toEqual([
+      "fetch",
+      "ls-remote",
+      "fetch",
+      "ls-remote",
+    ]);
     await expect(
       git(remote, "rev-parse", "--verify", `refs/heads/cogmo/run/${taskId}`),
     ).rejects.toThrow();

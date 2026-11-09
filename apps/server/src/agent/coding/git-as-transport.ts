@@ -141,7 +141,8 @@ export async function pushTaskBranchToRemote(
  * fetched as a pattern, which matches nothing rather than failing the fetch
  * when no earlier attempt pushed it. A fetch of a default branch the remote
  * lacks fails with the exit code an unreadable remote gives, so the branch is
- * listed first and, when absent, not fetched.
+ * listed first and, when absent, not fetched; a failed fetch lists it again,
+ * and is a miss when the branch has gone since, a fetch failure otherwise.
  */
 async function fetchBase(
   p: PushTaskBranchParams,
@@ -154,7 +155,11 @@ async function fetchBase(
   await fetchRefspec(`+refs/heads/${runBranch}*:refs/remotes/origin/${runBranch}*`);
   if (await hasCommit(p.localRepoPath, p.baseSha)) return true;
   if (!(await remoteHasBranch(p, p.defaultBranch, env))) return false;
-  await fetchRefspec(`+${p.defaultBranch}:refs/remotes/origin/${p.defaultBranch}`);
+  try {
+    await fetchRefspec(`+${p.defaultBranch}:refs/remotes/origin/${p.defaultBranch}`);
+  } catch (fetchError) {
+    if (await remoteHasBranch(p, p.defaultBranch, env)) throw fetchError;
+  }
   return hasCommit(p.localRepoPath, p.baseSha);
 }
 

@@ -125,11 +125,10 @@ async function pushMain(
 function classifyPushFailure(e: unknown, signal: AbortSignal): SkillsMirrorFailure {
   if (signal.aborted) return "timeout";
   const text = describeError(e);
-  // The remote refused to update `main` because another push moved it or
-  // held its lock: a rejection, whose winner `lostToNewerPush` reads.
-  if (/incorrect old value provided|cannot lock ref|failed to update ref/i.test(text)) {
-    return "rejected";
-  }
+  // The remote refused to update `main` because another push moved it
+  // first: a rejection, whose winner `lostToNewerPush` reads. A ref the remote
+  // cannot lock for another reason (permissions, I/O) is a failure to record.
+  if (/incorrect old value provided/i.test(text)) return "rejected";
   if (
     /\[remote rejected\]|protected branch|Authentication failed|Permission denied|denied to|marked as read only|could not read Username|\b40[13]\b/i.test(
       text,
@@ -174,7 +173,7 @@ async function recordPush(
         { detail, entered },
         // A plain push is a non-fast-forward; the bare repo keeps no
         // remote-tracking ref, so the lease names the sha.
-        "skills remote main diverged from local main; check what its main holds (`git -C $COGMO_SKILLS_PATH ls-remote origin main`), then push local main over it: `git -C $COGMO_SKILLS_PATH push --force-with-lease=main:<that sha> origin main`",
+        "skills remote main diverged from local main; check what its main holds (`git -C $COGMO_SKILLS_PATH ls-remote origin main`), then push local main over it, as an identity allowed to force-push it: `git -C $COGMO_SKILLS_PATH push --force-with-lease=main:<that sha> origin main`",
       );
     })
     .with(
@@ -249,18 +248,34 @@ async function runRemoteGit(
  * The env that makes a remote call fail instead of waiting on a prompt, which
  * would hold `cogmo serve`'s boot for the call's cap: no terminal prompt for
  * credentials, and ssh in batch mode, with no passphrase or host-key prompt.
- * `BatchMode` is appended to the ssh command git would run, from
- * `GIT_SSH_COMMAND` or `core.sshCommand`, so a key or wrapper configured there
- * still applies. A `GIT_SSH` program, whose options git adapts to its variant,
- * is left as it is.
+ * `BatchMode` goes into the ssh command git would run, from `GIT_SSH_COMMAND`
+ * or `core.sshCommand`, so a key or wrapper configured there still applies. A
+ * `GIT_SSH` program, whose options git adapts to its variant, is left as it is.
  */
 async function nonInteractiveEnv(repoPath: string): Promise<NodeJS.ProcessEnv> {
   const configured = process.env.GIT_SSH_COMMAND || (await readSshCommand(repoPath));
   const ssh = configured ?? (process.env.GIT_SSH ? null : "ssh");
   return {
     GIT_TERMINAL_PROMPT: "0",
-    ...(ssh !== null && { GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` }),
+    ...(ssh !== null && { GIT_SSH_COMMAND: withBatchMode(ssh) }),
   };
+}
+
+/** One shell word: unquoted characters, backslash escapes, and quoted spans. */
+const SHELL_WORD = /(?:[^\s'"\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+/g;
+
+/** A shell word that sets a variable for the command after it. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * `command` with `-o BatchMode=yes` right after its executable, the first
+ * shell word past any variable assignments, so it precedes the command's own
+ * options: ssh keeps the first value it reads for an option.
+ */
+function withBatchMode(command: string): string {
+  const executable = command.matchAll(SHELL_WORD).find((word) => !ASSIGNMENT.test(word[0]));
+  const end = executable === undefined ? command.length : executable.index + executable[0].length;
+  return `${command.slice(0, end)} -o BatchMode=yes${command.slice(end)}`;
 }
 
 /** `core.sshCommand` as git reads it for the repo, or null when it is unset. */
