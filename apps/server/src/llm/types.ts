@@ -325,6 +325,13 @@ export interface ChatParams {
   system: string;
   messages: Message[];
   tools?: ToolDefinition[];
+  /**
+   * `"none"` sends `tools` and forbids calling them: a fork keeps the tools
+   * its replayed thinking is bound to and asks for text (design/prompt-caching.md
+   * → source (h)). The OpenAI-compatible adapter, whose routes replay no
+   * reasoning, omits both instead; every adapter omits it without tools.
+   */
+  toolChoice?: "none";
   /** Strategy 1's edit intent. */
   clearToolResults?: ToolResultClearing;
   maxTokens?: number;
@@ -363,12 +370,12 @@ export interface ChatOptions {
 // --- Token counting ---
 
 /**
- * ChatParams minus `maxTokens` and `cache` — if you can chat(), you can count
- * tokens for it, since a `ChatParams` value still fits. A count is never sent
- * again, so it takes no cache intent. With `clearToolResults`, the count is
- * the prompt after clearing.
+ * ChatParams minus `maxTokens`, `cache` and `toolChoice` — if you can chat(),
+ * you can count tokens for it, since a `ChatParams` value still fits. A count
+ * is never sent again, so it takes no cache intent, and no caller counts a
+ * fork. With `clearToolResults`, the count is the prompt after clearing.
  */
-export interface CountTokensParams extends Omit<ChatParams, "maxTokens" | "cache"> {
+export interface CountTokensParams extends Omit<ChatParams, "maxTokens" | "cache" | "toolChoice"> {
   /**
    * The largest count the caller tells apart. An adapter that counts locally
    * stops once its sum passes this and returns that sum, a figure past it but

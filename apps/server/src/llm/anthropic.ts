@@ -651,12 +651,16 @@ function buildCreateParams(
   // previous one wrote. It takes the third of four breakpoint slots; the
   // tools and system markers stay as read points that survive a miss further
   // down.
+  //
+  // `tool_choice` is a standard parameter, so it goes to third-party
+  // endpoints too, and only with the tools it governs.
   return {
     model: params.model,
     max_tokens: maxTokens,
     ...(systemBlocks.length > 0 && { system: systemBlocks }),
     messages,
     ...(tools && { tools }),
+    ...(tools && params.toolChoice === "none" && { tool_choice: { type: "none" as const } }),
     ...(params.cache && { cache_control: marker }),
     ...controls,
   };

@@ -20,9 +20,7 @@ import type {
   Usage,
 } from "../llm/types.js";
 import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
-import { promptServerMismatches } from "../metrics.js";
 import { canonicalJson, sha256 } from "../util/canonical-json.js";
-import { validateHistory } from "./history-invariants.js";
 import {
   classifyClassDTrip,
   classifyPostStream,
@@ -37,6 +35,7 @@ import {
   summarizeToolHistory,
   truncationNotice,
 } from "./repair.js";
+import { countServerMismatches } from "./server-mismatches.js";
 import type { Service } from "./service.js";
 import { fromToolStepResult, toToolStepResult } from "./tool-step-result.js";
 import {
@@ -46,15 +45,14 @@ import {
   type ToolRegistry,
   type ToolSpec,
 } from "./tools.js";
+import type { Transcript } from "./transcript.js";
 import {
-  baseDigest,
   isDivergingTransformation,
   type LoopRequests,
   PrefixViolationError,
   type PrefixViolationPolicy,
   type RequestHead,
   type SentRequest,
-  TranscriptHasher,
 } from "./transcript-head.js";
 
 const tracer = trace.getTracer("cogmo.agent");
@@ -82,8 +80,13 @@ export type StepRunner = Durable["run"];
 export interface AgentLoopParams {
   provider: LlmProvider;
   model: string;
-  systemPrompt: string;
-  messages: Message[];
+  /**
+   * The turn's opened transcript: the prefix and history every request sends.
+   * The loop appends to it, and changes only a last message no request has
+   * carried yet.
+   */
+  transcript: Transcript;
+  /** The registry the loop dispatches on, whose definitions the transcript's prefix holds. */
   tools: ToolRegistry;
   service: Service;
   /**
@@ -190,24 +193,6 @@ export interface AgentLoopResult {
 const DEFAULT_MAX_ITERATIONS = 20;
 
 /**
- * Run the history invariant validator and log any repairs.
- *
- * Defensive pre-flight: even with the loop's content-driven flow control
- * (no orphan tool_use is produced this turn), historical bugs could have
- * left orphans in the DB that any future turn would re-load. The validator
- * synthesizes error tool_results / drops strays so the request always
- * satisfies the API contract; repairs are logged so we can see whether
- * stale state is still showing up.
- */
-function sanitizeHistory(messages: ReadonlyArray<Message>, log: Logger): Message[] {
-  const { messages: repaired, repairs } = validateHistory(messages);
-  if (repairs.length > 0) {
-    log.warn({ repairCount: repairs.length, repairs }, "agent loop history invariants repaired");
-  }
-  return repaired;
-}
-
-/**
  * Run the agentic loop: call LLM → execute tools → repeat until done.
  *
  * Each iteration calls the LLM. If the response contains tool_use blocks,
@@ -218,7 +203,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   const {
     provider,
     model,
-    systemPrompt,
+    transcript,
     tools,
     service,
     stepRun,
@@ -227,9 +212,8 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
-  const messages = sanitizeHistory(params.messages, log);
-  const initialLength = messages.length;
-  const toolDefs = tools.definitions();
+  assertDispatchesTranscriptTools(tools, transcript);
+  const initialLength = transcript.openedLength;
   let totalUsage: Readonly<Usage> = ZERO_USAGE;
   let iterations = 0;
   let finalModel = model;
@@ -237,14 +221,15 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   while (iterations < maxIterations) {
     iterations++;
 
+    const request = transcript.request();
     const chatParams: Parameters<LlmProvider["chat"]>[0] = {
       model,
-      system: systemPrompt,
-      messages,
+      system: request.system,
+      messages: [...request.messages],
       ...(maxTokens !== undefined && { maxTokens }),
     };
-    if (toolDefs.length > 0) {
-      chatParams.tools = toolDefs;
+    if (request.tools.length > 0) {
+      chatParams.tools = [...request.tools];
     }
     const response = await provider.chat(chatParams);
 
@@ -254,7 +239,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // Append assistant response. The same canonical blocks are appended and
     // executed, so handlers see what the transcript records.
     const content = canonicalizeToolInputs(response.content);
-    messages.push({ role: "assistant", content });
+    transcript.append({ role: "assistant", content });
 
     // Drive flow on content, not `stop_reason`. Models occasionally return a
     // tool_use block alongside `stop_reason: "end_turn"` / `"max_tokens"`; if
@@ -265,41 +250,58 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     const hasToolUse = content.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
       return buildResult(
-        messages,
+        transcript.messages,
         initialLength,
         totalUsage,
         finalModel,
         iterations,
         { text: "", toolUseIds: [] },
-        unrecordedRequests(baseDigest(systemPrompt, toolDefs), initialLength),
+        unrecordedRequests(transcript.base, initialLength),
       );
     }
 
     // Volume-cluster intercept (Class D) — same shape as the streaming
     // variant. See computeVolumeClusterInterceptions and
     // design/agent-resilience.md → Volume cluster trigger.
-    const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
+    const interceptions = computeVolumeClusterInterceptions(
+      transcript.messages,
+      initialLength,
+      tools,
+      log,
+    );
     const toolResults = await executeToolCalls(
       content,
       { tools, service, stepRun, turnKey, log },
       iterations,
       interceptions,
     );
-    messages.push({ role: "user", content: toolResults });
+    transcript.append({ role: "user", content: toolResults });
 
     log.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
   }
 
   log.warn({ maxIterations }, "agent loop hit iteration limit");
   return buildResult(
-    messages,
+    transcript.messages,
     initialLength,
     totalUsage,
     finalModel,
     iterations,
     { text: "", toolUseIds: [] },
-    unrecordedRequests(baseDigest(systemPrompt, toolDefs), initialLength),
+    unrecordedRequests(transcript.base, initialLength),
   );
+}
+
+/**
+ * The loop's entry invariant: the registry it dispatches on defines exactly
+ * the tools its transcript sends, compared canonically, so a call to a tool a
+ * request offered reaches that tool's handler. Both come from one frozen
+ * table; a mismatch is a bug in the caller.
+ */
+function assertDispatchesTranscriptTools(tools: ToolRegistry, transcript: Transcript): void {
+  if (canonicalJson(tools.definitions()) !== canonicalJson(transcript.tools)) {
+    throw new Error("the loop's tool registry doesn't define the tools its transcript sends");
+  }
 }
 
 /** {@link AgentLoopResult.requests} for a loop that records no request heads. */
@@ -677,7 +679,7 @@ async function runOne(
 }
 
 function buildResult(
-  messages: Message[],
+  messages: ReadonlyArray<Message>,
   initialLength: number,
   usage: Usage,
   model: string,
@@ -716,7 +718,7 @@ function buildResult(
  * text — that lives next to the channel-aware delivery code.
  */
 function buildDegradedResult(
-  messages: Message[],
+  messages: ReadonlyArray<Message>,
   initialLength: number,
   usage: Usage,
   model: string,
@@ -998,7 +1000,7 @@ export async function runStreamingAgentLoop(
   const {
     provider,
     model,
-    systemPrompt,
+    transcript,
     tools,
     service,
     onEvent,
@@ -1013,9 +1015,8 @@ export async function runStreamingAgentLoop(
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
-  const messages = sanitizeHistory(params.messages, log);
-  const initialLength = messages.length;
-  const toolDefs = tools.definitions();
+  assertDispatchesTranscriptTools(tools, transcript);
+  const initialLength = transcript.openedLength;
   let totalUsage: Readonly<Usage> = ZERO_USAGE;
   const budgets: RepairBudgets = freshBudgets();
   // Class D loop-pathology state. `consecutiveFingerprint` tracks the most
@@ -1033,17 +1034,14 @@ export async function runStreamingAgentLoop(
   // iteration outcomes (cached or live) — see AgentLoopResult.streamed.
   const streamed: EmittedLedger = { text: "", toolUseIds: [] };
   // The requests the iterations sent, rebuilt every invocation from their
-  // outcomes like the ledger above. Every invocation hashes h₀ once, over the
-  // system prompt and tool definitions. The head each request sent is hashed
-  // inside its step body; every invocation hashes the request it rebuilds for
-  // a headed memo again, for the in-turn check.
-  const hasher = new TranscriptHasher();
-  const base = baseDigest(systemPrompt, toolDefs);
+  // outcomes like the ledger above: each memo's head, which the in-turn check
+  // compares with the head of the request the transcript records for it on
+  // this invocation.
   const sent: SentRequest[] = [];
   let diverged = false;
   let violatedAt: number | null = null;
   const requests = (): LoopRequests => ({
-    base,
+    base: transcript.base,
     historyLength: initialLength,
     sent: [...sent],
     diverged,
@@ -1058,16 +1056,19 @@ export async function runStreamingAgentLoop(
     // answered with a synthetic `is_error` tool_result instead of running.
     let cutOffCall: { toolUseId: string; toolName: string } | null = null;
 
+    // Recorded in the bare body, so every invocation records the requests
+    // the run sent, replayed iterations included.
+    const request = transcript.request();
     const chatParams: Parameters<LlmProvider["chat"]>[0] = {
       model,
-      system: systemPrompt,
-      messages,
+      system: request.system,
+      messages: [...request.messages],
       ...(maxTokens !== undefined && { maxTokens }),
       ...(cache && { cache }),
       ...(clearToolResults && { clearToolResults }),
     };
-    if (toolDefs.length > 0) {
-      chatParams.tools = toolDefs;
+    if (request.tools.length > 0) {
+      chatParams.tools = [...request.tools];
     }
 
     // The whole iteration — stream drain plus the in-step Class C repair
@@ -1079,14 +1080,13 @@ export async function runStreamingAgentLoop(
     // deterministically because every input to the control flow below comes
     // from cached outcomes. The `superseded` check runs first in the same
     // body, so its verdict is memoized with the iteration it gates. The body
-    // also hashes the request it sends and counts what the provider reported
-    // changing in it, so both happen once, live.
+    // returns the head of the request it sends and counts what the provider
+    // reported changing in it, so the count happens once, live.
     const iterate = async (): Promise<LlmIterationOutcome> => {
       if (await superseded?.()) return { kind: "superseded" };
-      const head = hasher.head(base, chatParams.messages);
       const outcome = await runLlmIteration(provider, chatParams, onEvent, budgets, log);
       countServerMismatches(reportedTransformations(outcome), site);
-      return { ...outcome, head };
+      return { ...outcome, head: request.head };
     };
     const iterOutcome = stepRun
       ? await stepRun(llmIterStepId(iterations), iterate)
@@ -1094,15 +1094,15 @@ export async function runStreamingAgentLoop(
 
     if (iterOutcome.kind === "superseded") return { kind: "superseded" };
 
-    // The in-turn head check, before this iteration's content joins
-    // `messages`, so they hold the request the iteration sends.
+    // The in-turn head check: the memo's head against the request this
+    // invocation rebuilt for the iteration.
     if (
       iterOutcome.head !== undefined &&
-      !rebuiltMatches(hasher, base, messages, iterOutcome.head, iterations, prefixViolation)
+      !rebuiltMatches(request.head, iterOutcome.head, iterations, prefixViolation)
     ) {
       violatedAt ??= iterations;
     }
-    sent.push(iterOutcome.head ?? { length: messages.length, digest: null });
+    sent.push(iterOutcome.head ?? { length: request.messages.length, digest: null });
     if (reportedTransformations(iterOutcome).some(isDivergingTransformation)) diverged = true;
 
     streamed.text += iterOutcome.emitted.text;
@@ -1111,7 +1111,7 @@ export async function runStreamingAgentLoop(
     if (iterOutcome.kind === "degrade") {
       return finished(
         buildDegradedResult(
-          messages,
+          transcript.messages,
           initialLength,
           totalUsage,
           finalModel,
@@ -1138,8 +1138,8 @@ export async function runStreamingAgentLoop(
     finalModel = iterOutcome.model;
     totalUsage = sumUsage(totalUsage, iterOutcome.usage);
 
-    // Append assistant response to messages
-    messages.push({ role: "assistant", content: iterationContent });
+    // Append assistant response to the transcript
+    transcript.append({ role: "assistant", content: iterationContent });
 
     // Post-stream classifier. Runs BEFORE the hasToolUse gate so an empty
     // end_turn that still has a tool_use somehow (unlikely) doesn't trip
@@ -1147,18 +1147,18 @@ export async function runStreamingAgentLoop(
     // answered rather than dispatched. See `repair.ts` for the verdicts.
     const outcome = classifyPostStream(iterationContent, iterationStopReason, budgets);
     if (outcome.kind === "degrade") {
-      // The just-pushed assistant message is the one that triggered the
-      // degrade — pop it so newMessages doesn't carry the failing
+      // The just-appended assistant message is the one that triggered the
+      // degrade — discard it, unsent, so newMessages doesn't carry the failing
       // iteration's output. See design/agent-resilience.md → Persistence
       // boundary on a degraded turn.
-      messages.pop();
+      transcript.discardUnsent();
       log.warn(
         { event: "agent.degrade", reason: outcome.reason, subtype: outcome.subtype },
         "agent loop degraded (post-stream)",
       );
       return finished(
         buildDegradedResult(
-          messages,
+          transcript.messages,
           initialLength,
           totalUsage,
           finalModel,
@@ -1181,14 +1181,14 @@ export async function runStreamingAgentLoop(
         "agent loop class C repair (post-stream)",
       );
       if (outcome.instructions.kind === "continuation_prompt") {
-        // Drop the just-pushed empty assistant message — it has no
-        // content the model can build on and would just confuse next
+        // Discard the just-appended empty assistant message, unsent — it has
+        // no content the model can build on and would just confuse next
         // iteration's view of history. Then append the continuation
         // prompt, tagged harness-authored. It persists with the turn, since
         // the reply's thinking is bound to it, and follows a user row (see
         // design/context-management.md → Pair-Aware Compaction).
-        messages.pop();
-        messages.push({
+        transcript.discardUnsent();
+        transcript.append({
           role: "user",
           content: [{ type: "text", text: outcome.instructions.text, harness: "continuation" }],
         });
@@ -1226,17 +1226,10 @@ export async function runStreamingAgentLoop(
         await emitNotice();
       }
       streamed.text += notice;
-      messages.pop();
-      messages.push({
-        role: "assistant",
-        content: [
-          ...iterationContent,
-          { type: "text", text: notice, harness: "truncation_notice" },
-        ],
-      });
+      transcript.amendUnsent([{ type: "text", text: notice, harness: "truncation_notice" }]);
       return finished({
         ...buildResult(
-          messages,
+          transcript.messages,
           initialLength,
           totalUsage,
           finalModel,
@@ -1253,7 +1246,7 @@ export async function runStreamingAgentLoop(
     if (!hasToolUse) {
       return finished(
         buildResult(
-          messages,
+          transcript.messages,
           initialLength,
           totalUsage,
           finalModel,
@@ -1276,7 +1269,12 @@ export async function runStreamingAgentLoop(
     // identical args, the existing fingerprint catches it and
     // degrades. See design/agent-resilience.md → Volume cluster
     // trigger.
-    const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
+    const interceptions = computeVolumeClusterInterceptions(
+      transcript.messages,
+      initialLength,
+      tools,
+      log,
+    );
     if (cutOffCall) {
       // Whatever the volume-cluster verdict was for this call, the output cap
       // is the more specific reason it isn't running.
@@ -1333,7 +1331,7 @@ export async function runStreamingAgentLoop(
       await emitToolResults();
     }
 
-    messages.push({ role: "user", content: toolResults });
+    transcript.append({ role: "user", content: toolResults });
 
     log.debug(
       { iteration: iterations, toolCalls: toolResults.length },
@@ -1399,12 +1397,12 @@ export async function runStreamingAgentLoop(
       // gate); don't persist them. Design rule: the iteration that
       // triggered a degrade is not persisted (see
       // design/agent-resilience.md → Persistence boundary on a degraded
-      // turn).
-      messages.pop(); // user (tool_results)
-      messages.pop(); // assistant (tool_use)
+      // turn). Neither has been sent.
+      transcript.discardUnsent(); // user (tool_results)
+      transcript.discardUnsent(); // assistant (tool_use)
       return finished(
         buildDegradedResult(
-          messages,
+          transcript.messages,
           initialLength,
           totalUsage,
           finalModel,
@@ -1425,7 +1423,7 @@ export async function runStreamingAgentLoop(
   );
   return finished(
     buildDegradedResult(
-      messages,
+      transcript.messages,
       initialLength,
       totalUsage,
       finalModel,
@@ -1608,22 +1606,18 @@ async function applyStreamReplay(
 
 /**
  * The in-turn head check (design/prompt-caching.md → Head check): whether
- * `messages`, the request this invocation rebuilt for `iteration`, has the
- * head the iteration's memo recorded. On the invocation that ran the step
- * body they are one request; on a replay a difference means the loop rebuilt
- * input the provider never saw. Hashed in the bare body, only for a memo with
- * a head: the check's per-invocation cost. Under `throw` a difference throws
+ * `rebuilt`, the head of the request this invocation rebuilt for `iteration`,
+ * is the head the iteration's memo recorded. On the invocation that ran the
+ * step body they are one request; on a replay a difference means the loop
+ * rebuilt input the provider never saw. Under `throw` a difference throws
  * {@link PrefixViolationError}; under `reopen` it returns false.
  */
 function rebuiltMatches(
-  hasher: TranscriptHasher,
-  base: string,
-  messages: ReadonlyArray<Message>,
+  rebuilt: RequestHead,
   memoized: RequestHead,
   iteration: number,
   policy: PrefixViolationPolicy,
 ): boolean {
-  const rebuilt = hasher.head(base, messages);
   if (rebuilt.length === memoized.length && rebuilt.digest === memoized.digest) return true;
   return match(policy)
     .with("reopen", () => false)
@@ -1646,14 +1640,4 @@ function reportedTransformations(
     .with({ kind: "drained" }, ({ transformations }) => transformations ?? [])
     .with({ kind: "degrade" }, () => [])
     .exhaustive();
-}
-
-/** Count each transformation the provider reported on one request. */
-function countServerMismatches(
-  transformations: ReadonlyArray<InputTransformation>,
-  site: StreamingAgentLoopParams["site"],
-): void {
-  for (const { type, reason } of transformations) {
-    promptServerMismatches.add(1, { type, reason, site });
-  }
 }
