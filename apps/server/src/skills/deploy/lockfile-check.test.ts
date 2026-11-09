@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { skillsRepoAt } from "../../test/skills-repo.js";
 import type { LockfileCompiler } from "../deps.js";
+import type { SkillsRepo } from "../skill-files.js";
 import { SkillManifestSchema } from "../types.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 
@@ -14,22 +16,25 @@ const execFileP = promisify(execFile);
 /** Pins pydantic at another version than the runtime's. */
 const SHADOWING_LOCKFILE = "pydantic==2.14.3 --hash=sha256:0\n";
 
-let repo: string;
+let dir: string;
+let repo: SkillsRepo;
 let sha: string;
 
 beforeAll(async () => {
-  repo = await mkdtemp(join(tmpdir(), "skills-lockfile-check-"));
-  await execFileP("git", ["init", "-b", "main", repo]);
-  await execFileP("git", ["-C", repo, "config", "user.email", "test@cogmo.dev"]);
-  await execFileP("git", ["-C", repo, "config", "user.name", "test"]);
-  await writeFile(join(repo, "requirements.lock"), SHADOWING_LOCKFILE);
-  await execFileP("git", ["-C", repo, "add", "."]);
-  await execFileP("git", ["-C", repo, "commit", "-m", "lockfile"]);
-  sha = (await execFileP("git", ["-C", repo, "rev-parse", "HEAD"])).stdout.trim();
+  dir = await mkdtemp(join(tmpdir(), "skills-lockfile-check-"));
+  await execFileP("git", ["init", "-b", "main", dir]);
+  await execFileP("git", ["-C", dir, "config", "user.email", "test@cogmo.dev"]);
+  await execFileP("git", ["-C", dir, "config", "user.name", "test"]);
+  await mkdir(join(dir, "skills", "echo"), { recursive: true });
+  await writeFile(join(dir, "skills", "echo", "requirements.lock"), SHADOWING_LOCKFILE);
+  await execFileP("git", ["-C", dir, "add", "."]);
+  await execFileP("git", ["-C", dir, "commit", "-m", "lockfile"]);
+  sha = (await execFileP("git", ["-C", dir, "rev-parse", "HEAD"])).stdout.trim();
+  repo = skillsRepoAt(dir, sha);
 });
 
 afterAll(async () => {
-  await rm(repo, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true });
 });
 
 const manifest = SkillManifestSchema.parse({

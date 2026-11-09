@@ -34,11 +34,13 @@ import {
   renderConfigureError,
 } from "../skills/configure-remote-prompts.js";
 import { bootstrapSkillsRepo, readOriginUrl, SKILLS_CODING_REPO_NAME } from "../skills/repo.js";
+import type { SkillStore } from "../skills/store/index.js";
 import type { LoadDeps } from "./run.js";
 
 export interface MigrateSkillsRemoteCliDeps {
   runInTx: Transactor;
   codingStore: CodingStore;
+  skillStore: SkillStore;
   secretsStore: SecretsStore;
   /** Bare-repo path — usually `env.COGMO_SKILLS_PATH`. */
   skillsRepoPath: string;

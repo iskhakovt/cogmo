@@ -175,3 +175,28 @@ export async function deleteRef(repoPath: string, ref: string): Promise<void> {
 export async function getMainSha(repoPath: string): Promise<string | null> {
   return (await revParse(repoPath, "refs/heads/main")).unwrapOr(null);
 }
+
+/**
+ * Run `git -C repoPath <args>` and return its stdout; `input` goes to its
+ * stdin, which is closed either way. A failure throws: the callers handle no
+ * git failure as an outcome.
+ */
+export async function runGitIn(
+  repoPath: string,
+  args: readonly string[],
+  opts: { env?: NodeJS.ProcessEnv; input?: string } = {},
+): Promise<string> {
+  try {
+    const child = execFileP("git", ["-C", repoPath, ...args], {
+      maxBuffer: 16 * 1024 * 1024,
+      ...(opts.env && { env: opts.env }),
+    });
+    // A git that exits without reading stdin closes the pipe under the
+    // write; its exit status, not the EPIPE, says how it went.
+    child.child.stdin?.on("error", () => {});
+    child.child.stdin?.end(opts.input ?? "");
+    return (await child).stdout;
+  } catch (e) {
+    throw gitFailure(args[0] ?? "", e);
+  }
+}

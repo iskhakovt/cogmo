@@ -2,6 +2,7 @@ import { Ajv, type ValidateFunction } from "ajv";
 import { err, ok, type Result } from "neverthrow";
 import { describeError } from "../util/describe-error.js";
 import { type LockfileSnapshot, readLockfileAtSha } from "./deps.js";
+import type { SkillsRepo } from "./skill-files.js";
 import { readSkillSource, type SkillSource } from "./skill-source.js";
 import type { SkillRow } from "./store/index.js";
 import type { SkillInputs, SkillManifest, SkillSchemas } from "./types.js";
@@ -55,10 +56,10 @@ export function schemaIssues(validator: ValidateFunction): string[] {
 export class SkillSourceCache {
   #ajv = new Ajv({ allErrors: true, strict: false });
   #entries = new Map<string, SkillSourceCacheEntry>();
-  #repoPath: string | undefined;
+  #repo: SkillsRepo | undefined;
 
-  constructor(repoPath: string | undefined) {
-    this.#repoPath = repoPath;
+  constructor(repo: SkillsRepo | undefined) {
+    this.#repo = repo;
   }
 
   /**
@@ -113,7 +114,7 @@ export class SkillSourceCache {
     const cached = this.#entries.get(cacheKey(row.name, row.gitSha));
     if (cached) return cached;
 
-    if (!this.#repoPath) {
+    if (!this.#repo) {
       throw new Error(
         `no source for skill '${row.name}' — skillsRepoPath not configured and no test seed cached`,
       );
@@ -121,7 +122,7 @@ export class SkillSourceCache {
 
     // A deployed sha passed these reads at register, so a failure here is
     // the repo and the DB out of sync — corruption, not an outcome to handle.
-    const source = await readSkillSource(this.#repoPath, row.gitSha);
+    const source = await readSkillSource(this.#repo, row.name, row.gitSha);
     if (source.isErr()) {
       throw new Error(
         `no source for skill '${row.name}' at ${row.gitSha} (${source.error.kind}) — repo and DB are out of sync`,
@@ -134,7 +135,7 @@ export class SkillSourceCache {
       // with a hash always has a committed lockfile. A missing/empty
       // read here means the repo + DB drifted (manual git tampering,
       // partial restore, ...) — surface it loudly.
-      const snapshot = await readLockfileAtSha(this.#repoPath, row.gitSha);
+      const snapshot = await readLockfileAtSha(this.#repo, row.name, row.gitSha);
       if (snapshot.isErr()) {
         throw new Error(
           `lockfile for skill '${row.name}' at ${row.gitSha} is ${snapshot.error.kind} — repo and DB are out of sync (skills.lockfile_hash=${row.lockfileHash})`,

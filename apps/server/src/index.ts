@@ -16,7 +16,7 @@ import { bootstrapCore } from "./boot/core.js";
 import { verifyHindsight } from "./boot/memory.js";
 import { bootstrapRuntime } from "./boot/runtime.js";
 import { bootstrapSandbox } from "./boot/sandbox.js";
-import { bootstrapSkillRunner } from "./boot/skills.js";
+import { bootstrapSkillRunner, scheduleSkillsMirror } from "./boot/skills.js";
 import type { BootstrapOptions, CoreDeps } from "./boot/stages.js";
 import { env } from "./env.js";
 import { inngest } from "./inngest/index.js";
@@ -60,6 +60,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     { reapWasmChildren: true },
     opts,
   );
+  scheduleSkillsMirror(core);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);
 
   // Spread every stage so any field added to a stage interface flows

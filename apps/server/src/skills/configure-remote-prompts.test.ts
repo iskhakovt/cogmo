@@ -28,6 +28,7 @@ vi.mock("@clack/prompts", () => ({
   log: { error: vi.fn(), info: vi.fn(), warn: vi.fn() },
 }));
 
+const { commitAsCogmo, writeEditedTree } = await import("./cogmo-commits.js");
 const { collectSkillsRemoteMode, renderConfigureError, readLocalMainSha } = await import(
   "./configure-remote-prompts.js"
 );
@@ -310,6 +311,22 @@ describe("readLocalMainSha", () => {
 
     const sha = await readLocalMainSha(repo);
     expect(sha).toMatch(/^[0-9a-f]{40}$/);
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("returns null when main holds only the boot's bare layout commit", async () => {
+    const repo = join(tmpRoot, "layout.git");
+    await execFileP("git", ["init", "--bare", "--initial-branch=main", repo]);
+    const tree = await writeEditedTree(repo, null, []);
+    const commit = await commitAsCogmo(repo, {
+      tree,
+      parent: null,
+      subject: "chore(skills): move each skill to skills/<name>/",
+      trailers: { "Cogmo-Layout": "v1" },
+    });
+    await execFileP("git", ["-C", repo, "update-ref", "refs/heads/main", commit]);
+
+    expect(await readLocalMainSha(repo)).toBeNull();
     await rm(tmpRoot, { recursive: true, force: true });
   });
 

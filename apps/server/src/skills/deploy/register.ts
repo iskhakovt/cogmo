@@ -6,14 +6,16 @@ import { classifyManifest } from "../classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
 import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
+import type { SkillsRepo } from "../skill-files.js";
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest, SkillSchemas } from "../types.js";
 import { describeWasmPackagesError, type SkillSchemaImportError } from "../worker-wasm/wasm.js";
 import { lintWasmCompat } from "../worker-wasm/wasm-lint.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
-import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
+import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
+import { describeLocateSkillRejection, locateSkill } from "./locate-skill.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
@@ -43,10 +45,11 @@ export async function registerSkill(
   deps: DeployDeps,
   opts: { branch: string; origin: SkillDeployOrigin; signal?: AbortSignal },
 ): Promise<RegisterResult> {
-  const repoPath = requireRepoPath(deps, "register");
+  const repo = requireRepo(deps, "register");
+  const repoPath = repo.path;
 
   opts.signal?.throwIfAborted();
-  const prepared = await prepareRegister(deps, repoPath, opts.branch, opts.signal);
+  const prepared = await prepareRegister(deps, repo, opts.branch, opts.signal);
   // The last point an abort stops the deploy: the transaction moves main.
   // Checked ahead of the outcome, so an abort surfaces as itself, not as a
   // rejection it caused.
@@ -122,10 +125,11 @@ async function deleteFeatureBranch(repoPath: string, branch: string): Promise<vo
  */
 async function prepareRegister(
   deps: DeployDeps,
-  repoPath: string,
+  repo: SkillsRepo,
   branch: string,
   signal: AbortSignal | undefined,
 ): Promise<Result<PreparedRegister, RegisterResult>> {
+  const repoPath = repo.path;
   // Reject branch=main at the boundary. Without this guard, the register
   // flow would "fast-forward" main onto itself (no-op) and then, after the
   // commit, call `deleteRef("refs/heads/main")`, which would drop the only
@@ -142,21 +146,37 @@ async function prepareRegister(
   }
   const branchSha = resolved.value;
 
+  // Boot's layout commit gives main a sha before any register runs.
   const mainSha = await getMainSha(repoPath);
+  if (mainSha === null) {
+    throw new Error("register: the skills repo's main is unborn; boot makes the layout commit");
+  }
   // Fast-forward check: feature branch must descend from current main.
-  if (mainSha && !(await isAncestor(repoPath, mainSha, branchSha))) {
+  if (!(await isAncestor(repoPath, mainSha, branchSha))) {
     return err(rejectedResult(branchSha, NON_FAST_FORWARD));
   }
 
-  const source = await readSkillSource(repoPath, branchSha);
+  const located = await locateSkill(deps, repo, mainSha, branchSha);
+  if (located.isErr()) {
+    return err(rejectedResult(branchSha, describeLocateSkillRejection(located.error)));
+  }
+  const name = located.value;
+
+  const source = await readSkillSource(repo, name, branchSha);
   if (source.isErr()) {
     return err(
       match(source.error)
         .with({ kind: "missing_file", file: SKILL_MANIFEST_FILE }, () =>
-          rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip"),
+          rejectedResult(
+            branchSha,
+            `missing_skill_md: skills/${name}/SKILL.md not found at branch tip`,
+          ),
         )
         .with({ kind: "missing_file", file: SKILL_BODY_FILE }, () =>
-          rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip"),
+          rejectedResult(
+            branchSha,
+            `missing_skill_py: skills/${name}/skill.py not found at branch tip`,
+          ),
         )
         .with({ kind: "commit_not_found" }, () =>
           rejectedResult(branchSha, "missing_commit: branch tip not found"),
@@ -166,6 +186,14 @@ async function prepareRegister(
     );
   }
   const { manifest, body } = source.value;
+  if (manifest.name !== name) {
+    return err(
+      rejectedResult(
+        branchSha,
+        `skill_name_mismatch: skills/${name}/SKILL.md names the skill '${manifest.name}'; its directory must be skills/${manifest.name}/`,
+      ),
+    );
+  }
 
   // Wasm bodies get the Pyodide-compatibility scan before anything is
   // written. Its whole purpose is turning "imports fine, dies on first
@@ -192,7 +220,7 @@ async function prepareRegister(
 
   const lockfileResult = await readManifestLockfile(
     deps.lockfileCompiler,
-    repoPath,
+    repo,
     branchSha,
     manifest,
     { verifyFresh: true, ...(signal && { signal }) },

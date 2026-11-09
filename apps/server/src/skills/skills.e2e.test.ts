@@ -135,12 +135,17 @@ function cliOutcome(run: CliRun): { code: number | null; output: unknown } {
 }
 
 /**
- * Commit `SKILL.md` + `skill.py` in a scratch clone of the skills repo inside
- * the container, on top of `main` if it exists, and push the commit to
+ * Commit `skills/<name>/SKILL.md` + `skill.py` in a scratch clone of the
+ * skills repo inside the container, on top of `main`, and push the commit to
  * `branch` for `skills register` to deploy. Returns the pushed sha. The
  * scratch clone stays behind in the container, which the stack discards.
  */
-async function pushSkillBranch(branch: string, manifest: string, body: string): Promise<string> {
+async function pushSkillBranch(
+  branch: string,
+  name: string,
+  manifest: string,
+  body: string,
+): Promise<string> {
   const work = (await dockerExec(["mktemp", "-d"])).stdout.trim();
   const git = (...args: string[]) => dockerExec(["git", "-C", work, ...args]);
   const write = (file: string, content: string) =>
@@ -152,9 +157,10 @@ async function pushSkillBranch(branch: string, manifest: string, body: string): 
       content,
     ]);
   await dockerExec(["git", "clone", "--quiet", SKILLS_REPO, work]);
-  await write("SKILL.md", manifest);
-  await write("skill.py", body);
-  await git("add", "SKILL.md", "skill.py");
+  await dockerExec(["mkdir", "-p", `${work}/skills/${name}`]);
+  await write(`skills/${name}/SKILL.md`, manifest);
+  await write(`skills/${name}/skill.py`, body);
+  await git("add", "skills");
   await git(
     "-c",
     "user.name=cogmo-e2e",
@@ -220,7 +226,7 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
     // put live back out of the bare repo, then spawns the worker from the
     // bundled host.
     const branch = `skill/${ECHO_SKILL}`;
-    const sha = await pushSkillBranch(branch, ECHO_MANIFEST, ECHO_BODY);
+    const sha = await pushSkillBranch(branch, ECHO_SKILL, ECHO_MANIFEST, ECHO_BODY);
 
     const registered = cliOutcome(await runCogmo(["skills", "register", branch]));
     // Only a live deploy leaves a skill to take down, so files that run after

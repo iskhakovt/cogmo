@@ -1,6 +1,7 @@
 import { err, ok, type Result } from "neverthrow";
-import { gitShow } from "./git-ops.js";
+import { revParse } from "./git-ops.js";
 import { manifestErrorIssues, parseManifest } from "./manifest.js";
+import { readSkillFile, type SkillsRepo } from "./skill-files.js";
 import type { SkillManifest } from "./types.js";
 
 export const SKILL_MANIFEST_FILE = "SKILL.md";
@@ -18,17 +19,22 @@ export type SkillSourceError =
   | { kind: "invalid_manifest"; issues: readonly string[] };
 
 /**
- * Read and parse the skill committed at `sha`: `SKILL.md`, then `skill.py`.
- * Errs when `sha` does not resolve, either file is absent, or the manifest
- * does not parse.
+ * Read and parse skill `name` as committed at `sha`: `SKILL.md`, then
+ * `skill.py`, from `skills/<name>/` or, at a sha from before the layout
+ * commit, the repo root. Errs when `sha` does not resolve, either file is
+ * absent, or the manifest does not parse.
  */
 export async function readSkillSource(
-  repoPath: string,
+  repo: SkillsRepo,
+  name: string,
   sha: string,
 ): Promise<Result<SkillSource, SkillSourceError>> {
-  const manifestSource = await readFileAtSha(repoPath, sha, SKILL_MANIFEST_FILE);
+  if ((await revParse(repo.path, `${sha}^{commit}`)).isErr()) {
+    return err({ kind: "commit_not_found" });
+  }
+  const manifestSource = await readFileAtSha(repo, name, sha, SKILL_MANIFEST_FILE);
   if (manifestSource.isErr()) return err(manifestSource.error);
-  const body = await readFileAtSha(repoPath, sha, SKILL_BODY_FILE);
+  const body = await readFileAtSha(repo, name, sha, SKILL_BODY_FILE);
   if (body.isErr()) return err(body.error);
   const parsed = parseManifest(manifestSource.value);
   if (parsed.isErr()) {
@@ -38,11 +44,12 @@ export async function readSkillSource(
 }
 
 async function readFileAtSha(
-  repoPath: string,
+  repo: SkillsRepo,
+  name: string,
   sha: string,
   file: typeof SKILL_MANIFEST_FILE | typeof SKILL_BODY_FILE,
 ): Promise<Result<string, SkillSourceError>> {
-  return (await gitShow(repoPath, sha, file)).mapErr((e) =>
+  return (await readSkillFile(repo, name, sha, file)).mapErr((e) =>
     e.kind === "ref_not_found" ? { kind: "commit_not_found" } : { kind: "missing_file", file },
   );
 }

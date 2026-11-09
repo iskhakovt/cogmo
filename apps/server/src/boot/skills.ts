@@ -8,6 +8,7 @@ import { inngest } from "../inngest/index.js";
 import { logger } from "../logger.js";
 import { createSkillCronFireHandler } from "../skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "../skills/cron-ticker.js";
+import { mirrorMainBestEffort } from "../skills/deploy/mirror.js";
 import { createSkillDepsReaper } from "../skills/deps-reaper-function.js";
 import { loadBundledPackages } from "../skills/pyodide-compat.js";
 import { resolveSkillRunAs } from "../skills/run-as.js";
@@ -85,6 +86,21 @@ export async function bootstrapSkillRunner(
     ...(opts.skillCtxHttpOverride && { ctxHttp: opts.skillCtxHttpOverride }),
   });
   return { skillRunner };
+}
+
+/**
+ * Push the skills repo's `main` to its `origin` in the background, for
+ * `cogmo serve`. A coding task on a git-remote backend (Daytona) branches
+ * from the remote's `main`, so a commit only local `main` holds, the layout
+ * commit this boot may have made or a deploy whose push failed, would fail
+ * the draft's register as `non_fast_forward` (design/skills.md → Repo
+ * location → Mirror state).
+ */
+export function scheduleSkillsMirror(core: CoreDeps): void {
+  void mirrorMainBestEffort(
+    { runInTx: core.runInTx, secretsStore: core.secretsStore },
+    env.COGMO_SKILLS_PATH,
+  );
 }
 
 export function createSkillFunctions(

@@ -36,7 +36,13 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const stores = createStores();
 
   await prepareDataLayer(
-    { bootstrapLock: lock, db, runInTx: tx, codingStore: stores.codingStore },
+    {
+      bootstrapLock: lock,
+      db,
+      runInTx: tx,
+      codingStore: stores.codingStore,
+      skillStore: stores.skillStore,
+    },
     { skillsRepoPath: env.COGMO_SKILLS_PATH },
   );
 

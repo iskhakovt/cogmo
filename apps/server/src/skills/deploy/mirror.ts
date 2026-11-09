@@ -4,6 +4,7 @@ import { type GitEnv, runGit, withGitAskpass } from "../../secrets/git-askpass.j
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { describeError } from "../../util/describe-error.js";
+import { getMainSha } from "../git-ops.js";
 import { readOriginUrl } from "../repo.js";
 
 const log = logger.child({ component: "skills.runner" });
@@ -23,17 +24,16 @@ const MIRROR_PUSH_TIMEOUT_MS = 60_000;
  * skill set.
  *
  * Non-blocking failure: whatever fails here — reading `origin`, resolving
- * the GitHub identity, the push itself (network blip, lease check failed,
+ * the GitHub identity, the push itself (network blip, a remote that moved,
  * credentials revoked) — the local register is *still* the truth. We log a
  * warning and let the next register reconcile, or the operator run
  * `git -C $COGMO_SKILLS_PATH push origin main` manually. Throwing here
  * would report a deploy whose transaction already committed as a failure
  * — strictly worse than eventual consistency.
  *
- * Concurrency model: `register` is the only legitimate writer of remote
- * main. `force` is opt-in for `rollback` (which intentionally rewrites
- * history); register/approve use fast-forward push which fails clearly
- * if the remote has somehow drifted.
+ * Concurrency model: Cogmo is the only legitimate writer of remote main,
+ * and every deploy moves local main forward, so the push is a fast-forward
+ * that fails clearly if the remote has somehow drifted.
  *
  * The push gives up after `MIRROR_PUSH_TIMEOUT_MS`, or once `signal`
  * aborts: git is killed, and the push fails like any other.
@@ -42,7 +42,7 @@ export async function mirrorMainToRemote(
   deps: { runInTx: Transactor; secretsStore: SecretsStore },
   repoPath: string,
   newSha: string,
-  options?: { force?: { expectedRemoteSha: string }; signal?: AbortSignal },
+  options?: { signal?: AbortSignal },
 ): Promise<void> {
   try {
     const remoteUrl = await readOriginUrl(repoPath);
@@ -65,11 +65,7 @@ export async function mirrorMainToRemote(
       if (identity.isOk()) pat = identity.value.pat;
     }
 
-    const args = ["-C", repoPath, "push"];
-    if (options?.force) {
-      args.push(`--force-with-lease=refs/heads/main:${options.force.expectedRemoteSha}`);
-    }
-    args.push(remoteUrl, `${newSha}:refs/heads/main`);
+    const args = ["-C", repoPath, "push", remoteUrl, `${newSha}:refs/heads/main`];
 
     const signal = AbortSignal.any([
       AbortSignal.timeout(MIRROR_PUSH_TIMEOUT_MS),
@@ -79,14 +75,25 @@ export async function mirrorMainToRemote(
     await (pat ? withGitAskpass(pat, push) : push());
     log.info({ newSha, remoteUrl }, "mirrored skills main to remote");
   } catch (e) {
-    // After a rollback the remote is ahead of local main, so only a forced
-    // push with the lease the rollback expected reconciles it.
-    const retry = options?.force
-      ? `git -C $COGMO_SKILLS_PATH push --force-with-lease=refs/heads/main:${options.force.expectedRemoteSha} origin main`
-      : "git -C $COGMO_SKILLS_PATH push origin main";
     log.warn(
       { newSha, repoPath, error: describeError(e) },
-      `skills remote mirror failed; local state is authoritative — retry with \`${retry}\``,
+      "skills remote mirror failed; local state is authoritative — retry with `git -C $COGMO_SKILLS_PATH push origin main`",
     );
+  }
+}
+
+/**
+ * Push `main`, when it exists, to the skills repo's `origin`. Best-effort,
+ * like a deploy's own push: a failure is logged, never thrown.
+ */
+export async function mirrorMainBestEffort(
+  deps: { runInTx: Transactor; secretsStore: SecretsStore },
+  repoPath: string,
+): Promise<void> {
+  try {
+    const mainSha = await getMainSha(repoPath);
+    if (mainSha !== null) await mirrorMainToRemote(deps, repoPath, mainSha);
+  } catch (err: unknown) {
+    log.error({ err, repoPath }, "skills main not mirrored");
   }
 }

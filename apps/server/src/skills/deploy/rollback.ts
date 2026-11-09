@@ -1,8 +1,28 @@
+import { match } from "ts-pattern";
 import { classifyManifest } from "../classifier.js";
+import {
+  commitAsCogmo,
+  logCommits,
+  madeByCogmo,
+  pathsUnder,
+  RESTORES_TRAILER,
+  type TreeEdit,
+  writeEditedTree,
+} from "../cogmo-commits.js";
+import type { LockfileSnapshot } from "../deps.js";
 import { getMainSha, revParse } from "../git-ops.js";
-import { readSkillSource } from "../skill-source.js";
+import {
+  type SkillsRepo,
+  sameSkillBlobs,
+  skillBlobsAt,
+  skillBlobsMatchAt,
+  skillBlobsUnder,
+  skillDir,
+} from "../skill-files.js";
+import { readSkillSource, type SkillSource } from "../skill-source.js";
+import type { ClassifierLog, SkillSchemas } from "../types.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
-import { type DeployDeps, requireRepoPath, ZERO_SHA } from "./deploy-deps.js";
+import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
@@ -11,30 +31,29 @@ import { type RegisterResult, rejectedResult, targetSourceRejection } from "./re
 import { frontmatterSchemas } from "./schemas.js";
 
 /**
- * Rewind a skill to an earlier sha of its own: re-check that sha's source,
- * move main back onto it in one transaction, and force-mirror main to the
- * remote under a lease.
+ * Roll a skill back to an earlier sha of its own: re-check that sha's
+ * source, then commit its files to `skills/<name>/` on top of `main` (the
+ * restoring commit) and put that commit live in one transaction, so `main`
+ * only fast-forwards and no other skill's files move
+ * (design/skills.md → Deploy lifecycle).
  */
 export async function rollbackSkill(
   deps: DeployDeps,
   opts: { name: string; toGitSha: string; origin: SkillDeployOrigin },
 ): Promise<RegisterResult> {
-  const repoPath = requireRepoPath(deps, "rollback");
+  const repo = requireRepo(deps, "rollback");
+  const repoPath = repo.path;
 
-  const resolved = await revParse(repoPath, opts.toGitSha);
+  const resolved = await revParse(repoPath, `${opts.toGitSha}^{commit}`);
   if (resolved.isErr()) {
     return rejectedResult(opts.toGitSha, `target_sha_not_found: ${opts.toGitSha}`);
   }
   const targetSha = resolved.value;
 
-  // Re-read the manifest at the target sha. We need it for two things:
-  // (a) verify manifest.name matches opts.name — without this, rolling
-  // back skill X to a sha that originally belonged to skill Y would
-  // silently rebind X to Y's code; (b) project the full set of
-  // manifest-derived columns (tier, effects, schedule, inputs, outputs,
-  // riskTier) into the skills row, so tool definitions and validation
-  // reflect what's actually on disk at the rolled-back sha.
-  const source = await readSkillSource(repoPath, targetSha);
+  // The target's manifest must name the skill — otherwise rolling X back
+  // to Y's sha would rebind X to Y's code — and it supplies the
+  // manifest-derived columns of the skills row.
+  const source = await readSkillSource(repo, opts.name, targetSha);
   if (source.isErr()) return rejectedResult(targetSha, targetSourceRejection(source.error));
   const { manifest, body } = source.value;
 
@@ -72,18 +91,16 @@ export async function rollbackSkill(
   if (classifierLog.validation_errors.length > 0) {
     // Same UX-gate semantics as `register`: a target sha whose body
     // declares effects out of sync with the manifest is a foot-gun
-    // operators want flagged before main rewinds.
+    // operators want flagged before it goes live.
     return rejectedResult(targetSha, classifierLog.validation_errors.join("; "));
   }
 
-  const mainSha = await getMainSha(repoPath);
-
   // Trust the historical lockfile: it was valid at deploy time and
   // its hashes are still pinned. A wheel yanked since shouldn't
-  // block rewinding to a known-good revision.
+  // block rolling back to a known-good revision.
   const lockfileResult = await readManifestLockfile(
     deps.lockfileCompiler,
-    repoPath,
+    repo,
     targetSha,
     manifest,
     { verifyFresh: false },
@@ -93,27 +110,87 @@ export async function rollbackSkill(
   }
   const lockfile = lockfileResult.value;
 
+  const restores = await restoredCommit(deps, opts.name, targetSha);
+  const mainSha = await getMainSha(repoPath);
+  if (mainSha === null) {
+    throw new Error("rollback: the skills repo's main is unborn; boot makes the layout commit");
+  }
+  const restoring = await restoringCommit(deps, repo, {
+    name: opts.name,
+    targetSha,
+    restores,
+    mainSha,
+  });
+  return match(restoring)
+    .with(
+      { kind: "unchanged" },
+      ({ skill }): RegisterResult => ({
+        name: opts.name,
+        riskTier: skill.riskTier,
+        status: "no_op",
+        gitSha: skill.gitSha,
+      }),
+    )
+    .with({ kind: "restore" }, (restore) =>
+      putRestoringLive(deps, repoPath, {
+        name: opts.name,
+        targetSha,
+        restores,
+        mainSha,
+        restore,
+        source: { manifest, body },
+        schemas,
+        lockfile,
+        classifierLog,
+        origin: opts.origin,
+      }),
+    )
+    .exhaustive();
+}
+
+/**
+ * The rollback's transaction: `skills` at the restoring commit and the
+ * `rolled_back` row, with `main` moved to `restore.mainAfter` only if it is
+ * still the `main` the restoring commit was chosen against; then the mirror.
+ */
+async function putRestoringLive(
+  deps: DeployDeps,
+  repoPath: string,
+  args: {
+    name: string;
+    targetSha: string;
+    restores: string;
+    mainSha: string;
+    restore: { sha: string; mainAfter: string };
+    source: SkillSource;
+    schemas: SkillSchemas;
+    lockfile: LockfileSnapshot | null;
+    classifierLog: ClassifierLog;
+    origin: SkillDeployOrigin;
+  },
+): Promise<RegisterResult> {
+  const { name, targetSha, restores, mainSha, restore, source, schemas, lockfile } = args;
+  const { manifest } = source;
   const schedule = manifest.schedule ?? null;
   const executed = await runDeployTx(deps.runInTx, (tx) =>
     deps.store.executeRollback(tx, {
-      name: opts.name,
-      toGitSha: targetSha,
+      name,
+      restoringGitSha: restore.sha,
+      restoresGitSha: restores,
       tier: manifest.tier,
-      riskTier: classifierLog.risk_tier,
+      riskTier: args.classifierLog.risk_tier,
       effects: manifest.effects,
       schedule,
       scheduleNextRunAt: deps.scheduleNextRunAt(schedule),
       lockfileHash: lockfile?.hash ?? null,
       inputs: schemas.inputs,
       outputs: schemas.outputs,
-      classifierLog,
-      runAs: deployRunAs(deps.defaultRunAs, opts.origin),
+      classifierLog: args.classifierLog,
+      runAs: deployRunAs(deps.defaultRunAs, args.origin),
       applyFilesystem: async () => {
-        // Rollback rewrites main backward — pre-receive hook would normally
-        // reject this, but `update-ref` bypasses hooks by design (see
-        // bootstrapSkillsRepo). Main must still be the `mainSha` read above:
-        // rewinding past a deploy that landed since would drop it from main.
-        await advanceMain(repoPath, targetSha, { kind: "unchanged", expected: mainSha });
+        // A deploy of this skill that landed since would otherwise be
+        // overwritten in the database, or dropped from main.
+        await advanceMain(repoPath, restore.mainAfter, { kind: "unchanged", expected: mainSha });
       },
     }),
   );
@@ -122,24 +199,13 @@ export async function rollbackSkill(
   }
   const result = executed.value;
 
-  // Warm the source cache with the rolled-back manifest+body so the next
-  // invoke or listToolDefs read doesn't re-fetch from git.
   if (result.kind === "live") {
-    deps.sourceCache.put(targetSha, { manifest, body }, schemas, lockfile);
-    // Rollback rewinds main backwards, so the remote push needs `force`. We
-    // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
-    // moved remote main between our last fetch and this push, the lease
-    // fails and the operator is told to investigate rather than silently
-    // overwriting a divergent remote. `mainSha` is null when local main is
-    // unborn (first ever register-then-rollback before any pushes
-    // succeeded); `ZERO_SHA` is git's convention for "ref must not exist"
-    // in lease syntax, which is the correct lease for that edge.
-    await mirrorMainToRemote(deps, repoPath, targetSha, {
-      force: { expectedRemoteSha: mainSha ?? ZERO_SHA },
-    });
-  }
-
-  if (result.kind === "live") {
+    // Warm the source cache so the next invoke or listToolDefs read
+    // doesn't re-fetch from git.
+    deps.sourceCache.put(restore.sha, source, schemas, lockfile);
+    // A plain push of main, which only moved forward; a recovered restoring
+    // commit may not have reached the remote either.
+    await mirrorMainToRemote(deps, repoPath, restore.mainAfter);
     return {
       name: result.skill.name,
       riskTier: result.skill.riskTier,
@@ -159,4 +225,82 @@ export async function rollbackSkill(
     };
   }
   return rejectedResult(targetSha, result.kind === "rejected" ? result.reason : result.kind);
+}
+
+/**
+ * What a rollback to `targetSha` restores: the target, or, when the target is
+ * itself a restoring commit, the commit that one restored, so the value
+ * always names a commit that had its own deploy.
+ */
+async function restoredCommit(deps: DeployDeps, name: string, targetSha: string): Promise<string> {
+  return (
+    (await deps.runInTx((tx) => deps.store.restoredTargetAt(tx, { name, gitSha: targetSha }))) ??
+    targetSha
+  );
+}
+
+/** What a rollback puts live. */
+type Restoring =
+  /** The enabled skill already runs the target's files: nothing to do. */
+  | { kind: "unchanged"; skill: { gitSha: string; riskTier: RegisterResult["riskTier"] } }
+  /**
+   * `sha`, a commit whose `skills/<name>/` holds the target's files, with
+   * `main` at `mainAfter` once it is live: a new restoring commit on top of
+   * `main` (`main` moves to it), or a commit `main` already holds — the
+   * restoring commit a crash left with no row, or `main` itself.
+   */
+  | { kind: "restore"; sha: string; mainAfter: string };
+
+async function restoringCommit(
+  deps: DeployDeps,
+  repo: SkillsRepo,
+  args: { name: string; targetSha: string; restores: string; mainSha: string },
+): Promise<Restoring> {
+  const { name, targetSha, restores, mainSha } = args;
+  const target = await skillBlobsAt(repo, name, targetSha);
+
+  // Recovery: the newest first-parent commit on main that changes the
+  // skill's directory is this rollback's restoring commit, which a crash
+  // after `update-ref` left with no row.
+  const [latest] = await logCommits(repo.path, [
+    "--first-parent",
+    "-1",
+    mainSha,
+    "--",
+    skillDir(name),
+  ]);
+  if (
+    latest !== undefined &&
+    madeByCogmo(latest) &&
+    latest.trailers.get(RESTORES_TRAILER) === restores &&
+    !(await deps.runInTx((tx) => deps.store.hasDeployAt(tx, latest.sha)))
+  ) {
+    return { kind: "restore", sha: latest.sha, mainAfter: mainSha };
+  }
+
+  const skill = await deps.runInTx((tx) => deps.store.getSkillByName(tx, name));
+  if (skill && !skill.disabled && (await skillBlobsMatchAt(repo, name, skill.gitSha, target))) {
+    return { kind: "unchanged", skill };
+  }
+  // Main already holds the target's files, as for a disabled skill rolled
+  // back to its own version: no commit to make.
+  const dir = skillDir(name);
+  if (sameSkillBlobs(target, await skillBlobsUnder(repo.path, mainSha, dir))) {
+    return { kind: "restore", sha: mainSha, mainAfter: mainSha };
+  }
+
+  const edits: TreeEdit[] = [
+    ...(await pathsUnder(repo.path, mainSha, dir)).map(
+      (path): TreeEdit => ({ kind: "remove", path }),
+    ),
+    ...[...target].map(([file, blob]): TreeEdit => ({ kind: "put", path: `${dir}${file}`, blob })),
+  ];
+  const tree = await writeEditedTree(repo.path, mainSha, edits);
+  const sha = await commitAsCogmo(repo.path, {
+    tree,
+    parent: mainSha,
+    subject: `revert(skills): roll ${name} back to ${restores.slice(0, 7)}`,
+    trailers: { [RESTORES_TRAILER]: restores },
+  });
+  return { kind: "restore", sha, mainAfter: sha };
 }

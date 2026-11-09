@@ -24,24 +24,30 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { RequestError } from "@octokit/request-error";
 import { Octokit } from "@octokit/rest";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { parseRemoteUrl } from "../agent/coding/open-pr.js";
 import type { CodingRepoRow, CodingStore } from "../agent/coding/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import type { GitHubIdentity } from "../secrets/github.js";
+import { describeError } from "../util/describe-error.js";
+import { deleteRef, getMainSha, RefMovedError, revParse, updateRef } from "./git-ops.js";
+import { configurableMainSha, isBareLayoutCommit, migrateSkillsLayout } from "./migrate-layout.js";
 import {
   type EnsureSkillsCodingRepoResult,
   ensureSkillsCodingRepo,
   readOriginUrl,
   SKILLS_CODING_REPO_NAME,
 } from "./repo.js";
+import type { SkillStore } from "./store/index.js";
 
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "skills.configure-remote" });
@@ -71,6 +77,8 @@ export type ConfigureSkillsRemoteMode =
 export interface ConfigureSkillsRemoteDeps {
   runInTx: Transactor;
   codingStore: CodingStore;
+  /** Re-records the layout after an adopt replaces the bare layout commit. */
+  skillStore: SkillStore;
   /** Bare-repo path — usually `env.COGMO_SKILLS_PATH`. */
   skillsRepoPath: string;
   /** Octokit factory for tests. Production omits this so a real Octokit is
@@ -164,7 +172,17 @@ export async function configureSkillsRemote(
   const lsRemote = await runLsRemote(deps.skillsRepoPath, remoteUrl, pat);
   if (lsRemote.isErr()) return err(lsRemote.error);
   const remoteMainSha = parseRemoteMainSha(lsRemote.value.refs);
-  const localMainSha = await getLocalMainSha(deps.skillsRepoPath);
+  // A main holding only the bare layout commit counts as unborn: an adopt
+  // replaces it, then moves the adopted main (design/skills.md → Per-skill
+  // structure). One read, so the swap expects the commit classified.
+  const mainNow = await getMainSha(deps.skillsRepoPath);
+  const bareMain =
+    mainNow !== null && (await isBareLayoutCommit(deps.skillsRepoPath, mainNow)) ? mainNow : null;
+  const localMainSha = bareMain === null ? mainNow : null;
+  const bareLayoutSha = match(direction)
+    .with("adopt", () => bareMain)
+    .with("publish", () => null)
+    .exhaustive();
 
   // Direction-specific preconditions. The transfer itself enforces
   // fast-forward semantics; these checks turn the "empty source" cases
@@ -181,15 +199,14 @@ export async function configureSkillsRemote(
   // untouched and the next boot's `ensureSkillsCodingRepo` won't sync a
   // stale URL into the DB row.
   //
-  // Fast-forward only (no `+` in the refspec). git rejects on non-FF,
-  // which we map to `*_diverged` so operators see a structured error
+  // Fast-forward only (no `+` in the refspec); an adopt over the bare
+  // layout commit swaps `main` by compare-and-swap instead. git rejects on
+  // non-FF, which we map to `*_diverged` so operators see a structured error
   // instead of a raw git message.
-  const transfer = await runTransfer({
-    cwd: deps.skillsRepoPath,
-    url: remoteUrl,
-    direction,
-    pat,
-  });
+  const transfer =
+    bareLayoutSha === null
+      ? await runTransfer({ cwd: deps.skillsRepoPath, url: remoteUrl, direction, pat })
+      : await adoptOverBareLayout(deps, { url: remoteUrl, pat, bareLayoutSha });
   if (transfer.isErr()) {
     // Branch on kind so the error variants stay clean — spreading
     // `transfer.error` and tacking on SHAs would add fields the
@@ -197,24 +214,24 @@ export async function configureSkillsRemote(
     if (transfer.error.kind === "remote_unreachable") {
       return err({ kind: "remote_unreachable", remoteUrl, reason: transfer.error.reason });
     }
-    // For *_diverged, both sides must have main: the empty-source
-    // preconditions above guarantee `localMainSha` (publish) and
-    // `remoteMainSha` (adopt) are non-null, and the surviving SHA is
-    // probed up front. `localSha`/`remoteSha` empty would mean a probe
-    // returned null after a transient git failure — surface that as a
-    // boundary violation rather than silently rendering "localSha: " to
-    // the operator.
-    if (localMainSha === null || remoteMainSha === null) {
+    // For *_diverged, both sides have main: the empty-source preconditions
+    // above guarantee the remote's for an adopt and the local one for a
+    // publish, and an adopt over the bare layout commit diverges only when a
+    // deploy moved local main meanwhile. A null probe here is a transient
+    // git failure — surface it as a boundary violation rather than
+    // rendering "localSha: " to the operator.
+    const localSha = localMainSha ?? (await getMainSha(deps.skillsRepoPath));
+    if (localSha === null || remoteMainSha === null) {
       throw new Error(
         `configureSkillsRemote: ${transfer.error.kind} fired but state probe returned null (localMainSha=${String(
-          localMainSha,
+          localSha,
         )}, remoteMainSha=${String(remoteMainSha)})`,
       );
     }
     return err({
       kind: transfer.error.kind,
       remoteUrl,
-      localSha: localMainSha,
+      localSha,
       remoteSha: remoteMainSha,
     });
   }
@@ -231,6 +248,24 @@ export async function configureSkillsRemote(
     return err({ kind: "origin_attach_failed", remoteUrl, reason: attached.error });
   }
   const originAction = attached.value;
+
+  if (bareLayoutSha !== null) {
+    // The remote lacks the layout commit the adopt just made, and a
+    // git-remote task branches from the remote's main. Best-effort, like a
+    // deploy's push.
+    const pushed = await runTransfer({
+      cwd: deps.skillsRepoPath,
+      url: remoteUrl,
+      direction: "publish",
+      pat,
+    });
+    if (pushed.isErr()) {
+      log.warn(
+        { remoteUrl, error: pushed.error },
+        "skills layout commit not pushed after adopt; the next deploy's push or `cogmo serve`'s boot push carries it",
+      );
+    }
+  }
 
   // Backup the current row (if any) before ensureSkillsCodingRepo
   // potentially updates `remote_url`. Operator-recoverable trace of the
@@ -295,7 +330,7 @@ async function resolveTarget(
   // want the remote to seed our main (adopt); populated local means we
   // want to publish what we have. The `auto_init` flag matches: it gives
   // us the README seed when we need one, and an empty repo otherwise.
-  const localMainSha = await getLocalMainSha(deps.skillsRepoPath);
+  const localMainSha = await configurableMainSha(deps.skillsRepoPath);
   const direction: ConfigureSkillsRemoteDirection = localMainSha === null ? "adopt" : "publish";
   const repoName = mode.repoName ?? AUTO_PROVISION_REPO_NAME;
   const octokit =
@@ -354,6 +389,55 @@ type TransferError =
   | { kind: "remote_diverged" }
   | { kind: "local_diverged" }
   | { kind: "remote_unreachable"; reason: string };
+
+/** Where adopts over the bare layout commit fetch the remote's main, one ref each. */
+const ADOPT_REF_PREFIX = "refs/cogmo/adopt-main-";
+
+/**
+ * Adopt the remote's main over a local main that holds only the bare layout
+ * commit, then move the adopted main: fetch it to a side ref, drop the
+ * layout row, and replace `main` by compare-and-swap against the bare commit
+ * (design/skills.md → Per-skill structure, failure modes).
+ */
+async function adoptOverBareLayout(
+  deps: ConfigureSkillsRemoteDeps,
+  p: { url: string; pat: string | null; bareLayoutSha: string },
+): Promise<Result<void, TransferError>> {
+  const relayout = () =>
+    migrateSkillsLayout({ runInTx: deps.runInTx, store: deps.skillStore }, deps.skillsRepoPath);
+  // Its own ref, so a concurrent adopt neither resolves nor deletes it.
+  const adoptRef = `${ADOPT_REF_PREFIX}${randomUUID()}`;
+  const args = ["-C", deps.skillsRepoPath, "fetch", p.url, `+refs/heads/main:${adoptRef}`];
+  try {
+    try {
+      if (p.pat) {
+        await withGitAskpass(p.pat, (env) => runGit(args, env));
+      } else {
+        await runGit(args);
+      }
+    } catch (e) {
+      return err({ kind: "remote_unreachable", reason: describeError(e) });
+    }
+    const adopted = await revParse(deps.skillsRepoPath, adoptRef);
+    if (adopted.isErr()) {
+      throw new Error(`configureSkillsRemote: ${adoptRef} is missing right after its fetch`);
+    }
+    await deps.runInTx((tx) => deps.skillStore.forgetLayoutCommit(tx));
+    try {
+      await updateRef(deps.skillsRepoPath, "refs/heads/main", adopted.value, p.bareLayoutSha);
+    } catch (e) {
+      if (!(e instanceof RefMovedError)) throw e;
+      return err({ kind: "remote_diverged" });
+    } finally {
+      // Whatever the swap did, the move records the layout again: the
+      // adopted main's, or the bare commit's still on main.
+      await relayout();
+    }
+  } finally {
+    await deleteRef(deps.skillsRepoPath, adoptRef);
+  }
+  return ok(undefined);
+}
 
 async function runTransfer(p: TransferParams): Promise<Result<void, TransferError>> {
   // Fast-forward only — no `+` in the refspec. Git rejects non-FF with
@@ -436,22 +520,4 @@ function parseRemoteMainSha(lsRemoteLines: string[]): string | null {
     if (ref === "refs/heads/main" && sha) return sha;
   }
   return null;
-}
-
-async function getLocalMainSha(repoPath: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileP("git", [
-      "-C",
-      repoPath,
-      "rev-parse",
-      "--verify",
-      "refs/heads/main",
-    ]);
-    return stdout.trim();
-  } catch {
-    // `rev-parse --verify` exits non-zero when the ref doesn't exist.
-    // Treat as unborn — `git init --bare` plus `symbolic-ref HEAD` leaves
-    // refs/heads/main unborn until something writes it.
-    return null;
-  }
 }

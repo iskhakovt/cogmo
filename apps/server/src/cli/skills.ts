@@ -117,13 +117,13 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
       }),
       rollback: command({
         name: "rollback",
-        description: "Rewind a skill's git_sha to a prior commit.",
+        description: "Restore a skill's files from a prior commit, in a new commit on main.",
         args: {
           name: skillName("The skill."),
           toGitSha: positional({
             type: identifier("toGitSha"),
             displayName: "toGitSha",
-            description: "The commit to rewind to.",
+            description: "The commit whose version of the skill to restore.",
           }),
         },
         handler: async ({ name, toGitSha }) => {

@@ -1,7 +1,7 @@
 import { getMainSha, isAncestor } from "../git-ops.js";
 import { readSkillSource } from "../skill-source.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
-import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
+import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
@@ -17,7 +17,8 @@ export async function approveDeploy(
   deps: DeployDeps,
   opts: { pendingId: string; origin: SkillDeployOrigin },
 ): Promise<RegisterResult> {
-  const repoPath = requireRepoPath(deps, "approveDeploy");
+  const repo = requireRepo(deps, "approveDeploy");
+  const repoPath = repo.path;
 
   const deploy = await deps.runInTx((tx) => deps.store.getDeployById(tx, opts.pendingId));
   if (!deploy) {
@@ -45,7 +46,7 @@ export async function approveDeploy(
   // the prior live commit's manifest while pointing at the approved sha,
   // which would silently mismatch tool definitions and ajv input
   // validation against the actual code on disk.
-  const source = await readSkillSource(repoPath, deploy.gitSha);
+  const source = await readSkillSource(repo, skill.name, deploy.gitSha);
   if (source.isErr()) return rejectedResult(deploy.gitSha, targetSourceRejection(source.error));
   const { manifest, body } = source.value;
 
@@ -77,7 +78,7 @@ export async function approveDeploy(
 
   const lockfileResult = await readManifestLockfile(
     deps.lockfileCompiler,
-    repoPath,
+    repo,
     deploy.gitSha,
     manifest,
     { verifyFresh: true },
