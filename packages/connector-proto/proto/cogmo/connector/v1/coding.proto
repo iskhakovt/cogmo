@@ -12,7 +12,7 @@ message PrepareSpec {
 }
 
 message AgentTurnSpec {
-  string prompt = 1;
+  string prompt = 1; // cogmo keeps the Job under the 4 MiB message limit
   string agent = 2;
   optional uint64 token_budget = 3; // input plus output tokens; absent, no budget
   optional string session_id = 4; // the plan's session handle, on execute
@@ -29,7 +29,7 @@ message PublishSpec {
 }
 
 message ReleaseSpec {
-  optional string salvage_ref = 1;
+  optional string salvage_ref = 1; // absent: no salvage push, as for a task that reached pr_open
 }
 
 message ToolCall {
@@ -53,7 +53,7 @@ message Usage {
 message Prepared {}
 
 message PlanResult {
-  string plan = 1;
+  string plan = 1; // the connector keeps the FinishJob under 4 MiB, truncating the plan if it must
   string session_id = 2;
 }
 
@@ -62,7 +62,7 @@ message Executed {
 }
 
 message VerifyVerdict {
-  oneof end {
+  oneof outcome {
     int32 exit_code = 1;
     VerifyTimedOut timed_out = 2;
   }

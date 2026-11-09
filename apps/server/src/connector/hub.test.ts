@@ -185,7 +185,7 @@ function textEvent(seq: bigint, text: string): JobEvent {
 function usageEvent(seq: bigint, inputTokens: bigint, outputTokens: bigint): JobEvent {
   return create(JobEventSchema, {
     seq,
-    event: { case: "usage", value: { inputTokens, outputTokens, costUsd: 0 } },
+    event: { case: "usage", value: { inputTokens, outputTokens } },
   });
 }
 
@@ -664,6 +664,18 @@ describe("caps", () => {
     expect(run.result).toBeNull();
     await advance(1);
     expect(run.result).toEqual(err({ kind: "timed_out", cap: "total" }));
+  });
+
+  it("treats a zero token budget as a budget, not as none", async () => {
+    const stream = await connected("paseo-token", []);
+    const run = startRun(planJob(0n));
+    await settle();
+    const auth = bearer("paseo-token");
+    await client.acceptJob({ jobId: "task-1/plan/d2" }, auth);
+    await client.reportEvents({ jobId: "task-1/plan/d2", events: [usageEvent(1n, 1n, 0n)] }, auth);
+    await settle();
+    expect(run.result).toEqual(err({ kind: "timed_out", cap: "token_budget" }));
+    expect(stream.cancels()).toEqual(["task-1/plan/d2"]);
   });
 
   it("never cancels a turn without a token budget for its usage", async () => {

@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file cogmo/connector/v1/coding.proto.
  */
 export const file_cogmo_connector_v1_coding: GenFile = /*@__PURE__*/
-  fileDesc("Ch9jb2dtby9jb25uZWN0b3IvdjEvY29kaW5nLnByb3RvEhJjb2dtby5jb25uZWN0b3IudjEiSwoLUHJlcGFyZVNwZWMSEgoKcmVtb3RlX3VybBgBIAEoCRITCgtiYXNlX2JyYW5jaBgCIAEoCRITCgt3b3JrX2JyYW5jaBgDIAEoCSKCAQoNQWdlbnRUdXJuU3BlYxIOCgZwcm9tcHQYASABKAkSDQoFYWdlbnQYAiABKAkSGQoMdG9rZW5fYnVkZ2V0GAMgASgESACIAQESFwoKc2Vzc2lvbl9pZBgEIAEoCUgBiAEBQg8KDV90b2tlbl9idWRnZXRCDQoLX3Nlc3Npb25faWQiNgoKVmVyaWZ5U3BlYxIPCgdjb21tYW5kGAEgASgJEhcKD3RpbWVvdXRfc2Vjb25kcxgCIAEoDSI5CgtQdWJsaXNoU3BlYxIWCg5jb21taXRfbWVzc2FnZRgBIAEoCRISCgpyZW1vdGVfcmVmGAIgASgJIjcKC1JlbGVhc2VTcGVjEhgKC3NhbHZhZ2VfcmVmGAEgASgJSACIAQFCDgoMX3NhbHZhZ2VfcmVmIikKCFRvb2xDYWxsEgwKBG5hbWUYASABKAkSDwoHc3VtbWFyeRgCIAEoCSI3CgpUb29sUmVzdWx0EgwKBG5hbWUYASABKAkSCgoCb2sYAiABKAgSDwoHc3VtbWFyeRgDIAEoCSJYCgVVc2FnZRIUCgxpbnB1dF90b2tlbnMYASABKAQSFQoNb3V0cHV0X3Rva2VucxgCIAEoBBIVCghjb3N0X3VzZBgDIAEoAUgAiAEBQgsKCV9jb3N0X3VzZCIKCghQcmVwYXJlZCIuCgpQbGFuUmVzdWx0EgwKBHBsYW4YASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCSI0CghFeGVjdXRlZBIoCgV1c2FnZRgBIAEoCzIZLmNvZ21vLmNvbm5lY3Rvci52MS5Vc2FnZSJ5Cg1WZXJpZnlWZXJkaWN0EhMKCWV4aXRfY29kZRgBIAEoBUgAEjcKCXRpbWVkX291dBgCIAEoCzIiLmNvZ21vLmNvbm5lY3Rvci52MS5WZXJpZnlUaW1lZE91dEgAEhMKC291dHB1dF90YWlsGAMgASgJQgUKA2VuZCIQCg5WZXJpZnlUaW1lZE91dCIdCglQdWJsaXNoZWQSEAoIaGVhZF9zaGEYASABKAkiwgEKCFJlbGVhc2VkEjkKDXJlbW92ZWRfY2xlYW4YASABKAsyIC5jb2dtby5jb25uZWN0b3IudjEuUmVtb3ZlZENsZWFuSAASRgoUc2FsdmFnZWRfYW5kX3JlbW92ZWQYAiABKAsyJi5jb2dtby5jb25uZWN0b3IudjEuU2FsdmFnZWRBbmRSZW1vdmVkSAASKAoEa2VwdBgDIAEoCzIYLmNvZ21vLmNvbm5lY3Rvci52MS5LZXB0SABCCQoHb3V0Y29tZSIOCgxSZW1vdmVkQ2xlYW4iNgoSU2FsdmFnZWRBbmRSZW1vdmVkEhMKC3NhbHZhZ2VfcmVmGAEgASgJEgsKA3NoYRgCIAEoCSIWCgRLZXB0Eg4KBnJlYXNvbhgBIAEoCWIGcHJvdG8z");
+  fileDesc("Ch9jb2dtby9jb25uZWN0b3IvdjEvY29kaW5nLnByb3RvEhJjb2dtby5jb25uZWN0b3IudjEiSwoLUHJlcGFyZVNwZWMSEgoKcmVtb3RlX3VybBgBIAEoCRITCgtiYXNlX2JyYW5jaBgCIAEoCRITCgt3b3JrX2JyYW5jaBgDIAEoCSKCAQoNQWdlbnRUdXJuU3BlYxIOCgZwcm9tcHQYASABKAkSDQoFYWdlbnQYAiABKAkSGQoMdG9rZW5fYnVkZ2V0GAMgASgESACIAQESFwoKc2Vzc2lvbl9pZBgEIAEoCUgBiAEBQg8KDV90b2tlbl9idWRnZXRCDQoLX3Nlc3Npb25faWQiNgoKVmVyaWZ5U3BlYxIPCgdjb21tYW5kGAEgASgJEhcKD3RpbWVvdXRfc2Vjb25kcxgCIAEoDSI5CgtQdWJsaXNoU3BlYxIWCg5jb21taXRfbWVzc2FnZRgBIAEoCRISCgpyZW1vdGVfcmVmGAIgASgJIjcKC1JlbGVhc2VTcGVjEhgKC3NhbHZhZ2VfcmVmGAEgASgJSACIAQFCDgoMX3NhbHZhZ2VfcmVmIikKCFRvb2xDYWxsEgwKBG5hbWUYASABKAkSDwoHc3VtbWFyeRgCIAEoCSI3CgpUb29sUmVzdWx0EgwKBG5hbWUYASABKAkSCgoCb2sYAiABKAgSDwoHc3VtbWFyeRgDIAEoCSJYCgVVc2FnZRIUCgxpbnB1dF90b2tlbnMYASABKAQSFQoNb3V0cHV0X3Rva2VucxgCIAEoBBIVCghjb3N0X3VzZBgDIAEoAUgAiAEBQgsKCV9jb3N0X3VzZCIKCghQcmVwYXJlZCIuCgpQbGFuUmVzdWx0EgwKBHBsYW4YASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCSI0CghFeGVjdXRlZBIoCgV1c2FnZRgBIAEoCzIZLmNvZ21vLmNvbm5lY3Rvci52MS5Vc2FnZSJ9Cg1WZXJpZnlWZXJkaWN0EhMKCWV4aXRfY29kZRgBIAEoBUgAEjcKCXRpbWVkX291dBgCIAEoCzIiLmNvZ21vLmNvbm5lY3Rvci52MS5WZXJpZnlUaW1lZE91dEgAEhMKC291dHB1dF90YWlsGAMgASgJQgkKB291dGNvbWUiEAoOVmVyaWZ5VGltZWRPdXQiHQoJUHVibGlzaGVkEhAKCGhlYWRfc2hhGAEgASgJIsIBCghSZWxlYXNlZBI5Cg1yZW1vdmVkX2NsZWFuGAEgASgLMiAuY29nbW8uY29ubmVjdG9yLnYxLlJlbW92ZWRDbGVhbkgAEkYKFHNhbHZhZ2VkX2FuZF9yZW1vdmVkGAIgASgLMiYuY29nbW8uY29ubmVjdG9yLnYxLlNhbHZhZ2VkQW5kUmVtb3ZlZEgAEigKBGtlcHQYAyABKAsyGC5jb2dtby5jb25uZWN0b3IudjEuS2VwdEgAQgkKB291dGNvbWUiDgoMUmVtb3ZlZENsZWFuIjYKElNhbHZhZ2VkQW5kUmVtb3ZlZBITCgtzYWx2YWdlX3JlZhgBIAEoCRILCgNzaGEYAiABKAkiFgoES2VwdBIOCgZyZWFzb24YASABKAliBnByb3RvMw");
 
 /**
  * @generated from message cogmo.connector.v1.PrepareSpec
@@ -50,6 +50,8 @@ export const PrepareSpecSchema: GenMessage<PrepareSpec> = /*@__PURE__*/
  */
 export type AgentTurnSpec = Message<"cogmo.connector.v1.AgentTurnSpec"> & {
   /**
+   * cogmo keeps the Job under the 4 MiB message limit
+   *
    * @generated from field: string prompt = 1;
    */
   prompt: string;
@@ -130,6 +132,8 @@ export const PublishSpecSchema: GenMessage<PublishSpec> = /*@__PURE__*/
  */
 export type ReleaseSpec = Message<"cogmo.connector.v1.ReleaseSpec"> & {
   /**
+   * absent: no salvage push, as for a task that reached pr_open
+   *
    * @generated from field: optional string salvage_ref = 1;
    */
   salvageRef?: string | undefined;
@@ -240,6 +244,8 @@ export const PreparedSchema: GenMessage<Prepared> = /*@__PURE__*/
  */
 export type PlanResult = Message<"cogmo.connector.v1.PlanResult"> & {
   /**
+   * the connector keeps the FinishJob under 4 MiB, truncating the plan if it must
+   *
    * @generated from field: string plan = 1;
    */
   plan: string;
@@ -279,9 +285,9 @@ export const ExecutedSchema: GenMessage<Executed> = /*@__PURE__*/
  */
 export type VerifyVerdict = Message<"cogmo.connector.v1.VerifyVerdict"> & {
   /**
-   * @generated from oneof cogmo.connector.v1.VerifyVerdict.end
+   * @generated from oneof cogmo.connector.v1.VerifyVerdict.outcome
    */
-  end: {
+  outcome: {
     /**
      * @generated from field: int32 exit_code = 1;
      */

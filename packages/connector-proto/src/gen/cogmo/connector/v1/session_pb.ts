@@ -252,6 +252,8 @@ export type ReportEventsRequest = Message<"cogmo.connector.v1.ReportEventsReques
   jobId: string;
 
   /**
+   * the connector keeps each request under 4 MiB, splitting a larger report
+   *
    * @generated from field: repeated cogmo.connector.v1.JobEvent events = 2;
    */
   events: JobEvent[];
