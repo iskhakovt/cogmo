@@ -806,11 +806,12 @@ describe("sessions", () => {
     expect(stream.error?.code).toBe(Code.Unavailable);
   });
 
-  it("answers a run after close with unavailable", async () => {
+  it("answers a run after close with a frozen unavailable", async () => {
     hub.close();
     const run = startRun(prepareJob());
     await settle();
     expect(run.result).toEqual(err({ kind: "unavailable" }));
+    expect(Object.isFrozen(run.result)).toBe(true);
   });
 
   it("starts no idle cap for a report that arrives after close", async () => {
