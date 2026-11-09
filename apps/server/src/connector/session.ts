@@ -7,7 +7,7 @@ import type { ConnectResponse } from "@cogmo/connector-proto";
 import type { ActiveConnector } from "./store/index.js";
 
 /** Why the hub ended a session. */
-export type SessionEnd = "replaced" | "unauthenticated" | "shutdown";
+export type SessionEnd = "replaced" | "unauthenticated" | "auth_unavailable" | "shutdown";
 
 /** The session as the `Connect` handler drives it. */
 export interface ConnectorSession {

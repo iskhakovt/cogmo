@@ -97,6 +97,10 @@ function sessionEnded(reason: SessionEnd): ConnectError {
       "unauthenticated",
       () => new ConnectError("the connector's token was rotated or revoked", Code.Unauthenticated),
     )
+    .with(
+      "auth_unavailable",
+      () => new ConnectError("cogmo cannot check connector tokens", Code.Unavailable),
+    )
     .with("shutdown", () => new ConnectError("cogmo is shutting down", Code.Unavailable))
     .exhaustive();
 }

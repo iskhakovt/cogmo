@@ -12,11 +12,16 @@ import { connectorRoutes } from "./service.js";
 /** HTTP/2 keepalive: a ping this often, and a connection that misses one this long is closed. */
 const PING_INTERVAL_MS = 30_000;
 const PING_TIMEOUT_MS = 20_000;
+/** How long `close` lets open streams finish before destroying their connections. */
+const CLOSE_GRACE_MS = 2_000;
 
 export interface ConnectorServer {
   /** The bound port; the ephemeral one when started on port 0. */
   readonly port: number;
-  /** Ends every session in the hub, then closes every connection. */
+  /**
+   * Ends every session in the hub, then closes every connection, destroying
+   * those with streams still open after a 2 s grace.
+   */
   close(): Promise<void>;
 }
 
@@ -62,7 +67,11 @@ export async function startConnectorServer(params: {
       hub.close();
       const closed = new Promise<void>((resolve) => server.close(() => resolve()));
       for (const session of sessions) session.close();
+      const force = setTimeout(() => {
+        for (const session of sessions) session.destroy();
+      }, CLOSE_GRACE_MS);
       await closed;
+      clearTimeout(force);
     },
   };
 }

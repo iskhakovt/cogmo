@@ -160,9 +160,8 @@ export class SessionHub implements ConnectorHub {
       leaseTimer: null,
     };
     this.#jobs.set(job.jobId, entry);
-    const session = this.#sessions.get(connectorId);
-    if (session) session.send(jobMessage(job));
-    else this.#startLease(entry);
+    this.#startLease(entry);
+    this.#sessions.get(connectorId)?.send(jobMessage(job));
     logger.info({ connectorId, jobId: job.jobId, phase }, "connector job dispatched");
     return this.#join(entry, handlers);
   }
@@ -176,11 +175,15 @@ export class SessionHub implements ConnectorHub {
     const held = new Set(heldJobIds);
     const resend: Job[] = [];
     for (const entry of this.#openJobsOf(connector.id)) {
-      clearTimer(entry.leaseTimer);
-      entry.leaseTimer = null;
-      if (held.has(entry.job.jobId)) continue;
-      if (entry.status === "accepted") this.#end(entry, "lost", err({ kind: "lost" }));
-      else resend.push(entry.job);
+      const isHeld = held.has(entry.job.jobId);
+      if (entry.status === "dispatched") {
+        if (!isHeld) resend.push(entry.job);
+      } else if (isHeld) {
+        clearTimer(entry.leaseTimer);
+        entry.leaseTimer = null;
+      } else {
+        this.#end(entry, "lost", err({ kind: "lost" }));
+      }
     }
     const awaited = this.#openJobsOf(connector.id).map((entry) => entry.job.jobId);
     session.send(
@@ -273,6 +276,9 @@ export class SessionHub implements ConnectorHub {
   #accept(entry: JobEntry): void {
     if (entry.status !== "dispatched") return;
     entry.status = "accepted";
+    clearTimer(entry.leaseTimer);
+    entry.leaseTimer = null;
+    if (!this.#sessions.has(entry.connectorId)) this.#startLease(entry);
     this.#restartIdle(entry);
   }
 
@@ -315,8 +321,13 @@ export class SessionHub implements ConnectorHub {
     entry.idleTimer = setTimeout(() => this.#timeOut(entry, "idle"), idleMs);
   }
 
+  /**
+   * A dispatched job's lease runs from dispatch to acceptance; an accepted
+   * job's runs while its connector has no session.
+   */
   #startLease(entry: JobEntry): void {
     if (this.#closed) return;
+    clearTimer(entry.leaseTimer);
     entry.leaseTimer = setTimeout(
       () =>
         entry.status === "accepted"
@@ -349,20 +360,26 @@ export class SessionHub implements ConnectorHub {
       { connectorId: entry.connectorId, jobId: entry.job.jobId, phase: entry.phase, status },
       "connector job ended",
     );
-    if (entry.phase === "release" && outcome.isOk()) this.#forgetTask(entry.job.taskId);
+    if (entry.phase === "release" && outcome.isOk()) this.#forgetTask(entry);
   }
 
-  /** A finished release ends the task's time on the connector; its ended jobs go. */
-  #forgetTask(taskId: string): void {
+  /**
+   * A finished release ends the task's time on the connector: its other ended
+   * jobs go, and the release stays to answer a retried `FinishJob` or `run`.
+   */
+  #forgetTask(release: JobEntry): void {
     for (const [jobId, entry] of this.#jobs) {
-      if (entry.job.taskId === taskId && entry.outcome !== null) this.#jobs.delete(jobId);
+      if (entry === release || entry.job.taskId !== release.job.taskId) continue;
+      if (entry.outcome !== null) this.#jobs.delete(jobId);
     }
   }
 
   #sessionClosed(session: Session): void {
     if (this.#sessions.get(session.connector.id) !== session) return;
     this.#sessions.delete(session.connector.id);
-    for (const entry of this.#openJobsOf(session.connector.id)) this.#startLease(entry);
+    for (const entry of this.#openJobsOf(session.connector.id)) {
+      if (entry.status === "accepted") this.#startLease(entry);
+    }
     logger.info(
       { connectorId: session.connector.id, connector: session.connector.name },
       "connector session closed",
@@ -385,10 +402,11 @@ export class SessionHub implements ConnectorHub {
       await this.#auth.refresh();
     } catch (error) {
       logger.warn({ err: error }, "connector auth: refreshing the connector cache failed");
-      return;
     }
+    const stale = this.#auth.isStale();
     for (const session of [...this.#sessions.values()]) {
-      if (!this.#auth.isCurrent(session.connector)) session.end("unauthenticated");
+      if (stale) session.end("auth_unavailable");
+      else if (!this.#auth.isCurrent(session.connector)) session.end("unauthenticated");
     }
   }
 }

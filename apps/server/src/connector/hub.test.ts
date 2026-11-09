@@ -244,6 +244,29 @@ describe("auth", () => {
     expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.Unavailable);
   });
 
+  it("fails closed with UNAVAILABLE once the cache has gone 90 s without a refresh", async () => {
+    store.listActive.mockRejectedValue(new Error("db down"));
+    await advance(60_000);
+    // Refreshes failing for 60 s: the cached token still works.
+    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("paseo-token")))).toBe(
+      Code.NotFound,
+    );
+    await advance(30_000);
+    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("paseo-token")))).toBe(
+      Code.Unavailable,
+    );
+  });
+
+  it("closes every stream with UNAVAILABLE once the cache is stale", async () => {
+    const stream = await connected("paseo-token");
+    store.listActive.mockRejectedValue(new Error("db down"));
+    await advance(60_000);
+    expect(stream.error).toBeNull();
+    await advance(30_000);
+    await stream.done;
+    expect(stream.error?.code).toBe(Code.Unavailable);
+  });
+
   it("closes a revoked connector's stream at the next refresh, and its accepted job is lost", async () => {
     const stream = await connected("paseo-token");
     const run = startRun(prepareJob());
@@ -335,6 +358,23 @@ describe("a job's life", () => {
   it("is unavailable when no session carries it within the lease", async () => {
     const run = startRun(prepareJob());
     await advance(LEASE_MS);
+    expect(run.result).toEqual(err({ kind: "unavailable" }));
+  });
+
+  it("is unavailable when an open session does not accept it within the lease", async () => {
+    await connected("paseo-token");
+    const run = startRun(prepareJob());
+    await advance(LEASE_MS);
+    expect(run.result).toEqual(err({ kind: "unavailable" }));
+  });
+
+  it("does not restart the acceptance lease on a reconnect", async () => {
+    const first = await connected("paseo-token");
+    const run = startRun(prepareJob());
+    await advance(LEASE_MS - 1_000);
+    await first.disconnect();
+    await connected("paseo-token", ["task-1/prepare/d1"]);
+    await advance(1_000);
     expect(run.result).toEqual(err({ kind: "unavailable" }));
   });
 
@@ -643,6 +683,28 @@ describe("release", () => {
     expect(await callError(client.finishJob(PREPARED, auth))).toBe(Code.NotFound);
   });
 
+  it("keeps the release itself: a retried FinishJob is acknowledged and run returns its outcome", async () => {
+    const stream = await connected("paseo-token");
+    const auth = bearer("paseo-token");
+    startRun(releaseJob());
+    await settle();
+    const released = finish({
+      jobId: "task-1/release/d4",
+      outcome: {
+        case: "completed",
+        value: {
+          result: { case: "released", value: { outcome: { case: "removedClean", value: {} } } },
+        },
+      },
+    });
+    await client.finishJob(released, auth);
+    await client.finishJob(released, auth);
+    const again = startRun(releaseJob());
+    await settle();
+    expect(again.result).toEqual(ok(expect.objectContaining({ kind: "completed" })));
+    expect(stream.jobs()).toEqual(["task-1/release/d4"]);
+  });
+
   it("keeps the task's jobs when the release ends in a hub error", async () => {
     await connected("paseo-token");
     const auth = bearer("paseo-token");
@@ -650,6 +712,8 @@ describe("release", () => {
     await settle();
     await client.finishJob(PREPARED, auth);
     const release = startRun(releaseJob());
+    await settle();
+    await client.acceptJob({ jobId: "task-1/release/d4" }, auth);
     await advance(10 * MINUTE);
     expect(release.result).toEqual(err({ kind: "timed_out", cap: "total" }));
     await client.finishJob(PREPARED, auth);

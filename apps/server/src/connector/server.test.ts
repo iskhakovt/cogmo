@@ -1,3 +1,4 @@
+import { connect as connectHttp2 } from "node:http2";
 import { create } from "@bufbuild/protobuf";
 import {
   ConnectorService,
@@ -107,4 +108,21 @@ it("serves only the gRPC protocol", async () => {
     code: Code.Unknown,
     rawMessage: "HTTP 415",
   });
+});
+
+it("closes within its grace when a request body never finishes", async () => {
+  const session = connectHttp2(baseUrl);
+  session.on("error", () => {});
+  const request = session.request({
+    ":method": "POST",
+    ":path": "/cogmo.connector.v1.ConnectorService/AcceptJob",
+    "content-type": "application/grpc",
+    authorization: "Bearer paseo-token",
+  });
+  request.on("error", () => {});
+  request.write(Buffer.from([0, 0, 0, 0, 16]));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  await resolvesWithin(server.close(), 4_000, "server close");
+  session.destroy();
 });
