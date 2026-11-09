@@ -17,6 +17,9 @@ export const DevcontainerSpecSchema = z
   .passthrough();
 export type DevcontainerSpec = z.infer<typeof DevcontainerSpecSchema>;
 
+/** A commit as git names it: 40 lowercase hex characters. */
+const BaseShaSchema = z.string().regex(/^[0-9a-f]{40}$/, "expected 40-char lowercase hex SHA");
+
 /**
  * Branch + transport-specific worktree material derived from the task id
  * by the orchestrator's `allocate-worktree` step. Stored as one JSONB blob
@@ -29,12 +32,21 @@ export type DevcontainerSpec = z.infer<typeof DevcontainerSpecSchema>;
  * the local-Docker backend bind-mounts at `/workspace`; `git-remote` carries
  * only the slice-4 feature branch, because the run-branch is materialized
  * inside the sandbox by `git clone` (no host worktree).
+ *
+ * `baseSha` is the commit the branch was cut from: the parent repo's HEAD
+ * on `host-path`, the remote's freshly fetched default branch on
+ * `git-remote`.
+ * It is saved with the assignment before the branch is cut, so a retry cuts
+ * at the same commit, and every session of the task receives it as
+ * `COGMO_VERIFY_BASE`. Absent on assignments saved before it was recorded,
+ * and on a `host-path` one whose parent repo had no commit.
  */
 export const HostPathWorktreeAssignmentSchema = z
   .object({
     type: z.literal("host-path"),
     branch: z.string().min(1),
     worktreePath: z.string().min(1),
+    baseSha: BaseShaSchema.optional(),
   })
   .strict();
 
@@ -42,6 +54,7 @@ export const GitRemoteWorktreeAssignmentSchema = z
   .object({
     type: z.literal("git-remote"),
     branch: z.string().min(1),
+    baseSha: BaseShaSchema.optional(),
   })
   .strict();
 

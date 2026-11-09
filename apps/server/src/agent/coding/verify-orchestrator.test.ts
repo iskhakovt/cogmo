@@ -598,6 +598,45 @@ describe("runCodingVerify", () => {
     });
   });
 
+  it("gives the verify container the branch's base as COGMO_VERIFY_BASE", async () => {
+    const baseSha = "0123456789abcdef0123456789abcdef01234567";
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    deps.octokitFactory = fakeOctokitFactory(
+      vi.fn(async () => ({
+        data: { html_url: "https://github.com/user/cogmo/pull/1", number: 1 },
+      })),
+    );
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+    const { taskId } = await seedTask();
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, taskId, {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/tmp/worktrees/abc12345",
+        baseSha,
+      }),
+    );
+
+    await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    const createCall = vi.mocked(deps.sandbox.create).mock.calls[0]?.[0];
+    expect(createCall?.env).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-code-oauth-token",
+      COGMO_VERIFY_BASE: baseSha,
+    });
+  });
+
   it("missing CLAUDE_CODE_OAUTH_TOKEN → status=failed before container creation", async () => {
     // Removes only the OAuth secret — GitHub identity stays so the
     // identity-resolution gate doesn't short-circuit first. The auth

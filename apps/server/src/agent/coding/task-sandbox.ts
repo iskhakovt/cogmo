@@ -26,6 +26,9 @@ import type { TaskFailure, WorktreeAssignment } from "./types.js";
 const HOME_VOLUME_PREFIX = "cogmo-task-home";
 export const WORKTREE_DIR_IN_CONTAINER = "/workspace";
 
+/** Carries the assignment's `baseSha` to the skills repo's `.cogmo/verify`. */
+const VERIFY_BASE_ENV = "COGMO_VERIFY_BASE";
+
 /**
  * Build the `WorktreeSpec` the sandbox backend wants. Bind-mount backends
  * get `host-path` pointing at the previously-allocated host worktree;
@@ -141,6 +144,8 @@ export function taskImage(repo: CodingRepoRow, devbaseImage: string): string {
  * The `sandbox.create` spec for a task container. Call it inside the
  * `create-container` step body: `expiresAt` is stamped from the clock, and
  * the PAT inside the worktree spec must never reach a step's return value.
+ * Its env adds `COGMO_VERIFY_BASE` when the assignment has a base; every exec
+ * in the session inherits it, as the Claude token does.
  */
 export function taskSessionSpec(args: {
   sandbox: Pick<SandboxClient, "capabilities">;
@@ -176,7 +181,12 @@ export function taskSessionSpec(args: {
     resourceLimits: args.resourceLimits,
     expiresAt: new Date(Date.now() + args.taskTtlMs),
     allowPrivilegedRunc: args.task.allowPrivilegedRunc,
-    env: args.env,
+    env: {
+      ...args.env,
+      ...(args.assignment.baseSha !== undefined && {
+        [VERIFY_BASE_ENV]: args.assignment.baseSha,
+      }),
+    },
     // The coding CLI reaches its provider, the git remote and package indexes.
     network: "bridge",
   };

@@ -145,6 +145,7 @@ describe("allocateWorktree output inside a task container (real Docker, runc)", 
       branch,
       worktreePath,
       remoteUrl: "https://github.com/user/fixture.git",
+      baseSha: null,
     });
 
     const session = await sandbox.create({

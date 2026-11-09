@@ -326,7 +326,14 @@ describe("bootstrapSkillsRepo", () => {
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-function storedSkillsRow(repoPath: string, remoteUrl: string): CodingRepoRow {
+/** The skills repo's `verify_command`, which Cogmo writes at each boot. */
+const VERIFY_COMMAND = "uv run --locked --group dev .cogmo/verify";
+
+function storedSkillsRow(
+  repoPath: string,
+  remoteUrl: string,
+  verifyCommand: string,
+): CodingRepoRow {
   return {
     id: "00000000-0000-0000-0000-000000000001",
     name: "skills",
@@ -335,7 +342,7 @@ function storedSkillsRow(repoPath: string, remoteUrl: string): CodingRepoRow {
     remoteUrl,
     devcontainer: null,
     allowedBackends: ["claude"],
-    verifyCommand: "true",
+    verifyCommand,
     verifyTimeoutSeconds: 600,
     taskTokenBudget: 200_000,
     taskWallTimeSeconds: 1800,
@@ -373,6 +380,29 @@ describe("ensureSkillsCodingRepo", () => {
     }
     expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
     expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
+    expect(codingStore.updateRepoVerifyCommand).not.toHaveBeenCalled();
+  });
+
+  it("writes Cogmo's verify_command to an existing row even when origin is gone", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue(
+      storedSkillsRow(repoPath, "git@github.com:user/skills.git", "true"),
+    );
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result.kind).toBe("skipped_no_origin");
+    expect(codingStore.updateRepoVerifyCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      "00000000-0000-0000-0000-000000000001",
+      VERIFY_COMMAND,
+    );
+    expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 
   it("inserts a `skills` row with the bare repo's origin URL on first run", async () => {
@@ -381,7 +411,7 @@ describe("ensureSkillsCodingRepo", () => {
     codingStore.getRepoByName.mockResolvedValue(undefined);
     codingStore.insertOrRecoverRepo.mockImplementation(async (_tx, params) => ({
       kind: "new",
-      row: storedSkillsRow(params.localPath, params.remoteUrl),
+      row: storedSkillsRow(params.localPath, params.remoteUrl, params.verifyCommand),
     }));
 
     const result = await ensureSkillsCodingRepo(
@@ -403,17 +433,19 @@ describe("ensureSkillsCodingRepo", () => {
         defaultBranch: "main",
         remoteUrl: "git@github.com:operator/cogmo-skills.git",
         allowedBackends: ["claude"],
+        verifyCommand: VERIFY_COMMAND,
         maxConcurrentTasks: 1,
       }),
     );
     expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
+    expect(codingStore.updateRepoVerifyCommand).not.toHaveBeenCalled();
   });
 
   it("returns unchanged without writing when the row matches bare repo origin", async () => {
     const repoPath = await skillsRepoWithOrigin("git@github.com:user/skills.git");
     const codingStore = mock<CodingStore>();
     codingStore.getRepoByName.mockResolvedValue(
-      storedSkillsRow(repoPath, "git@github.com:user/skills.git"),
+      storedSkillsRow(repoPath, "git@github.com:user/skills.git", VERIFY_COMMAND),
     );
 
     const result = await ensureSkillsCodingRepo(
@@ -427,13 +459,35 @@ describe("ensureSkillsCodingRepo", () => {
     }
     expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
     expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
+    expect(codingStore.updateRepoVerifyCommand).not.toHaveBeenCalled();
+  });
+
+  it("writes Cogmo's verify_command over an existing row's", async () => {
+    const repoPath = await skillsRepoWithOrigin("git@github.com:user/skills.git");
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue(
+      storedSkillsRow(repoPath, "git@github.com:user/skills.git", "true"),
+    );
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result.kind).toBe("unchanged");
+    expect(codingStore.updateRepoVerifyCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      "00000000-0000-0000-0000-000000000001",
+      VERIFY_COMMAND,
+    );
+    expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 
   it("updates stale remote_url when bare repo origin changes", async () => {
     const repoPath = await skillsRepoWithOrigin("git@github.com:user/new-skills.git");
     const codingStore = mock<CodingStore>();
     codingStore.getRepoByName.mockResolvedValue(
-      storedSkillsRow(repoPath, "git@github.com:user/old-skills.git"),
+      storedSkillsRow(repoPath, "git@github.com:user/old-skills.git", "true"),
     );
 
     const result = await ensureSkillsCodingRepo(
@@ -460,7 +514,7 @@ describe("ensureSkillsCodingRepo", () => {
     codingStore.getRepoByName.mockResolvedValue(undefined);
     codingStore.insertOrRecoverRepo.mockResolvedValue({
       kind: "recovered",
-      row: storedSkillsRow(repoPath, "git@github.com:user/old-skills.git"),
+      row: storedSkillsRow(repoPath, "git@github.com:user/old-skills.git", "true"),
     });
 
     const result = await ensureSkillsCodingRepo(
@@ -478,6 +532,11 @@ describe("ensureSkillsCodingRepo", () => {
       "00000000-0000-0000-0000-000000000001",
       "git@github.com:user/new-skills.git",
     );
+    expect(codingStore.updateRepoVerifyCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      "00000000-0000-0000-0000-000000000001",
+      VERIFY_COMMAND,
+    );
   });
 
   it("keeps an origin the wizard committed just before this call's snapshot", async () => {
@@ -485,7 +544,7 @@ describe("ensureSkillsCodingRepo", () => {
     const newUrl = "git@github.com:user/new-skills.git";
     const repoPath = await skillsRepoWithOrigin(oldUrl);
     // One `skills` row that reads and writes go through, standing in for the table.
-    let row = storedSkillsRow(repoPath, oldUrl);
+    let row = storedSkillsRow(repoPath, oldUrl, "true");
     const codingStore = mock<CodingStore>();
     codingStore.getRepoByName.mockImplementation(async () => row);
     codingStore.updateRepoRemoteUrl.mockImplementation(async (_tx, _id, remoteUrl) => {

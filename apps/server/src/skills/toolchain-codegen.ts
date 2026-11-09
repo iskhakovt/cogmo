@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { RUNTIME_PACKAGES } from "./runtime-packages.js";
+import { SKILLS_VERIFY_COMMAND } from "./toolchain.js";
 import { SKILL_EFFECTS, SkillManifestSchema } from "./types.js";
 
 /**
@@ -44,6 +45,8 @@ export interface ToolchainPins {
   uvVersion: string;
   /** The image's Python minor, `images/skills/.python-version`. */
   pythonMinor: string;
+  /** The image's exact Python, from `images/skills/Dockerfile`'s final `FROM`. */
+  pythonVersion: string;
 }
 
 /** Read {@link ToolchainPins} from the repo at `repoRoot`. */
@@ -55,14 +58,28 @@ export function readToolchainPins(repoRoot: string): ToolchainPins {
   if (!/^\d+\.\d+$/.test(pythonMinor)) {
     throw new Error(`images/skills/.python-version holds '${pythonMinor}', not a Python minor`);
   }
-  return { uvVersion, pythonMinor };
+  const dockerfile = readFileSync(join(repoRoot, "images/skills/Dockerfile"), "utf8");
+  const finalFrom = dockerfile.split("\n").findLast((line) => /^FROM\s/i.test(line)) ?? "";
+  const pythonVersion = /\bpython:(\d+\.\d+\.\d+)-slim\b/.exec(finalFrom)?.[1];
+  if (pythonVersion === undefined) {
+    throw new Error(
+      `images/skills/Dockerfile's final FROM names no python:<X.Y.Z>-slim image: ${finalFrom}`,
+    );
+  }
+  if (!pythonVersion.startsWith(`${pythonMinor}.`)) {
+    throw new Error(
+      `images/skills/Dockerfile's final FROM runs Python ${pythonVersion}, not on .python-version's ${pythonMinor}`,
+    );
+  }
+  return { uvVersion, pythonMinor, pythonVersion };
 }
 
 /**
  * The toolchain's `pyproject.toml`: a virtual project whose dev group is the
  * tools `.cogmo/verify` runs and the runtime's pydantic, uv pinned to the
  * image's, and `[tool.uv.pip]` set so an author's plain `uv pip compile`
- * writes register's lockfile bytes.
+ * writes register's lockfile bytes: register's compile runs on the image's
+ * interpreter, so the author's resolves for its exact version.
  */
 export function renderToolchainPyproject(pins: ToolchainPins): string {
   const dev = Object.entries({ ...TOOL_PINS, pydantic: RUNTIME_PACKAGES.pydantic })
@@ -87,7 +104,7 @@ export function renderToolchainPyproject(pins: ToolchainPins): string {
     `required-version = "==${pins.uvVersion}"`,
     "",
     "[tool.uv.pip]",
-    `python-version = "${pins.pythonMinor}"`,
+    `python-version = "${pins.pythonVersion}"`,
     "generate-hashes = true",
     "no-header = true",
     "",
@@ -216,11 +233,8 @@ function frontmatterFields(): string[] {
 
 /**
  * The skills repo's `CLAUDE.md`: the authoring convention, its frontmatter
- * fields from `SkillManifestSchema` and its effects from `SKILL_EFFECTS`.
- *
- * It names no check for the author to run: `.cogmo/verify` needs
- * `COGMO_VERIFY_BASE`, which no coding session carries yet (todo.md → Skills
- * autonomy S5).
+ * fields from `SkillManifestSchema`, its effects from `SKILL_EFFECTS`, and
+ * the check that must pass, the repo's `verify_command`.
  */
 export function renderToolchainClaudeMd(): string {
   const owned = TOOLCHAIN_ENTRIES.map((entry) => code(entry === ".cogmo" ? ".cogmo/" : entry));
@@ -284,6 +298,10 @@ export function renderToolchainClaudeMd(): string {
     "```",
     "",
     `\`pyproject.toml\` supplies \`--generate-hashes\`, \`--no-header\` and the image's Python version, so the output matches register's own compile byte for byte. Skills share the runtime's pydantic: when a dependency needs it, also declare \`pydantic==${RUNTIME_PACKAGES.pydantic}\`. Do not run \`uv add\` or \`uv lock\`: the project's dependencies are Cogmo's tools, not the skill's.`,
+    "",
+    "## Checks",
+    "",
+    `${code(SKILLS_VERIFY_COMMAND)} runs ruff, pyrefly and pytest over each skill changed since \`COGMO_VERIFY_BASE\`, the commit the branch was cut from. It must pass before the work is done.`,
     "",
   ].join("\n");
 }

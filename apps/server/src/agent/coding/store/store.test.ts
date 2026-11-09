@@ -356,6 +356,33 @@ describe("DrizzleCodingStore", () => {
       expect(reloaded?.createdAt.getTime()).toBe(inserted.createdAt.getTime());
     });
 
+    it("updateRepoVerifyCommand updates only `verify_command`, leaves other columns alone", async () => {
+      const inserted = await tx((trx) =>
+        store
+          .insertRepo(trx, {
+            name: "skills",
+            localPath: "/var/lib/cogmo/skills",
+            ...REPO_DEFAULTS,
+            verifyCommand: "true",
+          })
+          .then(expectOk),
+      );
+
+      await tx((trx) =>
+        store.updateRepoVerifyCommand(
+          trx,
+          inserted.id,
+          "uv run --locked --group dev .cogmo/verify",
+        ),
+      );
+
+      const reloaded = await tx((trx) => store.getRepoById(trx, inserted.id));
+      expect(reloaded).toEqual({
+        ...inserted,
+        verifyCommand: "uv run --locked --group dev .cogmo/verify",
+      });
+    });
+
     it("updateRepoRemoteUrl on an unknown id is a silent no-op", async () => {
       // UPDATE … WHERE id = <nonexistent> affects zero rows; not an error.
       // Caller responsibility to verify the row exists before calling — we

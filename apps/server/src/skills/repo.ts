@@ -4,9 +4,10 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import type { CodingStore } from "../agent/coding/store/index.js";
-import type { Transactor } from "../db/index.js";
+import type { CodingRepoRow, CodingStore } from "../agent/coding/store/index.js";
+import type { Transaction, Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
+import { SKILLS_VERIFY_COMMAND } from "./toolchain.js";
 
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "skills.repo" });
@@ -166,7 +167,7 @@ export type EnsureSkillsCodingRepoResult =
       previousRemoteUrl: string;
     }
   | {
-      /** Row already present and in sync — no-op. */
+      /** Row already present, its `remote_url` in sync. */
       kind: "unchanged";
       name: string;
       localPath: string;
@@ -184,7 +185,8 @@ export interface EnsureSkillsCodingRepoArgs {
 
 /**
  * Idempotently ensure `coding_repos.skills` reflects the bare repo's current
- * `origin`. Called at boot and at the end of {@link configureSkillsRemote}.
+ * `origin`, and carries Cogmo's `verify_command`. Called at boot, after the
+ * toolchain commit, and at the end of {@link configureSkillsRemote}.
  *
  * The bare repo's `origin` is the source of truth — this function mirrors it
  * into the DB row. Four outcomes (discriminated by `kind`):
@@ -195,17 +197,21 @@ export interface EnsureSkillsCodingRepoArgs {
  *     `register` mirrors `main` to it). The wizard / `cogmo migrate
  *     skills-remote` CLI is the path to attach one.
  *   - `created` — no row existed, origin is present: row inserted.
- *   - `updated` — row existed with a stale `remote_url`: column updated. This
- *     is the one mutation we allow on the otherwise insert-once
- *     `coding_repos` table; see `CodingStore.updateRepoRemoteUrl`.
- *   - `unchanged` — row present and in sync.
+ *   - `updated` — row existed with a stale `remote_url`: column updated
+ *     (`CodingStore.updateRepoRemoteUrl`).
+ *   - `unchanged` — row present, its `remote_url` in sync.
+ *
+ * `verify_command` is {@link SKILLS_VERIFY_COMMAND}, which runs the
+ * toolchain's `.cogmo/verify` (design/skills.md → The skills repo
+ * toolchain): inserted with the row, and written over any other value
+ * whenever a row exists, `origin` or not.
  *
  * Reads the row, then `origin`, in one transaction: the snapshot predates the
  * `origin` read, so a boot racing the wizard can't write an older URL back; a
  * concurrent write fails this one with `40001`, and the retry re-reads both.
  *
- * Defaults on first insert match the per-repo knobs `Transport.repos.add`
- * uses for user-added repos. `maxConcurrentTasks: 1` is intentional — register
+ * Its other knobs on first insert match those `Transport.repos.add` uses for
+ * user-added repos. `maxConcurrentTasks: 1` is intentional — register
  * is single-writer on `refs/heads/main` and parallel skill-author tasks would
  * compete to fast-forward the same ref.
  */
@@ -215,6 +221,7 @@ export async function ensureSkillsCodingRepo(
 ): Promise<EnsureSkillsCodingRepoResult> {
   return deps.runInTx(async (tx) => {
     const existing = await deps.codingStore.getRepoByName(tx, SKILLS_CODING_REPO_NAME);
+    if (existing !== undefined) await writeVerifyCommand(deps.codingStore, tx, existing);
     const remoteUrl = await readOriginUrl(args.skillsRepoPath);
     if (!remoteUrl) {
       log.warn(
@@ -236,12 +243,14 @@ export async function ensureSkillsCodingRepo(
             remoteUrl,
             devcontainer: null,
             allowedBackends: ["claude"],
-            verifyCommand: "true",
+            verifyCommand: SKILLS_VERIFY_COMMAND,
             taskTokenBudget: 200_000,
             taskWallTimeSeconds: 1800,
             maxConcurrentTasks: 1,
           })
         : { kind: "recovered" as const, row: existing };
+    // A row a concurrent bootstrap inserted after the read missed.
+    if (existing === undefined) await writeVerifyCommand(deps.codingStore, tx, row);
     if (kind === "new") {
       log.info(
         { name: row.name, localPath: row.localPath, remoteUrl },
@@ -270,4 +279,18 @@ export async function ensureSkillsCodingRepo(
       previousRemoteUrl: row.remoteUrl,
     };
   });
+}
+
+/** Write {@link SKILLS_VERIFY_COMMAND} over the row's `verify_command` when it differs. */
+async function writeVerifyCommand(
+  store: CodingStore,
+  tx: Transaction,
+  row: CodingRepoRow,
+): Promise<void> {
+  if (row.verifyCommand === SKILLS_VERIFY_COMMAND) return;
+  await store.updateRepoVerifyCommand(tx, row.id, SKILLS_VERIFY_COMMAND);
+  log.info(
+    { name: row.name, previousVerifyCommand: row.verifyCommand },
+    "wrote the skills coding_repos.verify_command",
+  );
 }

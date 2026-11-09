@@ -23,6 +23,8 @@ export interface AllocateWorktreeParams {
    * config, so it must point at the real remote, not at `repoPath`.
    */
   remoteUrl: string;
+  /** The assignment's `baseSha` to cut `branch` at; null cuts at the parent's HEAD. */
+  baseSha: string | null;
 }
 
 export interface AllocateWorktreeResult {
@@ -70,7 +72,7 @@ export interface AllocateWorktreeResult {
 export async function allocateWorktree(
   params: AllocateWorktreeParams,
 ): Promise<AllocateWorktreeResult> {
-  const { repoPath, branch, worktreePath, remoteUrl } = params;
+  const { repoPath, branch, worktreePath, remoteUrl, baseSha } = params;
   await mkdir(dirname(worktreePath), { recursive: true });
 
   const existing = await classifyPath(worktreePath);
@@ -102,11 +104,36 @@ export async function allocateWorktree(
   await execFileP("git", ["clone", "--no-hardlinks", repoPath, staging]);
   // `-B` rather than `-b`: the parent repo may carry this branch from a
   // crashed prior attempt (it gets copied into the clone's refs), and the
-  // task always starts from the parent's HEAD tip anyway.
-  await git(staging, ["checkout", "-B", branch]);
+  // task always starts from its base, or the parent's HEAD tip without one.
+  await git(staging, ["checkout", "-B", branch, ...(baseSha === null ? [] : [baseSha])]);
   await git(staging, ["remote", "set-url", "origin", remoteUrl]);
   await rename(staging, worktreePath);
   return { adopted: false };
+}
+
+/**
+ * The commit the HEAD of the repo at `repoPath` names: the parent clone the
+ * task's tree is cloned from, so the commit a clone of it checks out. Null
+ * when HEAD names no commit, an empty repo, which `rev-parse --verify
+ * --quiet` reports by exiting 1 with nothing printed. Any other failure (no
+ * repo at the path, git missing) rejects.
+ */
+export async function readHeadSha(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP("git", [
+      "-C",
+      repoPath,
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      "--end-of-options",
+      "HEAD^{commit}",
+    ]);
+    return stdout.trim();
+  } catch (err) {
+    if (typeof err === "object" && err !== null && "code" in err && err.code === 1) return null;
+    throw err;
+  }
 }
 
 /**

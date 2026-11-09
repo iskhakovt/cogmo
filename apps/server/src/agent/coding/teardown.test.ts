@@ -105,7 +105,13 @@ async function allocatedWorktree(
 ): Promise<{ worktreePath: string; branch: string }> {
   const branch = `cogmo/${taskId.slice(-8)}`;
   const worktreePath = join(baseDir, "worktrees", taskId.slice(-8));
-  await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: join(baseDir, "remote") });
+  await allocateWorktree({
+    repoPath,
+    branch,
+    worktreePath,
+    remoteUrl: join(baseDir, "remote"),
+    baseSha: null,
+  });
   return { worktreePath, branch };
 }
 
@@ -451,7 +457,13 @@ describe("teardownWorktree", () => {
     expect(calls).toEqual([]);
     // The path is free for a later allocation.
     await expect(
-      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: join(baseDir, "remote") }),
+      allocateWorktree({
+        repoPath,
+        branch,
+        worktreePath,
+        remoteUrl: join(baseDir, "remote"),
+        baseSha: null,
+      }),
     ).resolves.toBeDefined();
   });
 
