@@ -425,10 +425,12 @@ describe("runCodingTask", () => {
     expect(stopCalls).toEqual([]);
   });
 
-  it("threads CLAUDE_CODE_OAUTH_TOKEN from secretsStore into sandbox.create env", async () => {
+  it("threads CLAUDE_CODE_OAUTH_TOKEN and the branch's base into sandbox.create env", async () => {
     // Pins the contract: when a secretsStore is wired and the OAuth
-    // secret is present, it lands on `SessionSpec.env`. See
-    // design/coding-delegation.md → Subscription Auth.
+    // secret is present, it lands on `SessionSpec.env`, beside the commit
+    // allocate-worktree cut the branch from. See design/coding-delegation.md
+    // → Subscription Auth, and design/skills.md → The skills repo toolchain.
+    const { stdout: head } = await execFileP("git", ["-C", repoPath, "rev-parse", "HEAD"]);
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox, createCalls } = fakeSandbox();
@@ -451,7 +453,182 @@ describe("runCodingTask", () => {
       stepSendEvent,
     });
     expect(result.status).toBe("awaiting_approval");
-    expect(createCalls[0]?.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" });
+    expect(createCalls[0]?.env).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth",
+      COGMO_VERIFY_BASE: head.trim(),
+    });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.worktreeAssignment?.baseSha).toBe(head.trim());
+  });
+
+  it("allocates on an empty parent repo, saving no base and giving the session no COGMO_VERIFY_BASE", async () => {
+    const parentPath = join(baseDir, "repo-empty");
+    await execFileP("git", ["init", "--initial-branch=main", parentPath]);
+    const repo = await tx((trx) =>
+      store
+        .insertRepo(trx, {
+          name: "empty",
+          localPath: parentPath,
+          defaultBranch: "main",
+          remoteUrl: "git@github.com:user/empty.git",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          verifyCommand: "true",
+          taskTokenBudget: 100_000,
+          taskWallTimeSeconds: 600,
+          maxConcurrentTasks: 1,
+        })
+        .then(expectOk),
+    );
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-EMPTY" },
+          { kind: "plan_ready", plan: "## Plan\n" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+      }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("awaiting_approval");
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    const assignment = expectDefined(reloaded?.worktreeAssignment, "worktree assignment");
+    expect(assignment).not.toHaveProperty("baseSha");
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]?.env).not.toHaveProperty("COGMO_VERIFY_BASE");
+  });
+
+  it("cuts the branch at the parent's HEAD when that sits on a branch other than main", async () => {
+    // The commit a clone of the parent checks out, whatever its default branch.
+    const parentPath = join(baseDir, "repo-on-feature");
+    await execFileP("git", ["clone", "--quiet", repoPath, parentPath]);
+    await execFileP("git", ["-C", parentPath, "checkout", "-b", "feature"]);
+    writeFileSync(join(parentPath, "feature.txt"), "on feature\n");
+    await execFileP("git", ["-C", parentPath, "add", "."]);
+    await execFileP("git", [
+      "-C",
+      parentPath,
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-m",
+      "on feature",
+    ]);
+    const { stdout: featureTip } = await execFileP("git", ["-C", parentPath, "rev-parse", "HEAD"]);
+    const repo = await tx((trx) =>
+      store
+        .insertRepo(trx, {
+          name: "on-feature",
+          localPath: parentPath,
+          defaultBranch: "main",
+          remoteUrl: "git@github.com:user/on-feature.git",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          verifyCommand: "true",
+          taskTokenBudget: 100_000,
+          taskWallTimeSeconds: 600,
+          maxConcurrentTasks: 1,
+        })
+        .then(expectOk),
+    );
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-FEATURE" },
+          { kind: "plan_ready", plan: "## Plan\n" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+      }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("awaiting_approval");
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.worktreeAssignment?.baseSha).toBe(featureTip.trim());
+    const worktreePath = expectDefined(createCalls[0]?.worktreePath, "worktree path");
+    const { stdout: cut } = await execFileP("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+    expect(cut.trim()).toBe(featureTip.trim());
+  });
+
+  it("allocates on a SHA-256 parent repo, saving its 64-character HEAD as the base", async () => {
+    const parentPath = join(baseDir, "repo-sha256");
+    await execFileP("git", ["init", "--object-format=sha256", "--initial-branch=main", parentPath]);
+    await execFileP("git", [
+      "-C",
+      parentPath,
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "init",
+    ]);
+    const head = (await execFileP("git", ["-C", parentPath, "rev-parse", "HEAD"])).stdout.trim();
+    expect(head).toHaveLength(64);
+    const repo = await tx((trx) =>
+      store
+        .insertRepo(trx, {
+          name: "sha256",
+          localPath: parentPath,
+          defaultBranch: "main",
+          remoteUrl: "git@github.com:user/sha256.git",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          verifyCommand: "true",
+          taskTokenBudget: 100_000,
+          taskWallTimeSeconds: 600,
+          maxConcurrentTasks: 1,
+        })
+        .then(expectOk),
+    );
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-SHA256" },
+          { kind: "plan_ready", plan: "## Plan\n" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+      }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("awaiting_approval");
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.worktreeAssignment?.baseSha).toBe(head);
+    expect(createCalls[0]?.env).toMatchObject({ COGMO_VERIFY_BASE: head });
+    const worktreePath = expectDefined(createCalls[0]?.worktreePath, "worktree path");
+    const { stdout: cut } = await execFileP("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+    expect(cut.trim()).toBe(head);
   });
 
   it("missing CLAUDE_CODE_OAUTH_TOKEN with secretsStore wired → status=failed before container", async () => {
@@ -1702,6 +1879,40 @@ describe("runCodingExecute", () => {
     expect(Number.isFinite(createdAt)).toBe(true);
     expect(Number.isFinite(deletedAt)).toBe(true);
     expect(deletedAt).toBeGreaterThanOrEqual(createdAt);
+  });
+
+  it("a recreated container carries the saved base as COGMO_VERIFY_BASE", async () => {
+    const baseSha = "0123456789abcdef0123456789abcdef01234567";
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "host-path",
+        branch: "cogmo/abc",
+        worktreePath: join(baseDir, "worktrees", "cogmo", "abc"),
+        baseSha,
+      }),
+    );
+    const { sandbox, createCalls } = fakeSandbox();
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: executeBackendYielding([
+          { kind: "session_started", sessionId: "sess-from-plan" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+      }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("pending_verify");
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]?.env).toMatchObject({ COGMO_VERIFY_BASE: baseSha });
   });
 
   it("backend reports error → status=failed, sandbox stopped, stream failed (not completed)", async () => {

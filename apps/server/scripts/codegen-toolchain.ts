@@ -15,9 +15,10 @@ import {
 } from "../src/skills/toolchain-codegen.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+const pins = readToolchainPins(repoRoot);
 
 for (const [path, contents] of [
-  [GENERATED_TOOLCHAIN_FILES.pyproject, renderToolchainPyproject(readToolchainPins(repoRoot))],
+  [GENERATED_TOOLCHAIN_FILES.pyproject, renderToolchainPyproject(pins)],
   [GENERATED_TOOLCHAIN_FILES.claudeMd, renderToolchainClaudeMd()],
   [GENERATED_TOOLCHAIN_FILES.manifestSchema, renderSkillManifestSchema()],
   [GENERATED_TOOLCHAIN_FILES.paths, renderToolchainPaths()],

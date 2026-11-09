@@ -82,3 +82,7 @@ printf '%s\n' httpx==0.27.0 | uv pip compile - > skills/<name>/requirements.lock
 ```
 
 `pyproject.toml` supplies `--generate-hashes`, `--no-header` and the image's Python version, so the output matches register's own compile byte for byte. Skills share the runtime's pydantic: when a dependency needs it, also declare `pydantic==2.12.5`. Do not run `uv add` or `uv lock`: the project's dependencies are Cogmo's tools, not the skill's.
+
+## Checks
+
+`uv run --locked --group dev .cogmo/verify` runs ruff, pyrefly and pytest over each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from. It must pass before the work is done.

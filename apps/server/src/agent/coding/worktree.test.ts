@@ -16,7 +16,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { allocateWorktree, removeWorktree } from "./worktree.js";
+import { expectDefined } from "../../test/assertions.js";
+import { allocateWorktree, readHeadSha, removeWorktree } from "./worktree.js";
 
 // A pass-through spy on `rm`, so every other case in this file keeps deleting
 // for real and only the retry contract below inspects the options. Node applies
@@ -94,6 +95,40 @@ async function headOf(path: string): Promise<string> {
   return stdout.trim();
 }
 
+async function shaOf(path: string, rev: string): Promise<string> {
+  const { stdout } = await execFileP("git", ["-C", path, "rev-parse", rev]);
+  return stdout.trim();
+}
+
+/** Commit a change to `file.txt` on the checked-out branch; the new commit's sha. */
+async function commitChange(path: string, label: string): Promise<string> {
+  writeFileSync(join(path, "file.txt"), `${label}\n`);
+  await execFileP("git", ["-C", path, "add", "."]);
+  await execFileP("git", [
+    "-C",
+    path,
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "user.email=t@t",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-m",
+    label,
+  ]);
+  return shaOf(path, "HEAD");
+}
+
+/** A fresh repo whose `main` holds `count` commits, with their shas oldest first. */
+async function repoWithCommits(count: number): Promise<{ path: string; shas: string[] }> {
+  const path = join(baseDir, `parent-${Math.random().toString(36).slice(2, 10)}`);
+  await execFileP("git", ["init", "--initial-branch=main", path]);
+  const shas: string[] = [];
+  for (let i = 0; i < count; i++) shas.push(await commitChange(path, `commit ${i}`));
+  return { path, shas };
+}
+
 async function originUrlOf(path: string): Promise<string> {
   const { stdout } = await execFileP("git", ["-C", path, "remote", "get-url", "origin"]);
   return stdout.trim();
@@ -126,6 +161,7 @@ describe("allocateWorktree", () => {
       branch,
       worktreePath,
       remoteUrl: REMOTE_URL,
+      baseSha: null,
     });
     expect(result.adopted).toBe(false);
     expect(await headOf(worktreePath)).toBe(branch);
@@ -144,7 +180,13 @@ describe("allocateWorktree", () => {
     // different absolute path. git status/commit must keep working.
     const worktreePath = uniqueWorktreePath();
     const branch = uniqueBranch();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
 
     const movedPath = `${worktreePath}-moved`;
     renameSync(worktreePath, movedPath);
@@ -175,6 +217,7 @@ describe("allocateWorktree", () => {
       branch,
       worktreePath,
       remoteUrl: REMOTE_URL,
+      baseSha: null,
     });
     expect(result.adopted).toBe(false);
     expect(await headOf(worktreePath)).toBe(branch);
@@ -185,7 +228,13 @@ describe("allocateWorktree", () => {
   it("adopts an existing clone on the right branch (crash recovery)", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
 
     // Re-allocate at the same path / branch — should adopt.
     const result = await allocateWorktree({
@@ -193,6 +242,7 @@ describe("allocateWorktree", () => {
       branch,
       worktreePath,
       remoteUrl: REMOTE_URL,
+      baseSha: null,
     });
     expect(result.adopted).toBe(true);
     await removeWorktree(repoPath, worktreePath);
@@ -201,7 +251,13 @@ describe("allocateWorktree", () => {
   it("adopts by reading HEAD as a file, with no git process in the clone", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
 
     hostSpawns.length = 0;
     const result = await allocateWorktree({
@@ -209,6 +265,7 @@ describe("allocateWorktree", () => {
       branch,
       worktreePath,
       remoteUrl: REMOTE_URL,
+      baseSha: null,
     });
 
     expect(result.adopted).toBe(true);
@@ -219,12 +276,18 @@ describe("allocateWorktree", () => {
   it("refuses to adopt a clone whose HEAD is detached", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     const { stdout } = await execFileP("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
     writeFileSync(join(worktreePath, ".git", "HEAD"), stdout);
 
     await expect(
-      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL, baseSha: null }),
     ).rejects.toThrow(/<detached>/);
     await removeWorktree(repoPath, worktreePath);
   });
@@ -232,7 +295,13 @@ describe("allocateWorktree", () => {
   it("refuses to adopt a clone whose HEAD is a symlink, without following it", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     // A host file that reads as the right HEAD: following the link would
     // adopt on content outside the clone.
     const decoy = join(baseDir, `decoy-head-${Math.random().toString(36).slice(2, 8)}`);
@@ -241,7 +310,7 @@ describe("allocateWorktree", () => {
     symlinkSync(decoy, join(worktreePath, ".git", "HEAD"));
 
     await expect(
-      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL, baseSha: null }),
     ).rejects.toThrow(/<detached>/);
     await removeWorktree(repoPath, worktreePath);
   });
@@ -249,14 +318,20 @@ describe("allocateWorktree", () => {
   it("refuses to adopt a clone whose HEAD is over the 1 KiB cap, however it reads", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     // The right ref, padded with trailing whitespace the parse would accept,
     // to one byte over the cap.
     const ref = `ref: refs/heads/${branch}`;
     writeFileSync(join(worktreePath, ".git", "HEAD"), ref.padEnd(1025, "\n"));
 
     await expect(
-      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL, baseSha: null }),
     ).rejects.toThrow(/<detached>/);
     await removeWorktree(repoPath, worktreePath);
   });
@@ -264,12 +339,18 @@ describe("allocateWorktree", () => {
   it("refuses to adopt a clone whose HEAD is a FIFO, without blocking on it", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     rmSync(join(worktreePath, ".git", "HEAD"));
     await execFileP("mkfifo", [join(worktreePath, ".git", "HEAD")]);
 
     await expect(
-      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL, baseSha: null }),
     ).rejects.toThrow(/<detached>/);
     await removeWorktree(repoPath, worktreePath);
   });
@@ -277,11 +358,23 @@ describe("allocateWorktree", () => {
   it("replaces a clone whose .git is a symlink, leaving the link's target alone", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     // A real clone on the right branch elsewhere on the host: adopting through
     // the link would read, and later delete, state outside the tree.
     const decoy = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath: decoy, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath: decoy,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     rmSync(join(worktreePath, ".git"), { recursive: true, force: true });
     symlinkSync(join(decoy, ".git"), join(worktreePath, ".git"));
 
@@ -290,6 +383,7 @@ describe("allocateWorktree", () => {
       branch,
       worktreePath,
       remoteUrl: REMOTE_URL,
+      baseSha: null,
     });
 
     expect(result.adopted).toBe(false);
@@ -313,6 +407,7 @@ describe("allocateWorktree", () => {
       branch,
       worktreePath,
       remoteUrl: REMOTE_URL,
+      baseSha: null,
     });
     expect(result.adopted).toBe(false);
     expect(statSync(join(worktreePath, ".git")).isDirectory()).toBe(true);
@@ -331,6 +426,7 @@ describe("allocateWorktree", () => {
       branch,
       worktreePath,
       remoteUrl: REMOTE_URL,
+      baseSha: null,
     });
     expect(result.adopted).toBe(false);
     expect(await headOf(worktreePath)).toBe(branch);
@@ -342,9 +438,21 @@ describe("allocateWorktree", () => {
     const branchA = uniqueBranch();
     const branchB = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch: branchA, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch: branchA,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     await expect(
-      allocateWorktree({ repoPath, branch: branchB, worktreePath, remoteUrl: REMOTE_URL }),
+      allocateWorktree({
+        repoPath,
+        branch: branchB,
+        worktreePath,
+        remoteUrl: REMOTE_URL,
+        baseSha: null,
+      }),
     ).rejects.toThrow(/expected/);
     await removeWorktree(repoPath, worktreePath);
   });
@@ -355,7 +463,7 @@ describe("allocateWorktree", () => {
     writeFileSync(join(worktreePath, "junk"), "not a working tree");
     const branch = uniqueBranch();
     await expect(
-      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL, baseSha: null }),
     ).rejects.toThrow(/not a git working tree/);
   });
 
@@ -367,6 +475,7 @@ describe("allocateWorktree", () => {
       branch,
       worktreePath,
       remoteUrl: REMOTE_URL,
+      baseSha: null,
     });
     expect(result.adopted).toBe(false);
     await removeWorktree(repoPath, worktreePath);
@@ -375,7 +484,13 @@ describe("allocateWorktree", () => {
   it("does not hardlink objects into the parent repo (inode isolation)", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     // Every object file in the clone must have link count 1 — a hardlinked
     // object would share an inode with the parent repo, letting an
     // in-container write corrupt host state.
@@ -384,11 +499,109 @@ describe("allocateWorktree", () => {
   });
 });
 
+describe("allocateWorktree at a base commit", () => {
+  it("cuts the branch at baseSha, not at the parent's main that moved since", async () => {
+    const parent = await repoWithCommits(2);
+    const [base, moved] = parent.shas;
+    const worktreePath = uniqueWorktreePath();
+    const branch = uniqueBranch();
+
+    await allocateWorktree({
+      repoPath: parent.path,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: expectDefined(base, "base sha"),
+    });
+
+    expect(await headOf(worktreePath)).toBe(branch);
+    expect(await shaOf(worktreePath, "HEAD")).toBe(base);
+    expect(await shaOf(parent.path, "main")).toBe(moved);
+    await removeWorktree(parent.path, worktreePath);
+  });
+
+  it("cuts the branch at baseSha after the parent's HEAD, on another branch, moved", async () => {
+    const parent = await repoWithCommits(1);
+    await execFileP("git", ["-C", parent.path, "checkout", "-b", "feature"]);
+    const base = await commitChange(parent.path, "base");
+    const moved = await commitChange(parent.path, "moved");
+    const worktreePath = uniqueWorktreePath();
+    const branch = uniqueBranch();
+
+    await allocateWorktree({
+      repoPath: parent.path,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: base,
+    });
+
+    expect(await shaOf(worktreePath, "HEAD")).toBe(base);
+    expect(await shaOf(parent.path, "HEAD")).toBe(moved);
+    await removeWorktree(parent.path, worktreePath);
+  });
+
+  it("cuts the branch at the parent's HEAD when no base was recorded", async () => {
+    const parent = await repoWithCommits(2);
+    const worktreePath = uniqueWorktreePath();
+    const branch = uniqueBranch();
+
+    await allocateWorktree({
+      repoPath: parent.path,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
+
+    expect(await shaOf(worktreePath, "HEAD")).toBe(parent.shas[1]);
+    await removeWorktree(parent.path, worktreePath);
+  });
+});
+
+describe("readHeadSha", () => {
+  it("returns the commit HEAD names, on a branch other than main", async () => {
+    const parent = await repoWithCommits(1);
+    await execFileP("git", ["-C", parent.path, "checkout", "-b", "feature"]);
+    const featureTip = await commitChange(parent.path, "on feature");
+
+    expect(await readHeadSha(parent.path)).toBe(featureTip);
+    expect(featureTip).not.toBe(parent.shas[0]);
+  });
+
+  it("returns the commit main names in a bare repo, whose HEAD is main", async () => {
+    const parent = await repoWithCommits(1);
+    const bare = `${parent.path}.git`;
+    await execFileP("git", ["clone", "--bare", parent.path, bare]);
+
+    expect(await readHeadSha(bare)).toBe(parent.shas[0]);
+  });
+
+  it("returns null when HEAD names no commit, in an empty repo bare or not", async () => {
+    const empty = join(baseDir, `empty-${Math.random().toString(36).slice(2, 10)}`);
+    await execFileP("git", ["init", "--initial-branch=main", empty]);
+    await execFileP("git", ["init", "--bare", "--initial-branch=main", `${empty}.git`]);
+
+    expect(await readHeadSha(empty)).toBeNull();
+    expect(await readHeadSha(`${empty}.git`)).toBeNull();
+  });
+
+  it("rejects any other git failure", async () => {
+    await expect(readHeadSha(join(baseDir, "no-such-repo"))).rejects.toThrow(/no-such-repo/);
+  });
+});
+
 describe("removeWorktree", () => {
   it("removes an existing clone", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
     await removeWorktree(repoPath, worktreePath);
     expect(existsSync(worktreePath)).toBe(false);
   });
@@ -420,7 +633,13 @@ describe("removeWorktree", () => {
     // next allocation at the path refuses it.
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, worktreePath, branch, remoteUrl: REMOTE_URL });
+    await allocateWorktree({
+      repoPath,
+      worktreePath,
+      branch,
+      remoteUrl: REMOTE_URL,
+      baseSha: null,
+    });
 
     const rmSpy = vi.mocked(rm);
     rmSpy.mockClear();

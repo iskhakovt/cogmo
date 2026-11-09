@@ -118,7 +118,7 @@ export async function autoRegisterSkill(
   if (!branch.startsWith("cogmo/") || branch === "cogmo/" || branch.includes("..")) {
     return { kind: "skipped", reason: `unsafe branch name: ${branch}` };
   }
-  // Address remote by URL, not name — see pushTaskBranchToRemote.
+  // Address remote by URL, not name — see fetchDefaultBranchTip.
   await withGitAskpass(identity.pat, async (env) => {
     await runGit(["-C", deps.skillsRepoPath, "fetch", repo.remoteUrl, `+${branch}:${branch}`], env);
   });

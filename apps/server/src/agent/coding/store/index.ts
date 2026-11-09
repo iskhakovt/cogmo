@@ -216,15 +216,17 @@ export interface CodingStore {
   /** List all repos in name order. */
   listRepos(tx: Transaction): Promise<readonly CodingRepoRow[]>;
 
-  /**
-   * Update `remote_url` for an existing repo. Single-field method (not a
-   * generic `updateRepo`) because operator-driven remote changes are the
-   * one update we accept on the otherwise insert-once `coding_repos` table —
-   * narrow surface keeps the "prefer immutable rows" invariant intact for
-   * every other column. Used by `configureSkillsRemote` when the operator
-   * picks a new URL via the wizard or the `migrate-skills-remote` CLI.
-   */
+  // The only updates `coding_repos` accepts; it is otherwise insert-once.
+  // Both keep the skills row in sync (`ensureSkillsCodingRepo`): its
+  // `remote_url` with the bare repo's `origin`, and its `verify_command`, which
+  // Cogmo owns. Single-field methods rather than a generic `updateRepo`, so
+  // every other column stays immutable.
+
+  /** Update `remote_url` for an existing repo. */
   updateRepoRemoteUrl(tx: Transaction, id: string, remoteUrl: string): Promise<void>;
+
+  /** Update `verify_command` for an existing repo. */
+  updateRepoVerifyCommand(tx: Transaction, id: string, verifyCommand: string): Promise<void>;
 
   /** Delete a repo. Caller is responsible for cleaning up associated tasks first. */
   removeRepo(tx: Transaction, id: string): Promise<void>;
@@ -521,6 +523,10 @@ export class DrizzleCodingStore implements CodingStore {
 
   async updateRepoRemoteUrl(tx: Transaction, id: string, remoteUrl: string): Promise<void> {
     await tx.update(codingRepos).set({ remoteUrl }).where(eq(codingRepos.id, id));
+  }
+
+  async updateRepoVerifyCommand(tx: Transaction, id: string, verifyCommand: string): Promise<void> {
+    await tx.update(codingRepos).set({ verifyCommand }).where(eq(codingRepos.id, id));
   }
 
   async removeRepo(tx: Transaction, id: string): Promise<void> {

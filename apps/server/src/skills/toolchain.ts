@@ -15,6 +15,12 @@ const TOOLCHAIN_PATHS_FILE = ".cogmo/paths";
 /** The toolchain directory whose `cogmo_ctx/` joins from `images/skills/src/`. */
 const COGMO_DIR = ".cogmo";
 
+/**
+ * The skills repo's `verify_command`: `.cogmo/verify` under the toolchain's
+ * dev group. Cogmo owns it and writes it to the repo's row at each boot.
+ */
+export const SKILLS_VERIFY_COMMAND = "uv run --locked --group dev .cogmo/verify";
+
 type ToolchainFileMode = "100644" | "100755";
 
 /** A file or directory of the toolchain, as the toolchain commit writes it. */

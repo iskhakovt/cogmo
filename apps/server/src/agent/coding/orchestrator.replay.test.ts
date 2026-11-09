@@ -323,6 +323,70 @@ describe("coding-task-start — Inngest replay", () => {
     expect(backend.planCalls()).toBe(0);
   });
 
+  it("a run in flight whose `allocate-worktree` memoized void proceeds as allocated", async () => {
+    // An older build's step returned nothing, which replays as `null`: the
+    // worktree is allocated, as the row's assignment says.
+    const worktreePath = join(baseDir, "worktrees", "cogmo", "void-allocated");
+    const { store, current } = statefulCodingStore(
+      codingTaskRow({
+        status: "planning",
+        worktreeAssignment: { type: "host-path", branch: "cogmo/abc", worktreePath },
+      }),
+      localRepo(),
+    );
+    const backend = countingBackend({ plan: PLAN_EVENTS });
+    const fn = createCodingOrchestrator(makeDeps({ store, backend: backend.backend }), inngest);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+      steps: [
+        { id: "claim-task-planning", handler: () => ({ kind: "transitioned" }) },
+        { id: "allocate-worktree", handler: () => null },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ status: "awaiting_approval", plan: "## Plan\n1. Do X\n" });
+    expect(current().status).toBe("awaiting_approval");
+    expect(backend.planCalls()).toBe(1);
+  });
+
+  it("a memoized `base_missing` allocation ends the task push_failed, naming the base", async () => {
+    const baseSha = "89abcdef0123456789abcdef0123456789abcdef";
+    const worktreePath = join(baseDir, "worktrees", "cogmo", "base-missing");
+    const { store, current } = statefulCodingStore(
+      codingTaskRow({
+        status: "planning",
+        worktreeAssignment: { type: "host-path", branch: "cogmo/abc", worktreePath, baseSha },
+      }),
+      localRepo(),
+    );
+    const backend = countingBackend({ plan: PLAN_EVENTS });
+    const fn = createCodingOrchestrator(makeDeps({ store, backend: backend.backend }), inngest);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+      steps: [
+        { id: "claim-task-planning", handler: () => ({ kind: "transitioned" }) },
+        { id: "allocate-worktree", handler: () => ({ kind: "base_missing", baseSha }) },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "push_failed", detail: expect.stringContaining(baseSha) },
+    });
+    expect(current()).toMatchObject({ status: "failed", failureReason: "push_failed" });
+    expect(current().failureDetail).toContain(baseSha);
+    expect(backend.planCalls()).toBe(0);
+    expect(emittedEventNames(sendSpy)).toContain("coding/task/failed");
+  });
+
   describe("a step that throws reaches the catch", () => {
     // A `plan-cli` memo no session wrote: the bare body's parse throws on
     // every invocation, as a replayed `StepError` would, and reaches the catch.

@@ -238,27 +238,20 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
             credentials.error,
           );
     }
-    const worktree = await allocateTaskWorktree(run, deps, {
+    const allocation = await allocateTaskWorktree(run, deps, {
       repo,
       persisted: assignment,
       onAssigned: (next) => {
         assignment = next;
       },
     });
-    const exit = { repo, assignment: worktree, stream };
-    const state = await preparePlanSandbox(run, deps, {
-      task,
-      repo,
-      assignment: worktree,
-      askpass,
-    });
-    const session = await runPlanSession(run, deps, { task, repo, state, stream });
-    return await match(session)
-      .with({ kind: "errored" }, ({ failure }) => endPlanFailed(run, deps, exit, failure))
-      .with({ kind: "completed", plan: P.string.minLength(1) }, ({ plan }) =>
-        parkPlan(run, deps, { task, repo, assignment: worktree, plan, stream }),
+    return await match(allocation)
+      .with({ kind: "base_missing" }, ({ assignment: worktree, failure }) =>
+        endPlanFailed(run, deps, { repo, assignment: worktree, stream }, failure),
       )
-      .with({ kind: "completed" }, () => endPlanFailed(run, deps, exit, NO_PLAN_PRODUCED))
+      .with({ kind: "allocated" }, ({ assignment: worktree }) =>
+        planInWorktree(run, deps, { task, repo, worktree, askpass, stream }),
+      )
       .exhaustive();
   } catch (err) {
     run.log.error({ err }, "coding task failed");
@@ -277,6 +270,31 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   } finally {
     askpass.release();
   }
+}
+
+/** The worktree is allocated: create the task container, run the plan session, and park or fail. */
+async function planInWorktree(
+  run: CodingRun,
+  deps: CodingOrchestratorDeps,
+  args: {
+    task: CodingTaskRow;
+    repo: CodingRepoRow;
+    worktree: WorktreeAssignment;
+    askpass: AskpassLease;
+    stream: PlanStreamHandle;
+  },
+): Promise<CodingOrchestratorResult> {
+  const { task, repo, worktree, askpass, stream } = args;
+  const exit = { repo, assignment: worktree, stream };
+  const state = await preparePlanSandbox(run, deps, { task, repo, assignment: worktree, askpass });
+  const session = await runPlanSession(run, deps, { task, repo, state, stream });
+  return await match(session)
+    .with({ kind: "errored" }, ({ failure }) => endPlanFailed(run, deps, exit, failure))
+    .with({ kind: "completed", plan: P.string.minLength(1) }, ({ plan }) =>
+      parkPlan(run, deps, { task, repo, assignment: worktree, plan, stream }),
+    )
+    .with({ kind: "completed" }, () => endPlanFailed(run, deps, exit, NO_PLAN_PRODUCED))
+    .exhaustive();
 }
 
 /** How a plan failure exit reads to the run's caller. */

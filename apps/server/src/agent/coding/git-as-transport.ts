@@ -13,15 +13,19 @@
  * `resolveGitHubIdentity`) live in `src/secrets/`.
  */
 
-import type { Result } from "neverthrow";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
-import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
+import { type GitEnv, runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import {
   describeResolveIdentityError,
   type GitHubIdentity,
   resolveGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+
+const execFileP = promisify(execFile);
 
 /** Per-task ref namespace under `refs/heads/` on the GitHub remote. */
 const RUN_BRANCH_NAMESPACE = "cogmo/run";
@@ -36,31 +40,76 @@ export function runBranchFor(taskId: string): string {
   return `${RUN_BRANCH_NAMESPACE}/${taskId}`;
 }
 
-export interface PushTaskBranchParams {
+export interface FetchDefaultBranchParams {
   /** `coding_repos.local_path` — the host mirror clone. */
   localRepoPath: string;
   /** HTTPS clone URL — `coding_repos.remote_url`. */
   remoteUrl: string;
-  taskId: string;
   /** `coding_repos.default_branch` — captured at `/repo add` time. */
   defaultBranch: string;
   identity: GitHubIdentity;
 }
 
 /**
- * Refresh the local mirror's view of `defaultBranch`, then force-push it
- * to `cogmo/run/<task-id>` on the remote. The fetch and push share one
- * askpass helper to halve the host-side disk churn for credential
- * material. Force-push semantics are intentional: a retry of a task with
- * an existing run-branch should pick up the latest default-branch tip,
- * not whatever was pushed last time.
+ * Refresh the local mirror's view of the remote's `defaultBranch` and return
+ * the commit it names: the base a task's run branch is cut at. A stale
+ * mirror would cut the branch from old code.
  *
- * Both ops address the remote by URL (not by mirror-side remote name)
- * and use explicit refspecs — symmetric with `fetchFeatureBranch`, and
- * decouples the helper from whatever name `git remote` happens to use
- * locally. The fetch refspec writes `refs/remotes/origin/<defaultBranch>`
- * explicitly so the push refspec on the next line resolves regardless
- * of the mirror's remote configuration.
+ * The fetch addresses the remote by URL (not by mirror-side remote name)
+ * with an explicit refspec into `refs/remotes/origin/<defaultBranch>` —
+ * symmetric with `fetchFeatureBranch`, and decoupled from whatever name
+ * `git remote` happens to use locally. The tip is read back from that ref,
+ * locally.
+ */
+export async function fetchDefaultBranchTip(p: FetchDefaultBranchParams): Promise<string> {
+  requireRemoteUrl(p.remoteUrl);
+  const trackingRef = `refs/remotes/origin/${p.defaultBranch}`;
+  await withGitAskpass(p.identity.pat, (env) =>
+    runGit(
+      ["-C", p.localRepoPath, "fetch", p.remoteUrl, `+${p.defaultBranch}:${trackingRef}`],
+      env,
+    ),
+  );
+  const { stdout } = await runGit([
+    "-C",
+    p.localRepoPath,
+    "rev-parse",
+    "--verify",
+    "--end-of-options",
+    `${trackingRef}^{commit}`,
+  ]);
+  return stdout.trim();
+}
+
+export interface PushTaskBranchParams {
+  /** `coding_repos.local_path` — the host mirror clone. */
+  localRepoPath: string;
+  /** HTTPS clone URL — `coding_repos.remote_url`. */
+  remoteUrl: string;
+  taskId: string;
+  /** `coding_repos.default_branch`, fetched when the mirror lacks `baseSha`. */
+  defaultBranch: string;
+  /** The commit to cut the run branch at: the assignment's `baseSha`. */
+  baseSha: string;
+  identity: GitHubIdentity;
+}
+
+/** A base commit neither the mirror nor the remote's default or run branch holds. */
+export interface BaseMissing {
+  kind: "base_missing";
+  baseSha: string;
+}
+
+/**
+ * Force-push `baseSha` to `cogmo/run/<task-id>` on the remote, for the
+ * sandbox to clone. Force, so a run branch an earlier attempt left at
+ * another commit is reset to `baseSha`.
+ *
+ * The mirror may lack a base an earlier attempt recorded: the default branch
+ * rewritten on the remote since, say. Then the remote's run branch, and if
+ * need be its default branch, when the remote still has one, are fetched and
+ * the base is looked for again; it is never replaced. Errs with
+ * `base_missing` when none holds it.
  *
  * Inherits — does not enforce — single-writer-per-task semantics. Task
  * IDs are UUIDv7 and the orchestrator wraps this call in a durable
@@ -69,30 +118,104 @@ export interface PushTaskBranchParams {
  * not possible in production. If a future caller breaks that contract,
  * the force-push would silently overwrite a sibling run.
  */
-export async function pushTaskBranchToRemote(p: PushTaskBranchParams): Promise<void> {
-  if (!p.remoteUrl) {
-    // Empty `coding_repos.remote_url` is the fresh-deploy default — the
-    // skills row is auto-seeded with an empty string when the operator
-    // hasn't attached an `origin` to the bare repo yet. Surface the
-    // misconfiguration with a name the operator can act on, instead of
-    // letting git fail with an opaque "fatal: '' does not appear to be a
-    // git repository".
+export async function pushTaskBranchToRemote(
+  p: PushTaskBranchParams,
+): Promise<Result<void, BaseMissing>> {
+  requireRemoteUrl(p.remoteUrl);
+  const runBranch = runBranchFor(p.taskId);
+  return withGitAskpass(p.identity.pat, async (env) => {
+    if (!(await fetchBase(p, runBranch, env))) {
+      return err({ kind: "base_missing" as const, baseSha: p.baseSha });
+    }
+    await runGit(
+      ["-C", p.localRepoPath, "push", p.remoteUrl, `+${p.baseSha}:refs/heads/${runBranch}`],
+      env,
+    );
+    return ok(undefined);
+  });
+}
+
+/**
+ * Whether the mirror holds `p.baseSha`, after fetching the remote's
+ * `runBranch`, then its default branch, until it does. The run branch is
+ * fetched as a pattern, which matches nothing rather than failing the fetch
+ * when no earlier attempt pushed it. A fetch of a default branch the remote
+ * lacks fails with the exit code an unreadable remote gives, so the branch is
+ * listed first and, when absent, not fetched; a failed fetch lists it again,
+ * and is a miss when the branch has gone since, a fetch failure otherwise.
+ */
+async function fetchBase(
+  p: PushTaskBranchParams,
+  runBranch: string,
+  env: GitEnv,
+): Promise<boolean> {
+  const fetchRefspec = (refspec: string) =>
+    runGit(["-C", p.localRepoPath, "fetch", p.remoteUrl, refspec], env);
+  if (await hasCommit(p.localRepoPath, p.baseSha)) return true;
+  await fetchRefspec(`+refs/heads/${runBranch}*:refs/remotes/origin/${runBranch}*`);
+  if (await hasCommit(p.localRepoPath, p.baseSha)) return true;
+  if (!(await remoteHasBranch(p, p.defaultBranch, env))) return false;
+  try {
+    await fetchRefspec(`+${p.defaultBranch}:refs/remotes/origin/${p.defaultBranch}`);
+  } catch (fetchError) {
+    if (await remoteHasBranch(p, p.defaultBranch, env)) throw fetchError;
+  }
+  return hasCommit(p.localRepoPath, p.baseSha);
+}
+
+/**
+ * Whether the remote has `refs/heads/<branch>`. `ls-remote` succeeds listing
+ * nothing for a branch the remote lacks, and fails, as the fetch would, when
+ * the remote cannot be read. The pattern matches ref names by suffix, so a
+ * line counts only when it names exactly that ref.
+ */
+async function remoteHasBranch(
+  p: Pick<PushTaskBranchParams, "localRepoPath" | "remoteUrl">,
+  branch: string,
+  env: GitEnv,
+): Promise<boolean> {
+  const ref = `refs/heads/${branch}`;
+  const { stdout } = await runGit(["-C", p.localRepoPath, "ls-remote", p.remoteUrl, ref], env);
+  return stdout.split("\n").some((line) => line.endsWith(`\t${ref}`));
+}
+
+/**
+ * Whether the repo at `repoPath` holds `sha` as a commit. `rev-parse
+ * --verify --quiet` exits 1 when it does not; any other failure (no repo at
+ * the path) rejects. Through `execFile`, whose error carries the exit code.
+ */
+async function hasCommit(repoPath: string, sha: string): Promise<boolean> {
+  try {
+    await execFileP("git", [
+      "-C",
+      repoPath,
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      "--end-of-options",
+      `${sha}^{commit}`,
+    ]);
+    return true;
+  } catch (e) {
+    if (typeof e === "object" && e !== null && "code" in e && e.code === 1) return false;
+    throw e;
+  }
+}
+
+/**
+ * Empty `coding_repos.remote_url` is the fresh-deploy default — the skills
+ * row is auto-seeded with an empty string when the operator hasn't attached
+ * an `origin` to the bare repo yet. Surface the misconfiguration with a name
+ * the operator can act on, instead of letting git fail with an opaque
+ * "fatal: '' does not appear to be a git repository".
+ */
+function requireRemoteUrl(remoteUrl: string): void {
+  if (!remoteUrl) {
     throw new Error(
       "remote_url is empty for this repo — set it via SQL or attach `origin` " +
         "to the bare repo before delegating coding tasks.",
     );
   }
-  const runRef = runBranchFor(p.taskId);
-  const fetchRefSpec = `+${p.defaultBranch}:refs/remotes/origin/${p.defaultBranch}`;
-  const pushRefSpec = `+refs/remotes/origin/${p.defaultBranch}:refs/heads/${runRef}`;
-
-  await withGitAskpass(p.identity.pat, async (env) => {
-    // Refresh first — an N-day-stale mirror would push a stale base
-    // commit into the run branch and the sandbox would do its work off
-    // old code.
-    await runGit(["-C", p.localRepoPath, "fetch", p.remoteUrl, fetchRefSpec], env);
-    await runGit(["-C", p.localRepoPath, "push", p.remoteUrl, pushRefSpec], env);
-  });
 }
 
 export interface FetchFeatureBranchParams {
@@ -122,17 +245,10 @@ export interface FetchFeatureBranchParams {
  * stay unsurprising.
  */
 export async function fetchFeatureBranch(p: FetchFeatureBranchParams): Promise<void> {
-  if (!p.remoteUrl) {
-    // Symmetric guard with `pushTaskBranchToRemote` — see that branch
-    // for the rationale. Lifting the check here too means the
-    // post-task fetch fails at the helper boundary with a clear
-    // operator-facing message rather than inside the askpass scope
-    // where the symptom would be `git fetch ""` with no useful context.
-    throw new Error(
-      "remote_url is empty for this repo — set it via SQL or attach `origin` " +
-        "to the bare repo before delegating coding tasks.",
-    );
-  }
+  // At the helper boundary, so the post-task fetch fails with a clear
+  // operator-facing message rather than inside the askpass scope, where the
+  // symptom would be `git fetch ""` with no useful context.
+  requireRemoteUrl(p.remoteUrl);
   // Bareness check is a single cheap rev-parse — local-only, no network
   // or auth. `runGit` without an `env` argument skips the askpass setup,
   // so we can route every git invocation through the same primitive

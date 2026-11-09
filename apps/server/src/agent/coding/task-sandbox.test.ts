@@ -1,8 +1,17 @@
 import { Readable } from "node:stream";
 import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
-import type { ExecStreamingHandle, SandboxSession } from "../../sandbox/index.js";
-import { buildWorktreeSpec, checkoutFeatureBranchInSandbox } from "./task-sandbox.js";
+import type {
+  ExecStreamingHandle,
+  SandboxCapabilities,
+  SandboxSession,
+} from "../../sandbox/index.js";
+import { codingRepoRow } from "../../test/coding-fixtures.js";
+import {
+  buildWorktreeSpec,
+  checkoutFeatureBranchInSandbox,
+  taskSessionSpec,
+} from "./task-sandbox.js";
 import type { WorktreeAssignment } from "./types.js";
 
 // `runBranchFor("019d...") === "cogmo/run/019d..."` — pinned by
@@ -104,6 +113,58 @@ describe("buildWorktreeSpec", () => {
         }),
       ).toThrow(/identity\.pat/);
     });
+  });
+});
+
+// --- taskSessionSpec ---------------------------------------------------------
+
+describe("taskSessionSpec", () => {
+  const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
+  const AUTH_ENV = { CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" };
+
+  function specFor(assignment: WorktreeAssignment) {
+    const capabilities: SandboxCapabilities = {
+      siblingContainers: "host-proxy",
+      hostBindMount: true,
+      customImage: true,
+      volumes: "docker",
+      workingTreeTransport: "bind-mount",
+      depsCacheSharing: "shared-volume",
+      noNetworkSessions: true,
+    };
+    return taskSessionSpec({
+      sandbox: { capabilities },
+      task: { id: TASK_ID, allowPrivilegedRunc: false },
+      repo: codingRepoRow(),
+      assignment,
+      identityPat: undefined,
+      askpass: undefined,
+      image: "cogmo/devbase:test",
+      resourceLimits: { cpus: 1, memory_bytes: 1024, pids: 64 },
+      taskTtlMs: 60_000,
+      env: AUTH_ENV,
+    });
+  }
+
+  it("gives the session the branch's base as COGMO_VERIFY_BASE beside the auth env", () => {
+    const spec = specFor({
+      type: "host-path",
+      branch: "cogmo/abc12345",
+      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+      baseSha: BASE_SHA,
+    });
+
+    expect(spec.env).toEqual({ ...AUTH_ENV, COGMO_VERIFY_BASE: BASE_SHA });
+  });
+
+  it("sets no COGMO_VERIFY_BASE for an assignment saved before the base was recorded", () => {
+    const spec = specFor({
+      type: "host-path",
+      branch: "cogmo/abc12345",
+      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+    });
+
+    expect(spec.env).toEqual(AUTH_ENV);
   });
 });
 

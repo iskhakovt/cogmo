@@ -20,7 +20,7 @@ package = false
 required-version = "==0.13.7"
 
 [tool.uv.pip]
-python-version = "3.14"
+python-version = "3.14.10"
 generate-hashes = true
 no-header = true
 
