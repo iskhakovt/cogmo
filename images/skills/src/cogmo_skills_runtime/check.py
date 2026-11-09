@@ -169,9 +169,9 @@ def installed_modules(site_packages: str) -> dict[str, frozenset[str]]:
 def record_modules(records: Mapping[str, Iterable[PurePosixPath]]) -> dict[str, frozenset[str]]:
     """The modules each of one site-packages' `RECORD`s installs, keyed as `records` keys them.
 
-    A path names the first directory along it that is the distribution's package, one whose `__init__` its `RECORD`
-    alone installs; otherwise the module its file is: a `.py` file, or one with an extension module's suffix, without
-    the suffix, and an `__init__` its directory. So a directory whose `__init__` no `RECORD` installs (PEP 420), or
+    A path names each directory along it that is the distribution's package, one whose `__init__` its `RECORD` alone
+    installs; with none, the module its file is: a `.py` file, or one with an extension module's suffix, without the
+    suffix, and an `__init__` its directory. So a directory whose `__init__` no `RECORD` installs (PEP 420), or
     several do (pkgutil-style), is a namespace each distribution's modules sit beneath. Other files (`py.typed`, a
     license, a `.pth`), `*.dist-info/`, `*.data/`, `__pycache__/`, paths leaving site-packages, and names that are not
     identifiers name none.
@@ -186,9 +186,7 @@ def record_modules(records: Mapping[str, Iterable[PurePosixPath]]) -> dict[str, 
             if _module_name(parts[-1]) == "__init__":
                 init_owners.setdefault(parts[:-1], set()).add(name)
     return {
-        name: frozenset(
-            module for parts in name_paths if (module := _record_module(parts, {name}, init_owners)) is not None
-        )
+        name: frozenset(module for parts in name_paths for module in _record_modules(parts, {name}, init_owners))
         for name, name_paths in paths.items()
     }
 
@@ -200,20 +198,18 @@ def _record_parts(path: PurePosixPath) -> tuple[str, ...] | None:
     return parts
 
 
-def _record_module(
+def _record_modules(
     parts: tuple[str, ...], installer: set[str], init_owners: Mapping[tuple[str, ...], set[str]]
-) -> str | None:
-    package = next(
-        (parts[:depth] for depth in range(1, len(parts)) if init_owners.get(parts[:depth]) == installer), None
-    )
-    if package is not None:
-        segments = package
-    else:
+) -> list[str]:
+    packages = [parts[:depth] for depth in range(1, len(parts)) if init_owners.get(parts[:depth]) == installer]
+    if not packages:
         module = _module_name(parts[-1])
         if module is None:
-            return None
-        segments = parts[:-1] if module == "__init__" else (*parts[:-1], module)
-    return ".".join(segments) if segments and all(segment.isidentifier() for segment in segments) else None
+            return []
+        packages = [parts[:-1] if module == "__init__" else (*parts[:-1], module)]
+    return [
+        ".".join(segments) for segments in packages if segments and all(segment.isidentifier() for segment in segments)
+    ]
 
 
 def _module_name(file: str) -> str | None:
@@ -240,9 +236,10 @@ def import_findings(
 ) -> list[Finding]:
     """Every import the stdlib, the runtime and the modules a declared dependency installs do not cover.
 
-    `import a.b` imports `a.b`, and `from a.b import c` imports `a.b.c`, a submodule or a name in `a.b`. The
-    distributions that install it are those installing its deepest prefix that some distribution installs, or, for a
-    namespace, every one installing a module beneath it.
+    `import a.b` imports `a.b`. `from a.b import c` reads `c` from `a.b`, so it passes when one declared distribution
+    alone installs `a.b`; from a namespace it imports `a.b.c`. The distributions that install a module are those
+    installing its deepest prefix that some distribution installs, or, for a namespace, every one installing a module
+    beneath it.
     """
     declared = frozenset(_dependency_name(spec) for spec in dependencies)
     installers: dict[str, set[str]] = {}
@@ -258,6 +255,8 @@ def import_findings(
                 findings.append(_at(node, lines, "a relative import, which a skill's one module cannot resolve"))
                 continue
             module = node.module or ""
+            if _sole_installer(module, installers) in declared:
+                continue
             imported = [module if alias.name == "*" else f"{module}.{alias.name}" for alias in node.names]
         else:
             continue
@@ -283,6 +282,12 @@ def _import_refusal(name: str, declared: frozenset[str], installers: Mapping[str
         f"'{module}' is installed by {', '.join(f"'{n}'" for n in sorted(names))}, which no declared dependency "
         "names; declare every package the skill imports"
     )
+
+
+def _sole_installer(module: str, installers: Mapping[str, set[str]]) -> str | None:
+    """The one distribution installing `module` as its package or module file; None for a namespace or no module."""
+    names = installers.get(module, set())
+    return next(iter(names)) if len(names) == 1 else None
 
 
 def _installed_as(name: str, installers: Mapping[str, set[str]]) -> tuple[str, set[str]] | None:

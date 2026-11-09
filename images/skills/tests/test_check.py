@@ -386,24 +386,36 @@ def test_a_namespace_package_lets_through_only_what_a_declared_dependency_instal
     ]
 
 
-def test_a_shared_init_is_a_namespace_and_a_contributed_package_is_its_installers(
-    toolchain: Toolchain, venvs: Path
-) -> None:
-    # Both install `zope/__init__.py` (a pkgutil-style namespace); `ns/__init__.py` is `ns-core`'s alone, and
-    # `ns-plugin` installs a package inside it.
+def test_a_shared_init_is_a_namespace_a_from_import_reaches_through(toolchain: Toolchain, venvs: Path) -> None:
+    # Both install `zope/__init__.py`: a pkgutil-style namespace, which neither answers for alone.
     site_packages = _site_packages(venvs, _HASH)
     _install(site_packages, "zope-interface", {"zope/__init__.py": "", "zope/interface/__init__.py": ""})
     _install(site_packages, "zope-event", {"zope/__init__.py": "", "zope/event/__init__.py": ""})
-    _install(site_packages, "ns-core", {"ns/__init__.py": "", "ns/core.py": ""})
-    _install(site_packages, "ns-plugin", {"ns/plugin/__init__.py": ""})
-    body = "import zope\nimport zope.interface\nimport zope.event\nimport ns.core\nfrom ns import plugin\n"
+    body = "import zope\nimport zope.interface\nimport zope.event\nfrom zope import event, interface\n"
 
-    reply = _check(body, toolchain, ["zope-interface==1.0", "ns-core==1.0"], _HASH)
+    reply = _check(body, toolchain, ["zope-interface==1.0"], _HASH)
 
     transitive = "which no declared dependency names; declare every package the skill imports"
     assert [f for f in _findings(reply) if f[0] == "imports"] == [
         ("imports", 3, 1, f"'zope.event' is installed by 'zope-event', {transitive}"),
-        ("imports", 5, 1, f"'ns.plugin' is installed by 'ns-plugin', {transitive}"),
+        ("imports", 4, 1, f"'zope.event' is installed by 'zope-event', {transitive}"),
+    ]
+
+
+def test_a_name_from_a_declared_regular_package_may_be_its_attribute(toolchain: Toolchain, venvs: Path) -> None:
+    # `alpha`'s `__init__`s, `alpha`'s alone, define `b` and `c`, which `from` reads first; `alpha-extras` installs
+    # modules of those names inside them, which only `import` reaches.
+    site_packages = _site_packages(venvs, _HASH)
+    _install(site_packages, "alpha", {"alpha/__init__.py": "b = 42\n", "alpha/inner/__init__.py": "c = 1\n"})
+    _install(site_packages, "alpha-extras", {"alpha/b.py": "", "alpha/inner/c.py": ""})
+    body = "from alpha import b\nfrom alpha.inner import c\nimport alpha.b\nimport alpha.inner.c\n"
+
+    reply = _check(body, toolchain, ["alpha==1.0"], _HASH)
+
+    transitive = "which no declared dependency names; declare every package the skill imports"
+    assert [f for f in _findings(reply) if f[0] == "imports"] == [
+        ("imports", 3, 1, f"'alpha.b' is installed by 'alpha-extras', {transitive}"),
+        ("imports", 4, 1, f"'alpha.inner.c' is installed by 'alpha-extras', {transitive}"),
     ]
 
 
@@ -419,6 +431,7 @@ def test_record_paths_map_to_the_modules_they_install() -> None:
     files = [
         "pkg/__init__.py",
         "pkg/sub/mod.py",
+        "pkg/inner/__init__.py",
         "single.py",
         f"_native{suffix}",
         "_plain.so",
@@ -443,7 +456,17 @@ def test_record_paths_map_to_the_modules_they_install() -> None:
 
     assert modules == {
         "pkg": frozenset(
-            {"pkg", "single", "_native", "_plain", "namespace.part", "namespace.nested.leaf", "shared", "shared.mine"}
+            {
+                "pkg",
+                "pkg.inner",
+                "single",
+                "_native",
+                "_plain",
+                "namespace.part",
+                "namespace.nested.leaf",
+                "shared",
+                "shared.mine",
+            }
         ),
         "other": frozenset({"shared"}),
     }
