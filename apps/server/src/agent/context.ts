@@ -145,10 +145,9 @@ export function toolResultClearing(budget: number): ToolResultClearing {
 }
 
 /**
- * Strategy 1's edit intent for a summarization fork whose request leaves
- * `budget` input tokens beside its output cap: it clears only once the prompt
- * passes the budget, so a prefix that fits is summarized from the full tool
- * results. What it keeps and frees
+ * Strategy 1's edit intent for a summarization fork with `budget` input
+ * tokens: it clears only once the prompt passes the budget, so a prefix that
+ * fits is summarized from the full tool results. What it keeps and frees
  * follows {@link toolResultClearing} (design/context-management.md →
  * Strategy 2 → Cleared results in the fork).
  */
@@ -186,8 +185,8 @@ Be specific — preserve names, paths, and values, not abstractions.`;
  * → Fork shape). It sends the `system` and `tools` the turn sends with
  * `toolChoice: "none"`, so the thinking blocks the prefix replays stay valid,
  * appends its instruction as a user message, and carries the summarization
- * model's own Strategy 1 intent, triggered at the input its window leaves
- * beside the request's output cap.
+ * model's own Strategy 1 intent, triggered at the fork's budget: the model's
+ * budget with the request's output cap in place of the model's.
  *
  * The prefix is repaired first, through the same `validateHistory` the agent
  * loop applies to every request — so the summarizer reads the shape the model

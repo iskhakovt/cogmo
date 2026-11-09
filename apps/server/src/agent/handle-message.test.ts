@@ -1708,9 +1708,9 @@ describe("createHandleMessage", () => {
       expect(params.clearToolResults).toEqual(clearing);
     }
     // The system prompt and frozen tools the view was counted with, tool
-    // calls disabled, and the summarization model's intent: past the input
-    // its window leaves beside the fork's 16,000-token cap, rather than 60%
-    // of the turn's budget.
+    // calls disabled, and the summarization model's intent: past the fork's
+    // budget, with its 16,000-token output cap, rather than 60% of the
+    // turn's budget.
     const toolDefs = loopParams.tools.definitions();
     expect(toolDefs.map((t) => t.name)).toContain("read_file");
     expect(expectDefined(chat.mock.calls[0], "summarization call")[0]).toMatchObject({

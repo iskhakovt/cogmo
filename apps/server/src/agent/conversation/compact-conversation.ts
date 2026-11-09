@@ -159,7 +159,7 @@ export async function compactConversation(
   const limits = resolveLimits(model, rowLimits);
 
   // The summarizer reads the prefix under the epoch's attachment cutoff, its
-  // tool results cleared only past the summarization model's budget. Outside
+  // tool results cleared only past the fork's budget. Outside
   // a turn there is no frozen tool table for the thinking blocks to stay
   // bound to, so every one is stripped.
   const epoch = await deps.runInTx((tx) =>

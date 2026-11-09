@@ -4,7 +4,8 @@ import { promptServerMismatches } from "../metrics.js";
 /**
  * Count each transformation the provider reported on one request, under the
  * `site` that sent it ({@link promptServerMismatches}). Call it once per
- * request: inside the step that sends it, so a replay adds nothing.
+ * request: inside the step that sends it, so a replay adds nothing, or, outside
+ * Inngest, as `/compact` sends it.
  */
 export function countServerMismatches(
   transformations: ReadonlyArray<InputTransformation>,

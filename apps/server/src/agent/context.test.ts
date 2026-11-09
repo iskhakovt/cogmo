@@ -1631,7 +1631,7 @@ describe("summarizationRequest", () => {
     });
   });
 
-  it("clears tool results only past the summarization model's budget, as Strategy 1 keeps and frees", () => {
+  it("clears tool results only past the fork's budget, as Strategy 1 keeps and frees", () => {
     const params = summarizationRequest({
       model: "m",
       limits: LIMITS,

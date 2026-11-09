@@ -167,7 +167,7 @@ describe("compactConversation", () => {
     ]);
   });
 
-  it("sends no tools and no thinking block, and clears at the summarization model's budget, counted under site fork", async () => {
+  it("sends no tools and no thinking block, and clears at the fork's budget, counted under site fork", async () => {
     const thinking = { type: "thinking", thinking: "", signature: "sig" } as const;
     // `transcript(10)`, each reply carrying a thinking block.
     const rows: Row[] = Array.from({ length: 10 }, (_, i) =>
