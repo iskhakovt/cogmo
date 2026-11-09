@@ -264,18 +264,21 @@ async function nonInteractiveEnv(repoPath: string): Promise<NodeJS.ProcessEnv> {
   };
 }
 
-/** `$(…)`, `${…}` or a backtick span, none nested. */
-const SUBSTITUTION = /\$\([^()]*\)|\$\{[^{}]*\}|`[^`]*`/.source;
-/** A `$` that starts no substitution: a parameter such as `$HOME`. */
-const PARAMETER = /\$(?![({])/.source;
-const ESCAPE = /\\[\s\S]/.source;
-const DOUBLE_QUOTED = `"(?:[^"\\\\$\`]|${ESCAPE}|${SUBSTITUTION}|${PARAMETER})*"`;
-/**
- * One part of a shell word. Operators (`;`, `&`, `|`, `<`, `>`, `(`, `{`, a
- * newline) and nested or unbalanced quotes and substitutions are none.
- */
-const WORD_PART = `[^\\s'"\\\\$\`;&|<>(){}]|${ESCAPE}|'[^']*'|${DOUBLE_QUOTED}|${SUBSTITUTION}|${PARAMETER}`;
 const NAME = /[A-Za-z_][A-Za-z0-9_]*/.source;
+/**
+ * A plain parameter such as `$HOME`; no other `$` form is read. It takes the
+ * whole name, so a word splits only one way and the read stays linear.
+ */
+const PARAMETER = `\\$${NAME}(?![A-Za-z0-9_])`;
+const ESCAPE = /\\[\s\S]/.source;
+/** A double-quoted span holding no substitution. */
+const DOUBLE_QUOTED = `"(?:[^"\\\\$\`]|${ESCAPE}|${PARAMETER})*"`;
+/**
+ * One part of a shell word. A substitution (`$(…)`, `${…}`, a backtick), an
+ * operator (`;`, `&`, `|`, `<`, `>`, `(`, `{`, a newline) and an unbalanced
+ * quote are none.
+ */
+const WORD_PART = `[^\\s'"\\\\$\`;&|<>(){}]|${ESCAPE}|'[^']*'|${DOUBLE_QUOTED}|${PARAMETER}`;
 /**
  * A command read up to its executable, the first word past any variable
  * assignments, with the executable as group 1. A part the reader can't
@@ -289,8 +292,8 @@ const UP_TO_EXECUTABLE = new RegExp(
  * `command` with `-o BatchMode=yes` right after its executable, so it precedes
  * the command's own options: ssh keeps the first value it reads for an option.
  * Only a command read up to an executable named `ssh` takes it there; anything
- * else (a wrapper, a list, an executable named by a substitution, a part the
- * reader can't follow) gets it appended, as git appends its own arguments.
+ * else (a wrapper, a list, a substitution, a part the reader can't follow)
+ * gets it appended, as git appends its own arguments.
  */
 function withBatchMode(command: string): string {
   const read = UP_TO_EXECUTABLE.exec(command);
