@@ -1,6 +1,6 @@
 {
-  "id": "b7322c06-c92d-40c3-b8fd-7e7310e9b4ab",
-  "prevId": "e15da51a-20ea-4ad1-bdcb-8d7597f977dc",
+  "id": "e90bde1a-2098-414d-9ca5-c3933c2fe59b",
+  "prevId": "34af6615-ccea-4180-96a6-f3f77e196118",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2850,6 +2850,93 @@
       },
       "isRLSEnabled": false
     },
+    "public.connectors": {
+      "name": "connectors",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "connector_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "connector_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "uq_connectors_active_name": {
+          "name": "uq_connectors_active_name",
+          "columns": [
+            {
+              "expression": "name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "status = 'active'::connector_status",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "connectors_token_hash_unique": {
+          "name": "connectors_token_hash_unique",
+          "nullsNotDistinct": false,
+          "columns": ["token_hash"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_connectors_revoked_at": {
+          "name": "chk_connectors_revoked_at",
+          "value": "(\"connectors\".\"status\" = 'revoked') = (\"connectors\".\"revoked_at\" IS NOT NULL)"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.mcp_server_tools": {
       "name": "mcp_server_tools",
       "schema": "",
@@ -4273,84 +4360,6 @@
       },
       "isRLSEnabled": false
     },
-    "public.skills_repo_mirror": {
-      "name": "skills_repo_mirror",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "uuidv7()"
-        },
-        "singleton": {
-          "name": "singleton",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "skills_mirror_status",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "local_sha": {
-          "name": "local_sha",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pushed_sha": {
-          "name": "pushed_sha",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_failure": {
-          "name": "last_failure",
-          "type": "skills_mirror_failure",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "skills_repo_mirror_singleton_unique": {
-          "name": "skills_repo_mirror_singleton_unique",
-          "nullsNotDistinct": false,
-          "columns": ["singleton"]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "chk_skills_repo_mirror_singleton": {
-          "name": "chk_skills_repo_mirror_singleton",
-          "value": "\"skills_repo_mirror\".\"singleton\""
-        },
-        "chk_skills_repo_mirror_synced_no_failure": {
-          "name": "chk_skills_repo_mirror_synced_no_failure",
-          "value": "\"skills_repo_mirror\".\"status\" <> 'synced' OR \"skills_repo_mirror\".\"last_failure\" IS NULL"
-        },
-        "chk_skills_repo_mirror_diverged_rejected": {
-          "name": "chk_skills_repo_mirror_diverged_rejected",
-          "value": "\"skills_repo_mirror\".\"status\" <> 'diverged' OR \"skills_repo_mirror\".\"last_failure\" = 'rejected'"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.attachment_originals": {
       "name": "attachment_originals",
       "schema": "",
@@ -5305,6 +5314,16 @@
       "schema": "public",
       "values": ["openai", "openai_compatible", "elevenlabs"]
     },
+    "public.connector_kind": {
+      "name": "connector_kind",
+      "schema": "public",
+      "values": ["coding"]
+    },
+    "public.connector_status": {
+      "name": "connector_status",
+      "schema": "public",
+      "values": ["active", "revoked"]
+    },
     "public.mcp_server_approval_status": {
       "name": "mcp_server_approval_status",
       "schema": "public",
@@ -5397,16 +5416,6 @@
       "name": "skill_tier",
       "schema": "public",
       "values": ["wasm", "container"]
-    },
-    "public.skills_mirror_failure": {
-      "name": "skills_mirror_failure",
-      "schema": "public",
-      "values": ["rejected", "unreachable", "auth", "timeout"]
-    },
-    "public.skills_mirror_status": {
-      "name": "skills_mirror_status",
-      "schema": "public",
-      "values": ["synced", "behind", "diverged"]
     },
     "public.attachment_original_state": {
       "name": "attachment_original_state",

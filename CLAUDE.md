@@ -9,3 +9,4 @@
 @.agents/rules/architecture-rules.md
 @.agents/rules/state-machines.md
 @.agents/rules/inngest.md
+@.agents/rules/protobuf.md

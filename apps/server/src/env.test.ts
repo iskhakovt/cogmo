@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ModelCatalogUrlSchema, ServiceUrlSchema } from "./env.js";
+import { ConnectorLeaseSecondsSchema, ModelCatalogUrlSchema, ServiceUrlSchema } from "./env.js";
 
 describe("ServiceUrlSchema", () => {
   it.each([
@@ -42,5 +42,15 @@ describe("ModelCatalogUrlSchema", () => {
     ["something that isn't a URL", "not a url"],
   ])("rejects %s", (_label, value) => {
     expect(ModelCatalogUrlSchema.safeParse(value).success).toBe(false);
+  });
+});
+
+describe("ConnectorLeaseSecondsSchema", () => {
+  it("accepts the longest lease a timer can hold", () => {
+    expect(ConnectorLeaseSecondsSchema.safeParse("2147483").success).toBe(true);
+  });
+
+  it("rejects a lease past it, which a timer would fire at once", () => {
+    expect(ConnectorLeaseSecondsSchema.safeParse("2147484").success).toBe(false);
   });
 });
