@@ -228,6 +228,17 @@ async function getMainSha(bare: string): Promise<string | null> {
   }
 }
 
+/**
+ * Rewind main to `sha` and drop every commit only the old main held, as
+ * restoring the repo from a remote that lagged a deploy leaves it.
+ */
+async function restoreMainTo(repo: RepoSetup, sha: string, dropped: string): Promise<void> {
+  await git(repo.bare, "update-ref", "refs/heads/main", sha);
+  await git(repo.bare, "reflog", "expire", "--expire=now", "--all");
+  await git(repo.bare, "gc", "-q", "--prune=now");
+  await expect(git(repo.bare, "cat-file", "-e", `${dropped}^{commit}`)).rejects.toThrow();
+}
+
 /** Point the working clone at the bare repo's main, as a fresh branch would start. */
 async function resetToMain(repo: RepoSetup): Promise<void> {
   await execFileP("git", ["-C", repo.work, "fetch", "-q", "origin", "main"]);
@@ -1339,6 +1350,32 @@ outputs:
       expect(left.name).toBe("echo");
     });
 
+    it("a branch at main whose skill's live sha the repo no longer has puts main's files live", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      assertStatus(await runner.register({ branch: "skill/echo-v1", origin: OWNER }), "live");
+      const v2 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      assertStatus(await runner.register({ branch: "skill/echo-v2", origin: OWNER }), "live");
+      await restoreMainTo(repo, v1, v2);
+      await git(repo.bare, "update-ref", "refs/heads/skill/at-main", v1);
+
+      const result = await runner.register({ branch: "skill/at-main", origin: OWNER });
+
+      assertStatus(result, "live");
+      expect(result.gitSha).toBe(v1);
+      expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(v1);
+    });
+
     it("refuses a branch at main that changes no skill", async () => {
       const runner = await makeRunner();
       await git(repo.bare, "update-ref", "refs/heads/skill/empty", repo.layout);
@@ -1798,6 +1835,33 @@ effects:
 
       assertStatus(repeat, "no_op");
       expect(await getMainSha(repo.bare)).toBe(main);
+    });
+
+    it("a rollback whose skill's live sha the repo no longer has restores the target", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      assertStatus(await runner.register({ branch: "skill/echo-v1", origin: OWNER }), "live");
+      const v2 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      assertStatus(await runner.register({ branch: "skill/echo-v2", origin: OWNER }), "live");
+      await restoreMainTo(repo, v1, v2);
+
+      const rolled = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+      // main already holds v1's files, so it is the restoring commit.
+      assertStatus(rolled, "live");
+      expect(rolled.gitSha).toBe(v1);
+      expect(await getMainSha(repo.bare)).toBe(v1);
+      expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(v1);
     });
 
     it("rollback to current sha is a no-op", async () => {

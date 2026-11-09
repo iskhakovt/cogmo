@@ -15,6 +15,7 @@ import {
   type SkillsRepo,
   sameSkillBlobs,
   skillBlobsAt,
+  skillBlobsMatchAt,
   skillBlobsUnder,
   skillDir,
 } from "../skill-files.js";
@@ -278,11 +279,7 @@ async function restoringCommit(
   }
 
   const skill = await deps.runInTx((tx) => deps.store.getSkillByName(tx, name));
-  if (
-    skill &&
-    !skill.disabled &&
-    sameSkillBlobs(target, await skillBlobsAt(repo, name, skill.gitSha))
-  ) {
+  if (skill && !skill.disabled && (await skillBlobsMatchAt(repo, name, skill.gitSha, target))) {
     return { kind: "unchanged", skill };
   }
   // Main already holds the target's files, as for a disabled skill rolled
