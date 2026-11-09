@@ -231,7 +231,7 @@ export class SessionHub implements ConnectorHub {
   finishJob(connector: ActiveConnector, request: FinishJobRequest): Result<void, JobCallError> {
     return this.#lookup(connector, request.jobId).andThen((entry) => {
       if (entry.state.status === "ended") return ok(undefined);
-      if (request.lastSeq > entry.lastSeq) {
+      if (request.lastSeq !== undefined && request.lastSeq > entry.lastSeq) {
         logger.warn(
           {
             jobId: request.jobId,
@@ -451,7 +451,7 @@ function unspecifiedError(message: string): JobError {
   return create(JobErrorSchema, { code: JobErrorCode.UNSPECIFIED, message });
 }
 
-/** Whether a turn's cumulative usage passed its `token_budget`; 0 means no budget. */
+/** Whether a turn's cumulative usage passed its `token_budget`; an absent budget is none. */
 function overBudget(job: Job, usage: { inputTokens: bigint; outputTokens: bigint }): boolean {
   const budget = match(job.spec)
     .with({ case: "plan" }, { case: "execute" }, ({ value }) => value.tokenBudget)
@@ -461,10 +461,10 @@ function overBudget(job: Job, usage: { inputTokens: bigint; outputTokens: bigint
       { case: "publish" },
       { case: "release" },
       { case: undefined },
-      () => 0n,
+      () => undefined,
     )
     .exhaustive();
-  return budget > 0n && usage.inputTokens + usage.outputTokens > budget;
+  return budget !== undefined && usage.inputTokens + usage.outputTokens > budget;
 }
 
 /** A release the connector completed or failed ends the task's time on it; a cancelled one does not. */

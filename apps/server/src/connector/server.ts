@@ -15,6 +15,9 @@ const PING_TIMEOUT_MS = 20_000;
 /** How long `close` lets open streams finish before destroying their connections. */
 const CLOSE_GRACE_MS = 2_000;
 
+/** The largest message cogmo reads, gRPC's default; a larger one fails `RESOURCE_EXHAUSTED`. */
+const READ_MAX_BYTES = 4 * 1024 * 1024;
+
 export interface ConnectorServer {
   /** The bound port; the ephemeral one when started on port 0. */
   readonly port: number;
@@ -36,6 +39,7 @@ export async function startConnectorServer(params: {
     grpc: true,
     grpcWeb: false,
     connect: false,
+    readMaxBytes: READ_MAX_BYTES,
   });
   const server = createServer(handler);
   const sessions = new Set<Http2Session>();

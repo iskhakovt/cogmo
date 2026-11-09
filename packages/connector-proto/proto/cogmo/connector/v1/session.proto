@@ -1,8 +1,10 @@
 // The session between cogmo and a connector: a process outside cogmo that
 // dials in, takes jobs, and reports their events and outcomes. This file holds
-// what every kind of connector shares; each kind's job payloads have a file of
-// their own (coding.proto). The rules a connector follows are in
-// design/connectors.md → Wire contract.
+// the service, the session, and the job envelopes, whose oneofs name each
+// kind's payloads. Each kind's payloads have a file of their own (coding.proto)
+// that imports nothing from this one; a type two kinds share goes in a file of
+// its own. The rules a connector follows are in design/connectors.md → Wire
+// contract, and the protobuf conventions in .agents/rules/protobuf.md.
 //
 // Every call carries `authorization: Bearer <token>`, the token
 // `cogmo connector add` printed.
@@ -92,7 +94,7 @@ message FinishJobRequest {
     JobError failed = 3;
     Cancelled cancelled = 4;
   }
-  uint64 last_seq = 5; // the last event seq it reported; 0 if none
+  optional uint64 last_seq = 5; // the last event seq it reported; absent if none
 }
 
 message FinishJobResponse {}

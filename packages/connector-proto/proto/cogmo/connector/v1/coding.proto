@@ -14,7 +14,7 @@ message PrepareSpec {
 message AgentTurnSpec {
   string prompt = 1;
   string agent = 2;
-  uint64 token_budget = 3;
+  optional uint64 token_budget = 3; // input plus output tokens; absent, no budget
   optional string session_id = 4; // the plan's session handle, on execute
 }
 
@@ -47,7 +47,7 @@ message ToolResult {
 message Usage {
   uint64 input_tokens = 1;
   uint64 output_tokens = 2;
-  double cost_usd = 3;
+  optional double cost_usd = 3; // absent when the runtime reports no cost
 }
 
 message Prepared {}
@@ -62,10 +62,14 @@ message Executed {
 }
 
 message VerifyVerdict {
-  int32 exit_code = 1;
-  bool timed_out = 2;
+  oneof end {
+    int32 exit_code = 1;
+    VerifyTimedOut timed_out = 2;
+  }
   string output_tail = 3;
 }
+
+message VerifyTimedOut {}
 
 message Published {
   string head_sha = 1;

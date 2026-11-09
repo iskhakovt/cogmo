@@ -126,3 +126,10 @@ it("closes within its grace when a request body never finishes", async () => {
   await resolvesWithin(server.close(), 4_000, "server close");
   session.destroy();
 });
+
+it("refuses a message larger than 4 MiB", async () => {
+  const client = createClient(ConnectorService, createGrpcTransport({ baseUrl }));
+  await expect(
+    client.acceptJob({ jobId: "x".repeat(4 * 1024 * 1024 + 1) }, AUTH),
+  ).rejects.toMatchObject({ code: Code.ResourceExhausted });
+});

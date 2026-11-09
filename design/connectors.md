@@ -22,14 +22,14 @@ A connector is a process outside cogmo that runs part of cogmo's work somewhere 
 
 ## Wire contract `[confirmed]`
 
-One server-streaming call carries cogmo's messages to the connector; unary calls carry the connector's side back. Each unary call is acknowledged on its own and is idempotent, so a dropped stream loses nothing the connector already sent, and an error belongs to one call. The server speaks only the gRPC protocol; a Connect or gRPC-Web request gets HTTP 415.
+One server-streaming call carries cogmo's messages to the connector; unary calls carry the connector's side back. Each unary call is acknowledged on its own and is idempotent, so a dropped stream loses nothing the connector already sent, and an error belongs to one call. The server speaks only the gRPC protocol; a Connect or gRPC-Web request gets HTTP 415. It reads messages up to 4 MiB, gRPC's default; a larger one fails `RESOURCE_EXHAUSTED`.
 
 The contract is two files in package `cogmo.connector.v1`, under [`packages/connector-proto/proto/cogmo/connector/v1/`](../packages/connector-proto/proto/cogmo/connector/v1/), which are its source of truth:
 
-- **`session.proto`** holds what every kind of connector shares: the service, the session's messages, and the job envelopes (`Job`, `JobEvent`, `JobResult`, `JobError` and its codes).
+- **`session.proto`** holds the service, the session's messages, and the job envelopes (`Job`, `JobEvent`, `JobResult`, `JobError` and its codes), whose oneofs name each kind's payloads.
 - **`coding.proto`** holds the coding jobs' payloads: each phase's spec, an agent turn's events, and each phase's result.
 
-A channel connector's messages go in a `channel.proto` of their own. The service, from `session.proto`:
+Both follow [protobuf.md](../.agents/rules/protobuf.md). From `session.proto`:
 
 ```proto
 service ConnectorService {
@@ -70,13 +70,13 @@ message FinishJobRequest {
     JobError failed = 3;
     Cancelled cancelled = 4;
   }
-  uint64 last_seq = 5;                // the last event seq it reported; 0 if none
+  optional uint64 last_seq = 5;       // the last event seq it reported; absent if none
 }
 ```
 
 A verify that runs and fails is a `completed` verdict, not a `failed` job.
 
-**The job id is the idempotency key.** cogmo computes `<spec digest>` as the SHA-256 of the spec's binary encoding as protobuf-es writes it: fields in number order, and the specs hold no maps. A re-sent job therefore keeps its key, and a different spec for the same task and phase gets a new one ([inngest.md](../.agents/rules/inngest.md) → key the request, not the slot). Connectors treat the id as opaque.
+**The job id is the idempotency key.** cogmo computes `<spec digest>` as the SHA-256 of the spec's proto3 JSON (protobuf-es `toJson`) in RFC 8785 canonical form (`canonicalize`). The JSON mapping is specified, so the digest is the same across builds and languages, which no library promises for the binary encoding. A re-sent job therefore keeps its key, and a different spec for the same task and phase gets a new one ([inngest.md](../.agents/rules/inngest.md) → key the request, not the slot). Connectors treat the id as opaque.
 
 **Connector rules**, which the contract suite (*Testing*) checks:
 
@@ -88,6 +88,7 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 6. **Reports.** `seq` rises strictly from 1, and a retried report re-sends the same `seq`. The connector calls `FinishJob` only once every report for the job has been acknowledged, and passes the last `seq` it sent.
 7. **Cancel.** Cancelling is cooperative: it answers with `FinishJob(cancelled)`, or with the job's real outcome if that came first.
 8. **Workspaces.** `prepare` adopts an existing workspace for the task on `work_branch`. `release` stops the task's running job first, is idempotent, succeeds for a task it never prepared, and keeps the workspace when the salvage push fails. After a `kept` or failed release, the connector stops listing the task in `held_task_ids`, and the workspace becomes the operator's.
+9. **Liveness.** It reconnects when its stream has carried no message for 90 s, which is three missed `Heartbeat`s.
 
 **Auth.** Each call carries `authorization: Bearer <token>`.
 - `cogmo connector add <name> --kind coding` mints a 32-byte token, prints it once and stores its SHA-256, as `web_sessions` does. `rotate` replaces the token. `revoke` moves the connector to `revoked`, and refuses while a repo points at it; tasks running on it lose their jobs. `list` shows the connectors.
@@ -169,7 +170,7 @@ dispatched ──► accepted ──► completed | failed | cancelled
 | `publish` | 5 min | — |
 | `release` | 10 min | — |
 
-The connector enforces `token_budget` inside the turn. The hub also cancels a turn whose reported input and output tokens together pass it, which resolves `timed_out` with `cap: "token_budget"`. A budget of 0 is none.
+The connector enforces `token_budget` inside the turn. The hub also cancels a turn whose reported input and output tokens together pass it, which resolves `timed_out` with `cap: "token_budget"`. An absent budget is none.
 
 **Session.** A session is one open `Connect` stream. When it closes, its accepted jobs wait out the lease for a new session. A new `Connect` under the same name replaces the old session and closes its stream; its `held_job_ids` decide which jobs carry over.
 
@@ -262,8 +263,8 @@ A channel connector exposes the per-channel `Transport` from [operator-facade.md
 
 ## Testing `[proposed]`
 
-- **Unit:** the hub and server over `createRouterTransport` with a fake connector. Cover a matrix of the eight rules, the transition table, the caps, lease expiry, a session replaced under one name, revoke and rotate, and the mapping onto `TaskFailure`s.
-- **Contract suite:** a TypeScript kit that drives any connector over gRPC through the eight rules. The Paseo connector runs it in CI.
+- **Unit:** the hub and server over `createRouterTransport` with a fake connector. Cover a matrix of the nine rules, the transition table, the caps, lease expiry, a session replaced under one name, revoke and rotate, and the mapping onto `TaskFailure`s.
+- **Contract suite:** a TypeScript kit that drives any connector over gRPC through the nine rules. The Paseo connector runs it in CI.
 - **Integration:** one coding task end to end against the fake connector, over a real h2c socket bound to port 0.
 - **Paseo connector:** against the official Paseo image (a `dev/containers.ts` factory), with the Claude provider's `ANTHROPIC_BASE_URL` pointed at llmock. Whether replay holds across Paseo's provider launch is a spike item.
 

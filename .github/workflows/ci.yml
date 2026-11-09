@@ -173,7 +173,8 @@ jobs:
       - run: pnpm knip
 
   # The connector contract (design/connectors.md → Decisions → Contract CI):
-  # buf's lint, wire compatibility against the base branch, and the committed
+  # buf's lint, file-level compatibility against the base branch (buf.yaml's
+  # FILE rules, stricter than wire compatibility), and the committed
   # protobuf-es code matching what `buf generate` writes from the `.proto`.
   connector-proto:
     name: Connector contract

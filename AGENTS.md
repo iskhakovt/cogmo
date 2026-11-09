@@ -184,3 +184,7 @@ Anything with a lifecycle is an explicit state machine: a durable unit, a `pgEnu
 ## Inngest
 
 Replay model (per-boundary re-invocation on success), what belongs in a step, step-id determinism, tool durability policy. See [.agents/rules/inngest.md](.agents/rules/inngest.md).
+
+## Protobuf
+
+The connector contract's `.proto` files: presence through `optional`, alternatives as a `oneof`, unknown values handled, reserved numbers, additive evolution, no keys over serialized bytes, bounded messages. See [.agents/rules/protobuf.md](.agents/rules/protobuf.md).

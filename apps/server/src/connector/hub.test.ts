@@ -146,11 +146,19 @@ function prepareJob(): Job {
   });
 }
 
-function planJob(tokenBudget: bigint): Job {
+/** A plan job; `tokenBudget` `null` sends none. */
+function planJob(tokenBudget: bigint | null): Job {
   return create(JobSchema, {
     jobId: "task-1/plan/d2",
     taskId: "task-1",
-    spec: { case: "plan", value: { prompt: "plan it", agent: "claude", tokenBudget } },
+    spec: {
+      case: "plan",
+      value: {
+        prompt: "plan it",
+        agent: "claude",
+        ...(tokenBudget !== null && { tokenBudget }),
+      },
+    },
   });
 }
 
@@ -302,7 +310,7 @@ describe("auth", () => {
 describe("a job's life", () => {
   it("sends the job after SessionAccepted, delivers new events in order, and resolves on FinishJob", async () => {
     const stream = await connected("paseo-token", []);
-    const run = startRun(planJob(0n));
+    const run = startRun(planJob(null));
     await settle();
     expect(stream.received[0]?.message.case).toBe("accepted");
     expect(stream.jobs()).toEqual(["task-1/plan/d2"]);
@@ -455,12 +463,12 @@ describe("a job's life", () => {
   it("keeps delivering events when a handler throws", async () => {
     await connected("paseo-token", []);
     const seen: bigint[] = [];
-    void hub.run(PASEO.id, planJob(0n), {
+    void hub.run(PASEO.id, planJob(null), {
       onEvent: () => {
         throw new Error("handler bug");
       },
     });
-    void hub.run(PASEO.id, planJob(0n), { onEvent: (event) => seen.push(event.seq) });
+    void hub.run(PASEO.id, planJob(null), { onEvent: (event) => seen.push(event.seq) });
     await settle();
     await client.reportEvents(
       { jobId: "task-1/plan/d2", events: [textEvent(1n, "a"), textEvent(2n, "b")] },
@@ -611,7 +619,7 @@ describe("sessions", () => {
 
   it("starts no idle cap for a report that arrives after close", async () => {
     await connected("paseo-token", []);
-    const run = startRun(planJob(0n));
+    const run = startRun(planJob(null));
     await settle();
     const auth = bearer("paseo-token");
     await client.acceptJob({ jobId: "task-1/plan/d2" }, auth);
@@ -635,7 +643,7 @@ describe("caps", () => {
 
   it("times out an agent turn idle for 5 minutes, and a report resets the idle cap", async () => {
     await connected("paseo-token", []);
-    const run = startRun(planJob(0n));
+    const run = startRun(planJob(null));
     await settle();
     const auth = bearer("paseo-token");
     await client.acceptJob({ jobId: "task-1/plan/d2" }, auth);
@@ -656,6 +664,20 @@ describe("caps", () => {
     expect(run.result).toBeNull();
     await advance(1);
     expect(run.result).toEqual(err({ kind: "timed_out", cap: "total" }));
+  });
+
+  it("never cancels a turn without a token budget for its usage", async () => {
+    await connected("paseo-token", []);
+    const run = startRun(planJob(null));
+    await settle();
+    const auth = bearer("paseo-token");
+    await client.acceptJob({ jobId: "task-1/plan/d2" }, auth);
+    await client.reportEvents(
+      { jobId: "task-1/plan/d2", events: [usageEvent(1n, 10_000_000n, 10_000_000n)] },
+      auth,
+    );
+    await settle();
+    expect(run.result).toBeNull();
   });
 
   it("cancels a turn whose reported usage passes its token budget", async () => {
