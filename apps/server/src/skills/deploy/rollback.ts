@@ -252,7 +252,11 @@ export interface LiveVersionMoved {
  * itself a restoring commit, the commit that one restored, so the value
  * always names a commit that had its own deploy.
  */
-async function restoredCommit(deps: DeployDeps, name: string, targetSha: string): Promise<string> {
+export async function restoredCommit(
+  deps: DeployDeps,
+  name: string,
+  targetSha: string,
+): Promise<string> {
   return (
     (await deps.runInTx((tx) => deps.store.restoredTargetAt(tx, { name, gitSha: targetSha }))) ??
     targetSha

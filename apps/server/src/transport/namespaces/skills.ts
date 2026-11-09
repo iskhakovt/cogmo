@@ -88,13 +88,15 @@ export interface SkillsNamespace {
   /**
    * Roll back the edit `deployId`, as its live message's Roll back button
    * names it: restore the version it replaced through the runner's forward
-   * rollback (design/skills.md → Notifications and undo). Refused with
-   * `skill_deploy_superseded` once the deploy is no longer the skill's live
-   * version, so a stale button cannot undo a later deploy;
-   * `skill_deploy_not_found` for an unknown id; `skill_rollback_failed` with
-   * the runner's reason, or when the deploy did not go live or replaced no
-   * live version. The tapper and the conversation in `platformAddress` are
-   * the origin a schedule it puts live runs as.
+   * rollback (design/skills.md → Notifications and undo). Once the deploy
+   * is no longer the skill's live version, `already_rolled_back` when a later
+   * rollback restored that version (an earlier tap, or the CLI), else refused
+   * with `skill_deploy_superseded`, so a stale button cannot undo a later
+   * deploy; `skill_deploy_not_found` for an unknown id;
+   * `skill_rollback_failed` with the runner's reason, or when the deploy did
+   * not go live or replaced no other live version. The tapper and the
+   * conversation in `platformAddress` are the origin a schedule it puts live
+   * runs as.
    */
   rollbackDeploy(
     deployId: string,
@@ -251,7 +253,7 @@ export function createSkills(
           .with({ kind: "not_an_edit" }, () => ({
             code: "skill_rollback_failed",
             deployId,
-            reason: "the deploy did not go live, or replaced no live version",
+            reason: "the deploy did not go live, or replaced no other live version",
           }))
           .with({ kind: "superseded" }, () => ({ code: "skill_deploy_superseded", deployId }))
           .with({ kind: "refused" }, ({ reason }) => ({

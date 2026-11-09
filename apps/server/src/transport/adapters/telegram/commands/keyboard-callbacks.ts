@@ -1,6 +1,7 @@
 /** Taps on the plan, pipeline-gate and skill deploy keyboards, as what the adapter writes back. */
 
 import { match, P } from "ts-pattern";
+import type { RolledBack } from "../../../../skills/deploy/rollback-deploy.js";
 import type { ParsedSkillsDeployCallback } from "../../../../skills/skills-keyboard.js";
 import type { Transport } from "../../../transport.js";
 import type { TransportError } from "../../../transport-error.js";
@@ -155,6 +156,14 @@ function keepsSkillsKeyboard(error: TransportError): boolean {
 }
 
 /**
+ * The message once the edit is rolled back, the same whether this tap or an
+ * earlier one did it, so a second tap leaves the message as it is.
+ */
+function rolledBackText(r: RolledBack): string {
+  return `↩️ Rolled back ${r.skillName} to ${r.restoredGitSha.slice(0, 7)} (now live at ${r.gitSha.slice(0, 7)}).`;
+}
+
+/**
  * Skill deploy-keyboard callback handler — translates a parsed Approve /
  * Deny tap on a pending deploy, or a Disable or Roll back tap on a live one,
  * into a `transport.skills` call and an outcome the adapter renders. The
@@ -217,9 +226,14 @@ export async function handleSkillsDeployCallback(
         };
       }
       return match(res.value)
-        .with({ kind: "restored" }, ({ skillName, restoredGitSha, gitSha }) => ({
-          editText: `↩️ Rolled back ${skillName} to ${restoredGitSha.slice(0, 7)} (now live at ${gitSha.slice(0, 7)}).`,
+        .with({ kind: "restored" }, (rolledBack) => ({
+          editText: rolledBackText(rolledBack),
           toast: "Rolled back",
+          clearKeyboard: true,
+        }))
+        .with({ kind: "already_rolled_back" }, (rolledBack) => ({
+          editText: rolledBackText(rolledBack),
+          toast: "Already rolled back",
           clearKeyboard: true,
         }))
         .with({ kind: "unchanged" }, ({ skillName, restoredGitSha }) => ({

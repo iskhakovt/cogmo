@@ -190,6 +190,7 @@ One PR per slice, in order; each later slice assumes the earlier ones.
 - [ ] `p3` Redact a bound secret's substituted value when an upstream reflects it into a response (an echoed query parameter, a `Location` header). Needs a response hook, which ends streaming (design/skills.md → Egress proxy → Substitution). (design review 2026-11-01)
 - [ ] `p3` Scrub the exact secret values issued to a run from its output, `ctx.log` lines, memory and file writes (design/skills.md → Secrets: pull model). (design review 2026-11-01)
 - [ ] `p3` Point the code comments that cite design/skills.md → "Exactly-once invocation" at its heading "At-most-once invocation" (`invoke-rejection.ts`, `invoke/start-run.ts`, `runner.ts`, `store/schema.ts` under `apps/server/src/skills/`), and correct the two that claim exactly-once execution (`store/index.ts`, `skill-tool-builder.ts`): the guarantee is at-most-once with cached-result recovery. (design review 2026-11-01)
+- [ ] `p3` Integration-test the Roll back button's in-transaction race on real Postgres: hold the skill's advisory lock in a second session, start `executeRollback` (snapshot taken, then blocked), commit a skills `UPDATE` from another connection, release, and assert `live_version_moved` with `main` and the skills row untouched. PGlite cannot interleave transactions, so the 40001 path the design's failure-mode row relies on is untested. (S5b bug review, 2026-11-09)
 
 ### Skills, voice & transport
 
