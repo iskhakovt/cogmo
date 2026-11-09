@@ -4,7 +4,7 @@ import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { readManifestLockfile } from "./lockfile-check.js";
-import { mirrorMainToRemote } from "./mirror.js";
+import { mirrorMain } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult, targetSourceRejection } from "./register-result.js";
 import { frontmatterSchemas } from "./schemas.js";
@@ -106,6 +106,7 @@ export async function approveDeploy(
       outputs: schemas.outputs,
       runAs: deployRunAs(deps.defaultRunAs, opts.origin),
       applyFilesystem: async () => {
+        await deps.store.markMainAdvanced(tx, deploy.gitSha);
         await advanceMain(repoPath, deploy.gitSha, { kind: "fast_forward" });
       },
     }),
@@ -119,7 +120,7 @@ export async function approveDeploy(
     deps.sourceCache.put(deploy.gitSha, { manifest, body }, schemas, lockfile);
     // Mirror the new main SHA to the configured remote — same rationale as
     // register's mirror call.
-    await mirrorMainToRemote(deps, repoPath, deploy.gitSha);
+    await mirrorMain(deps, repoPath, deploy.gitSha);
     return {
       name: result.skill.name,
       riskTier: result.skill.riskTier,

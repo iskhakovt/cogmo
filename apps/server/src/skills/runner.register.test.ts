@@ -22,6 +22,7 @@ import { offlineWasm } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
 import { hashLockfileContents } from "./deps.js";
 import { migrateSkillsLayout } from "./migrate-layout.js";
+import { ensureSkillsMirror } from "./mirror-reconcile.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
@@ -2061,6 +2062,37 @@ effects:
       });
     });
 
+    it("a serialization retry of the rollback's transaction finishes the rollback", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v1", origin: OWNER });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      // A concurrent push recorded its result on the mirror row first.
+      const mark = vi
+        .spyOn(store, "markMainAdvanced")
+        .mockRejectedValueOnce(
+          Object.assign(new Error("could not serialize access"), { code: "40001" }),
+        );
+
+      const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+      mark.mockRestore();
+
+      assertStatus(result, "live");
+      expect(await getMainSha(repo.bare)).toBe(result.gitSha);
+      expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(result.gitSha);
+    });
+
     it("a target whose files the live version already holds is a no-op", async () => {
       const runner = await makeRunner();
       const v1 = await pushFeatureBranch({
@@ -4008,6 +4040,7 @@ effects:
       const repoWithRemote = await setupRepoWithRemote();
       try {
         const runner = await makeRunnerForRepo(repoWithRemote.bare);
+        await ensureSkillsMirror({ runInTx: tx, store }, repoWithRemote.bare);
         const sha = await pushFeatureBranch({
           work: repoWithRemote.work,
           branch: "skill/notifier",
@@ -4038,15 +4071,64 @@ effects:
         ).stdout.trim();
         expect(remoteMainAfter).toBe(sha);
         expect(remoteMainAfter).not.toBe(seedSha);
+        expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+          status: "synced",
+          localSha: sha,
+          pushedSha: sha,
+        });
       } finally {
         await repoWithRemote.cleanup();
       }
+    });
+
+    it("a deploy moves the mirror state behind in its transaction, and its landed push syncs it", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      try {
+        const runner = await makeRunnerForRepo(repoWithRemote.bare);
+        await ensureSkillsMirror({ runInTx: tx, store }, repoWithRemote.bare);
+        expect(await runner.mirrorStatus()).toEqual({ status: "behind", lastFailure: null });
+        const executeRegister = DrizzleSkillStore.prototype.executeRegister.bind(store);
+        let inTransaction: unknown;
+        const spy = vi
+          .spyOn(store, "executeRegister")
+          .mockImplementationOnce(async (trx, params) => {
+            const result = await executeRegister(trx, params);
+            inTransaction = await store.getMirror(trx);
+            return result;
+          });
+
+        const sha = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+        assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+        spy.mockRestore();
+
+        expect(inTransaction).toMatchObject({ status: "behind", localSha: sha });
+        expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+          status: "synced",
+          localSha: sha,
+          pushedSha: sha,
+        });
+        expect(await runner.mirrorStatus()).toEqual({ status: "synced", lastFailure: null });
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("mirrorStatus is null for a skills repo with no remote", async () => {
+      const runner = await makeRunner();
+      await ensureSkillsMirror({ runInTx: tx, store }, repo.bare);
+      expect(await runner.mirrorStatus()).toBeNull();
     });
 
     it("rollback pushes the restoring commit to the remote", async () => {
       const repoWithRemote = await setupRepoWithRemote();
       try {
         const runner = await makeRunnerForRepo(repoWithRemote.bare);
+        await ensureSkillsMirror({ runInTx: tx, store }, repoWithRemote.bare);
 
         // v1 → register, advances local + remote main.
         const v1 = await pushFeatureBranch({
@@ -4087,6 +4169,11 @@ effects:
             await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
           ).stdout.trim(),
         ).toBe(result.gitSha);
+        expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+          status: "synced",
+          localSha: result.gitSha,
+          pushedSha: result.gitSha,
+        });
       } finally {
         await repoWithRemote.cleanup();
       }
@@ -4096,6 +4183,7 @@ effects:
       const repoWithRemote = await setupRepoWithRemote();
       try {
         const runner = await makeRunnerForRepo(repoWithRemote.bare);
+        await ensureSkillsMirror({ runInTx: tx, store }, repoWithRemote.bare);
         const v1 = await pushFeatureBranch({
           work: repoWithRemote.work,
           branch: "skill/echo-v1",
@@ -4127,6 +4215,12 @@ effects:
             await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
           ).stdout.trim(),
         ).toBe(repeat.gitSha);
+        // The failed attempt's mark rolled back with its transaction.
+        expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+          status: "synced",
+          localSha: repeat.gitSha,
+          pushedSha: repeat.gitSha,
+        });
       } finally {
         await repoWithRemote.cleanup();
       }

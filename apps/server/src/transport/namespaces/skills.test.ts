@@ -767,3 +767,27 @@ describe("Transport.skills.rollbackDeploy", () => {
     expect(runner.rollbackDeploy).not.toHaveBeenCalled();
   });
 });
+
+describe("Transport.skills.mirrorStatus", () => {
+  it("returns the runner's view of the skills remote", async () => {
+    const runner = mock<SkillRunner>();
+    runner.mirrorStatus.mockResolvedValue({ status: "behind", lastFailure: "timeout" });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
+
+    expect((await skills.mirrorStatus(KNOWN_HANDLE))._unsafeUnwrap()).toEqual({
+      status: "behind",
+      lastFailure: "timeout",
+    });
+  });
+
+  it("rejects an unknown caller, and returns skills_disabled when the runner is unwired", async () => {
+    const runner = mock<SkillRunner>();
+    expect((await makeSkills({ runner }).mirrorStatus(UNKNOWN_HANDLE))._unsafeUnwrapErr()).toEqual({
+      code: "identity_rejected",
+    });
+    expect(runner.mirrorStatus).not.toHaveBeenCalled();
+    expect((await makeSkills({}).mirrorStatus(KNOWN_HANDLE))._unsafeUnwrapErr()).toEqual({
+      code: "skills_disabled",
+    });
+  });
+});

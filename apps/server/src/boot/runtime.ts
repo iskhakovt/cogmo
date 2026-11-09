@@ -89,6 +89,7 @@ export async function bootstrapRuntime(
     skills.skillCronFire,
     skills.skillDepsReaper,
     skills.skillRunsSweeper,
+    skills.skillsMirrorReconcile,
     session.boundaryWaiter,
     session.boundaryJanitor,
     agent.pipelineStageRunner,

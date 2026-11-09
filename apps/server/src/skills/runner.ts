@@ -43,11 +43,19 @@ import {
   type SkillToolDef,
 } from "./listing.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
+import { readOriginUrl } from "./repo.js";
 import type { SkillRunAs } from "./run-as.js";
 import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests.js";
 import { recordedSkillsRepo } from "./skill-files.js";
 import { SkillSourceCache } from "./source-cache.js";
-import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
+import type {
+  SkillRow,
+  SkillRunIdentity,
+  SkillRunTrigger,
+  SkillStore,
+  SkillsMirrorFailure,
+  SkillsMirrorStatus,
+} from "./store/index.js";
 import { wallClockSOf } from "./wall-clock.js";
 import {
   type ContainerSchemaImporter,
@@ -93,6 +101,12 @@ const DEFAULT_CONTAINER_IMAGE = defaultSkillsImage();
 
 const log = logger.child({ component: "skills.runner" });
 
+/** How the skills remote stands to local `main`, and why the last push failed. */
+export interface SkillsMirrorView {
+  status: SkillsMirrorStatus;
+  lastFailure: SkillsMirrorFailure | null;
+}
+
 /**
  * Public contract for the skills runtime: the deploy pipeline (`register` /
  * `approveDeploy` / `denyDeploy` / `rollback`), activation (`deregister` /
@@ -133,6 +147,11 @@ export interface SkillRunner {
     deployId: string;
     origin: SkillDeployOrigin;
   }): Promise<Result<RolledBack, RollbackDeployError>>;
+  /**
+   * How the skills remote stands to local `main`, or null when the skills
+   * repo has no `origin` (design/skills.md → Repo location → Mirror state).
+   */
+  mirrorStatus(): Promise<SkillsMirrorView | null>;
   /**
    * Soft-disable a skill. Idempotent on already-disabled rows (returns
    * `kind: "deregistered"` either way — soft-disable already supports
@@ -523,6 +542,13 @@ export class SkillRunnerImpl implements SkillRunner {
     origin: SkillDeployOrigin;
   }): Promise<Result<RolledBack, RollbackDeployError>> {
     return rollbackDeploy(this.#deploy, opts);
+  }
+
+  async mirrorStatus(): Promise<SkillsMirrorView | null> {
+    const repo = this.#deploy.skillsRepo;
+    if (!repo || (await readOriginUrl(repo.path)) === null) return null;
+    const mirror = await this.#deploy.runInTx((tx) => this.#deploy.store.getMirror(tx));
+    return mirror && { status: mirror.status, lastFailure: mirror.lastFailure };
   }
 
   deregister(opts: { name: string }): Promise<DeregisterResult> {

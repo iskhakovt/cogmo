@@ -68,12 +68,16 @@ export async function migrateSkillsLayout(
         const found = mainSha === null ? null : await findLayoutCommit(repoPath, mainSha, rows);
         if (found !== null) {
           await record(tx, found);
+          // The crash that left the commit unrecorded may have left the
+          // mirror state behind main too.
+          if (mainSha !== null) await deps.store.markMainAdvanced(tx, mainSha);
           log.info({ layoutCommit: found }, "recorded the skills layout commit found on main");
           return found;
         }
 
         const commit = await makeLayoutCommit(repoPath, mainSha, rows);
         await record(tx, commit);
+        await deps.store.markMainAdvanced(tx, commit);
         await updateRef(repoPath, "refs/heads/main", commit, mainSha ?? ZERO_SHA);
         log.info({ layoutCommit: commit, skills: rows.length }, "moved skills to skills/<name>/");
         return commit;

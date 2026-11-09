@@ -184,6 +184,40 @@ describe("migrateSkillsLayout", () => {
     expect(await git(bare, "rev-list", "--count", "refs/heads/main")).toBe("2");
   });
 
+  it("moves the mirror state behind to the layout commit it makes", async () => {
+    const alpha = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", alpha, false);
+    await tx(async (trx) => {
+      await store.ensureMirror(trx);
+      await store.markMainAdvanced(trx, alpha);
+      await store.recordMirrorLanded(trx, alpha);
+    });
+
+    const layout = await migrate();
+
+    expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+      status: "behind",
+      localSha: layout,
+      pushedSha: alpha,
+    });
+  });
+
+  it("brings the mirror state up to main when it records a layout commit a crash left", async () => {
+    const alpha = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", alpha, false);
+    await tx(async (trx) => {
+      await store.ensureMirror(trx);
+      await store.markMainAdvanced(trx, alpha);
+    });
+    const layout = await migrate();
+    // The crash left neither the layout row nor the mirror's move.
+    await db.execute(sql`DELETE FROM skills_repo_layout`);
+    await db.execute(sql`UPDATE skills_repo_mirror SET local_sha = ${alpha}`);
+
+    expect(await migrate()).toBe(layout);
+    expect(await tx((trx) => store.getMirror(trx))).toMatchObject({ localSha: layout });
+  });
+
   /**
    * alpha deployed at the repo root, the layout commit on top, then a deploy
    * of beta from a draft cut before the move that merged `main`, so the

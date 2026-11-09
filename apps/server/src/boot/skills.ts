@@ -8,8 +8,12 @@ import { inngest } from "../inngest/index.js";
 import { logger } from "../logger.js";
 import { createSkillCronFireHandler } from "../skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "../skills/cron-ticker.js";
-import { mirrorMainBestEffort } from "../skills/deploy/mirror.js";
 import { createSkillDepsReaper } from "../skills/deps-reaper-function.js";
+import {
+  createSkillsMirrorReconcile,
+  reconcileMirrorAtBoot,
+  type SkillsMirrorReconcileDeps,
+} from "../skills/mirror-reconcile.js";
 import { loadBundledPackages } from "../skills/pyodide-compat.js";
 import { resolveSkillRunAs } from "../skills/run-as.js";
 import { SkillRunnerImpl } from "../skills/runner.js";
@@ -89,18 +93,23 @@ export async function bootstrapSkillRunner(
 }
 
 /**
- * Push the skills repo's `main` to its `origin` in the background, for
- * `cogmo serve`. A coding task on a git-remote backend (Daytona) branches
- * from the remote's `main`, so a commit only local `main` holds, the layout
- * commit this boot may have made or a deploy whose push failed, would fail
- * the draft's register as `non_fast_forward` (design/skills.md → Repo
- * location → Mirror state).
+ * Reconcile the skills remote once, for `cogmo serve`, before the runtime
+ * starts. A coding task on a git-remote backend (Daytona) branches from the
+ * remote's `main`, so a commit this boot made, which only local `main` holds,
+ * would fail the draft's register as `non_fast_forward` (design/skills.md →
+ * Repo location → Mirror state). Never rejects.
  */
-export function scheduleSkillsMirror(core: CoreDeps): void {
-  void mirrorMainBestEffort(
-    { runInTx: core.runInTx, secretsStore: core.secretsStore },
-    env.COGMO_SKILLS_PATH,
-  );
+export function reconcileSkillsMirrorAtBoot(core: CoreDeps): Promise<void> {
+  return reconcileMirrorAtBoot(skillsMirrorDeps(core));
+}
+
+function skillsMirrorDeps(core: CoreDeps): SkillsMirrorReconcileDeps {
+  return {
+    runInTx: core.runInTx,
+    secretsStore: core.secretsStore,
+    store: core.skillStore,
+    repoPath: env.COGMO_SKILLS_PATH,
+  };
 }
 
 export function createSkillFunctions(
@@ -156,7 +165,17 @@ export function createSkillFunctions(
     inngest,
   );
 
-  return { skillCronTicker, skillCronFire, skillDepsReaper, skillRunsSweeper };
+  // Pushes skills `main` to its remote while it is behind, every 10 min.
+  // See `src/skills/mirror-reconcile.ts`.
+  const skillsMirrorReconcile = createSkillsMirrorReconcile(skillsMirrorDeps(core), inngest);
+
+  return {
+    skillCronTicker,
+    skillCronFire,
+    skillDepsReaper,
+    skillRunsSweeper,
+    skillsMirrorReconcile,
+  };
 }
 
 /**

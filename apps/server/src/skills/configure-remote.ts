@@ -262,7 +262,7 @@ export async function configureSkillsRemote(
     if (pushed.isErr()) {
       log.warn(
         { remoteUrl, error: pushed.error },
-        "skills layout commit not pushed after adopt; the next deploy's push or `cogmo serve`'s boot push carries it",
+        "skills layout commit not pushed after adopt; the mirror reconcile pushes it within 10 minutes",
       );
     }
   }

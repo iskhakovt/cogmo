@@ -617,6 +617,13 @@
       "when": 1794240073433,
       "tag": "0087_skills_layout_restores",
       "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1794240164859,
+      "tag": "0088_skills_repo_mirror",
+      "breakpoints": true
     }
   ]
 }

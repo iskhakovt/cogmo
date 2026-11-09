@@ -16,7 +16,7 @@ Each domain module owns its DB access in a `store/` subdirectory:
 | `mcp/store/` | mcp_servers, mcp_server_tools |
 | `sandbox/store/` | cogmo_instances, containers, networks, volumes |
 | `secrets/store/` | secrets |
-| `skills/store/` | skills, skill_deploys, skill_runs, skill_context_calls, skills_repo_layout |
+| `skills/store/` | skills, skill_deploys, skill_runs, skill_context_calls, skills_repo_layout, skills_repo_mirror |
 | `web/store/` | web_sessions |
 | `connector/store/` | connectors |
 

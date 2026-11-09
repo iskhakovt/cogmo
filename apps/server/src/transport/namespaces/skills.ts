@@ -1,7 +1,7 @@
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import type { RolledBack } from "../../skills/deploy/rollback-deploy.js";
-import type { SkillDeployOrigin, SkillRunner } from "../../skills/runner.js";
+import type { SkillDeployOrigin, SkillRunner, SkillsMirrorView } from "../../skills/runner.js";
 import type { SkillRiskTier, SkillStore, SkillTier } from "../../skills/store/index.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
@@ -66,6 +66,10 @@ export interface SkillsNamespace {
    * `skills_disabled` when the runtime isn't wired.
    */
   list(platformUserHandle: string): Promise<Result<ReadonlyArray<SkillListEntry>, TransportError>>;
+  /** How the skills remote stands to local `main`; null when the skills repo has no remote. */
+  mirrorStatus(
+    platformUserHandle: string,
+  ): Promise<Result<SkillsMirrorView | null, TransportError>>;
   /**
    * Soft-disable a live skill by name. Wraps `runner.deregister` —
    * preserves history, just flips `disabled=true`. Returns
@@ -206,6 +210,13 @@ export function createSkills(
           pendingDeploy: r.pendingDeploy,
         })),
       );
+    },
+
+    async mirrorStatus(platformUserHandle) {
+      const identityCheck = await checkSkillsTapper(platformUserHandle);
+      if (identityCheck.isErr()) return err(identityCheck.error);
+      if (!skillRunner) return err({ code: "skills_disabled" as const });
+      return ok(await skillRunner.mirrorStatus());
     },
 
     async disable(platformUserHandle, name) {

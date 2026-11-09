@@ -25,7 +25,7 @@ import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { readManifestLockfile } from "./lockfile-check.js";
-import { mirrorMainToRemote } from "./mirror.js";
+import { mirrorMain } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult, targetSourceRejection } from "./register-result.js";
 import { frontmatterSchemas } from "./schemas.js";
@@ -203,6 +203,9 @@ async function putRestoringLive(
       applyFilesystem: async () => {
         // A deploy of this skill that landed since would otherwise be
         // overwritten in the database, or dropped from main.
+        // Also when main does not move: a recovered restoring commit's crash
+        // may have left the mirror state behind main.
+        await deps.store.markMainAdvanced(tx, restore.mainAfter);
         await advanceMain(repoPath, restore.mainAfter, { kind: "unchanged", expected: mainSha });
       },
     }),
@@ -218,7 +221,7 @@ async function putRestoringLive(
       deps.sourceCache.put(restore.sha, source, schemas, lockfile);
       // A plain push of main, which only moved forward; a recovered restoring
       // commit may not have reached the remote either.
-      await mirrorMainToRemote(deps, repoPath, restore.mainAfter);
+      await mirrorMain(deps, repoPath, restore.mainAfter);
       return {
         name: result.skill.name,
         riskTier: result.skill.riskTier,

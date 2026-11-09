@@ -6,8 +6,10 @@ import {
   getTableColumns,
   inArray,
   isNotNull,
+  isNull,
   lt,
   lte,
+  ne,
   or,
   type SQL,
   sql,
@@ -35,7 +37,10 @@ import {
   skillRuns,
   type skillRunTrigger,
   skills,
+  type skillsMirrorFailure,
+  type skillsMirrorStatus,
   skillsRepoLayout,
+  skillsRepoMirror,
   type skillTier,
 } from "./schema.js";
 
@@ -83,6 +88,16 @@ export type SkillRiskTier = (typeof skillRiskTier.enumValues)[number];
 export type SkillRunStatus = (typeof skillRunStatus.enumValues)[number];
 export type SkillRunTrigger = (typeof skillRunTrigger.enumValues)[number];
 export type SkillDeployStatus = (typeof skillDeployStatus.enumValues)[number];
+export type SkillsMirrorStatus = (typeof skillsMirrorStatus.enumValues)[number];
+export type SkillsMirrorFailure = (typeof skillsMirrorFailure.enumValues)[number];
+
+/** The skills remote's mirror state (design/skills.md → Repo location → Mirror state). */
+export interface SkillsMirrorRow {
+  status: SkillsMirrorStatus;
+  localSha: string | null;
+  pushedSha: string | null;
+  lastFailure: SkillsMirrorFailure | null;
+}
 /** See {@link skillRunRecoveryPoint} in schema.ts for the per-state contract. */
 export type SkillRunRecoveryPoint = (typeof skillRunRecoveryPoint.enumValues)[number];
 /** See {@link skillRunErrorKind} in schema.ts. */
@@ -563,6 +578,39 @@ export interface SkillStore {
   ): Promise<string | null>;
   /** Whether any deploy row records `gitSha`, the forward rollback's recovery check. */
   hasDeployAt(tx: Transaction, gitSha: string): Promise<boolean>;
+
+  // --- skills_repo_mirror (design/skills.md → Repo location → Mirror state) ---
+  /**
+   * Insert the singleton `behind`, with no `local_sha`, when it is missing; a
+   * present row is left as it is. Either way the row is locked until the
+   * transaction ends.
+   */
+  ensureMirror(tx: Transaction): Promise<void>;
+  /** Lock the singleton until the transaction ends; false before it is inserted. */
+  lockMirror(tx: Transaction): Promise<boolean>;
+  getMirror(tx: Transaction): Promise<SkillsMirrorRow | null>;
+  /**
+   * A transaction advances `main` to `localSha`: `synced` and `behind` become
+   * `behind`; `diverged` stays. A row already at `localSha` is left as it is,
+   * so a recovery can repeat it. Written before the `update-ref`, so a
+   * conflict on the singleton retries the transaction before `main` moves.
+   */
+  markMainAdvanced(tx: Transaction, localSha: string): Promise<void>;
+  /** A push landed `sha`: `synced` when it is `local_sha`, read here. Returns whether that held. */
+  recordMirrorLanded(tx: Transaction, sha: string): Promise<boolean>;
+  /** A push failed unreachable, on auth or on time: `behind` keeps, recording why. */
+  recordMirrorFailed(
+    tx: Transaction,
+    failure: Exclude<SkillsMirrorFailure, "rejected">,
+  ): Promise<void>;
+  /** A push was rejected by a remote `main` local `main` does not descend from: `behind` → `diverged`. Returns whether it entered. */
+  recordMirrorDiverged(tx: Transaction): Promise<boolean>;
+  /**
+   * The remote's `main` is again an ancestor of `localSha`: `diverged` →
+   * `behind`, when `local_sha` is still `localSha`, read here. Returns whether
+   * that held.
+   */
+  recordMirrorBehind(tx: Transaction, localSha: string): Promise<boolean>;
 
   // --- skills_repo_layout ---
   /** The recorded layout commit (design/skills.md → Per-skill structure), or null before one is. */
@@ -1367,6 +1415,84 @@ export class DrizzleSkillStore implements SkillStore {
 
   async forgetLayoutCommit(tx: Transaction): Promise<void> {
     await tx.delete(skillsRepoLayout);
+  }
+
+  async ensureMirror(tx: Transaction): Promise<void> {
+    await tx
+      .insert(skillsRepoMirror)
+      .values({ singleton: true, status: "behind", localSha: null })
+      .onConflictDoUpdate({ target: skillsRepoMirror.singleton, set: { singleton: true } });
+  }
+
+  async lockMirror(tx: Transaction): Promise<boolean> {
+    const rows = await tx
+      .select({ id: skillsRepoMirror.id })
+      .from(skillsRepoMirror)
+      .limit(1)
+      .for("update");
+    return rows.length > 0;
+  }
+
+  async getMirror(tx: Transaction): Promise<SkillsMirrorRow | null> {
+    const rows = await tx
+      .select({
+        status: skillsRepoMirror.status,
+        localSha: skillsRepoMirror.localSha,
+        pushedSha: skillsRepoMirror.pushedSha,
+        lastFailure: skillsRepoMirror.lastFailure,
+      })
+      .from(skillsRepoMirror)
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async markMainAdvanced(tx: Transaction, localSha: string): Promise<void> {
+    const moved = or(isNull(skillsRepoMirror.localSha), ne(skillsRepoMirror.localSha, localSha));
+    await tx
+      .update(skillsRepoMirror)
+      .set({ localSha })
+      .where(and(moved, eq(skillsRepoMirror.status, "diverged")));
+    await tx
+      .update(skillsRepoMirror)
+      .set({ localSha, status: "behind" })
+      .where(and(moved, inArray(skillsRepoMirror.status, ["synced", "behind"])));
+  }
+
+  async recordMirrorLanded(tx: Transaction, sha: string): Promise<boolean> {
+    const rows = await tx
+      .update(skillsRepoMirror)
+      .set({ status: "synced", pushedSha: sha, lastFailure: null })
+      .where(eq(skillsRepoMirror.localSha, sha))
+      .returning({ id: skillsRepoMirror.id });
+    return rows.length > 0;
+  }
+
+  async recordMirrorFailed(
+    tx: Transaction,
+    failure: Exclude<SkillsMirrorFailure, "rejected">,
+  ): Promise<void> {
+    await tx
+      .update(skillsRepoMirror)
+      .set({ lastFailure: failure })
+      .where(eq(skillsRepoMirror.status, "behind"));
+  }
+
+  async recordMirrorDiverged(tx: Transaction): Promise<boolean> {
+    const rows = await tx
+      .update(skillsRepoMirror)
+      .set({ status: "diverged", lastFailure: "rejected" })
+      .where(eq(skillsRepoMirror.status, "behind"))
+      .returning({ id: skillsRepoMirror.id });
+    return rows.length > 0;
+  }
+
+  async recordMirrorBehind(tx: Transaction, localSha: string): Promise<boolean> {
+    const rows = await tx
+      .update(skillsRepoMirror)
+      .set({ status: "behind", lastFailure: null })
+      .where(and(eq(skillsRepoMirror.status, "diverged"), eq(skillsRepoMirror.localSha, localSha)))
+      .returning({ id: skillsRepoMirror.id });
+    return rows.length > 0;
   }
 
   async listPendingDeploys(tx: Transaction): Promise<readonly SkillDeployRow[]> {
