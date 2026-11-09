@@ -238,7 +238,7 @@ Each dispatching step is durable for the reason its sandbox counterpart is: the 
 | Cancel during a job | task `cancelled` | the next sweep, within 10 minutes, releases the workspace, and rule 8 stops the job. The waiting step sees a `cancelled` it did not request, the failure write reads `already_terminal`, and the run reclaims. A job that ends before the sweep runs to its end, as `plan-cli` and `execute-cli` do. **Residual:** the connector works for up to 10 minutes (`todo.md`: `CancelJob` on Cancel) |
 | Cancel during `publish` | task `cancelled` | **Residual:** `cogmo/<idShort>` may already be on the remote, as on the sandbox path |
 | Cancel at `awaiting_approval` or `pending_verify` | task `cancelled` | the sweep releases the workspace within 10 minutes |
-| The connector is revoked mid-job | task `failed`, `connector_job_lost` | the stream closes within 30 s and the token is refused, so the lease runs out |
+| The connector is revoked mid-job | task `failed`, `connector_job_lost` | the session ends within 30 s (95 s while the table can't be read) and the token is refused, so the lease runs out |
 | The token is rotated mid-job | job `accepted`, if the connector reconnects with the new token within the lease | otherwise as revoked |
 | Two connector processes under one name | the newer session | each `Connect` replaces the other's session, and jobs missing from the newer `held_job_ids` are lost. **Residual:** two live processes flap until one stops |
 | A call names another connector's job | unchanged | `PERMISSION_DENIED` |

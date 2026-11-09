@@ -384,7 +384,7 @@ The app's auth is defense in depth, not the boundary. Keep the port off the open
 
 ## Connectors
 
-A connector is a process outside cogmo that dials in to run part of its work elsewhere ([`design/connectors.md`](design/connectors.md)). Set `CONNECTOR_PORT` to serve them, then register each with `cogmo connector add <name> --kind coding`, which prints its bearer token once. `rotate` replaces the token and `revoke` retires the connector; either closes the connector's open stream within 30 s.
+A connector is a process outside cogmo that dials in to run part of its work elsewhere ([`design/connectors.md`](design/connectors.md)). Set `CONNECTOR_PORT` to serve them, then register each with `cogmo connector add <name> --kind coding`, which prints its bearer token once. `rotate` replaces the token and `revoke` retires the connector; either ends the connector's open session within 30 s, or 95 s while cogmo can't read its database.
 
 The token crosses the connection in cleartext (h2c). As with the web UI, keep the port off the open network: publish it on loopback (`-p 127.0.0.1:<port>:<port>`) and reach it through a tailnet or a TLS-terminating proxy that speaks HTTP/2 to cogmo.
 
