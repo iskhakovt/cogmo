@@ -39,7 +39,7 @@ import {
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined, expectFinished } from "./assertions.js";
-import { TEST_PREFIX_VIOLATION } from "./factories.js";
+import { TEST_PREFIX_VIOLATION, testTranscript } from "./factories.js";
 import { createWireRecorder, type WireRequestInit, type WireResponse } from "./wire-recorder.js";
 
 // An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
@@ -222,8 +222,12 @@ async function converse(params: {
     const result = await runStreamingAgentLoop({
       provider,
       model: params.model,
-      systemPrompt,
-      messages: [...history, message],
+      transcript: testTranscript({
+        system: systemPrompt,
+        tools,
+        messages: [...history, message],
+        log: logger,
+      }),
       tools,
       service: mock<Service>(),
       maxTokens: 16000,
