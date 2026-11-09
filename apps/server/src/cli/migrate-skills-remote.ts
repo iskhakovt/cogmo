@@ -44,7 +44,7 @@ export interface MigrateSkillsRemoteCliDeps {
   codingStore: CodingStore;
   skillStore: SkillStore;
   secretsStore: SecretsStore;
-  /** Held by `configureSkillsRemote` from its classification of `main` through an adopt's toolchain commit. */
+  /** Held by `configureSkillsRemote`'s adopt from its classification of `main` through its toolchain commit, after its fetch. */
   bootstrapLock: BootstrapLock;
   /** The release's toolchain, committed after an adopt replaces a Cogmo-only `main`. */
   toolchain: ReleaseToolchain;

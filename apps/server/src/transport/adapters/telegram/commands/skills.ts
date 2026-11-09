@@ -58,7 +58,12 @@ export async function handleSkills(
   }
 }
 
-/** The skills remote's lag, for the listing; null while it is synced. */
+/**
+ * The skills remote's lag, for the listing; null while it is synced. A
+ * diverged remote turns a plain push away as a non-fast-forward, and the bare
+ * repo keeps no remote-tracking ref, so the lease names the sha the owner
+ * checked.
+ */
 function mirrorLine(mirror: SkillsMirrorView): string | null {
   return match(mirror.status)
     .with("synced", () => null)
@@ -70,7 +75,7 @@ function mirrorLine(mirror: SkillsMirrorView): string | null {
     .with(
       "diverged",
       () =>
-        "Skills remote: diverged from local main; push local main to it by hand (`git -C $COGMO_SKILLS_PATH push origin main`).",
+        "Skills remote: diverged from local main. Check what its main holds (`git -C $COGMO_SKILLS_PATH ls-remote origin main`), then push local main over it: `git -C $COGMO_SKILLS_PATH push --force-with-lease=main:<that sha> origin main`.",
     )
     .exhaustive();
 }

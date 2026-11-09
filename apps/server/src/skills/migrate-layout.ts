@@ -96,9 +96,11 @@ export async function migrateSkillsLayout(
 }
 
 /**
- * The layout commit on `mainSha`'s first-parent history: the oldest commit
- * carrying the layout trailer under Cogmo's identity whose tree keeps no skill
- * file at the root and a `skills/<name>/` for each row at it or an ancestor.
+ * The layout commit in `mainSha`'s history, every parent followed, since a
+ * deploy merging `main` into a draft cut before the move makes it a second
+ * parent: the oldest commit carrying the layout trailer under Cogmo's
+ * identity whose tree keeps no skill file at the root and a `skills/<name>/`
+ * for each row at it or an ancestor.
  */
 async function findLayoutCommit(
   repoPath: string,
@@ -106,7 +108,6 @@ async function findLayoutCommit(
   rows: readonly SkillRow[],
 ): Promise<string | null> {
   const candidates = await logCommits(repoPath, [
-    "--first-parent",
     "--reverse",
     "--fixed-strings",
     `--grep=${LAYOUT_TRAILER}: ${LAYOUT_TRAILER_VALUE}`,
@@ -195,17 +196,18 @@ async function onHistoryOf(repoPath: string, sha: string, head: string): Promise
 
 /**
  * Whether a recorded layout commit no longer describes the repo: the repo
- * was recreated without it, or it is a bare layout commit `main` no longer
- * descends from, as after an adopt replaced it. A bare one holds no skill, so
- * moving again reads every row as before.
+ * was recreated without it, `main` is unborn (the operator deleted it), or it
+ * is a bare layout commit `main` no longer descends from, as after an adopt
+ * replaced it. A bare one holds no skill, so moving again reads every row as
+ * before; moving onto an unborn `main` makes it Cogmo-only.
  */
 async function isStaleLayout(repoPath: string, recorded: string): Promise<boolean> {
   if ((await revParse(repoPath, `${recorded}^{commit}`)).isErr()) return true;
   const mainSha = await getMainSha(repoPath);
   return (
-    mainSha !== null &&
-    !(await isAncestor(repoPath, recorded, mainSha)) &&
-    (await isBareLayoutCommit(repoPath, recorded))
+    mainSha === null ||
+    (!(await isAncestor(repoPath, recorded, mainSha)) &&
+      (await isBareLayoutCommit(repoPath, recorded)))
   );
 }
 
