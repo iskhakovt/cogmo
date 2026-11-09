@@ -80,6 +80,7 @@ describe("ClassifierLogSchema", () => {
     reasons: ["wasm_unhardened" as const],
     declared_network: null,
     toolchain_version: null,
+    suppressions: [],
   };
 
   it("round-trips a stub log", () => {
@@ -115,6 +116,30 @@ describe("ClassifierLogSchema", () => {
 
   it("rejects an empty toolchain version", () => {
     expect(() => ClassifierLogSchema.parse({ ...STUB, toolchain_version: "" })).toThrow();
+  });
+
+  it("round-trips the suppressions register's CPython checks accepted", () => {
+    const log = {
+      ...STUB,
+      suppressions: [
+        { tool: "ruff", code: "S603", line: 12 },
+        { tool: "pyrefly", code: "bad-return", line: 30 },
+      ],
+    };
+    expect(ClassifierLogSchema.parse(JSON.parse(JSON.stringify(log)))).toEqual(log);
+  });
+
+  it("reads a log written before the checks recorded suppressions as carrying none", () => {
+    const { suppressions: _suppressions, ...legacy } = STUB;
+    expect(ClassifierLogSchema.parse(legacy).suppressions).toEqual([]);
+  });
+
+  it.each([
+    { tool: "mypy", code: "misc", line: 1 },
+    { tool: "ruff", code: "", line: 1 },
+    { tool: "ruff", code: "S603", line: 0 },
+  ])("rejects a suppression that is not one: %o", (suppression) => {
+    expect(() => ClassifierLogSchema.parse({ ...STUB, suppressions: [suppression] })).toThrow();
   });
 
   it("reads a row written under the tier1/tier2 names as the wasm/container names", () => {

@@ -489,7 +489,8 @@
                       "syntax",
                       "ruff",
                       "pyrefly",
-                      "imports"
+                      "imports",
+                      "suppression"
                     ]
                   },
                   "line": {
@@ -530,6 +531,36 @@
                 "additionalProperties": false
               }
             },
+            "suppressions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "tool": {
+                    "type": "string",
+                    "enum": [
+                      "ruff",
+                      "pyrefly"
+                    ]
+                  },
+                  "code": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "line": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "tool",
+                  "code",
+                  "line"
+                ],
+                "additionalProperties": false
+              }
+            },
             "toolchainVersion": {
               "type": "string",
               "minLength": 1
@@ -538,6 +569,7 @@
           "required": [
             "type",
             "findings",
+            "suppressions",
             "toolchainVersion"
           ],
           "additionalProperties": false

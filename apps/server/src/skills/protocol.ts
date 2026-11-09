@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CtxErrorKindSchema } from "./ctx-contract.js";
 import type { SkillRunErrorKind } from "./store/index.js";
+import { SkillSuppressionSchema } from "./types.js";
 
 /**
  * Worker JSON-RPC protocol — transport-agnostic message shapes used by the
@@ -312,7 +313,7 @@ export const CheckRequestSchema = z.object({
 export type CheckRequest = z.infer<typeof CheckRequestSchema>;
 
 /** The CPython checks, in the order a reply reports them. */
-const CPYTHON_CHECK_IDS = ["syntax", "ruff", "pyrefly", "imports"] as const;
+const CPYTHON_CHECK_IDS = ["syntax", "ruff", "pyrefly", "imports", "suppression"] as const;
 
 /**
  * One CPython check's finding in `skill.py`. Lines are 1-based; columns are
@@ -330,14 +331,15 @@ export type CheckFinding = z.infer<typeof CheckFindingSchema>;
 
 /**
  * The one reply of register's CPython checks: every check's findings, empty
- * for a body that passes, and the release version the image baked beside
- * its toolchain; `fatal` when a check could not run (a tool's failure
- * status, a skill venv that is missing).
+ * for a body that passes, the suppressions the body carries, and the release
+ * version the image baked beside its toolchain; `fatal` when a check could
+ * not run (a tool's failure status, a skill venv that is missing).
  */
 export const CheckReplySchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("check_findings"),
     findings: z.array(CheckFindingSchema),
+    suppressions: z.array(SkillSuppressionSchema),
     toolchainVersion: z.string().min(1),
   }),
   z.object({ type: z.literal("fatal"), error: z.string() }),

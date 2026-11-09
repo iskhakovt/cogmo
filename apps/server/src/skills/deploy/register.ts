@@ -282,7 +282,7 @@ async function prepareRegister(
     branchSha,
     manifest,
     body,
-    classifierLog: { ...classifierLog, toolchain_version: cpython.value },
+    classifierLog: { ...classifierLog, ...cpython.value },
     lockfile,
     schemas: schemas.value,
   });

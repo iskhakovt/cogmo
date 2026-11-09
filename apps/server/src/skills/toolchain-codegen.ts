@@ -37,8 +37,18 @@ const TOOL_PINS: Readonly<Record<string, string>> = {
   ruff: "0.17.3",
 };
 
-/** The verify stage's ruff rule set (design/skills.md → Verify stage, Types and lint). */
-const RUFF_RULES = ["E", "F", "B", "BLE", "S", "ASYNC"];
+/**
+ * The suppressions a file may carry: `.cogmo/suppressions.py`'s
+ * `MAX_SUPPRESSIONS`, which a unit test pins this to.
+ */
+const MAX_SUPPRESSIONS = 100;
+
+/**
+ * The verify stage's ruff rule set (design/skills.md → Verify stage, Types and
+ * lint), with PGH004, which refuses a `noqa` that names no rule
+ * (Register-time CPython checks → Suppressions).
+ */
+const RUFF_RULES = ["E", "F", "B", "BLE", "S", "ASYNC", "PGH004"];
 
 /** The pins `pyproject.toml` derives from the skills image's build. */
 export interface ToolchainPins {
@@ -121,6 +131,7 @@ export function renderToolchainPyproject(pins: ToolchainPins): string {
     "",
     "[tool.pyrefly]",
     'search-path = [".cogmo"]',
+    'enabled-ignores = ["pyrefly"]',
     "",
     "[tool.pytest.ini_options]",
     'pythonpath = [".cogmo"]',
@@ -309,7 +320,9 @@ export function renderToolchainClaudeMd(): string {
     "",
     "## Checks",
     "",
-    `${code(SKILLS_VERIFY_COMMAND)} runs ruff, pyrefly and pytest over each skill changed since \`COGMO_VERIFY_BASE\`, the commit the branch was cut from. It must pass before the work is done.`,
+    `${code(SKILLS_VERIFY_COMMAND)} runs ruff, pyrefly and pytest over each skill changed since \`COGMO_VERIFY_BASE\`, the commit the branch was cut from, and refuses the suppressions register refuses. It must pass before the work is done.`,
+    "",
+    `Fix a finding rather than suppress it. A suppression names its rule and covers one line: \`# noqa: <code>\` or \`# ruff: ignore[<code>]\` for ruff, \`# pyrefly: ignore[<error>]\` for pyrefly; pyrefly ignores \`# type: ignore\`. Register refuses a pragma that covers more (\`# ruff: noqa\`, \`# ruff: file-ignore\`, \`# ruff: disable\`, \`# pyrefly: ignore-errors\`), one that names no rule (\`# noqa\`, \`# pyrefly: ignore\`), and more than ${MAX_SUPPRESSIONS} in a file, and records each suppression on the deploy for review.`,
     "",
   ].join("\n");
 }

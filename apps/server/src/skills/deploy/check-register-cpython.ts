@@ -6,7 +6,7 @@ import type { LockfileSnapshot } from "../deps.js";
 import { skillDir } from "../skill-files.js";
 import type { SkillFinding } from "../skill-gates.js";
 import { SKILL_BODY_FILE } from "../skill-source.js";
-import type { SkillManifest } from "../types.js";
+import type { ClassifierLog, SkillManifest } from "../types.js";
 
 const log = logger.child({ component: "skills.register" });
 
@@ -27,24 +27,29 @@ export type RegisterCpythonRejection =
   /** A check could not run: pausing, since nothing is wrong with the tip. */
   | { kind: "registrar_unavailable"; cause: "sandbox"; detail: string };
 
+/** What register's CPython checks record on the deploy's classifier log. */
+type CpythonCheckRecord = Pick<ClassifierLog, "toolchain_version" | "suppressions">;
+
 /**
  * Register's CPython checks, after its lockfile compile and before its schema
- * import. Resolves to the release version of the toolchain that ran them, or
- * null where none ran: with no sandbox backend configured, register skips
- * them, logged at warn. A version other than the server's `releaseVersion`
- * is logged at warn; a check that cannot run at error.
+ * import. Resolves to what the classifier log records of them: the release
+ * version of the toolchain that ran them and the suppressions they accepted,
+ * or a null version and none where none ran: with no sandbox backend
+ * configured, register skips them, logged at warn. A version other than the
+ * server's `releaseVersion` is logged at warn; a check that cannot run at
+ * error.
  */
 export async function checkRegisterCpython(
   checks: CpythonChecks | undefined,
   skill: CheckedSkill,
   opts: { releaseVersion: string; signal: AbortSignal | undefined },
-): Promise<Result<string | null, RegisterCpythonRejection>> {
+): Promise<Result<CpythonCheckRecord, RegisterCpythonRejection>> {
   if (checks === undefined) {
     log.warn(
       { skillName: skill.name },
       "no sandbox backend is configured: register skips the lockfile compile and the CPython checks",
     );
-    return ok(null);
+    return ok({ toolchain_version: null, suppressions: [] });
   }
   const checked = await checks.check({
     body: skill.body,
@@ -67,7 +72,7 @@ export async function checkRegisterCpython(
         .exhaustive(),
     );
   }
-  const { findings, toolchainVersion } = checked.value;
+  const { findings, suppressions, toolchainVersion } = checked.value;
   if (toolchainVersion !== opts.releaseVersion) {
     log.warn(
       { skillName: skill.name, toolchainVersion, releaseVersion: opts.releaseVersion },
@@ -78,5 +83,5 @@ export async function checkRegisterCpython(
     const path = `${skillDir(skill.name)}${SKILL_BODY_FILE}`;
     return err({ kind: "lint_failed", findings: findings.map((f) => ({ ...f, path })) });
   }
-  return ok(toolchainVersion);
+  return ok({ toolchain_version: toolchainVersion, suppressions: [...suppressions] });
 }

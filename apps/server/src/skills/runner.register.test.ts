@@ -3355,7 +3355,7 @@ async def run(inputs, ctx):
     const VERSION = "dev";
     /** The checks' answer: their findings and the toolchain release that ran them. */
     function passing(toolchainVersion: string) {
-      return ok({ findings: [], toolchainVersion });
+      return ok({ findings: [], suppressions: [], toolchainVersion });
     }
 
     function checksAnswering(answer: Awaited<ReturnType<CpythonChecks["check"]>>) {
@@ -3413,6 +3413,7 @@ async def run(inputs, ctx):
               message: "source code string cannot contain null bytes",
             },
           ],
+          suppressions: [],
           toolchainVersion: VERSION,
         }),
       );
@@ -3438,6 +3439,22 @@ async def run(inputs, ctx):
       assertStatus(result, "live");
       const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
       expect(deploy?.classifierLog.toolchain_version).toBe("2.17.0");
+    });
+
+    it("records every suppression the checks accepted on the deploy's classifier log", async () => {
+      const suppressions = [
+        { tool: "ruff" as const, code: "S603", line: 4 },
+        { tool: "pyrefly" as const, code: "bad-return", line: 6 },
+      ];
+      const cpythonChecks = checksAnswering(
+        ok({ findings: [], suppressions, toolchainVersion: VERSION }),
+      );
+
+      const { result } = await registerEcho({ cpythonChecks });
+
+      assertStatus(result, "live");
+      const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+      expect(deploy?.classifierLog.suppressions).toEqual(suppressions);
     });
 
     it("hands the checks the body, the declared dependencies, the lockfile and the register's signal", async () => {
@@ -3535,6 +3552,7 @@ async def run(inputs, ctx):
         assertStatus(result, "live");
         const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
         expect(deploy?.classifierLog.toolchain_version).toBeNull();
+        expect(deploy?.classifierLog.suppressions).toEqual([]);
         expect(warn).toHaveBeenCalledWith(
           { skillName: "echo" },
           "no sandbox backend is configured: register skips the lockfile compile and the CPython checks",
@@ -3564,6 +3582,7 @@ async def run(inputs, ctx):
       const cpythonChecks = checksAnswering(
         ok({
           findings: [{ id: "ruff", line: 1, column: 1, message: "E501 Line too long" }],
+          suppressions: [],
           toolchainVersion: VERSION,
         }),
       );
@@ -3657,6 +3676,7 @@ async def run(inputs, ctx):
       assertStatus(rolled, "live");
       const deploy = await tx((trx) => store.getDeployById(trx, rolled.deployId));
       expect(deploy?.classifierLog.toolchain_version).toBeNull();
+      expect(deploy?.classifierLog.suppressions).toEqual([]);
       expect(cpythonChecks.check).not.toHaveBeenCalled();
     });
   });
@@ -4123,7 +4143,9 @@ tier: wasm
         sandbox.create.mockRejectedValue(new Error("no daemon in this test"));
         // Checks that start no session, so the import is the first to reach the sandbox.
         const cpythonChecks = mock<CpythonChecks>();
-        cpythonChecks.check.mockResolvedValue(ok({ findings: [], toolchainVersion: "dev" }));
+        cpythonChecks.check.mockResolvedValue(
+          ok({ findings: [], suppressions: [], toolchainVersion: "dev" }),
+        );
         const runner = await makeRunner({ registerSandbox: sandbox, cpythonChecks });
         await pushWeather("skill/weather", CONTAINER_MANIFEST);
 
@@ -4418,6 +4440,7 @@ effects:
               reasons: [],
               declared_network: null,
               toolchain_version: null,
+              suppressions: [],
             },
             applyFilesystem: async () => {
               throw new Error("simulated git update-ref failure");

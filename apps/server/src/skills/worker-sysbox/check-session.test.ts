@@ -14,9 +14,11 @@ const VOLUME = "cogmo-skills-venvs";
 const LOCKFILE = { hash: "c".repeat(64), contents: "idna==3.10 --hash=sha256:00\n" };
 const BODY = "import idna\n\n\nasync def run(inputs, ctx):\n    return idna.__name__\n";
 const FINDING = { id: "ruff", line: 1, column: 8, message: "F401 `os` imported but unused" };
+const SUPPRESSION = { tool: "pyrefly", code: "bad-return", line: 5 };
 const FINDINGS_REPLY = `${JSON.stringify({
   type: "check_findings",
   findings: [FINDING],
+  suppressions: [SUPPRESSION],
   toolchainVersion: "2.17.0",
 })}\n`;
 const CHECK_RUNNER = ["python3", "-I", "-m", "cogmo_skills_runtime.check"];
@@ -52,7 +54,11 @@ describe("makeSandboxCpythonChecks", () => {
       signal: undefined,
     });
 
-    expect(checked._unsafeUnwrap()).toEqual({ findings: [FINDING], toolchainVersion: "2.17.0" });
+    expect(checked._unsafeUnwrap()).toEqual({
+      findings: [FINDING],
+      suppressions: [SUPPRESSION],
+      toolchainVersion: "2.17.0",
+    });
     expect(h.specs).toHaveLength(1);
     const [spec] = h.specs;
     expect(spec).toMatchObject({

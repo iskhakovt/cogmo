@@ -71,7 +71,11 @@ describe.skipIf(RUNTIME === undefined)("register's CPython checks in the skills 
       signal: undefined,
     });
 
-    expect(checked._unsafeUnwrap()).toEqual({ findings: [], toolchainVersion: "test" });
+    expect(checked._unsafeUnwrap()).toEqual({
+      findings: [],
+      suppressions: [],
+      toolchainVersion: "test",
+    });
   }, 120_000);
 
   it("reports every check, positioned in UTF-16 units on a non-ASCII line", async () => {

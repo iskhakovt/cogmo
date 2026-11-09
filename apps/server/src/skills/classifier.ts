@@ -111,5 +111,6 @@ export function classifyManifestStub(
     declared_network: manifest.network?.allow ?? null,
     capabilities: { ...capabilities },
     toolchain_version: null,
+    suppressions: [],
   };
 }

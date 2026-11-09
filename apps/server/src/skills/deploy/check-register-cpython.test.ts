@@ -33,13 +33,14 @@ afterEach(() => {
 });
 
 describe("checkRegisterCpython", () => {
-  it("resolves to the toolchain version of checks that pass, handing them the skill and the signal", async () => {
-    const checks = checksAnswering(ok({ findings: [], toolchainVersion: "2.17.0" }));
+  it("resolves to the toolchain version and the suppressions of checks that pass, handing them the skill and the signal", async () => {
+    const suppressions = [{ tool: "ruff" as const, code: "S603", line: 3 }];
+    const checks = checksAnswering(ok({ findings: [], suppressions, toolchainVersion: "2.17.0" }));
     const signal = new AbortController().signal;
 
     const checked = await checkRegisterCpython(checks, SKILL, { ...OPTS, signal });
 
-    expect(checked._unsafeUnwrap()).toBe("2.17.0");
+    expect(checked._unsafeUnwrap()).toEqual({ toolchain_version: "2.17.0", suppressions });
     expect(checks.check).toHaveBeenCalledWith({
       body: "import idna\n",
       dependencies: ["idna==3.10"],
@@ -53,7 +54,7 @@ describe("checkRegisterCpython", () => {
 
     const checked = await checkRegisterCpython(undefined, SKILL, OPTS);
 
-    expect(checked._unsafeUnwrap()).toBeNull();
+    expect(checked._unsafeUnwrap()).toEqual({ toolchain_version: null, suppressions: [] });
     expect(warn).toHaveBeenCalledWith(
       { skillName: "echo" },
       "no sandbox backend is configured: register skips the lockfile compile and the CPython checks",
@@ -67,6 +68,7 @@ describe("checkRegisterCpython", () => {
           { id: "imports", line: 1, column: 1, message: "'requests' is not allowed" },
           { id: "syntax", line: null, column: null, message: "null bytes" },
         ],
+        suppressions: [],
         toolchainVersion: "2.17.0",
       }),
     );
@@ -133,11 +135,14 @@ describe("checkRegisterCpython", () => {
     "warns on the image's toolchain version $toolchainVersion: $warns",
     async ({ toolchainVersion, warns }) => {
       const warn = vi.spyOn(logger, "warn");
-      const checks = checksAnswering(ok({ findings: [], toolchainVersion }));
+      const checks = checksAnswering(ok({ findings: [], suppressions: [], toolchainVersion }));
 
       const checked = await checkRegisterCpython(checks, SKILL, OPTS);
 
-      expect(checked._unsafeUnwrap()).toBe(toolchainVersion);
+      expect(checked._unsafeUnwrap()).toEqual({
+        toolchain_version: toolchainVersion,
+        suppressions: [],
+      });
       expect(warn).toHaveBeenCalledTimes(warns ? 1 : 0);
       if (warns) {
         expect(warn).toHaveBeenCalledWith(

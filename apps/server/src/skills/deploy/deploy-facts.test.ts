@@ -23,6 +23,7 @@ function classifierLog(overrides: Partial<ClassifierLog> = {}): ClassifierLog {
     reasons: [],
     declared_network: null,
     toolchain_version: null,
+    suppressions: [],
     ...overrides,
   };
 }

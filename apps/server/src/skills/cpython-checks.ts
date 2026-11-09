@@ -1,11 +1,14 @@
 import type { Result } from "neverthrow";
 import type { LockfileSnapshot } from "./deps.js";
 import type { CheckFinding } from "./protocol.js";
+import type { SkillSuppression } from "./types.js";
 
 /** What register's CPython checks found, and the release of the toolchain that ran them. */
 export interface CpythonCheckOutcome {
   /** Empty for a body that passes. */
   findings: readonly CheckFinding[];
+  /** The suppressions the body carries that the checks accept. */
+  suppressions: readonly SkillSuppression[];
   /** The release version the skills image baked beside its toolchain. */
   toolchainVersion: string;
 }

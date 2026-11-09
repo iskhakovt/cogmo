@@ -225,14 +225,15 @@ jobs:
             images/skills/toolchain/uv.lock
       - run: uv sync --locked
       # The skills repo toolchain (design/skills.md → The skills repo
-      # toolchain): its lock, and its verify script under this project's
-      # config, since the toolchain's own excludes `.cogmo/`.
-      - name: toolchain (lock + verify script)
+      # toolchain): its lock, and its verify script and suppression rule
+      # under this project's config, since the toolchain's own excludes
+      # `.cogmo/`.
+      - name: toolchain (lock + verify script + suppression rule)
         run: |
           uv lock --check --directory toolchain
-          uv run ruff check --config pyproject.toml toolchain/.cogmo/verify
-          uv run ruff format --config pyproject.toml --check toolchain/.cogmo/verify
-          uv run pyrefly check --config pyproject.toml toolchain/.cogmo/verify
+          uv run ruff check --config pyproject.toml toolchain/.cogmo/verify toolchain/.cogmo/suppressions.py
+          uv run ruff format --config pyproject.toml --check toolchain/.cogmo/verify toolchain/.cogmo/suppressions.py
+          uv run pyrefly check --config pyproject.toml --search-path toolchain/.cogmo toolchain/.cogmo/verify toolchain/.cogmo/suppressions.py
       - name: ruff (lint + format)
         run: |
           uv run ruff check

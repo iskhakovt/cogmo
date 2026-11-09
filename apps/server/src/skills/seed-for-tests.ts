@@ -108,6 +108,7 @@ export async function seedSkillForTests(
     reasons: [],
     declared_network: null,
     toolchain_version: null,
+    suppressions: [],
   };
   await deps.runInTx((tx) =>
     deps.store.insertDeploy(tx, {
