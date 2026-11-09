@@ -375,6 +375,7 @@ describe("a job's life", () => {
     const run = startRun(prepareJob());
     await advance(LEASE_MS);
     expect(run.result).toEqual(err({ kind: "unavailable" }));
+    expect(Object.isFrozen(run.result)).toBe(true);
   });
 
   it("is unavailable when an open session does not accept it within the lease", async () => {
@@ -608,7 +609,12 @@ describe("what callers receive", () => {
         value: { result: { case: "plan", value: { plan: "p", agentSessionId: "s" } } },
       },
     });
-    void hub.run(PASEO.id, planJob(100n), { onEvent: () => hub.finishJob(PASEO, plan) });
+    const attempts: Array<"acknowledged" | "refused"> = [];
+    void hub.run(PASEO.id, planJob(100n), {
+      onEvent: () => {
+        attempts.push(hub.finishJob(PASEO, plan).isOk() ? "acknowledged" : "refused");
+      },
+    });
     await settle();
     await client.acceptJob({ jobId: "task-1/plan/d2" }, bearer("paseo-token"));
     await client.reportEvents(
@@ -616,6 +622,8 @@ describe("what callers receive", () => {
       bearer("paseo-token"),
     );
     await settle();
+    // The handler ran and tried to finish the job, after the budget had already ended it.
+    expect(attempts).toEqual(["acknowledged"]);
     expect(run.result).toEqual(err({ kind: "timed_out", cap: "token_budget" }));
   });
 

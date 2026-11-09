@@ -23,7 +23,7 @@ const RESULT_CASE = {
   verify: "verify",
   publish: "published",
   release: "released",
-} as const satisfies Record<JobPhase, string>;
+} as const satisfies Record<JobPhase, NonNullable<JobResult["result"]["case"]>>;
 
 /** Every code this build knows; a new `JobErrorCode` fails to compile until it is mapped. */
 const FAILURE_CODE: Readonly<Record<JobErrorCode, JobFailureCode>> = {

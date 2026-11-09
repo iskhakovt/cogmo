@@ -161,10 +161,7 @@ it("resets a replaced session's stream that its peer stopped reading", async () 
   // A second session for the same connector replaces the first.
   const client = createClient(ConnectorService, createGrpcTransport({ baseUrl }));
   const controller = new AbortController();
-  let firstMessage: (message: ConnectResponse) => void = () => {};
-  const accepted = new Promise<ConnectResponse>((resolve) => {
-    firstMessage = resolve;
-  });
+  const { promise: accepted, resolve: firstMessage } = Promise.withResolvers<ConnectResponse>();
   const second = (async () => {
     try {
       for await (const message of client.connect(

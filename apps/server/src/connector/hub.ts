@@ -501,7 +501,8 @@ function releaseFreesTask(outcome: RunResult): boolean {
 /**
  * Freezes `value` and every object it holds, the neverthrow `Result` wrapper
  * included, so callers that share an outcome or a report can't change it under
- * each other. Applied only to the fresh, acyclic values `translate.ts` builds.
+ * each other. Applied only to fresh, acyclic values: the outcomes the hub
+ * builds and the reports `translate.ts` maps.
  */
 function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {

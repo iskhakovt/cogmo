@@ -26,8 +26,9 @@ export interface ConnectorCliDeps {
 }
 
 /**
- * How soon a rotate or revoke reaches a running server: its auth cache's next
- * refresh, or, while the server can't read its database, the cache going stale.
+ * How soon a rotate or revoke ends the old token's session on a running server:
+ * its auth cache's next refresh, or, while the server can't read its
+ * database, the cache going stale.
  */
 const REVOKE_WITHIN = `${AUTH_REFRESH_MS / 1_000} s (${(STALE_MS + STALE_CHECK_MS) / 1_000} s while the server can't read its database)`;
 
@@ -146,7 +147,7 @@ async function revoke(args: { name: string }, deps: ConnectorCliDeps, io: CliIo)
     return 1;
   }
   io.out(
-    `Revoked connector "${args.name}". Its stream closes within ${REVOKE_WITHIN}, and its jobs in flight are lost.`,
+    `Revoked connector "${args.name}". Its session ends within ${REVOKE_WITHIN}, and its jobs in flight are lost.`,
   );
   return 0;
 }

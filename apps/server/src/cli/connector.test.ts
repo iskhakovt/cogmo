@@ -146,7 +146,7 @@ describe("connectorCli", () => {
       const text = out.join("\n");
       expect(text).toContain('Revoked connector "laptop".');
       expect(text).toContain(
-        "stream closes within 30 s (95 s while the server can't read its database)",
+        "session ends within 30 s (95 s while the server can't read its database)",
       );
       expect(text).toContain("jobs in flight are lost");
       expect(err).toEqual([]);
