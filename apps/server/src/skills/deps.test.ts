@@ -19,9 +19,12 @@ import {
   parseLockfileEntries,
   parseLockfilePackageSpecs,
   REQUIREMENTS_LOCK_FILE,
+  RUNTIME_PYTHON,
   readLockfileAtSha,
 } from "./deps.js";
 import { bootstrapSkillsRepo } from "./repo.js";
+
+import type { SkillsRepo } from "./skill-files.js";
 
 /** The runtime virtualenv, as `images/skills/Dockerfile` declares it. */
 function dockerfileRuntimeVenv(): string {
@@ -31,8 +34,6 @@ function dockerfileRuntimeVenv(): string {
     "images/skills/Dockerfile's ENV VIRTUAL_ENV",
   );
 }
-
-import type { SkillsRepo } from "./skill-files.js";
 
 const execFileP = promisify(execFile);
 
@@ -714,6 +715,10 @@ describe("ensureVenvPopulated", () => {
     expect(argv[4]).toBe("abc123");
     expect(argv[5]).toBe("worker-1");
     expect(call[1]?.attachStdin).toBe(true);
+  });
+
+  it("names the skills image's runtime interpreter by path", () => {
+    expect(RUNTIME_PYTHON).toBe(`${dockerfileRuntimeVenv()}/bin/python3`);
   });
 
   it("reads the ABI tag with the runtime interpreter and the exec's cwd off sys.path", async () => {

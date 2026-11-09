@@ -2,8 +2,8 @@
 
 A skill venv on `/skill-venvs` is named `<lockfile hash>-<tag>`. The host's
 populate and reap scripts (`apps/server/src/skills/deps.ts`,
-`deps-reaper.ts`) read the tag from `-I -m cogmo_skills_runtime.abi`, run by the runtime interpreter,
-and the supervisor builds the same name to activate a venv. An image whose
+`deps-reaper.ts`) read the tag from `-I -m cogmo_skills_runtime.abi`, run by
+the runtime interpreter, and the supervisor builds the same name to activate a venv. An image whose
 Python minor differs has a different tag, so it populates fresh venvs and
 the reaper sweeps the old ones.
 """
