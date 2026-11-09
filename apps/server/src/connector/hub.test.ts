@@ -302,6 +302,39 @@ describe("auth", () => {
     expect(stream.error?.code).toBe(Code.Unavailable);
   });
 
+  it("fails a call closed within 5 s when a stalled refresh outlives the cache", async () => {
+    store.listActive.mockReturnValue(new Promise(() => {}));
+    await advance(90_000);
+    const call = callError(client.acceptJob({ jobId: "x" }, bearer("paseo-token")));
+    await advance(5_000);
+    expect(await call).toBe(Code.Unavailable);
+  });
+
+  it("closes streams within 5 s of the cache going stale, whatever the refreshes do", async () => {
+    const stream = await connected("paseo-token", []);
+    store.listActive.mockReturnValue(new Promise(() => {}));
+    await advance(95_000);
+    await stream.done;
+    expect(stream.error?.code).toBe(Code.Unavailable);
+  });
+
+  it("closes streams on time after a good load between refresh ticks", async () => {
+    const added: ActiveConnector = {
+      ...OTHER,
+      id: "conn-new",
+      tokenHash: hashConnectorToken("new"),
+    };
+    store.listActive.mockResolvedValue([PASEO, OTHER, added]);
+    await advance(5_000);
+    // An unknown token loads the cache at 5 s.
+    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.NotFound);
+    store.listActive.mockRejectedValue(new Error("db down"));
+    const stream = await connected("paseo-token", []);
+    await advance(95_000);
+    await stream.done;
+    expect(stream.error?.code).toBe(Code.Unavailable);
+  });
+
   it("closes a revoked connector's stream at the next refresh, and its accepted job is lost", async () => {
     const stream = await connected("paseo-token", []);
     const run = startRun(prepareJob());

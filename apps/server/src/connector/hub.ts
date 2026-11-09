@@ -44,6 +44,8 @@ import type { ActiveConnector } from "./store/index.js";
 
 const HEARTBEAT_MS = 30_000;
 const AUTH_REFRESH_MS = 30_000;
+/** How often open sessions are checked against a stale auth cache, whatever its refreshes do. */
+const STALE_CHECK_MS = 5_000;
 
 /** Why the hub refused a call naming a job. */
 export type JobCallError =
@@ -112,6 +114,7 @@ export class SessionHub implements ConnectorHub {
   readonly #jobs = new Map<string, JobEntry>();
   readonly #heartbeat: NodeJS.Timeout;
   readonly #authRefresh: NodeJS.Timeout;
+  readonly #staleCheck: NodeJS.Timeout;
   #closed = false;
 
   private constructor(auth: ConnectorAuth, options: ConnectorHubOptions) {
@@ -119,6 +122,7 @@ export class SessionHub implements ConnectorHub {
     this.#leaseMs = options.leaseMs;
     this.#heartbeat = setInterval(() => this.#sendHeartbeats(), HEARTBEAT_MS);
     this.#authRefresh = setInterval(() => void this.#refreshAuth(), AUTH_REFRESH_MS);
+    this.#staleCheck = setInterval(() => this.#closeIfStale(), STALE_CHECK_MS);
   }
 
   /** Loads the active connectors, then starts the heartbeat and refresh timers. */
@@ -267,6 +271,7 @@ export class SessionHub implements ConnectorHub {
     this.#closed = true;
     clearInterval(this.#heartbeat);
     clearInterval(this.#authRefresh);
+    clearInterval(this.#staleCheck);
     for (const entry of this.#jobs.values()) clearJobTimers(entry);
     for (const session of [...this.#sessions.values()]) session.end("shutdown");
   }
@@ -424,11 +429,17 @@ export class SessionHub implements ConnectorHub {
 
   async #refreshAuth(): Promise<void> {
     await this.#auth.refresh();
-    const stale = this.#auth.isStale();
+    if (this.#closeIfStale()) return;
     for (const session of [...this.#sessions.values()]) {
-      if (stale) session.end("auth_unavailable");
-      else if (!this.#auth.isCurrent(session.connector)) session.end("unauthenticated");
+      if (!this.#auth.isCurrent(session.connector)) session.end("unauthenticated");
     }
+  }
+
+  /** Ends every session once the auth cache is stale; whether it was. */
+  #closeIfStale(): boolean {
+    if (!this.#auth.isStale()) return false;
+    for (const session of [...this.#sessions.values()]) session.end("auth_unavailable");
+    return true;
   }
 }
 

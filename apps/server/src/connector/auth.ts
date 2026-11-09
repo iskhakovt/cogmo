@@ -6,6 +6,7 @@
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
+import { finishesWithin } from "../util/finishes-within.js";
 import type { ActiveConnector, ConnectorStore } from "./store/index.js";
 import { hashConnectorToken } from "./token.js";
 
@@ -14,6 +15,9 @@ const UNKNOWN_TOKEN_REFRESH_MS = 5_000;
 
 /** A cache not loaded for this long, three refreshes in a row, fails every call closed. */
 const STALE_MS = 90_000;
+
+/** How long a call waits on a refresh before answering `UNAVAILABLE`. */
+const REFRESH_WAIT_MS = 5_000;
 
 export type AuthError = { kind: "unauthenticated" } | { kind: "unavailable" };
 
@@ -58,8 +62,11 @@ export class ConnectorAuth implements ConnectorAuthCache {
   async authenticate(rawToken: string): Promise<Result<ActiveConnector, AuthError>> {
     const tokenHash = hashConnectorToken(rawToken);
     if (!this.#byHash.has(tokenHash) || this.isStale()) {
-      if (this.#refreshing) await this.#refreshing;
-      else if (Date.now() - this.#attemptedAt >= UNKNOWN_TOKEN_REFRESH_MS) await this.refresh();
+      const throttled = Date.now() - this.#attemptedAt < UNKNOWN_TOKEN_REFRESH_MS;
+      const refresh = this.#refreshing ?? (throttled ? null : this.refresh());
+      if (refresh && !(await finishesWithin(refresh, REFRESH_WAIT_MS))) {
+        return err({ kind: "unavailable" });
+      }
     }
     if (this.isStale()) return err({ kind: "unavailable" });
     const found = this.#byHash.get(tokenHash);
