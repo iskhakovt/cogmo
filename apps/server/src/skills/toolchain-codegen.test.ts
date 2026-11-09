@@ -32,7 +32,7 @@ describe("the generated skills repo toolchain", () => {
 
   it("states the register-time gates' rules in CLAUDE.md", () => {
     const claudeMd = renderToolchainClaudeMd();
-    expect(claudeMd).toContain("At most 400 lines and 48000 characters");
+    expect(claudeMd).toContain("At most 1000 lines and 120000 characters");
     expect(claudeMd).toContain("one undecorated `async def run` directly at module level");
     expect(claudeMd).toContain("exactly two parameters");
     expect(claudeMd).toContain("No code built at run time");

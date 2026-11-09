@@ -1,6 +1,6 @@
 Register runs the verify stage's host-side gates before its transaction (design/skills.md → Verify stage → Register-time gates). Each gate rejects with one `errors` string per finding, `<id>: skills/<name>/skill.py:<line>:<column>: <message>`, or, for a wasm-lint finding, which has no column, `wasm_lint: skills/<name>/skill.py:<line>: <message>`.
 
-- **Size:** `skill.py` within 400 lines and 48 000 characters.
+- **Size:** `skill.py` within 1000 lines and 120 000 characters.
 - **Syntax:** the tree-sitter parse has no error.
 - **Entrypoint:** one undecorated module-level `async def run`.
 - **Dynamic code:** no `exec`, `eval`, `compile`, `__import__`, `importlib.import_module` or `getattr` with a computed name.

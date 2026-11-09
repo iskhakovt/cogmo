@@ -40,7 +40,7 @@ async def run(inputs: Input, ctx: Ctx) -> Output: ...
 
 Register refuses a `skill.py` that breaks any of these:
 
-- At most 400 lines and 48000 characters.
+- At most 1000 lines and 120000 characters.
 - `run` bound once, as one undecorated `async def run` directly at module level, taking exactly two parameters, none `*args`, `**kwargs` or keyword-only. With an `Input` or `Output` class, annotate `inputs: Input` and `-> Output` by their bare names.
 - No code built at run time: no `exec`, `eval`, `compile` or `__import__`, no `importlib.import_module`, and no `getattr` on an imported module by a computed name.
 - Each `ctx.memory` and `ctx.files` call's effect declared. A literal URL's host is in `network.allow`, and a literal secret name in `secrets`.

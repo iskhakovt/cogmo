@@ -988,7 +988,7 @@ describe("classifyWithAst — deep and long bodies", () => {
       "import urllib.parse",
       "async def run(inputs, ctx):",
       '    resp = await ctx.http.get("https://api.example.com/")',
-      ...R.times(397, (i) => `    v${i} = urllib.parse.quote(resp.headers.get("x-${i}", ""))`),
+      ...R.times(997, (i) => `    v${i} = urllib.parse.quote(resp.headers.get("x-${i}", ""))`),
       "",
     ].join("\n");
 
