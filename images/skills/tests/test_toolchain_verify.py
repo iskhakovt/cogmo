@@ -5,18 +5,15 @@ Its skills declare no dependencies, so no check reaches the network, and the
 tools come from this project's environment, first on PATH.
 """
 
-import io
-import json
 import os
 import shutil
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
 import pytest
 
-from cogmo_skills_runtime import check
+from .pragma_cases import PRAGMAS, REFUSED, SKILL
 
 _IMAGE = Path(__file__).parent.parent
 _UNTRACKED = shutil.ignore_patterns("__pycache__", "*.py[co]", ".venv", ".ruff_cache", ".pytest_cache")
@@ -26,28 +23,6 @@ pytestmark = pytest.mark.skipif(
     shutil.which("git") is None or not (_IMAGE / "toolchain").is_dir(),
     reason="needs git and images/skills/toolchain/",
 )
-
-_SKILL = """\
-from pydantic import BaseModel
-
-from cogmo_ctx import Ctx
-
-
-class Input(BaseModel):
-    text: str
-
-
-class Output(BaseModel):
-    text: str
-
-
-def shout(text: str) -> str:
-    return text.upper()
-
-
-async def run(inputs: Input, ctx: Ctx) -> Output:
-    return Output(text=shout(inputs.text))
-"""
 
 _PASSING_TEST = """\
 from skill import Input, shout
@@ -130,7 +105,7 @@ def test_it_passes_when_no_skill_changed(repo: Path) -> None:
 
 def test_it_passes_a_new_skill_and_writes_no_bytecode(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
-    _write_skill(repo, "echo", _SKILL, _PASSING_TEST)
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
     result = _verify(repo, base)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "echo passed" in result.stdout
@@ -147,7 +122,7 @@ def test_it_checks_a_skill_against_the_repos_cogmo_ctx(
     (decoy / "__init__.py").write_text('raise ImportError("a cogmo_ctx outside the repo\'s .cogmo/")\n')
     monkeypatch.setenv("PYTHONPATH", str(decoy.parent))
     base = _git(repo, "rev-parse", "HEAD")
-    _write_skill(repo, "echo", _SKILL, _PASSING_TEST)
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
     result = _verify(repo, base)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "echo passed" in result.stdout
@@ -155,7 +130,7 @@ def test_it_checks_a_skill_against_the_repos_cogmo_ctx(
 
 def test_it_fails_a_skill_whose_test_fails(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
-    _write_skill(repo, "echo", _SKILL, _FAILING_TEST)
+    _write_skill(repo, "echo", SKILL, _FAILING_TEST)
     result = _verify(repo, base)
     assert result.returncode == 1
     assert "echo failed pytest" in result.stderr
@@ -164,7 +139,7 @@ def test_it_fails_a_skill_whose_test_fails(repo: Path) -> None:
 def test_it_fails_a_skill_with_a_ruff_finding(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
     # BLE001 and S110: an exception swallowed into success.
-    swallowing = _SKILL.replace(
+    swallowing = SKILL.replace(
         "    return text.upper()",
         "    try:\n        return text.upper()\n    except Exception:\n        pass\n    return text",
     )
@@ -176,8 +151,8 @@ def test_it_fails_a_skill_with_a_ruff_finding(repo: Path) -> None:
 
 
 def test_it_checks_a_tracked_change_and_skips_unchanged_skills(repo: Path) -> None:
-    _write_skill(repo, "stale", _SKILL, _FAILING_TEST)
-    _write_skill(repo, "echo", _SKILL, _PASSING_TEST)
+    _write_skill(repo, "stale", SKILL, _FAILING_TEST)
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "skills")
     base = _git(repo, "rev-parse", "HEAD")
@@ -190,56 +165,19 @@ def test_it_checks_a_tracked_change_and_skips_unchanged_skills(repo: Path) -> No
 
 def test_it_fails_a_skill_file_the_suppression_rule_cannot_read(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
-    _write_skill(repo, "echo", _SKILL, 'x = """unterminated\n')
+    _write_skill(repo, "echo", SKILL, 'x = """unterminated\n')
     result = _verify(repo, base)
     assert result.returncode == 1
     assert "echo failed suppressions" in result.stderr
     assert "skills/echo/test_skill.py: the suppression rule cannot read it: " in result.stdout
 
 
-# Each pragma on `_SKILL`, and whether the suppression rule refuses it.
-_PRAGMAS = {
-    "noqa-coded": (_SKILL.replace("return text.upper()", "return text.upper()  # noqa: E501"), False),
-    "ruff-ignore": (_SKILL.replace("def shout", "# ruff: ignore[E501]\ndef shout"), False),
-    "pyrefly-coded": (
-        _SKILL.replace("return text.upper()", "return text.upper()  # pyrefly: ignore[bad-return]"),
-        False,
-    ),
-    "noqa-bare": (_SKILL.replace("return text.upper()", "return text.upper()  # noqa"), True),
-    "ruff-noqa": (f"# ruff: noqa\n{_SKILL}", True),
-    "ruff-noqa-coded": (f"{_SKILL}# ruff: noqa: E501\n", True),
-    "ruff-disable": (f"# ruff: disable[E501]\n{_SKILL}", True),
-    "pyrefly-bare": (_SKILL.replace("return text.upper()", "return text.upper()  # pyrefly: ignore"), True),
-    "pyrefly-file": (f"# pyrefly: ignore-errors\n{_SKILL}", True),
-}
-
-
-def _register_refuses(repo: Path, body: str) -> bool:
-    """Whether register's CPython checks, run with the repo's toolchain, find anything in `body`."""
-    toolchain = check.Toolchain(
-        ruff=str(Path(sys.executable).parent / "ruff"),
-        pyrefly=str(Path(sys.executable).parent / "pyrefly"),
-        config=str(repo / "pyproject.toml"),
-        site_packages=sysconfig.get_path("purelib"),
-        version="test",
-    )
-    stdout = io.StringIO()
-    check.main(
-        io.StringIO(json.dumps({"body": body, "dependencies": [], "lockfileHash": None})), stdout, lambda: toolchain
-    )
-    reply = json.loads(stdout.getvalue())
-    assert reply["type"] == "check_findings", reply
-    return bool(reply["findings"])
-
-
-def test_it_refuses_the_pragmas_register_refuses(repo: Path) -> None:
+def test_it_refuses_the_pragmas_the_shared_table_refuses(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
-    for name, (body, _) in _PRAGMAS.items():
+    for name, (body, _) in PRAGMAS.items():
         _write_skill(repo, name, body, _PASSING_TEST)
 
     result = _verify(repo, base)
 
-    refused = {name for name, (_, refuses) in _PRAGMAS.items() if refuses}
     failed = {line.split()[1] for line in result.stderr.splitlines() if " failed " in line}
-    assert failed == refused, result.stdout + result.stderr
-    assert {name for name, (body, _) in _PRAGMAS.items() if _register_refuses(repo, body)} == refused
+    assert failed == REFUSED, result.stdout + result.stderr

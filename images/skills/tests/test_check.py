@@ -5,6 +5,7 @@ The tools run from this environment's `bin/`, at the toolchain's pins, against a
 """
 
 import base64
+import builtins
 import hashlib
 import io
 import json
@@ -20,6 +21,8 @@ import pytest
 
 from cogmo_skills_runtime import check, supervisor
 from cogmo_skills_runtime.check import Toolchain
+
+from .pragma_cases import PRAGMAS, REFUSED
 
 type ProtocolCheck = Callable[[str, object], None]
 
@@ -177,6 +180,28 @@ def test_a_body_holding_a_null_byte_is_a_finding_about_the_file(toolchain: Toolc
     reply = _check("x = 1\x00\n", toolchain)
 
     assert _findings(reply) == [("syntax", None, None, "source code string cannot contain null bytes")]
+
+
+@pytest.mark.parametrize("stage", ["parse", "compile"])
+def test_a_body_too_deep_for_a_compile_stage_is_a_finding_about_the_file(
+    toolchain: Toolchain, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    # `ast.parse` compiles too, so the compile stage's fake shadows `compile` in `check` alone.
+    real: Callable[..., object] = check.ast.parse if stage == "parse" else builtins.compile
+
+    def too_deep(source: object, filename: str, *args: object, **kwargs: object) -> object:
+        if filename == "skill.py":
+            raise RecursionError("maximum recursion depth exceeded")
+        return real(source, filename, *args, **kwargs)
+
+    if stage == "parse":
+        monkeypatch.setattr(check.ast, "parse", too_deep)
+    else:
+        monkeypatch.setattr(check, "compile", too_deep, raising=False)
+
+    reply = _check(_CLEAN, toolchain)
+
+    assert _findings(reply) == [("syntax", None, None, "CPython could not compile it: RecursionError")]
 
 
 def test_a_body_the_compile_cannot_nest_is_a_finding_about_the_file(toolchain: Toolchain) -> None:
@@ -419,6 +444,22 @@ def test_a_name_from_a_declared_regular_package_may_be_its_attribute(toolchain: 
     ]
 
 
+def test_an_init_several_distributions_list_is_none_of_theirs_alone(toolchain: Toolchain, venvs: Path) -> None:
+    # Both list `a/ns/__init__.py`, so `a.ns` is neither's alone; `b` beneath it is `transitive`'s.
+    site_packages = _site_packages(venvs, _HASH)
+    _install(site_packages, "direct", {"a/ns/__init__.py": "", "a/ns/direct.py": ""})
+    _install(site_packages, "transitive", {"a/__init__.py": "", "a/ns/__init__.py": "", "a/ns/b/__init__.py": ""})
+    body = "from a.ns import b\nimport a.ns.b\nfrom a.ns import direct\n"
+
+    reply = _check(body, toolchain, ["direct==1.0"], _HASH)
+
+    transitive = "which no declared dependency names; declare every package the skill imports"
+    assert [f for f in _findings(reply) if f[0] == "imports"] == [
+        ("imports", 1, 1, f"'a.ns.b' is installed by 'transitive', {transitive}"),
+        ("imports", 2, 1, f"'a.ns.b' is installed by 'transitive', {transitive}"),
+    ]
+
+
 def test_a_dependency_without_its_skill_venv_is_fatal(toolchain: Toolchain, venvs: Path) -> None:
     reply = _check(_CLEAN, toolchain, ["idna==3.10"], _HASH)
 
@@ -437,39 +478,32 @@ def test_record_paths_map_to_the_modules_they_install() -> None:
         "_plain.so",
         "namespace/part/__init__.py",
         "namespace/nested/leaf.py",
-        "shared/__init__.py",
-        "shared/mine.py",
         "pkg.libs/libvendored-1a2b.so",
         "py.typed",
         "LICENSE",
         "pkg-1.0.pth",
         "pkg-1.0.dist-info/METADATA",
-        "pkg-1.0.data/scripts/tool",
+        "pkg-1.0.data/scripts/tool.py",
         "__pycache__/single.cpython-314.pyc",
+        "pkg/__pycache__/mod.cpython-314.pyc",
         "../../../bin/tool",
         "/etc/absolute",
     ]
 
-    modules = check.record_modules(
-        {"pkg": [PurePosixPath(f) for f in files], "other": [PurePosixPath("shared/__init__.py")]}
-    )
+    modules = check.record_modules(PurePosixPath(f) for f in files)
 
-    assert modules == {
-        "pkg": frozenset(
-            {
-                "pkg",
-                "pkg.inner",
-                "single",
-                "_native",
-                "_plain",
-                "namespace.part",
-                "namespace.nested.leaf",
-                "shared",
-                "shared.mine",
-            }
-        ),
-        "other": frozenset({"shared"}),
-    }
+    assert modules == frozenset(
+        {
+            "pkg",
+            "pkg.sub.mod",
+            "pkg.inner",
+            "single",
+            "_native",
+            "_plain",
+            "namespace.part",
+            "namespace.nested.leaf",
+        }
+    )
 
 
 def test_installed_distributions_are_keyed_by_their_pep_503_name(tmp_path: Path) -> None:
@@ -577,6 +611,12 @@ def test_a_suppression_naming_its_rule_on_its_line_passes_and_is_recorded(
     protocol("check_reply", reply)
     assert _findings(reply) == []
     assert _suppressions(reply) == suppressions
+
+
+def test_it_refuses_the_pragmas_the_shared_table_refuses(toolchain: Toolchain) -> None:
+    refused = {name for name, (body, _) in PRAGMAS.items() if _findings(_check(body, toolchain))}
+
+    assert refused == REFUSED
 
 
 def test_more_suppressions_than_a_file_may_carry_are_refused(toolchain: Toolchain) -> None:

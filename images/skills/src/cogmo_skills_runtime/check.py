@@ -156,60 +156,33 @@ def _uncompilable(e: RecursionError | MemoryError) -> Finding:
 
 
 def installed_modules(site_packages: str) -> dict[str, frozenset[str]]:
-    """Each distribution in `site_packages` with the modules its `RECORD` installs, by its PEP 503 name."""
-    return record_modules(
-        {
-            _normalized(name): dist.files or []
-            for dist in importlib.metadata.distributions(path=[site_packages])
-            if (name := dist.metadata.get("Name"))
-        }
-    )
-
-
-def record_modules(records: Mapping[str, Iterable[PurePosixPath]]) -> dict[str, frozenset[str]]:
-    """The modules each of one site-packages' `RECORD`s installs, keyed as `records` keys them.
-
-    A path names each directory along it that is the distribution's package, one whose `__init__` its `RECORD` alone
-    installs; with none, the module its file is: a `.py` file, or one with an extension module's suffix, without the
-    suffix, and an `__init__` its directory. So a directory whose `__init__` no `RECORD` installs (PEP 420), or
-    several do (pkgutil-style), is a namespace each distribution's modules sit beneath. Other files (`py.typed`, a
-    license, a `.pth`), `*.dist-info/`, `*.data/`, `__pycache__/`, paths leaving site-packages, and names that are not
-    identifiers name none.
-    """
-    paths = {
-        name: [parts for path in files if (parts := _record_parts(PurePosixPath(path))) is not None]
-        for name, files in records.items()
-    }
-    init_owners: dict[tuple[str, ...], set[str]] = {}
-    for name, name_paths in paths.items():
-        for parts in name_paths:
-            if _module_name(parts[-1]) == "__init__":
-                init_owners.setdefault(parts[:-1], set()).add(name)
+    """Each distribution in `site_packages` with the modules its `RECORD` lists, by its PEP 503 name."""
     return {
-        name: frozenset(module for parts in name_paths for module in _record_modules(parts, {name}, init_owners))
-        for name, name_paths in paths.items()
+        _normalized(name): record_modules(dist.files or [])
+        for dist in importlib.metadata.distributions(path=[site_packages])
+        if (name := dist.metadata.get("Name"))
     }
 
 
-def _record_parts(path: PurePosixPath) -> tuple[str, ...] | None:
-    parts = path.parts
+def record_modules(files: Iterable[PurePosixPath]) -> frozenset[str]:
+    """The modules a `RECORD`'s paths list.
+
+    Each path names the module its file is: a `.py` file, or one with an extension module's suffix, without the
+    suffix, and an `__init__` its directory. So a directory whose `__init__` no `RECORD` lists (PEP 420) is a namespace
+    and names no module. Other files (`py.typed`, a license, a `.pth`), `*.dist-info/`, `*.data/`, `__pycache__/`,
+    paths leaving site-packages, and names that are not identifiers name none.
+    """
+    return frozenset(module for path in files if (module := _record_module(PurePosixPath(path).parts)) is not None)
+
+
+def _record_module(parts: tuple[str, ...]) -> str | None:
     if not parts or parts[0] in ("..", "/") or parts[0].endswith((".dist-info", ".data")) or "__pycache__" in parts:
         return None
-    return parts
-
-
-def _record_modules(
-    parts: tuple[str, ...], installer: set[str], init_owners: Mapping[tuple[str, ...], set[str]]
-) -> list[str]:
-    packages = [parts[:depth] for depth in range(1, len(parts)) if init_owners.get(parts[:depth]) == installer]
-    if not packages:
-        module = _module_name(parts[-1])
-        if module is None:
-            return []
-        packages = [parts[:-1] if module == "__init__" else (*parts[:-1], module)]
-    return [
-        ".".join(segments) for segments in packages if segments and all(segment.isidentifier() for segment in segments)
-    ]
+    module = _module_name(parts[-1])
+    if module is None:
+        return None
+    segments = parts[:-1] if module == "__init__" else (*parts[:-1], module)
+    return ".".join(segments) if segments and all(segment.isidentifier() for segment in segments) else None
 
 
 def _module_name(file: str) -> str | None:
@@ -236,10 +209,10 @@ def import_findings(
 ) -> list[Finding]:
     """Every import the stdlib, the runtime and the modules a declared dependency installs do not cover.
 
-    `import a.b` imports `a.b`. `from a.b import c` reads `c` from `a.b`, so it passes when one declared distribution
-    alone installs `a.b`; from a namespace it imports `a.b.c`. The distributions that install a module are those
-    installing its deepest prefix that some distribution installs, or, for a namespace, every one installing a module
-    beneath it.
+    `import a.b` imports `a.b`. `from a.b import c` reads `c` from `a.b`, so it passes when a declared distribution's
+    `RECORD` alone lists `a.b`'s file; from a namespace it imports `a.b.c`. The distributions that install a module are
+    those installing its deepest prefix that some distribution installs, or, for a namespace, every one installing a
+    module beneath it.
     """
     declared = frozenset(_dependency_name(spec) for spec in dependencies)
     installers: dict[str, set[str]] = {}
@@ -285,7 +258,7 @@ def _import_refusal(name: str, declared: frozenset[str], installers: Mapping[str
 
 
 def _sole_installer(module: str, installers: Mapping[str, set[str]]) -> str | None:
-    """The one distribution installing `module` as its package or module file; None for a namespace or no module."""
+    """The one distribution whose `RECORD` lists `module`'s file, its `__init__` or module; None for none or several."""
     names = installers.get(module, set())
     return next(iter(names)) if len(names) == 1 else None
 
