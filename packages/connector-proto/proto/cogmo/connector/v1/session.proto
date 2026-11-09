@@ -56,8 +56,8 @@ message Job {
   string task_id = 2;
   oneof spec {
     PrepareSpec prepare = 10;
-    AgentTurnSpec plan = 11;
-    AgentTurnSpec execute = 12;
+    PlanSpec plan = 11;
+    ExecuteSpec execute = 12;
     VerifySpec verify = 13;
     PublishSpec publish = 14;
     ReleaseSpec release = 15;
@@ -80,7 +80,7 @@ message ReportEventsResponse {}
 message JobEvent {
   uint64 seq = 1; // strictly increasing per job, from 1
   oneof event {
-    string text_delta = 2;
+    string text_delta = 2; // at most 64 KiB; a longer delta is split across events
     ToolCall tool_call = 3;
     ToolResult tool_result = 4;
     Usage usage = 5;
@@ -116,7 +116,7 @@ message JobResult {
 
 message JobError {
   JobErrorCode code = 1;
-  string message = 2;
+  string message = 2; // at most 8 KiB, truncated by the connector
 }
 
 enum JobErrorCode {

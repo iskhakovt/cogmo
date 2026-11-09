@@ -10,6 +10,9 @@ const MINUTE_MS = 60_000;
 /** The longest delay `setTimeout` honours; a longer one fires at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
+/** What a verify job gets beyond its command's own timeout, to report it. */
+const VERIFY_GRACE_SECONDS = 60;
+
 /** The spec cases of a `Job`, which name its phase. */
 export type JobPhase = NonNullable<Job["spec"]["case"]>;
 
@@ -28,7 +31,7 @@ export function jobCaps(spec: Job["spec"]): JobCaps {
       idleMs: 5 * MINUTE_MS,
     }))
     .with({ case: "verify" }, ({ value }) => ({
-      totalMs: Math.min((value.timeoutSeconds + 60) * 1_000, MAX_TIMER_MS),
+      totalMs: Math.min((value.timeoutSeconds + VERIFY_GRACE_SECONDS) * 1_000, MAX_TIMER_MS),
       idleMs: null,
     }))
     .with({ case: "publish" }, () => ({ totalMs: 5 * MINUTE_MS, idleMs: null }))

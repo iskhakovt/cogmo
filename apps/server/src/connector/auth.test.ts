@@ -22,7 +22,7 @@ const NEW_CONNECTOR: ActiveConnector = {
 let store: ReturnType<typeof mock<ConnectorStore>>;
 
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
   store = mock<ConnectorStore>();
   store.listActive.mockResolvedValue([PASEO]);
 });
@@ -96,6 +96,21 @@ it("answers unavailable within 5 s when a stalled reload outlives the cache", as
   const call = auth.authenticate("paseo-token");
   await vi.advanceTimersByTimeAsync(5_000);
   expect(await call).toEqual(err({ kind: "unavailable" }));
+});
+
+it("answers unavailable at once once a stalled reload has outlived its wait", async () => {
+  const auth = await ConnectorAuth.create({ runInTx: fakeRunInTx, connectorStore: store });
+  store.listActive.mockReturnValue(never());
+  await vi.advanceTimersByTimeAsync(5_000);
+  void auth.authenticate("new-token");
+  await vi.advanceTimersByTimeAsync(5_000);
+  // The reload started 5 s ago and is still stalled: a new call doesn't wait another 5 s.
+  const settled = await Promise.race([
+    auth.authenticate("new-token"),
+    new Promise<"waiting">((resolve) => setImmediate(() => resolve("waiting"))),
+  ]);
+  expect(settled).toEqual(err({ kind: "unavailable" }));
+  expect(store.listActive).toHaveBeenCalledTimes(2);
 });
 
 it("keeps the old cache when a reload fails", async () => {

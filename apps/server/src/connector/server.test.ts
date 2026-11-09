@@ -13,6 +13,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { resolvesWithin } from "../test/assertions.js";
 import { fakeRunInTx } from "../test/factories.js";
+import { ConnectorAuth } from "./auth.js";
 import { SessionHub } from "./hub.js";
 import { type ConnectorServer, startConnectorServer } from "./server.js";
 import type { ActiveConnector, ConnectorStore } from "./store/index.js";
@@ -33,10 +34,8 @@ let baseUrl: string;
 beforeEach(async () => {
   const store = mock<ConnectorStore>();
   store.listActive.mockResolvedValue([PASEO]);
-  hub = await SessionHub.create(
-    { runInTx: fakeRunInTx, connectorStore: store },
-    { leaseMs: 60_000 },
-  );
+  const auth = await ConnectorAuth.create({ runInTx: fakeRunInTx, connectorStore: store });
+  hub = new SessionHub(auth, { leaseMs: 60_000 });
   server = await startConnectorServer({ hub, host: "127.0.0.1", port: 0 });
   baseUrl = `http://127.0.0.1:${server.port}`;
 });
@@ -68,7 +67,7 @@ it("runs a job over gRPC on h2c, and close ends the stream with UNAVAILABLE", as
   const job = create(JobSchema, {
     jobId: "task-1/publish/d1",
     taskId: "task-1",
-    spec: { case: "publish", value: { commitMessage: "m", remoteRef: "cogmo/t" } },
+    spec: { case: "publish", value: { commitMessage: "m", workBranch: "cogmo/t" } },
   });
   const run = hub.run(PASEO.id, job, { onEvent: () => {} });
   await client.acceptJob({ jobId: job.jobId }, AUTH);
@@ -132,4 +131,42 @@ it("refuses a message larger than 4 MiB", async () => {
   await expect(
     client.acceptJob({ jobId: "x".repeat(4 * 1024 * 1024 + 1) }, AUTH),
   ).rejects.toMatchObject({ code: Code.ResourceExhausted });
+});
+
+it("resets a replaced session's stream that its peer stopped reading", async () => {
+  // A peer advertising a zero window leaves the server stuck writing SessionAccepted.
+  const stuck = connectHttp2(baseUrl, { settings: { initialWindowSize: 0 } });
+  stuck.on("error", () => {});
+  const request = stuck.request({
+    ":method": "POST",
+    ":path": "/cogmo.connector.v1.ConnectorService/Connect",
+    "content-type": "application/grpc",
+    te: "trailers",
+    authorization: "Bearer paseo-token",
+  });
+  request.on("error", () => {});
+  const closed = new Promise<void>((resolve) => request.on("close", () => resolve()));
+  request.end(Buffer.from([0, 0, 0, 0, 0]));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  // A second session for the same connector replaces the first.
+  const client = createClient(ConnectorService, createGrpcTransport({ baseUrl }));
+  const controller = new AbortController();
+  const second = (async () => {
+    try {
+      for await (const _ of client.connect(
+        { heldJobIds: [] },
+        { ...AUTH, signal: controller.signal },
+      )) {
+        // Reading keeps this stream flowing.
+      }
+    } catch {
+      // Aborted below.
+    }
+  })();
+
+  await resolvesWithin(closed, 4_000, "the stuck stream's reset");
+  controller.abort();
+  await second;
+  stuck.destroy();
 });

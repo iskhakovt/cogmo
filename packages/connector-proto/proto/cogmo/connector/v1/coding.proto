@@ -11,11 +11,19 @@ message PrepareSpec {
   string work_branch = 3;
 }
 
-message AgentTurnSpec {
+// A plan turn: the agent explores in plan mode and returns a plan.
+message PlanSpec {
   string prompt = 1; // cogmo keeps the Job under the 4 MiB message limit
-  string agent = 2;
-  optional uint64 token_budget = 3; // input plus output tokens; absent, no budget
-  optional string session_id = 4; // the plan's session handle, on execute
+  string agent = 2; // `coding_tasks.backend` (`claude`, `codex`); a connector that doesn't serve it fails the job UNSUPPORTED
+  optional uint64 token_budget = 3; // input plus output tokens, as `Usage` counts them; absent, no budget
+}
+
+// An execute turn: the agent resumes the plan's session and makes the change.
+message ExecuteSpec {
+  string prompt = 1; // cogmo keeps the Job under the 4 MiB message limit
+  string agent = 2; // as in PlanSpec
+  optional uint64 token_budget = 3; // as in PlanSpec
+  string agent_session_id = 4; // the plan's `PlanResult.agent_session_id`; a connector that lost it fails the job SESSION_LOST
 }
 
 message VerifySpec {
@@ -25,7 +33,7 @@ message VerifySpec {
 
 message PublishSpec {
   string commit_message = 1;
-  string remote_ref = 2;
+  string work_branch = 2; // the connector pushes the workspace to `refs/heads/<work_branch>`
 }
 
 message ReleaseSpec {
@@ -34,27 +42,26 @@ message ReleaseSpec {
 
 message ToolCall {
   string name = 1;
-  string summary = 2;
 }
 
 message ToolResult {
   string name = 1;
   bool ok = 2;
-  string summary = 3;
+  string summary = 3; // at most 1 KiB, truncated by the connector
 }
 
-// Cumulative for the job.
+// Cumulative for the job. Each count is absent when the runtime reports none.
 message Usage {
-  uint64 input_tokens = 1;
-  uint64 output_tokens = 2;
-  optional double cost_usd = 3; // absent when the runtime reports no cost
+  optional uint64 input_tokens = 1; // input not read from or written to the prompt cache, as the Claude CLI's `result.usage.input_tokens` counts it
+  optional uint64 output_tokens = 2;
+  optional double cost_usd = 3;
 }
 
 message Prepared {}
 
 message PlanResult {
   string plan = 1; // the connector keeps the FinishJob under 4 MiB, truncating the plan if it must
-  string session_id = 2;
+  string agent_session_id = 2; // the agent's session handle, which execute passes back
 }
 
 message Executed {
@@ -91,5 +98,5 @@ message SalvagedAndRemoved {
 }
 
 message Kept {
-  string reason = 1;
+  string reason = 1; // at most 1 KiB, truncated by the connector
 }

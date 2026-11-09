@@ -4,28 +4,31 @@
  *
  * A job is keyed on its `job_id` and owned by one connector. Its states:
  *
- *   dispatched ──► accepted ──► completed | failed | cancelled
+ *   dispatched ──► accepted ──► completed | failed | cancelled | invalid_result
  *       │              ├──────► lost
  *       │              └──────► timed_out
+ *       ├──────────────────────► completed | failed | cancelled | invalid_result
  *       ├──────────────────────► unavailable
  *       └──────────────────────► timed_out
  *
  * An ended job's state is its outcome: the connector's `completed`, `failed`
- * or `cancelled`, or the hub's `lost`, `timed_out` or `unavailable`. The job's
- * durable state is the connector's (rule 4). This view lives inside
- * the step that awaits the job, so a process that loses it also loses the run.
+ * or `cancelled`, or the hub's `lost`, `timed_out`, `unavailable` or
+ * `invalid_result`. The job's durable state is the connector's (rule 4). This
+ * view lives inside the step that awaits the job, so a process that loses it
+ * also loses the run. The hub keeps its own copy of each job and hands out
+ * plain, readonly outcomes and reports (`translate.ts`), so no caller can
+ * change what it stores or what another caller receives.
  */
 
-import { create } from "@bufbuild/protobuf";
+import { clone, create } from "@bufbuild/protobuf";
 import {
   type ConnectResponse,
   ConnectResponseSchema,
   type FinishJobRequest,
   type Job,
-  type JobError,
-  JobErrorCode,
-  JobErrorSchema,
   type JobEvent,
+  JobSchema,
+  type Usage,
 } from "@cogmo/connector-proto";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
@@ -37,13 +40,13 @@ import type {
   JobRunError,
 } from "../agent/coding/connector-jobs.js";
 import { logger } from "../logger.js";
-import { type AuthError, ConnectorAuth, type ConnectorAuthDeps } from "./auth.js";
+import { AUTH_REFRESH_MS, type AuthError, type ConnectorAuthCache } from "./auth.js";
 import { type JobCaps, type JobPhase, jobCaps } from "./caps.js";
-import { type ConnectorSession, Session } from "./session.js";
+import { type ConnectorSession, type HubSession, Session } from "./session.js";
 import type { ActiveConnector } from "./store/index.js";
+import { completionOf, failureCodeOf, reportOf } from "./translate.js";
 
 const HEARTBEAT_MS = 30_000;
-const AUTH_REFRESH_MS = 30_000;
 /** How often open sessions are checked against a stale auth cache, whatever its refreshes do. */
 const STALE_CHECK_MS = 5_000;
 
@@ -97,37 +100,24 @@ interface JobEntry {
   leaseTimer: NodeJS.Timeout | null;
 }
 
-/** The `JobResult` case each phase completes with. */
-const RESULT_CASE = {
-  prepare: "prepared",
-  plan: "plan",
-  execute: "executed",
-  verify: "verify",
-  publish: "published",
-  release: "released",
-} as const satisfies Record<JobPhase, string>;
-
 export class SessionHub implements ConnectorHub {
-  readonly #auth: ConnectorAuth;
+  readonly #auth: ConnectorAuthCache;
   readonly #leaseMs: number;
-  readonly #sessions = new Map<string, Session>();
+  readonly #sessions = new Map<string, HubSession>();
   readonly #jobs = new Map<string, JobEntry>();
   readonly #heartbeat: NodeJS.Timeout;
   readonly #authRefresh: NodeJS.Timeout;
   readonly #staleCheck: NodeJS.Timeout;
+  #refreshPending = false;
   #closed = false;
 
-  private constructor(auth: ConnectorAuth, options: ConnectorHubOptions) {
+  /** Starts the heartbeat, auth refresh and stale-check timers. */
+  constructor(auth: ConnectorAuthCache, options: ConnectorHubOptions) {
     this.#auth = auth;
     this.#leaseMs = options.leaseMs;
     this.#heartbeat = setInterval(() => this.#sendHeartbeats(), HEARTBEAT_MS);
     this.#authRefresh = setInterval(() => void this.#refreshAuth(), AUTH_REFRESH_MS);
     this.#staleCheck = setInterval(() => this.#closeIfStale(), STALE_CHECK_MS);
-  }
-
-  /** Loads the active connectors, then starts the heartbeat and refresh timers. */
-  static async create(deps: ConnectorAuthDeps, options: ConnectorHubOptions): Promise<SessionHub> {
-    return new SessionHub(await ConnectorAuth.create(deps), options);
   }
 
   authenticate(rawToken: string): Promise<Result<ActiveConnector, AuthError>> {
@@ -152,12 +142,13 @@ export class SessionHub implements ConnectorHub {
       if (held) return held;
     }
 
-    const phase = job.spec.case;
-    if (phase === undefined) throw new Error(`job ${job.jobId} has no spec`);
-    const caps = jobCaps(job.spec);
+    const stored = clone(JobSchema, job);
+    const phase = stored.spec.case;
+    if (phase === undefined) throw new Error(`job ${stored.jobId} has no spec`);
+    const caps = jobCaps(stored.spec);
     const entry: JobEntry = {
       connectorId,
-      job,
+      job: stored,
       phase,
       caps,
       state: { status: "dispatched" },
@@ -167,10 +158,10 @@ export class SessionHub implements ConnectorHub {
       idleTimer: null,
       leaseTimer: null,
     };
-    this.#jobs.set(job.jobId, entry);
+    this.#jobs.set(stored.jobId, entry);
     this.#startLease(entry);
-    this.#sessions.get(connectorId)?.send(jobMessage(job));
-    logger.info({ connectorId, jobId: job.jobId, phase }, "connector job dispatched");
+    this.#sessions.get(connectorId)?.send(jobMessage(stored));
+    logger.info({ connectorId, jobId: stored.jobId, phase }, "connector job dispatched");
     return this.#join(entry, handlers);
   }
 
@@ -242,18 +233,23 @@ export class SessionHub implements ConnectorHub {
         );
       }
       return match(request.outcome)
-        .with({ case: "completed" }, ({ value }) => {
-          const expected = RESULT_CASE[entry.phase];
-          if (value.result.case !== expected) {
-            const message = `a ${entry.phase} job completes with a ${expected} result, not ${value.result.case ?? "none"}`;
-            this.#end(entry, ok({ kind: "failed", error: unspecifiedError(message) }));
-            return err({ kind: "invalid_argument" as const, message });
-          }
-          this.#end(entry, ok({ kind: "completed", result: value }));
-          return ok(undefined);
-        })
+        .with({ case: "completed" }, ({ value }) =>
+          completionOf(entry.phase, value).match(
+            (result) => {
+              this.#end(entry, ok({ kind: "completed", result }));
+              return ok(undefined);
+            },
+            (message) => {
+              this.#end(entry, err({ kind: "invalid_result", message }));
+              return err({ kind: "invalid_argument" as const, message });
+            },
+          ),
+        )
         .with({ case: "failed" }, ({ value }) => {
-          this.#end(entry, ok({ kind: "failed", error: value }));
+          this.#end(
+            entry,
+            ok({ kind: "failed", code: failureCodeOf(value.code), message: value.message }),
+          );
           return ok(undefined);
         })
         .with({ case: "cancelled" }, () => {
@@ -317,16 +313,24 @@ export class SessionHub implements ConnectorHub {
       );
     }
     entry.lastSeq = event.seq;
-    for (const { handlers } of entry.waiters) {
-      try {
-        handlers.onEvent(event);
-      } catch (error) {
-        logger.error({ err: error, jobId: entry.job.jobId }, "connector job event handler threw");
+    const over = event.event.case === "usage" && overBudget(entry.job, event.event.value);
+    const report = reportOf(event);
+    if (report !== null) deepFreeze(report);
+    if (report === null) {
+      logger.debug(
+        { jobId: entry.job.jobId, seq: String(event.seq) },
+        "connector job event of an unknown kind",
+      );
+    } else {
+      for (const { handlers } of entry.waiters) {
+        try {
+          handlers.onEvent(report);
+        } catch (error) {
+          logger.error({ err: error, jobId: entry.job.jobId }, "connector job event handler threw");
+        }
       }
     }
-    if (event.event.case === "usage" && overBudget(entry.job, event.event.value)) {
-      this.#timeOut(entry, "token_budget");
-    }
+    if (over) this.#timeOut(entry, "token_budget");
   }
 
   #restartIdle(entry: JobEntry): void {
@@ -370,8 +374,9 @@ export class SessionHub implements ConnectorHub {
   }
 
   /** Moves a job to a terminal state, once, and resolves everyone waiting on it. */
-  #end(entry: JobEntry, outcome: RunResult): void {
+  #end(entry: JobEntry, result: RunResult): void {
     if (entry.state.status === "ended") return;
+    const outcome = deepFreeze(result);
     entry.state = { status: "ended", outcome };
     clearJobTimers(entry);
     const waiters = entry.waiters;
@@ -399,7 +404,7 @@ export class SessionHub implements ConnectorHub {
     }
   }
 
-  #sessionClosed(session: Session): void {
+  #sessionClosed(session: HubSession): void {
     if (this.#sessions.get(session.connector.id) !== session) return;
     this.#sessions.delete(session.connector.id);
     for (const entry of this.#jobsOf(session.connector.id)) {
@@ -424,11 +429,18 @@ export class SessionHub implements ConnectorHub {
 
   #sendHeartbeats(): void {
     const heartbeat = create(ConnectResponseSchema, { message: { case: "heartbeat", value: {} } });
-    for (const session of this.#sessions.values()) session.send(heartbeat);
+    for (const session of this.#sessions.values()) session.heartbeat(heartbeat);
   }
 
+  /** At most one at a time: a refresh still running when the next tick comes is not joined again. */
   async #refreshAuth(): Promise<void> {
-    await this.#auth.refresh();
+    if (this.#refreshPending) return;
+    this.#refreshPending = true;
+    try {
+      await this.#auth.refresh();
+    } finally {
+      this.#refreshPending = false;
+    }
     if (this.#closeIfStale()) return;
     for (const session of [...this.#sessions.values()]) {
       if (!this.#auth.isCurrent(session.connector)) session.end("unauthenticated");
@@ -447,12 +459,11 @@ function jobMessage(job: Job): ConnectResponse {
   return create(ConnectResponseSchema, { message: { case: "job", value: job } });
 }
 
-function unspecifiedError(message: string): JobError {
-  return create(JobErrorSchema, { code: JobErrorCode.UNSPECIFIED, message });
-}
-
-/** Whether a turn's cumulative usage passed its `token_budget`; an absent budget is none. */
-function overBudget(job: Job, usage: { inputTokens: bigint; outputTokens: bigint }): boolean {
+/**
+ * Whether a turn's cumulative usage passed its `token_budget`: the input and
+ * output counts it reports, summed. An absent budget is none.
+ */
+function overBudget(job: Job, usage: Usage): boolean {
   const budget = match(job.spec)
     .with({ case: "plan" }, { case: "execute" }, ({ value }) => value.tokenBudget)
     .with(
@@ -464,10 +475,14 @@ function overBudget(job: Job, usage: { inputTokens: bigint; outputTokens: bigint
       () => undefined,
     )
     .exhaustive();
-  return budget !== undefined && usage.inputTokens + usage.outputTokens > budget;
+  if (budget === undefined) return false;
+  return (usage.inputTokens ?? 0n) + (usage.outputTokens ?? 0n) > budget;
 }
 
-/** A release the connector completed or failed ends the task's time on it; a cancelled one does not. */
+/**
+ * A release the connector completed or failed ends the task's time on it; a
+ * cancelled one, or one the hub gave up on or refused, does not.
+ */
 function releaseFreesTask(outcome: RunResult): boolean {
   return outcome.match(
     (value) =>
@@ -477,6 +492,18 @@ function releaseFreesTask(outcome: RunResult): boolean {
         .exhaustive(),
     () => false,
   );
+}
+
+/**
+ * Freezes `value` and every plain object or array it holds, so callers that
+ * share an outcome or a report can't change it under each other.
+ */
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function clearJobTimers(entry: JobEntry): void {

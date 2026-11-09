@@ -21,12 +21,12 @@ import {
 import { err, ok, type Result } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import type { JobOutcome, JobRunError } from "../agent/coding/connector-jobs.js";
+import type { JobOutcome, JobReport, JobRunError } from "../agent/coding/connector-jobs.js";
 import { expectDefined, expectOk } from "../test/assertions.js";
-import { fakeRunInTx } from "../test/factories.js";
+import type { ConnectorAuthCache } from "./auth.js";
 import { SessionHub } from "./hub.js";
 import { connectorRoutes } from "./service.js";
-import type { ActiveConnector, ConnectorStore } from "./store/index.js";
+import type { ActiveConnector } from "./store/index.js";
 import { hashConnectorToken } from "./token.js";
 
 const LEASE_MS = 120_000;
@@ -44,30 +44,40 @@ const OTHER: ActiveConnector = {
   kind: "coding",
   tokenHash: hashConnectorToken("other-token"),
 };
-const NEW_CONNECTOR: ActiveConnector = {
-  id: "conn-new",
-  name: "new",
-  kind: "coding",
-  tokenHash: hashConnectorToken("new"),
-};
 
 type ConnectorClient = Client<typeof ConnectorService>;
 type RunResult = Result<JobOutcome, JobRunError>;
 
-let store: ReturnType<typeof mock<ConnectorStore>>;
+/** The fake auth cache's active connectors, by raw token, and whether it is stale. */
+let tokens: Map<string, ActiveConnector>;
+let stale: boolean;
+let authCache: ReturnType<typeof mock<ConnectorAuthCache>>;
 let hub: SessionHub;
 let client: ConnectorClient;
 
-beforeEach(async () => {
+beforeEach(() => {
   vi.useFakeTimers({
-    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"],
   });
-  store = mock<ConnectorStore>();
-  store.listActive.mockResolvedValue([PASEO, OTHER]);
-  hub = await SessionHub.create(
-    { runInTx: fakeRunInTx, connectorStore: store },
-    { leaseMs: LEASE_MS },
+  tokens = new Map([
+    ["paseo-token", PASEO],
+    ["other-token", OTHER],
+  ]);
+  stale = false;
+  authCache = mock<ConnectorAuthCache>();
+  authCache.authenticate.mockImplementation(async (rawToken) => {
+    if (stale) return err({ kind: "unavailable" });
+    const connector = tokens.get(rawToken);
+    return connector ? ok(connector) : err({ kind: "unauthenticated" });
+  });
+  authCache.isCurrent.mockImplementation((connector) =>
+    [...tokens.values()].some(
+      (active) => active.id === connector.id && active.tokenHash === connector.tokenHash,
+    ),
   );
+  authCache.isStale.mockImplementation(() => stale);
+  authCache.refresh.mockResolvedValue(undefined);
+  hub = new SessionHub(authCache, { leaseMs: LEASE_MS });
   client = createClient(ConnectorService, createRouterTransport(connectorRoutes(hub)));
 });
 
@@ -200,7 +210,7 @@ const PREPARED = finish({
 
 /** Starts `run` and records its outcome once it settles. */
 function startRun(job: Job) {
-  const events: JobEvent[] = [];
+  const events: JobReport[] = [];
   const state: { result: RunResult | null } = { result: null };
   void hub.run(PASEO.id, job, { onEvent: (event) => events.push(event) }).then((result) => {
     state.result = result;
@@ -211,6 +221,16 @@ function startRun(job: Job) {
       return state.result;
     },
   };
+}
+
+/** How a call answered: `ok`, or its error code. */
+async function callCode(call: Promise<unknown>): Promise<Code | "ok"> {
+  try {
+    await call;
+    return "ok";
+  } catch (error) {
+    return ConnectError.from(error).code;
+  }
 }
 
 async function callError(call: Promise<unknown>): Promise<Code> {
@@ -225,6 +245,7 @@ async function callError(call: Promise<unknown>): Promise<Code> {
 describe("auth", () => {
   it("refuses a call without a bearer token", async () => {
     expect(await callError(client.acceptJob({ jobId: "x" }))).toBe(Code.Unauthenticated);
+    expect(authCache.authenticate).not.toHaveBeenCalled();
   });
 
   it("refuses an unknown token", async () => {
@@ -233,40 +254,25 @@ describe("auth", () => {
     );
   });
 
-  it("answers UNAVAILABLE when the refresh for an unknown token fails", async () => {
-    store.listActive.mockRejectedValue(new Error("db down"));
+  it("answers UNAVAILABLE when the cache can't check the token", async () => {
+    authCache.authenticate.mockResolvedValue(err({ kind: "unavailable" }));
+    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("paseo-token")))).toBe(
+      Code.Unavailable,
+    );
+  });
+
+  it("closes every stream with UNAVAILABLE within 5 s of the cache going stale", async () => {
+    const stream = await connected("paseo-token", []);
+    stale = true;
     await advance(5_000);
-    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.Unavailable);
-  });
-
-  it("closes every stream with UNAVAILABLE once the cache is stale", async () => {
-    const stream = await connected("paseo-token", []);
-    store.listActive.mockRejectedValue(new Error("db down"));
-    await advance(60_000);
-    expect(stream.error).toBeNull();
-    await advance(30_000);
     await stream.done;
     expect(stream.error?.code).toBe(Code.Unavailable);
   });
 
-  it("closes streams within 5 s of the cache going stale, whatever the refreshes do", async () => {
-    const stream = await connected("paseo-token", []);
-    store.listActive.mockReturnValue(new Promise(() => {}));
-    await advance(95_000);
-    await stream.done;
-    expect(stream.error?.code).toBe(Code.Unavailable);
-  });
-
-  it("closes streams on time after a good load between refresh ticks", async () => {
-    store.listActive.mockResolvedValue([PASEO, OTHER, NEW_CONNECTOR]);
-    await advance(5_000);
-    // An unknown token loads the cache at 5 s.
-    expect(await callError(client.acceptJob({ jobId: "x" }, bearer("new")))).toBe(Code.NotFound);
-    store.listActive.mockRejectedValue(new Error("db down"));
-    const stream = await connected("paseo-token", []);
-    await advance(95_000);
-    await stream.done;
-    expect(stream.error?.code).toBe(Code.Unavailable);
+  it("refreshes the cache every 30 s, at most one refresh at a time", async () => {
+    authCache.refresh.mockReturnValue(new Promise(() => {}));
+    await advance(90_000);
+    expect(authCache.refresh).toHaveBeenCalledTimes(1);
   });
 
   it("closes a revoked connector's stream at the next refresh, and its accepted job is lost", async () => {
@@ -275,7 +281,7 @@ describe("auth", () => {
     await settle();
     await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
 
-    store.listActive.mockResolvedValue([OTHER]);
+    tokens.delete("paseo-token");
     await advance(30_000);
     await stream.done;
     expect(stream.error?.code).toBe(Code.Unauthenticated);
@@ -293,8 +299,8 @@ describe("auth", () => {
     await settle();
     await client.acceptJob({ jobId: "task-1/prepare/d1" }, bearer("paseo-token"));
 
-    const rotated: ActiveConnector = { ...PASEO, tokenHash: hashConnectorToken("rotated") };
-    store.listActive.mockResolvedValue([rotated, OTHER]);
+    tokens.delete("paseo-token");
+    tokens.set("rotated", { ...PASEO, tokenHash: hashConnectorToken("rotated") });
     await advance(30_000);
     await stream.done;
     expect(stream.error?.code).toBe(Code.Unauthenticated);
@@ -303,7 +309,7 @@ describe("auth", () => {
     expect(again.awaited()).toEqual(["task-1/prepare/d1"]);
     await client.finishJob(PREPARED, bearer("rotated"));
     await settle();
-    expect(run.result).toEqual(ok(expect.objectContaining({ kind: "completed" })));
+    expect(run.result).toEqual(ok({ kind: "completed", result: { phase: "prepare" } }));
   });
 });
 
@@ -332,18 +338,26 @@ describe("a job's life", () => {
         lastSeq: 3n,
         outcome: {
           case: "completed",
-          value: { result: { case: "plan", value: { plan: "the plan", sessionId: "s-1" } } },
+          value: {
+            result: { case: "plan", value: { plan: "the plan", agentSessionId: "s-1" } },
+          },
         },
       }),
       auth,
     );
     await settle();
 
-    expect(run.events.map((e) => e.seq)).toEqual([1n, 2n, 3n]);
-    expect(expectOk(expectDefined(run.result, "result"))).toMatchObject({
-      kind: "completed",
-      result: { result: { case: "plan", value: { plan: "the plan", sessionId: "s-1" } } },
-    });
+    expect(run.events).toEqual([
+      { kind: "text_delta", text: "a" },
+      { kind: "text_delta", text: "b" },
+      { kind: "text_delta", text: "c" },
+    ]);
+    expect(run.result).toEqual(
+      ok({
+        kind: "completed",
+        result: { phase: "plan", plan: "the plan", agentSessionId: "s-1" },
+      }),
+    );
   });
 
   it("waits for a session when none is open, then sends the job", async () => {
@@ -441,10 +455,12 @@ describe("a job's life", () => {
       Code.InvalidArgument,
     );
     await settle();
-    expect(expectOk(expectDefined(run.result, "result"))).toMatchObject({
-      kind: "failed",
-      error: { code: JobErrorCode.UNSPECIFIED },
-    });
+    expect(run.result).toEqual(
+      err({
+        kind: "invalid_result",
+        message: "a prepare job completes with a prepared result, not published",
+      }),
+    );
   });
 
   it("answers INVALID_ARGUMENT for a FinishJob without an outcome, leaving the job open", async () => {
@@ -462,19 +478,159 @@ describe("a job's life", () => {
 
   it("keeps delivering events when a handler throws", async () => {
     await connected("paseo-token", []);
-    const seen: bigint[] = [];
+    const seen: JobReport[] = [];
     void hub.run(PASEO.id, planJob(null), {
       onEvent: () => {
         throw new Error("handler bug");
       },
     });
-    void hub.run(PASEO.id, planJob(null), { onEvent: (event) => seen.push(event.seq) });
+    void hub.run(PASEO.id, planJob(null), { onEvent: (event) => seen.push(event) });
     await settle();
     await client.reportEvents(
       { jobId: "task-1/plan/d2", events: [textEvent(1n, "a"), textEvent(2n, "b")] },
       bearer("paseo-token"),
     );
-    expect(seen).toEqual([1n, 2n]);
+    expect(seen).toEqual([
+      { kind: "text_delta", text: "a" },
+      { kind: "text_delta", text: "b" },
+    ]);
+  });
+});
+
+describe("what callers receive", () => {
+  /** Runs `job`, finishes it with `request`, and returns the run and how the call answered. */
+  async function finishWith(job: Job, request: FinishJobRequest) {
+    await connected("paseo-token", []);
+    const run = startRun(job);
+    await settle();
+    const code = await callCode(client.finishJob(request, bearer("paseo-token")));
+    await settle();
+    return { run, code };
+  }
+
+  async function failWith(code: JobErrorCode) {
+    const { run } = await finishWith(
+      prepareJob(),
+      finish({
+        jobId: "task-1/prepare/d1",
+        outcome: { case: "failed", value: { code, message: "boom" } },
+      }),
+    );
+    return run;
+  }
+
+  it("maps a connector's error code to the port's", async () => {
+    const known = await failWith(JobErrorCode.SESSION_LOST);
+    expect(known.result).toEqual(ok({ kind: "failed", code: "session_lost", message: "boom" }));
+  });
+
+  it("maps an error code this build doesn't know to unknown", async () => {
+    const run = await failWith(99 as JobErrorCode);
+    expect(run.result).toEqual(ok({ kind: "failed", code: "unknown", message: "boom" }));
+  });
+
+  it("maps an unspecified error code to unspecified", async () => {
+    const run = await failWith(JobErrorCode.UNSPECIFIED);
+    expect(run.result).toEqual(ok({ kind: "failed", code: "unspecified", message: "boom" }));
+  });
+
+  it("refuses a verify verdict with no outcome as an invalid result", async () => {
+    const { run, code } = await finishWith(
+      verifyJob(600),
+      finish({
+        jobId: "task-1/verify/d3",
+        outcome: {
+          case: "completed",
+          value: { result: { case: "verify", value: { outputTail: "x" } } },
+        },
+      }),
+    );
+    expect(code).toBe(Code.InvalidArgument);
+    expect(run.result).toEqual(
+      err({ kind: "invalid_result", message: "a verify verdict carries no outcome" }),
+    );
+  });
+
+  it("refuses a release result with no outcome as an invalid result", async () => {
+    const { run, code } = await finishWith(
+      releaseJob(),
+      finish({
+        jobId: "task-1/release/d4",
+        outcome: { case: "completed", value: { result: { case: "released", value: {} } } },
+      }),
+    );
+    expect(code).toBe(Code.InvalidArgument);
+    expect(run.result).toEqual(
+      err({ kind: "invalid_result", message: "a release result carries no outcome" }),
+    );
+  });
+
+  it("skips an event of a kind this build doesn't know, still counting its seq", async () => {
+    await connected("paseo-token", []);
+    const run = startRun(planJob(null));
+    await settle();
+    const unknown = create(JobEventSchema, { seq: 1n });
+    await client.reportEvents(
+      { jobId: "task-1/plan/d2", events: [unknown, textEvent(1n, "dup"), textEvent(2n, "b")] },
+      bearer("paseo-token"),
+    );
+    expect(run.events).toEqual([{ kind: "text_delta", text: "b" }]);
+  });
+
+  it("hands every caller a frozen outcome", async () => {
+    await connected("paseo-token", []);
+    const first = startRun(prepareJob());
+    const second = startRun(prepareJob());
+    await settle();
+    await client.finishJob(PREPARED, bearer("paseo-token"));
+    await settle();
+    const outcome = expectDefined(first.result, "first result");
+    expect(second.result).toEqual(outcome);
+    expect(Object.isFrozen(outcome)).toBe(true);
+    const completed = expectOk(outcome);
+    if (completed.kind !== "completed") throw new Error("expected a completed outcome");
+    expect(Object.isFrozen(completed.result)).toBe(true);
+  });
+
+  it("keeps its own copy of the job, so a caller changing it after dispatch changes nothing", async () => {
+    const first = await connected("paseo-token", []);
+    const job = planJob(null);
+    startRun(job);
+    await settle();
+    if (job.spec.case !== "plan") throw new Error("a plan job");
+    job.spec.value.prompt = "changed";
+    await first.disconnect();
+    const again = await connected("paseo-token", []);
+    const resent = again.received.find((m) => m.message.case === "job");
+    if (resent?.message.case !== "job" || resent.message.value.spec.case !== "plan") {
+      throw new Error("expected the plan job re-sent");
+    }
+    expect(resent.message.value.spec.value.prompt).toBe("plan it");
+  });
+
+  it("checks the token budget against the connector's report, not what a handler does with it", async () => {
+    await connected("paseo-token", []);
+    const run = startRun(planJob(100n));
+    const tampered: string[] = [];
+    void hub.run(PASEO.id, planJob(100n), {
+      onEvent: (event) => {
+        try {
+          // A frozen report: the assignment throws.
+          Object.assign(event, { kind: "text_delta" });
+        } catch {
+          tampered.push("refused");
+        }
+      },
+    });
+    await settle();
+    await client.acceptJob({ jobId: "task-1/plan/d2" }, bearer("paseo-token"));
+    await client.reportEvents(
+      { jobId: "task-1/plan/d2", events: [usageEvent(1n, 500n, 0n)] },
+      bearer("paseo-token"),
+    );
+    await settle();
+    expect(tampered).toEqual(["refused"]);
+    expect(run.result).toEqual(err({ kind: "timed_out", cap: "token_budget" }));
   });
 });
 
@@ -709,7 +865,7 @@ describe("caps", () => {
     );
     await settle();
     expect(run.result).toEqual(err({ kind: "timed_out", cap: "token_budget" }));
-    expect(run.events.map((e) => e.seq)).toEqual([1n, 2n]);
+    expect(run.events.map((report) => report.kind)).toEqual(["usage", "usage"]);
     expect(stream.cancels()).toEqual(["task-1/plan/d2"]);
   });
 });

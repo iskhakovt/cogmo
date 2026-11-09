@@ -1,6 +1,7 @@
 /**
  * The hub's cache of active connectors, keyed on token hash
- * (design/connectors.md → Wire contract → Auth).
+ * (design/connectors.md → Wire contract → Auth). Ages are measured on the
+ * monotonic clock, so a wall-clock step moves no deadline.
  */
 
 import { err, ok, type Result } from "neverthrow";
@@ -10,13 +11,16 @@ import { finishesWithin } from "../util/finishes-within.js";
 import type { ActiveConnector, ConnectorStore } from "./store/index.js";
 import { hashConnectorToken } from "./token.js";
 
+/** How often the hub reloads the cache. */
+export const AUTH_REFRESH_MS = 30_000;
+
 /** At most one refresh per this long for tokens the cache does not recognise. */
 const UNKNOWN_TOKEN_REFRESH_MS = 5_000;
 
-/** A cache not loaded for this long, three refreshes in a row, fails every call closed. */
-const STALE_MS = 90_000;
+/** A cache not loaded for three refreshes in a row fails every call closed. */
+const STALE_MS = 3 * AUTH_REFRESH_MS;
 
-/** How long a call waits on a refresh before answering `UNAVAILABLE`. */
+/** How long after a refresh starts a call still waits on it before answering `UNAVAILABLE`. */
 const REFRESH_WAIT_MS = 5_000;
 
 export type AuthError = { kind: "unauthenticated" } | { kind: "unavailable" };
@@ -40,19 +44,27 @@ export interface ConnectorAuthCache {
   refresh(): Promise<void>;
 }
 
+/** A reload in flight, and the one bounded wait every caller shares. */
+interface Refresh {
+  readonly done: Promise<void>;
+  /** Resolves `true` once `done` settles, or `false` `REFRESH_WAIT_MS` after the reload started. */
+  readonly waited: Promise<boolean>;
+}
+
 export class ConnectorAuth implements ConnectorAuthCache {
   readonly #deps: ConnectorAuthDeps;
-  #byHash = new Map<string, ActiveConnector>();
+  #byHash: ReadonlyMap<string, ActiveConnector> = new Map();
   #attemptedAt = Number.NEGATIVE_INFINITY;
   /** When the last successful load started. */
   #loadedAt = Number.NEGATIVE_INFINITY;
   #lastLoadFailed = false;
-  #refreshing: Promise<void> | null = null;
+  #refreshing: Refresh | null = null;
 
   private constructor(deps: ConnectorAuthDeps) {
     this.#deps = deps;
   }
 
+  /** Loads the active connectors; rejects when that first read fails. */
   static async create(deps: ConnectorAuthDeps): Promise<ConnectorAuth> {
     const auth = new ConnectorAuth(deps);
     await auth.#load();
@@ -62,9 +74,9 @@ export class ConnectorAuth implements ConnectorAuthCache {
   async authenticate(rawToken: string): Promise<Result<ActiveConnector, AuthError>> {
     const tokenHash = hashConnectorToken(rawToken);
     if (!this.#byHash.has(tokenHash) || this.isStale()) {
-      const throttled = Date.now() - this.#attemptedAt < UNKNOWN_TOKEN_REFRESH_MS;
-      const refresh = this.#refreshing ?? (throttled ? null : this.refresh());
-      if (refresh && !(await finishesWithin(refresh, REFRESH_WAIT_MS))) {
+      const throttled = performance.now() - this.#attemptedAt < UNKNOWN_TOKEN_REFRESH_MS;
+      if (this.#refreshing === null && !throttled) void this.refresh();
+      if (this.#refreshing !== null && !(await this.#refreshing.waited)) {
         return err({ kind: "unavailable" });
       }
     }
@@ -79,23 +91,26 @@ export class ConnectorAuth implements ConnectorAuthCache {
   }
 
   isStale(): boolean {
-    return Date.now() - this.#loadedAt >= STALE_MS;
+    return performance.now() - this.#loadedAt >= STALE_MS;
   }
 
   refresh(): Promise<void> {
-    this.#refreshing ??= this.#load()
-      .catch((error: unknown) => {
-        logger.warn({ err: error }, "connector auth: refreshing the connector cache failed");
-      })
-      .finally(() => {
-        this.#refreshing = null;
-      });
-    return this.#refreshing;
+    if (this.#refreshing === null) {
+      const done = this.#load()
+        .catch((error: unknown) => {
+          logger.warn({ err: error }, "connector auth: refreshing the connector cache failed");
+        })
+        .finally(() => {
+          this.#refreshing = null;
+        });
+      this.#refreshing = { done, waited: finishesWithin(done, REFRESH_WAIT_MS) };
+    }
+    return this.#refreshing.done;
   }
 
   /** Loads the active connectors; rejects when the read fails. */
   async #load(): Promise<void> {
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     this.#attemptedAt = startedAt;
     const { runInTx, connectorStore } = this.#deps;
     try {

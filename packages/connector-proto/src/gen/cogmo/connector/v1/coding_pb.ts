@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file cogmo/connector/v1/coding.proto.
  */
 export const file_cogmo_connector_v1_coding: GenFile = /*@__PURE__*/
-  fileDesc("Ch9jb2dtby9jb25uZWN0b3IvdjEvY29kaW5nLnByb3RvEhJjb2dtby5jb25uZWN0b3IudjEiSwoLUHJlcGFyZVNwZWMSEgoKcmVtb3RlX3VybBgBIAEoCRITCgtiYXNlX2JyYW5jaBgCIAEoCRITCgt3b3JrX2JyYW5jaBgDIAEoCSKCAQoNQWdlbnRUdXJuU3BlYxIOCgZwcm9tcHQYASABKAkSDQoFYWdlbnQYAiABKAkSGQoMdG9rZW5fYnVkZ2V0GAMgASgESACIAQESFwoKc2Vzc2lvbl9pZBgEIAEoCUgBiAEBQg8KDV90b2tlbl9idWRnZXRCDQoLX3Nlc3Npb25faWQiNgoKVmVyaWZ5U3BlYxIPCgdjb21tYW5kGAEgASgJEhcKD3RpbWVvdXRfc2Vjb25kcxgCIAEoDSI5CgtQdWJsaXNoU3BlYxIWCg5jb21taXRfbWVzc2FnZRgBIAEoCRISCgpyZW1vdGVfcmVmGAIgASgJIjcKC1JlbGVhc2VTcGVjEhgKC3NhbHZhZ2VfcmVmGAEgASgJSACIAQFCDgoMX3NhbHZhZ2VfcmVmIikKCFRvb2xDYWxsEgwKBG5hbWUYASABKAkSDwoHc3VtbWFyeRgCIAEoCSI3CgpUb29sUmVzdWx0EgwKBG5hbWUYASABKAkSCgoCb2sYAiABKAgSDwoHc3VtbWFyeRgDIAEoCSJYCgVVc2FnZRIUCgxpbnB1dF90b2tlbnMYASABKAQSFQoNb3V0cHV0X3Rva2VucxgCIAEoBBIVCghjb3N0X3VzZBgDIAEoAUgAiAEBQgsKCV9jb3N0X3VzZCIKCghQcmVwYXJlZCIuCgpQbGFuUmVzdWx0EgwKBHBsYW4YASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCSI0CghFeGVjdXRlZBIoCgV1c2FnZRgBIAEoCzIZLmNvZ21vLmNvbm5lY3Rvci52MS5Vc2FnZSJ9Cg1WZXJpZnlWZXJkaWN0EhMKCWV4aXRfY29kZRgBIAEoBUgAEjcKCXRpbWVkX291dBgCIAEoCzIiLmNvZ21vLmNvbm5lY3Rvci52MS5WZXJpZnlUaW1lZE91dEgAEhMKC291dHB1dF90YWlsGAMgASgJQgkKB291dGNvbWUiEAoOVmVyaWZ5VGltZWRPdXQiHQoJUHVibGlzaGVkEhAKCGhlYWRfc2hhGAEgASgJIsIBCghSZWxlYXNlZBI5Cg1yZW1vdmVkX2NsZWFuGAEgASgLMiAuY29nbW8uY29ubmVjdG9yLnYxLlJlbW92ZWRDbGVhbkgAEkYKFHNhbHZhZ2VkX2FuZF9yZW1vdmVkGAIgASgLMiYuY29nbW8uY29ubmVjdG9yLnYxLlNhbHZhZ2VkQW5kUmVtb3ZlZEgAEigKBGtlcHQYAyABKAsyGC5jb2dtby5jb25uZWN0b3IudjEuS2VwdEgAQgkKB291dGNvbWUiDgoMUmVtb3ZlZENsZWFuIjYKElNhbHZhZ2VkQW5kUmVtb3ZlZBITCgtzYWx2YWdlX3JlZhgBIAEoCRILCgNzaGEYAiABKAkiFgoES2VwdBIOCgZyZWFzb24YASABKAliBnByb3RvMw");
+  fileDesc("Ch9jb2dtby9jb25uZWN0b3IvdjEvY29kaW5nLnByb3RvEhJjb2dtby5jb25uZWN0b3IudjEiSwoLUHJlcGFyZVNwZWMSEgoKcmVtb3RlX3VybBgBIAEoCRITCgtiYXNlX2JyYW5jaBgCIAEoCRITCgt3b3JrX2JyYW5jaBgDIAEoCSJVCghQbGFuU3BlYxIOCgZwcm9tcHQYASABKAkSDQoFYWdlbnQYAiABKAkSGQoMdG9rZW5fYnVkZ2V0GAMgASgESACIAQFCDwoNX3Rva2VuX2J1ZGdldCJyCgtFeGVjdXRlU3BlYxIOCgZwcm9tcHQYASABKAkSDQoFYWdlbnQYAiABKAkSGQoMdG9rZW5fYnVkZ2V0GAMgASgESACIAQESGAoQYWdlbnRfc2Vzc2lvbl9pZBgEIAEoCUIPCg1fdG9rZW5fYnVkZ2V0IjYKClZlcmlmeVNwZWMSDwoHY29tbWFuZBgBIAEoCRIXCg90aW1lb3V0X3NlY29uZHMYAiABKA0iOgoLUHVibGlzaFNwZWMSFgoOY29tbWl0X21lc3NhZ2UYASABKAkSEwoLd29ya19icmFuY2gYAiABKAkiNwoLUmVsZWFzZVNwZWMSGAoLc2FsdmFnZV9yZWYYASABKAlIAIgBAUIOCgxfc2FsdmFnZV9yZWYiGAoIVG9vbENhbGwSDAoEbmFtZRgBIAEoCSI3CgpUb29sUmVzdWx0EgwKBG5hbWUYASABKAkSCgoCb2sYAiABKAgSDwoHc3VtbWFyeRgDIAEoCSKFAQoFVXNhZ2USGQoMaW5wdXRfdG9rZW5zGAEgASgESACIAQESGgoNb3V0cHV0X3Rva2VucxgCIAEoBEgBiAEBEhUKCGNvc3RfdXNkGAMgASgBSAKIAQFCDwoNX2lucHV0X3Rva2Vuc0IQCg5fb3V0cHV0X3Rva2Vuc0ILCglfY29zdF91c2QiCgoIUHJlcGFyZWQiNAoKUGxhblJlc3VsdBIMCgRwbGFuGAEgASgJEhgKEGFnZW50X3Nlc3Npb25faWQYAiABKAkiNAoIRXhlY3V0ZWQSKAoFdXNhZ2UYASABKAsyGS5jb2dtby5jb25uZWN0b3IudjEuVXNhZ2UifQoNVmVyaWZ5VmVyZGljdBITCglleGl0X2NvZGUYASABKAVIABI3Cgl0aW1lZF9vdXQYAiABKAsyIi5jb2dtby5jb25uZWN0b3IudjEuVmVyaWZ5VGltZWRPdXRIABITCgtvdXRwdXRfdGFpbBgDIAEoCUIJCgdvdXRjb21lIhAKDlZlcmlmeVRpbWVkT3V0Ih0KCVB1Ymxpc2hlZBIQCghoZWFkX3NoYRgBIAEoCSLCAQoIUmVsZWFzZWQSOQoNcmVtb3ZlZF9jbGVhbhgBIAEoCzIgLmNvZ21vLmNvbm5lY3Rvci52MS5SZW1vdmVkQ2xlYW5IABJGChRzYWx2YWdlZF9hbmRfcmVtb3ZlZBgCIAEoCzImLmNvZ21vLmNvbm5lY3Rvci52MS5TYWx2YWdlZEFuZFJlbW92ZWRIABIoCgRrZXB0GAMgASgLMhguY29nbW8uY29ubmVjdG9yLnYxLktlcHRIAEIJCgdvdXRjb21lIg4KDFJlbW92ZWRDbGVhbiI2ChJTYWx2YWdlZEFuZFJlbW92ZWQSEwoLc2FsdmFnZV9yZWYYASABKAkSCwoDc2hhGAIgASgJIhYKBEtlcHQSDgoGcmVhc29uGAEgASgJYgZwcm90bzM");
 
 /**
  * @generated from message cogmo.connector.v1.PrepareSpec
@@ -46,9 +46,11 @@ export const PrepareSpecSchema: GenMessage<PrepareSpec> = /*@__PURE__*/
   messageDesc(file_cogmo_connector_v1_coding, 0);
 
 /**
- * @generated from message cogmo.connector.v1.AgentTurnSpec
+ * A plan turn: the agent explores in plan mode and returns a plan.
+ *
+ * @generated from message cogmo.connector.v1.PlanSpec
  */
-export type AgentTurnSpec = Message<"cogmo.connector.v1.AgentTurnSpec"> & {
+export type PlanSpec = Message<"cogmo.connector.v1.PlanSpec"> & {
   /**
    * cogmo keeps the Job under the 4 MiB message limit
    *
@@ -57,31 +59,68 @@ export type AgentTurnSpec = Message<"cogmo.connector.v1.AgentTurnSpec"> & {
   prompt: string;
 
   /**
+   * `coding_tasks.backend` (`claude`, `codex`); a connector that doesn't serve it fails the job UNSUPPORTED
+   *
    * @generated from field: string agent = 2;
    */
   agent: string;
 
   /**
-   * input plus output tokens; absent, no budget
+   * input plus output tokens, as `Usage` counts them; absent, no budget
+   *
+   * @generated from field: optional uint64 token_budget = 3;
+   */
+  tokenBudget?: bigint | undefined;
+};
+
+/**
+ * Describes the message cogmo.connector.v1.PlanSpec.
+ * Use `create(PlanSpecSchema)` to create a new message.
+ */
+export const PlanSpecSchema: GenMessage<PlanSpec> = /*@__PURE__*/
+  messageDesc(file_cogmo_connector_v1_coding, 1);
+
+/**
+ * An execute turn: the agent resumes the plan's session and makes the change.
+ *
+ * @generated from message cogmo.connector.v1.ExecuteSpec
+ */
+export type ExecuteSpec = Message<"cogmo.connector.v1.ExecuteSpec"> & {
+  /**
+   * cogmo keeps the Job under the 4 MiB message limit
+   *
+   * @generated from field: string prompt = 1;
+   */
+  prompt: string;
+
+  /**
+   * as in PlanSpec
+   *
+   * @generated from field: string agent = 2;
+   */
+  agent: string;
+
+  /**
+   * as in PlanSpec
    *
    * @generated from field: optional uint64 token_budget = 3;
    */
   tokenBudget?: bigint | undefined;
 
   /**
-   * the plan's session handle, on execute
+   * the plan's `PlanResult.agent_session_id`; a connector that lost it fails the job SESSION_LOST
    *
-   * @generated from field: optional string session_id = 4;
+   * @generated from field: string agent_session_id = 4;
    */
-  sessionId?: string | undefined;
+  agentSessionId: string;
 };
 
 /**
- * Describes the message cogmo.connector.v1.AgentTurnSpec.
- * Use `create(AgentTurnSpecSchema)` to create a new message.
+ * Describes the message cogmo.connector.v1.ExecuteSpec.
+ * Use `create(ExecuteSpecSchema)` to create a new message.
  */
-export const AgentTurnSpecSchema: GenMessage<AgentTurnSpec> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 1);
+export const ExecuteSpecSchema: GenMessage<ExecuteSpec> = /*@__PURE__*/
+  messageDesc(file_cogmo_connector_v1_coding, 2);
 
 /**
  * @generated from message cogmo.connector.v1.VerifySpec
@@ -103,7 +142,7 @@ export type VerifySpec = Message<"cogmo.connector.v1.VerifySpec"> & {
  * Use `create(VerifySpecSchema)` to create a new message.
  */
 export const VerifySpecSchema: GenMessage<VerifySpec> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 2);
+  messageDesc(file_cogmo_connector_v1_coding, 3);
 
 /**
  * @generated from message cogmo.connector.v1.PublishSpec
@@ -115,9 +154,11 @@ export type PublishSpec = Message<"cogmo.connector.v1.PublishSpec"> & {
   commitMessage: string;
 
   /**
-   * @generated from field: string remote_ref = 2;
+   * the connector pushes the workspace to `refs/heads/<work_branch>`
+   *
+   * @generated from field: string work_branch = 2;
    */
-  remoteRef: string;
+  workBranch: string;
 };
 
 /**
@@ -125,7 +166,7 @@ export type PublishSpec = Message<"cogmo.connector.v1.PublishSpec"> & {
  * Use `create(PublishSpecSchema)` to create a new message.
  */
 export const PublishSpecSchema: GenMessage<PublishSpec> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 3);
+  messageDesc(file_cogmo_connector_v1_coding, 4);
 
 /**
  * @generated from message cogmo.connector.v1.ReleaseSpec
@@ -144,7 +185,7 @@ export type ReleaseSpec = Message<"cogmo.connector.v1.ReleaseSpec"> & {
  * Use `create(ReleaseSpecSchema)` to create a new message.
  */
 export const ReleaseSpecSchema: GenMessage<ReleaseSpec> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 4);
+  messageDesc(file_cogmo_connector_v1_coding, 5);
 
 /**
  * @generated from message cogmo.connector.v1.ToolCall
@@ -154,11 +195,6 @@ export type ToolCall = Message<"cogmo.connector.v1.ToolCall"> & {
    * @generated from field: string name = 1;
    */
   name: string;
-
-  /**
-   * @generated from field: string summary = 2;
-   */
-  summary: string;
 };
 
 /**
@@ -166,7 +202,7 @@ export type ToolCall = Message<"cogmo.connector.v1.ToolCall"> & {
  * Use `create(ToolCallSchema)` to create a new message.
  */
 export const ToolCallSchema: GenMessage<ToolCall> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 5);
+  messageDesc(file_cogmo_connector_v1_coding, 6);
 
 /**
  * @generated from message cogmo.connector.v1.ToolResult
@@ -183,6 +219,8 @@ export type ToolResult = Message<"cogmo.connector.v1.ToolResult"> & {
   ok: boolean;
 
   /**
+   * at most 1 KiB, truncated by the connector
+   *
    * @generated from field: string summary = 3;
    */
   summary: string;
@@ -193,27 +231,27 @@ export type ToolResult = Message<"cogmo.connector.v1.ToolResult"> & {
  * Use `create(ToolResultSchema)` to create a new message.
  */
 export const ToolResultSchema: GenMessage<ToolResult> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 6);
+  messageDesc(file_cogmo_connector_v1_coding, 7);
 
 /**
- * Cumulative for the job.
+ * Cumulative for the job. Each count is absent when the runtime reports none.
  *
  * @generated from message cogmo.connector.v1.Usage
  */
 export type Usage = Message<"cogmo.connector.v1.Usage"> & {
   /**
-   * @generated from field: uint64 input_tokens = 1;
-   */
-  inputTokens: bigint;
-
-  /**
-   * @generated from field: uint64 output_tokens = 2;
-   */
-  outputTokens: bigint;
-
-  /**
-   * absent when the runtime reports no cost
+   * input not read from or written to the prompt cache, as the Claude CLI's `result.usage.input_tokens` counts it
    *
+   * @generated from field: optional uint64 input_tokens = 1;
+   */
+  inputTokens?: bigint | undefined;
+
+  /**
+   * @generated from field: optional uint64 output_tokens = 2;
+   */
+  outputTokens?: bigint | undefined;
+
+  /**
    * @generated from field: optional double cost_usd = 3;
    */
   costUsd?: number | undefined;
@@ -224,7 +262,7 @@ export type Usage = Message<"cogmo.connector.v1.Usage"> & {
  * Use `create(UsageSchema)` to create a new message.
  */
 export const UsageSchema: GenMessage<Usage> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 7);
+  messageDesc(file_cogmo_connector_v1_coding, 8);
 
 /**
  * @generated from message cogmo.connector.v1.Prepared
@@ -237,7 +275,7 @@ export type Prepared = Message<"cogmo.connector.v1.Prepared"> & {
  * Use `create(PreparedSchema)` to create a new message.
  */
 export const PreparedSchema: GenMessage<Prepared> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 8);
+  messageDesc(file_cogmo_connector_v1_coding, 9);
 
 /**
  * @generated from message cogmo.connector.v1.PlanResult
@@ -251,9 +289,11 @@ export type PlanResult = Message<"cogmo.connector.v1.PlanResult"> & {
   plan: string;
 
   /**
-   * @generated from field: string session_id = 2;
+   * the agent's session handle, which execute passes back
+   *
+   * @generated from field: string agent_session_id = 2;
    */
-  sessionId: string;
+  agentSessionId: string;
 };
 
 /**
@@ -261,7 +301,7 @@ export type PlanResult = Message<"cogmo.connector.v1.PlanResult"> & {
  * Use `create(PlanResultSchema)` to create a new message.
  */
 export const PlanResultSchema: GenMessage<PlanResult> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 9);
+  messageDesc(file_cogmo_connector_v1_coding, 10);
 
 /**
  * @generated from message cogmo.connector.v1.Executed
@@ -278,7 +318,7 @@ export type Executed = Message<"cogmo.connector.v1.Executed"> & {
  * Use `create(ExecutedSchema)` to create a new message.
  */
 export const ExecutedSchema: GenMessage<Executed> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 10);
+  messageDesc(file_cogmo_connector_v1_coding, 11);
 
 /**
  * @generated from message cogmo.connector.v1.VerifyVerdict
@@ -314,7 +354,7 @@ export type VerifyVerdict = Message<"cogmo.connector.v1.VerifyVerdict"> & {
  * Use `create(VerifyVerdictSchema)` to create a new message.
  */
 export const VerifyVerdictSchema: GenMessage<VerifyVerdict> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 11);
+  messageDesc(file_cogmo_connector_v1_coding, 12);
 
 /**
  * @generated from message cogmo.connector.v1.VerifyTimedOut
@@ -327,7 +367,7 @@ export type VerifyTimedOut = Message<"cogmo.connector.v1.VerifyTimedOut"> & {
  * Use `create(VerifyTimedOutSchema)` to create a new message.
  */
 export const VerifyTimedOutSchema: GenMessage<VerifyTimedOut> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 12);
+  messageDesc(file_cogmo_connector_v1_coding, 13);
 
 /**
  * @generated from message cogmo.connector.v1.Published
@@ -344,7 +384,7 @@ export type Published = Message<"cogmo.connector.v1.Published"> & {
  * Use `create(PublishedSchema)` to create a new message.
  */
 export const PublishedSchema: GenMessage<Published> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 13);
+  messageDesc(file_cogmo_connector_v1_coding, 14);
 
 /**
  * @generated from message cogmo.connector.v1.Released
@@ -379,7 +419,7 @@ export type Released = Message<"cogmo.connector.v1.Released"> & {
  * Use `create(ReleasedSchema)` to create a new message.
  */
 export const ReleasedSchema: GenMessage<Released> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 14);
+  messageDesc(file_cogmo_connector_v1_coding, 15);
 
 /**
  * @generated from message cogmo.connector.v1.RemovedClean
@@ -392,7 +432,7 @@ export type RemovedClean = Message<"cogmo.connector.v1.RemovedClean"> & {
  * Use `create(RemovedCleanSchema)` to create a new message.
  */
 export const RemovedCleanSchema: GenMessage<RemovedClean> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 15);
+  messageDesc(file_cogmo_connector_v1_coding, 16);
 
 /**
  * @generated from message cogmo.connector.v1.SalvagedAndRemoved
@@ -414,13 +454,15 @@ export type SalvagedAndRemoved = Message<"cogmo.connector.v1.SalvagedAndRemoved"
  * Use `create(SalvagedAndRemovedSchema)` to create a new message.
  */
 export const SalvagedAndRemovedSchema: GenMessage<SalvagedAndRemoved> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 16);
+  messageDesc(file_cogmo_connector_v1_coding, 17);
 
 /**
  * @generated from message cogmo.connector.v1.Kept
  */
 export type Kept = Message<"cogmo.connector.v1.Kept"> & {
   /**
+   * at most 1 KiB, truncated by the connector
+   *
    * @generated from field: string reason = 1;
    */
   reason: string;
@@ -431,5 +473,5 @@ export type Kept = Message<"cogmo.connector.v1.Kept"> & {
  * Use `create(KeptSchema)` to create a new message.
  */
 export const KeptSchema: GenMessage<Kept> = /*@__PURE__*/
-  messageDesc(file_cogmo_connector_v1_coding, 17);
+  messageDesc(file_cogmo_connector_v1_coding, 18);
 

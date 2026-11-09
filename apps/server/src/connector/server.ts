@@ -4,10 +4,11 @@
  */
 
 import { createServer, type Http2Session } from "node:http2";
+import { createContextValues } from "@connectrpc/connect";
 import { connectNodeAdapter } from "@connectrpc/connect-node";
 import { logger } from "../logger.js";
 import type { ConnectorHub } from "./hub.js";
-import { connectorRoutes } from "./service.js";
+import { connectorRoutes, HTTP2_STREAM } from "./service.js";
 
 /** HTTP/2 keepalive: a ping this often, and a connection that misses one this long is closed. */
 const PING_INTERVAL_MS = 30_000;
@@ -40,6 +41,8 @@ export async function startConnectorServer(params: {
     grpcWeb: false,
     connect: false,
     readMaxBytes: READ_MAX_BYTES,
+    contextValues: (request) =>
+      createContextValues().set(HTTP2_STREAM, "stream" in request ? request.stream : undefined),
   });
   const server = createServer(handler);
   const sessions = new Set<Http2Session>();
