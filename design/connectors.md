@@ -19,6 +19,8 @@ A connector is a process outside cogmo that runs part of cogmo's work somewhere 
 | Credentials | cogmo sends no secret to a connector. A connector pushes with its own git credentials; cogmo opens the PR with the repo's GitHub identity. `PrepareSpec.remote_url` is the repo's remote with any password removed, and with the whole userinfo removed from an http(s) remote, where a token can sit in either position. An SSH login name such as `git@` stays. | A PAT in a job: the identity would leave cogmo's custody for a process cogmo does not run. |
 | Process model | One cogmo process serves connectors. The hub is process memory: a second process, such as a rolling deploy's overlap, holds no session or job of the first. | — |
 | Runtime dependencies | `@connectrpc/connect` and `@connectrpc/connect-node` 2.3, `@bufbuild/protobuf` 2.16; dev: `@bufbuild/buf` 1.75, `@bufbuild/protoc-gen-es` 2.16. | — |
+| Syntax | proto3, with `optional` for presence ([protobuf.md](../.agents/rules/protobuf.md)). It compiles in every connector language's library. | Editions: explicit presence by default, but prost, the main Rust library, does not support them. Converting to Edition 2023 keeps the wire format, so the choice is revisited once prost or a successor supports Editions. |
+| Field validation | protovalidate annotations in the `.proto` files, enforced with `@bufbuild/protovalidate`, from slice 3 with the contract suite. Until then the hub's checks cover what reaches it. | Hand-written checks only: each connector language would repeat them. |
 
 ## Wire contract `[confirmed]`
 
@@ -273,7 +275,7 @@ A channel connector exposes the per-channel `Transport` from [operator-facade.md
 
 1. `packages/connector-proto` and its CI checks, with the generated code excluded from Biome. `src/connector/`: the server, auth, hub, store and migration, plus its place in the shutdown order. `cogmo connector add | rotate | revoke | list`, and the unit tier. Docs: the AGENTS.md module table, `store-pattern.md`, and `infrastructure.md` → Shutdown.
 2. Coding on a connector: the columns, the CHECKs and the assignment variant; `revoke` refusing while a repo points at the connector; the dispatching steps; the four reasons; the session's held tasks and the release sweep; the integration test. Docs: `coding-delegation.md`'s schema block, step table and failure-reason table.
-3. The Paseo spike, then `connectors/paseo` and the contract suite.
+3. The Paseo spike, then `connectors/paseo`, the contract suite, and the protovalidate annotations.
 4. Channel connectors, after operator-facade slice 3.
 
 ## Open questions

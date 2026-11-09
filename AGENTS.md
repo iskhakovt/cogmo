@@ -187,4 +187,4 @@ Replay model (per-boundary re-invocation on success), what belongs in a step, st
 
 ## Protobuf
 
-The connector contract's `.proto` files: presence through `optional`, alternatives as a `oneof`, unknown values handled, reserved numbers, additive evolution, no keys over serialized bytes, bounded messages. See [.agents/rules/protobuf.md](.agents/rules/protobuf.md).
+The connector contract's `.proto` files: presence through `optional`, alternatives as a `oneof`, unknown values handled, no deletions in v1, additive evolution, keys over canonical JSON, bounded messages. See [.agents/rules/protobuf.md](.agents/rules/protobuf.md).
