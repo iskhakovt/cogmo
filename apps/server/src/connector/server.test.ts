@@ -1,0 +1,110 @@
+import { create } from "@bufbuild/protobuf";
+import {
+  ConnectorService,
+  type ConnectResponse,
+  FinishJobRequestSchema,
+  JobSchema,
+} from "@cogmo/connector-proto";
+import { Code, ConnectError, createClient } from "@connectrpc/connect";
+import { createConnectTransport, createGrpcTransport } from "@connectrpc/connect-node";
+import { ok } from "neverthrow";
+import { afterEach, beforeEach, expect, it } from "vitest";
+import { mock } from "vitest-mock-extended";
+import { resolvesWithin } from "../test/assertions.js";
+import { fakeRunInTx } from "../test/factories.js";
+import { SessionHub } from "./hub.js";
+import { type ConnectorServer, startConnectorServer } from "./server.js";
+import type { ActiveConnector, ConnectorStore } from "./store/index.js";
+import { hashConnectorToken } from "./token.js";
+
+const PASEO: ActiveConnector = {
+  id: "conn-paseo",
+  name: "paseo",
+  kind: "coding",
+  tokenHash: hashConnectorToken("paseo-token"),
+};
+const AUTH = { headers: { authorization: "Bearer paseo-token" } };
+
+let hub: SessionHub;
+let server: ConnectorServer;
+let baseUrl: string;
+
+beforeEach(async () => {
+  const store = mock<ConnectorStore>();
+  store.listActive.mockResolvedValue([PASEO]);
+  hub = await SessionHub.create(
+    { runInTx: fakeRunInTx, connectorStore: store },
+    { leaseMs: 60_000 },
+  );
+  server = await startConnectorServer({ hub, host: "127.0.0.1", port: 0 });
+  baseUrl = `http://127.0.0.1:${server.port}`;
+});
+
+afterEach(async () => {
+  await server.close();
+});
+
+it("runs a job over gRPC on h2c, and close ends the stream with UNAVAILABLE", async () => {
+  const client = createClient(ConnectorService, createGrpcTransport({ baseUrl }));
+  const received: ConnectResponse[] = [];
+  let firstMessage: () => void = () => {};
+  const accepted = new Promise<void>((resolve) => {
+    firstMessage = resolve;
+  });
+  const stream = (async () => {
+    try {
+      for await (const message of client.connect({ heldJobIds: [] }, AUTH)) {
+        received.push(message);
+        firstMessage();
+      }
+      return null;
+    } catch (error) {
+      return ConnectError.from(error).code;
+    }
+  })();
+  await resolvesWithin(accepted, 5_000, "SessionAccepted");
+
+  const job = create(JobSchema, {
+    jobId: "task-1/publish/d1",
+    taskId: "task-1",
+    spec: { case: "publish", value: { commitMessage: "m", remoteRef: "cogmo/t" } },
+  });
+  const run = hub.run(PASEO.id, job, { onEvent: () => {} });
+  await client.acceptJob({ jobId: job.jobId }, AUTH);
+  await client.finishJob(
+    create(FinishJobRequestSchema, {
+      jobId: job.jobId,
+      outcome: {
+        case: "completed",
+        value: { result: { case: "published", value: { headSha: "abc" } } },
+      },
+    }),
+    AUTH,
+  );
+  expect(await resolvesWithin(run, 5_000, "the job's outcome")).toEqual(
+    ok(expect.objectContaining({ kind: "completed" })),
+  );
+  expect(received.map((m) => m.message.case)).toEqual(["accepted", "job"]);
+
+  await resolvesWithin(server.close(), 5_000, "server close");
+  expect(await resolvesWithin(stream, 5_000, "the stream's end")).toBe(Code.Unavailable);
+});
+
+it("refuses a call without a token", async () => {
+  const client = createClient(ConnectorService, createGrpcTransport({ baseUrl }));
+  await expect(client.acceptJob({ jobId: "x" })).rejects.toMatchObject({
+    code: Code.Unauthenticated,
+  });
+});
+
+it("serves only the gRPC protocol", async () => {
+  const client = createClient(
+    ConnectorService,
+    createConnectTransport({ baseUrl, httpVersion: "2" }),
+  );
+  // Served, this call would fail NOT_FOUND on the unknown job; it never reaches the hub.
+  await expect(client.acceptJob({ jobId: "x" }, AUTH)).rejects.toMatchObject({
+    code: Code.Unknown,
+    rawMessage: "HTTP 415",
+  });
+});

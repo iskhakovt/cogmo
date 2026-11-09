@@ -110,6 +110,17 @@ export const env = createEnv({
     WEB_HOST: z.string().default("0.0.0.0"),
     /** Web UI port. The web server replaces the health server on this port. */
     WEB_PORT: z.coerce.number().int().positive().default(9090),
+    /**
+     * Connector server bind host. Same posture as `WEB_HOST`: the token crosses
+     * h2c in cleartext, so the boundary is the publish layer (host loopback, a
+     * tailnet or a TLS proxy). Set `127.0.0.1` for a bare-metal run without one.
+     * See design/connectors.md → Serving.
+     */
+    CONNECTOR_HOST: z.string().default("0.0.0.0"),
+    /** Connector server port (gRPC over h2c). Unset, no connector server starts. */
+    CONNECTOR_PORT: z.coerce.number().int().positive().optional(),
+    /** How long a connector job waits for a session to carry it before it is lost or unavailable. */
+    CONNECTOR_LEASE_SECONDS: z.coerce.number().int().positive().default(120),
     /** Absolute web-session TTL (days). */
     WEB_SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
     /**

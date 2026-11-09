@@ -5,6 +5,7 @@
  */
 
 import { DrizzleCodingStore } from "../agent/coding/store/index.js";
+import { DrizzleConnectorStore } from "../connector/store/index.js";
 import { DrizzleModelCatalogStore } from "../agent/model-catalog/store/index.js";
 import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "../agent/pipeline/store/index.js";
 import { DrizzleAgentStore } from "../agent/store/index.js";
@@ -25,6 +26,7 @@ export interface Stores {
   mcpStore: DrizzleMcpStore;
   skillStore: DrizzleSkillStore;
   webSessionStore: DrizzleWebSessionStore;
+  connectorStore: DrizzleConnectorStore;
 }
 
 export function createStores(): Stores {
@@ -39,5 +41,6 @@ export function createStores(): Stores {
     mcpStore: new DrizzleMcpStore(),
     skillStore: new DrizzleSkillStore(),
     webSessionStore: new DrizzleWebSessionStore(),
+    connectorStore: new DrizzleConnectorStore(),
   };
 }
