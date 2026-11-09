@@ -435,7 +435,26 @@ describe("the push and the remote read", () => {
       });
     });
 
-    it("read a command substitution in an assignment as one word", async () => {
+    it("read a plain parameter in an assignment ahead of ssh", async () => {
+      const sha = await commitLocal("a");
+      const ssh = await recordingSsh(root);
+      vi.stubEnv("SKILLS_TAG_SOURCE", "kept");
+      await git(
+        local,
+        "config",
+        "core.sshCommand",
+        `SKILLS_SSH_TAG=$SKILLS_TAG_SOURCE ${ssh} -o BatchMode=no`,
+      );
+
+      await mirrorMain(deps(), local, sha);
+
+      expect(await sshCall()).toEqual({
+        args: expect.stringMatching(/^-o BatchMode=yes -o BatchMode=no /),
+        tag: "tag=kept",
+      });
+    });
+
+    it("append BatchMode=yes past a command substitution, so the command's own BatchMode stays first", async () => {
       const sha = await commitLocal("a");
       const ssh = await recordingSsh(root);
       await git(
@@ -448,7 +467,7 @@ describe("the push and the remote read", () => {
       await mirrorMain(deps(), local, sha);
 
       expect(await sshCall()).toEqual({
-        args: expect.stringMatching(/^-o BatchMode=yes -o BatchMode=no /),
+        args: expect.stringMatching(/^-o BatchMode=no -o BatchMode=yes git@skills\.invalid /),
         tag: "tag=kept",
       });
     });
@@ -462,6 +481,13 @@ describe("the push and the remote read", () => {
         "a nested substitution ahead of ssh",
         "SKILLS_SSH_TAG=$(printf %s $(printf kept)) ssh -i key",
       ],
+      ["a substitution holding a quoted `)`", "SKILLS_SSH_TAG=$(printf '%s' ') ssh ') ssh -i key"],
+      [
+        "a parameter expansion holding a quoted `}`",
+        `SKILLS_SSH_TAG=\${UNSET_TAG:-'} ssh '} ssh -i key`,
+      ],
+      // Read in linear time: a parameter matches its whole name or nothing.
+      ["many parameters ahead of a list", `SKILLS_SSH_TAG=${"$aa".repeat(36)}; ssh -i key`],
     ])("append BatchMode=yes to %s, which still runs", async (_, command) => {
       const sha = await commitLocal("a");
       const bin = join(root, "bin");

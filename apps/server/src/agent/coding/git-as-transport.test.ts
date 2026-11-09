@@ -282,6 +282,29 @@ describe("pushTaskBranchToRemote", () => {
     ]);
   });
 
+  it("rejects with the listing's error when the listing after a failed default-branch fetch fails", async () => {
+    let listings = 0;
+    gitMocks.runGit.mockImplementation(async (args) => {
+      if (args.includes("ls-remote")) {
+        listings += 1;
+        if (listings === 2) throw new Error("ls-remote: Could not resolve host");
+        return { stdout: `${held}\trefs/heads/main\n`, stderr: "" };
+      }
+      if (args.includes("+main:refs/remotes/origin/main")) {
+        throw new Error("fetch: connection reset");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    await expect(push(BASE_SHA)).rejects.toThrow(/Could not resolve host/);
+    expect(gitMocks.runGit.mock.calls.map(([args]) => args[2])).toEqual([
+      "fetch",
+      "ls-remote",
+      "fetch",
+      "ls-remote",
+    ]);
+  });
+
   it("rejects when the presence check fails for another reason than a missing commit", async () => {
     await expect(
       pushTaskBranchToRemote({
