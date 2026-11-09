@@ -1,0 +1,133 @@
+// The session between cogmo and a connector: a process outside cogmo that
+// dials in, takes jobs, and reports their events and outcomes. This file holds
+// the service, the session, and the job envelopes, whose oneofs name each
+// kind's payloads. Each kind's payloads have a file of their own (coding.proto)
+// that imports nothing from this one; a type a second kind may share starts in a
+// file of its own. The rules a connector follows are in design/connectors.md → Wire
+// contract, and the protobuf conventions in .agents/rules/protobuf.md.
+//
+// Every call carries `authorization: Bearer <token>`, the token
+// `cogmo connector add` printed.
+syntax = "proto3";
+
+package cogmo.connector.v1;
+
+import "cogmo/connector/v1/coding.proto";
+
+service ConnectorService {
+  // The connector's session: cogmo sends jobs and cancels down it while it is open.
+  rpc Connect(ConnectRequest) returns (stream ConnectResponse);
+  // Connector to cogmo.
+  rpc AcceptJob(AcceptJobRequest) returns (AcceptJobResponse); // idempotent on job_id
+  rpc ReportEvents(ReportEventsRequest) returns (ReportEventsResponse); // idempotent on (job_id, seq)
+  rpc FinishJob(FinishJobRequest) returns (FinishJobResponse); // idempotent on job_id
+}
+
+message ConnectRequest {
+  repeated string held_job_ids = 1; // jobs it has persisted and still holds
+  repeated string held_task_ids = 2; // tasks whose workspaces it holds
+}
+
+message ConnectResponse {
+  oneof message {
+    SessionAccepted accepted = 1; // first message
+    Job job = 2;
+    CancelJob cancel = 3;
+    Heartbeat heartbeat = 4;
+  }
+}
+
+// The jobs cogmo still awaits on this session. The connector stops any held
+// job missing from it.
+message SessionAccepted {
+  repeated string awaited_job_ids = 1;
+}
+
+message CancelJob {
+  string job_id = 1;
+}
+
+// Sent every 30 s on the stream itself, so it proves this stream is alive end
+// to end: a proxy answers HTTP/2 pings for its own hop.
+message Heartbeat {}
+
+message Job {
+  string job_id = 1; // "<task_id>/<phase>/<spec digest>"; opaque to connectors
+  string task_id = 2;
+  oneof spec {
+    PrepareSpec prepare = 10;
+    PlanSpec plan = 11;
+    ExecuteSpec execute = 12;
+    VerifySpec verify = 13;
+    PublishSpec publish = 14;
+    ReleaseSpec release = 15;
+  }
+}
+
+message AcceptJobRequest {
+  string job_id = 1;
+}
+
+message AcceptJobResponse {}
+
+message ReportEventsRequest {
+  string job_id = 1;
+  repeated JobEvent events = 2; // the connector keeps each request under 4 MiB, splitting a larger report
+}
+
+message ReportEventsResponse {}
+
+message JobEvent {
+  uint64 seq = 1; // strictly increasing per job, from 1
+  oneof event {
+    string text_delta = 2; // at most 64 KiB; a longer delta is split across events
+    ToolCall tool_call = 3;
+    ToolResult tool_result = 4;
+    Usage usage = 5;
+  }
+}
+
+message FinishJobRequest {
+  string job_id = 1;
+  oneof outcome {
+    JobResult completed = 2;
+    JobError failed = 3;
+    Cancelled cancelled = 4;
+  }
+  optional uint64 last_seq = 5; // the last event seq it reported; absent if none
+}
+
+message FinishJobResponse {}
+
+message Cancelled {}
+
+// The case matches the job's spec. A verify that runs and fails is a
+// `completed` verdict, not a `failed` job.
+message JobResult {
+  oneof result {
+    Prepared prepared = 1;
+    PlanResult plan = 2;
+    Executed executed = 3;
+    VerifyVerdict verify = 4;
+    Published published = 5;
+    Released released = 6;
+  }
+}
+
+message JobError {
+  JobErrorCode code = 1;
+  string message = 2; // at most 8 KiB, truncated by the connector
+}
+
+enum JobErrorCode {
+  JOB_ERROR_CODE_UNSPECIFIED = 0;
+  JOB_ERROR_CODE_AGENT_FAILED = 1;
+  JOB_ERROR_CODE_NO_PLAN = 2;
+  JOB_ERROR_CODE_SESSION_LOST = 3;
+  JOB_ERROR_CODE_BRANCH_CONFLICT = 4;
+  JOB_ERROR_CODE_PUSH_AUTH_FAILED = 5;
+  JOB_ERROR_CODE_PUSH_FAILED = 6;
+  JOB_ERROR_CODE_WORKSPACE_FAILED = 7;
+  JOB_ERROR_CODE_JOB_CONFLICT = 8;
+  JOB_ERROR_CODE_UNSUPPORTED = 9;
+}

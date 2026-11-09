@@ -7,27 +7,33 @@ A connector is a process outside cogmo that runs part of cogmo's work somewhere 
 | `coding` | the coding jobs below | this doc |
 | `channel` | the per-channel `Transport` that [operator-facade.md](operator-facade.md) splits out | after that split; see *Channel connectors* |
 
-## Decisions `[proposed]`
+## Decisions `[confirmed]`
 
 | Decision | Choice | Rejected |
 |-|-|-|
 | Wire protocol | gRPC over HTTP/2. Every mainstream language has a production gRPC library, and streaming is part of the protocol. | Connect protocol: its gains are browsers and HTTP/1.1, which no connector needs. oRPC: TypeScript only, other languages through generated OpenAPI. MCP Tasks: built for tools a model calls, and experimental in spec and SDK. REST: generated server stubs and SSE support vary by language. HTTP/3: neither Node nor grpc-go serves gRPC over it. |
 | Node library | `@connectrpc/connect-node` + `@bufbuild/protobuf`, speaking gRPC. ESM output, plain generated types, and an in-memory transport (`createRouterTransport`) for tests. | `@grpc/grpc-js`: `@grpc/proto-loader`'s generated types need hand edits, and `ts-proto` brings `long.js`. Connectors see only the `.proto`, so swapping the library touches none of them. |
 | Direction | Connectors dial in. One listening port, one auth model, connectors behind NAT work, and channel connectors share the session. | cogmo dialling each connector: a URL per connector, and no path to one cogmo cannot reach. |
-| Contract home | `packages/connector-proto/`: the `.proto`, `buf.yaml`, and the generated TypeScript, committed. Ships in cogmo's release. Package `cogmo.connector.v1`; a breaking change is a `v2` package. | A separate repo with its own versioning, until a connector outside this repo needs it. |
-| Contract CI | `buf lint`, `buf breaking` against `origin/main`, and a check that `buf generate` leaves the tree clean. | — |
+| Contract home | `packages/connector-proto/`: `session.proto` and `coding.proto` under `proto/`, `buf.yaml`, `buf.gen.yaml`, and the generated TypeScript under `src/gen/`, committed. Ships in cogmo's release. Package `cogmo.connector.v1`; a breaking change is a `v2` package. | A separate repo with its own versioning, until a connector outside this repo needs it. |
+| Contract CI | The `Connector contract` job: `buf lint`, `buf breaking` against `main`, and a check that `buf generate` leaves the tree clean. The generated code is excluded from Biome. | — |
 | Credentials | cogmo sends no secret to a connector. A connector pushes with its own git credentials; cogmo opens the PR with the repo's GitHub identity. `PrepareSpec.remote_url` is the repo's remote with any password removed, and with the whole userinfo removed from an http(s) remote, where a token can sit in either position. An SSH login name such as `git@` stays. | A PAT in a job: the identity would leave cogmo's custody for a process cogmo does not run. |
 | Process model | One cogmo process serves connectors. The hub is process memory: a second process, such as a rolling deploy's overlap, holds no session or job of the first. | — |
-| Runtime dependencies | `@connectrpc/connect`, `@connectrpc/connect-node`, `@bufbuild/protobuf`; dev: `@bufbuild/buf`, `@bufbuild/protoc-gen-es`. Pinned at implementation under the 7-day release-age gate. | — |
+| Runtime dependencies | `@connectrpc/connect` and `@connectrpc/connect-node` 2.3, `@bufbuild/protobuf` 2.16; dev: `@bufbuild/buf` 1.75, `@bufbuild/protoc-gen-es` 2.16. | — |
+| Syntax | proto3, with `optional` for presence ([protobuf.md](../.agents/rules/protobuf.md)). It compiles in every connector language's library. | Editions: explicit presence by default, but prost, the main Rust library, does not support them. Converting to Edition 2023 keeps the wire format, so the choice is revisited once prost or a successor supports Editions. |
+| Field validation | protovalidate annotations in the `.proto` files, enforced with `@bufbuild/protovalidate`, from slice 3 with the contract suite. Until then the hub's checks cover what reaches it. | Hand-written checks only: each connector language would repeat them. |
 
-## Wire contract `[proposed]`
+## Wire contract `[confirmed]`
 
-One server-streaming call carries cogmo's messages to the connector; unary calls carry the connector's side back. Each unary call is acknowledged on its own and is idempotent, so a dropped stream loses nothing the connector already sent, and an error belongs to one call.
+One server-streaming call carries cogmo's messages to the connector; unary calls carry the connector's side back. Each unary call is acknowledged on its own and is idempotent, so a dropped stream loses nothing the connector already sent, and an error belongs to one call. The server speaks only the gRPC protocol; a Connect or gRPC-Web request gets HTTP 415. It reads messages up to 4 MiB, gRPC's default; a larger one fails `RESOURCE_EXHAUSTED`.
+
+The contract is two files in package `cogmo.connector.v1`, under [`packages/connector-proto/proto/cogmo/connector/v1/`](../packages/connector-proto/proto/cogmo/connector/v1/), which are its source of truth:
+
+- **`session.proto`** holds the service, the session's messages, and the job envelopes (`Job`, `JobEvent`, `JobResult`, `JobError` and its codes), whose oneofs name each kind's payloads.
+- **`coding.proto`** holds the coding jobs' payloads: each phase's spec, an agent turn's events, and each phase's result.
+
+Both follow [protobuf.md](../.agents/rules/protobuf.md). From `session.proto`:
 
 ```proto
-syntax = "proto3";
-package cogmo.connector.v1;
-
 service ConnectorService {
   // The connector's session: cogmo sends jobs and cancels down it while it is open.
   rpc Connect(ConnectRequest) returns (stream ConnectResponse);
@@ -35,11 +41,6 @@ service ConnectorService {
   rpc AcceptJob(AcceptJobRequest) returns (AcceptJobResponse);           // idempotent on job_id
   rpc ReportEvents(ReportEventsRequest) returns (ReportEventsResponse);  // idempotent on (job_id, seq)
   rpc FinishJob(FinishJobRequest) returns (FinishJobResponse);           // idempotent on job_id
-}
-
-message ConnectRequest {
-  repeated string held_job_ids = 1;   // jobs it has persisted and still holds
-  repeated string held_task_ids = 2;  // tasks whose workspaces it holds
 }
 
 message ConnectResponse {
@@ -50,44 +51,19 @@ message ConnectResponse {
     Heartbeat heartbeat = 4;
   }
 }
-message SessionAccepted { repeated string awaited_job_ids = 1; }
-message CancelJob { string job_id = 1; }
-message Heartbeat {}
 
 message Job {
-  string job_id = 1;                  // "<task_id>/<phase>/<spec digest>"
+  string job_id = 1; // "<task_id>/<phase>/<spec digest>"; opaque to connectors
   string task_id = 2;
   oneof spec {
     PrepareSpec prepare = 10;
-    AgentTurnSpec plan = 11;
-    AgentTurnSpec execute = 12;
+    PlanSpec plan = 11;
+    ExecuteSpec execute = 12;
     VerifySpec verify = 13;
     PublishSpec publish = 14;
     ReleaseSpec release = 15;
   }
 }
-message PrepareSpec   { string remote_url = 1; string base_branch = 2; string work_branch = 3; }
-message AgentTurnSpec { string prompt = 1; string agent = 2; uint64 token_budget = 3; optional string session_id = 4; }
-message VerifySpec    { string command = 1; uint32 timeout_seconds = 2; }
-message PublishSpec   { string commit_message = 1; string remote_ref = 2; }
-message ReleaseSpec   { optional string salvage_ref = 1; }
-
-message AcceptJobRequest { string job_id = 1; }
-message AcceptJobResponse {}
-message ReportEventsRequest { string job_id = 1; repeated JobEvent events = 2; }
-message ReportEventsResponse {}
-message JobEvent {
-  uint64 seq = 1;                     // strictly increasing per job, from 1
-  oneof event {
-    string text_delta = 2;
-    ToolCall tool_call = 3;
-    ToolResult tool_result = 4;
-    Usage usage = 5;
-  }
-}
-message ToolCall { string name = 1; string summary = 2; }
-message ToolResult { string name = 1; bool ok = 2; string summary = 3; }
-message Usage { uint64 input_tokens = 1; uint64 output_tokens = 2; double cost_usd = 3; }  // cumulative for the job
 
 message FinishJobRequest {
   string job_id = 1;
@@ -96,71 +72,35 @@ message FinishJobRequest {
     JobError failed = 3;
     Cancelled cancelled = 4;
   }
-  uint64 last_seq = 5;                // the last event seq it reported; 0 if none
-}
-message FinishJobResponse {}
-message Cancelled {}
-message JobResult {
-  oneof result {
-    Prepared prepared = 1;
-    PlanResult plan = 2;
-    Executed executed = 3;
-    VerifyVerdict verify = 4;
-    Published published = 5;
-    Released released = 6;
-  }
-}
-message Prepared {}
-message PlanResult { string plan = 1; string session_id = 2; }
-message Executed { Usage usage = 1; }
-message VerifyVerdict { int32 exit_code = 1; bool timed_out = 2; string output_tail = 3; }
-message Published { string head_sha = 1; }
-message Released {
-  oneof outcome {
-    RemovedClean removed_clean = 1;
-    SalvagedAndRemoved salvaged_and_removed = 2;
-    Kept kept = 3;
-  }
-}
-message RemovedClean {}
-message SalvagedAndRemoved { string salvage_ref = 1; string sha = 2; }
-message Kept { string reason = 1; }
-message JobError { JobErrorCode code = 1; string message = 2; }
-enum JobErrorCode {
-  JOB_ERROR_CODE_UNSPECIFIED = 0;
-  JOB_ERROR_CODE_AGENT_FAILED = 1;
-  JOB_ERROR_CODE_NO_PLAN = 2;
-  JOB_ERROR_CODE_SESSION_LOST = 3;
-  JOB_ERROR_CODE_BRANCH_CONFLICT = 4;
-  JOB_ERROR_CODE_PUSH_AUTH_FAILED = 5;
-  JOB_ERROR_CODE_PUSH_FAILED = 6;
-  JOB_ERROR_CODE_WORKSPACE_FAILED = 7;
-  JOB_ERROR_CODE_JOB_CONFLICT = 8;
-  JOB_ERROR_CODE_UNSUPPORTED = 9;
+  optional uint64 last_seq = 5; // the last event seq it reported; absent if none
 }
 ```
 
 A verify that runs and fails is a `completed` verdict, not a `failed` job.
 
-**The job id is the idempotency key.** cogmo computes `<spec digest>` as the SHA-256 of the spec's binary encoding as protobuf-es writes it: fields in number order, and the specs hold no maps. A re-sent job therefore keeps its key, and a different spec for the same task and phase gets a new one ([inngest.md](../.agents/rules/inngest.md) → key the request, not the slot). Connectors treat the id as opaque.
+**The job id is the idempotency key.** cogmo computes `<spec digest>` as the SHA-256 of the spec's proto3 JSON (protobuf-es `toJson`, default options) in RFC 8785 canonical form: `sha256(canonicalJson(…))` from `src/util/canonical-json.ts`. Only cogmo computes it, and connectors treat the id as opaque, so the digest must only stay the same across cogmo's builds: the proto3 JSON mapping is specified, and no library promises that for the binary encoding. A re-sent job therefore keeps its key, and a different spec for the same task and phase gets a new one ([inngest.md](../.agents/rules/inngest.md) → key the request, not the slot).
 
 **Connector rules**, which the contract suite (*Testing*) checks:
 
 1. **Accept, then start.** The connector persists a job, calls `AcceptJob`, and starts the job only once that call succeeds. It retries a call that fails in transit. When the hub refuses `AcceptJob` with `NOT_FOUND`, because the job has ended or is unknown, the connector drops the job unstarted.
-2. **Reattach.** A `Job` whose `job_id` it holds is not new work. It re-sends `FinishJob` if the job has ended, and otherwise keeps reporting from where it was. It may forget a job once cogmo has acknowledged its `FinishJob`; an id it no longer holds is new work.
+2. **Reattach.** A `Job` whose `job_id` it holds is not new work. It re-sends `FinishJob` if the job has ended, and otherwise keeps reporting from where it was. It may forget a job once cogmo has acknowledged its `FinishJob`, or answered it `NOT_FOUND`; an id it no longer holds is new work.
 3. **Conflict.** A `Job` for a task and phase it holds under another running `job_id` fails with `JOB_CONFLICT`.
 4. **Restarts.** It keeps persisted jobs across its own restarts and lists them in `held_job_ids`, and lists the tasks whose workspaces it holds in `held_task_ids`. An accepted job it cannot recover is left out, and cogmo reads it as lost.
 5. **Not awaited.** It stops a held job that `awaited_job_ids` omits, or whose `AcceptJob` or report comes back `NOT_FOUND`, and keeps that job's workspace until `release`.
-6. **Reports.** `seq` rises strictly from 1, and a retried report re-sends the same `seq`. The connector calls `FinishJob` only once every report for the job has been acknowledged, and passes the last `seq` it sent.
+6. **Reports.** `seq` rises strictly from 1, and a retried report re-sends the same `seq`. Each request stays under the 4 MiB limit: a larger report is split across calls, a single event stays far below the limit, and a plan that would not fit is truncated. The connector calls `FinishJob` only once every report for the job has been acknowledged, and passes the last `seq` it sent.
 7. **Cancel.** Cancelling is cooperative: it answers with `FinishJob(cancelled)`, or with the job's real outcome if that came first.
 8. **Workspaces.** `prepare` adopts an existing workspace for the task on `work_branch`. `release` stops the task's running job first, is idempotent, succeeds for a task it never prepared, and keeps the workspace when the salvage push fails. After a `kept` or failed release, the connector stops listing the task in `held_task_ids`, and the workspace becomes the operator's.
+9. **Liveness.** It reconnects when its stream has carried no message for 90 s, which is three missed `Heartbeat`s.
+10. **Unknown values.** It ignores a `ConnectResponse` case it does not know. A `Job` whose spec case or `agent` it does not support is accepted, then finished `failed` with `UNSUPPORTED`.
 
 **Auth.** Each call carries `authorization: Bearer <token>`.
 - `cogmo connector add <name> --kind coding` mints a 32-byte token, prints it once and stores its SHA-256, as `web_sessions` does. `rotate` replaces the token. `revoke` moves the connector to `revoked`, and refuses while a repo points at it; tasks running on it lose their jobs. `list` shows the connectors.
-- Each call checks its token against the hub's cache of active connectors. A 30 s hub timer refreshes the cache from the table, as does a token the cache does not recognise (at most once every 5 s), so a new token works within seconds and a revoke or rotate takes effect, closing the old token's stream, within 30 s.
+- Each call checks its token against the hub's cache of active connectors. A 30 s hub timer refreshes the cache from the table, as does a token the cache does not recognise (at most once every 5 s), so a new token works within seconds. A revoke or rotate ends the old token's session within 30 s while the table can be read. A call that needs a refresh joins the one in flight, waiting at most until 5 s after it started, and an unknown token gets `UNAVAILABLE` while the last refresh failed. The hub runs at most one timer refresh at a time. Once three refreshes in a row have failed or stalled (90 s since the last good load started), the cache fails closed: every call gets `UNAVAILABLE`, and within 5 s every session ends. A revoked token's session therefore never outlives the revoke by more than 95 s. Its stream closes when the session ends, or 2 s later, reset, if its peer has stopped reading.
 - Jobs are keyed on (connector, `job_id`). A call naming another connector's job fails with `PERMISSION_DENIED`, and one naming a job this process does not know fails with `NOT_FOUND`.
 
-**Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_HOST`:`CONNECTOR_PORT`. When `CONNECTOR_PORT` is unset, no server starts, and boot warns if a repo points at a connector. `CONNECTOR_HOST` defaults to `0.0.0.0`, the container convention `WEB_HOST` follows ([web-ui.md](web-ui.md) → Auth and bind). As there, the boundary is the publish layer: the token crosses h2c in cleartext, so the port is published on host loopback, or reached through a tailnet or a TLS proxy. A bare-metal run with no such layer sets `CONNECTOR_HOST=127.0.0.1`. cogmo sends a `Heartbeat` every 30 s and both sides send HTTP/2 keepalive pings. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
+**Serving.** cogmo serves plaintext HTTP/2 (h2c) on `CONNECTOR_HOST`:`CONNECTOR_PORT`. When `CONNECTOR_PORT` is unset, no server starts, and boot warns if a repo points at a connector. `CONNECTOR_HOST` defaults to `0.0.0.0`, the container convention `WEB_HOST` follows ([web-ui.md](web-ui.md) → Auth and bind). As there, the boundary is the publish layer: the token crosses h2c in cleartext, so the port is published on host loopback, or reached through a tailnet or a TLS proxy. A bare-metal run with no such layer sets `CONNECTOR_HOST=127.0.0.1`. cogmo sends a `Heartbeat` down the stream every 30 s, which proves the stream alive end to end, since a proxy answers HTTP/2 pings for its own hop. Both sides also send HTTP/2 keepalive pings; cogmo pings every 30 s and closes a connection that has not answered within 20 s. On shutdown the connector server closes after Inngest's drain, so a step that finishes inside the stop grace still receives its `FinishJob`.
+
+When cogmo ends a session, nothing more is sent on it, and the stream closes with a status that says why: `ABORTED` when a newer session for the connector replaced it, `UNAUTHENTICATED` when its token was rotated or revoked, and `UNAVAILABLE` on shutdown or a stale cache. A stream that has not closed 2 s after its session ended, because its peer stopped reading, is reset. Closing the server destroys any connection whose streams are still open after 2 s. A heartbeat is skipped while other messages wait to be sent, so a stream its peer has stopped reading queues nothing more than its jobs.
 
 ## Data model `[proposed]`
 
@@ -169,41 +109,41 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 | `connectors` | `id`; `name TEXT NOT NULL`, unique among `active` rows; `kind connector_kind NOT NULL` (`coding`); `status connector_status NOT NULL` (`active`, `revoked`); `token_hash TEXT NOT NULL UNIQUE`; `revoked_at TIMESTAMPTZ`, set exactly when `revoked` (CHECK); `created_at` | Registry and auth. A revoked row stays, so the tasks that ran on it keep their foreign key, and its name can be added again. Whether a connector is connected is process memory, not a column. |
 | `coding_repos.connector_id` | `uuid` FK → `connectors.id`, nullable, `ON DELETE RESTRICT` | Null runs the repo's tasks in the built-in sandbox. |
 | `coding_tasks.connector_id` | `uuid` FK → `connectors.id`, nullable, `ON DELETE RESTRICT` | Copied from the repo at insert, so repointing a repo never moves a running task. |
-| `coding_tasks.session_id` | unchanged column | Holds the session handle from the plan result, which execute passes back. |
+| `coding_tasks.session_id` | unchanged column | Holds `PlanResult.agent_session_id`, which execute passes back as `ExecuteSpec.agent_session_id`. |
 | `WorktreeAssignmentSchema` | new variant `{ type: "connector", branch }` | The work branch. The workspace path is the connector's. |
 | `chk_coding_tasks_connector_no_container` | `connector_id IS NULL OR container_id IS NULL` | A connector task has no cogmo container. |
 | `chk_coding_tasks_connector_assignment` | `worktree_assignment IS NULL OR ((connector_id IS NOT NULL) = (worktree_assignment->>'type' = 'connector'))` | The variant follows where the task runs. |
 
-The module is `src/connector/`: the gRPC server, auth, the session hub, and the `connectors` store. It is a transport edge in the AGENTS.md sense. The coding stages depend on a port in `src/agent/coding/`, which boot wires to the hub:
+The module is `src/connector/`: the gRPC server, auth, the session hub, and the `connectors` store. It is a transport edge in the AGENTS.md sense. The coding stages depend on a port in `src/agent/coding/connector-jobs.ts`, which boot wires to the hub. The port takes the `Job` a stage builds, whose spec the job id digests, and returns plain, readonly, frozen values. The hub translates the wire messages into them (`src/connector/translate.ts`), so a step can return them as they are:
 
 ```ts
 interface ConnectorJobs {
-  run(
-    connectorId: string,
-    job: Job,
-    handlers: { onEvent(event: JobEvent): void },
-  ): Promise<Result<JobOutcome, JobRunError>>;
+  run(connectorId: string, job: Job, handlers: { onEvent(event: JobReport): void }): Promise<Result<JobOutcome, JobRunError>>;
 }
 type JobOutcome =
-  | { kind: "completed"; result: JobResult }
-  | { kind: "failed"; error: JobError }
+  | { kind: "completed"; result: JobCompletion }       // one variant per phase, checked against the spec
+  | { kind: "failed"; code: JobFailureCode; message: string }
   | { kind: "cancelled" };
 type JobRunError =
   | { kind: "unavailable" }
   | { kind: "lost" }
-  | { kind: "timed_out"; cap: "total" | "idle" | "token_budget" };
+  | { kind: "timed_out"; cap: "total" | "idle" | "token_budget" }
+  | { kind: "invalid_result"; message: string };      // a result that doesn't fit the job's spec
 ```
 
-`run` on a `job_id` the hub already holds sends nothing new. An id in flight joins the existing wait, and an id that ended `completed`, `failed` or `cancelled` returns the stored outcome. Only an id that ended `timed_out`, `lost` or `unavailable` is dispatched again.
+`JobFailureCode` names each `JobErrorCode`, plus `unknown` for a code this build does not know. `JobReport` is a text delta, a tool call, a tool result or the usage so far; an event of a kind this build does not know is skipped, though its `seq` counts.
+
+`run` on a `job_id` the hub already holds sends nothing new. An id in flight joins the existing wait, and an id that ended `completed`, `failed` or `cancelled` returns the stored outcome. Only an id that ended in a `JobRunError` is dispatched again. The hub keeps its own copy of each `Job`, so a caller changing one after dispatch changes nothing.
 
 ## Jobs `[proposed]`
 
 The unit is the job, keyed on (connector, `job_id`). The connector owns the job's durable state (rule 4). cogmo's view of the job lives in process memory. It sits inside one step's execution, and the orchestrators run with `retries: 0`, so a process that loses a job also loses the run, and reconcile fails the task. No row would outlive the step that reads it. The durable outcome is the `coding_tasks` row.
 
 ```text
-dispatched ──► accepted ──► completed | failed | cancelled
+dispatched ──► accepted ──► completed | failed | cancelled | invalid_result
     │              ├──────► lost
     │              └──────► timed_out
+    ├──────────────────────► completed | failed | cancelled | invalid_result
     ├──────────────────────► unavailable
     └──────────────────────► timed_out
 ```
@@ -214,13 +154,15 @@ dispatched ──► accepted ──► completed | failed | cancelled
 | `dispatched → dispatched` | a new session whose `held_job_ids` omit the job | sent again: never persisted, so never started (rule 1) |
 | `dispatched → dispatched` | a new session whose `held_job_ids` name the job | not sent again; the connector's retried `AcceptJob` moves it on |
 | `dispatched → accepted` | `AcceptJob` | — |
-| `accepted → accepted` | `ReportEvents` | events with a new `seq` go to `onEvent`; resets the idle cap |
-| `timed_out / lost / unavailable → dispatched` | `run` on the same id | — |
+| `dispatched / accepted → accepted` | `ReportEvents` (on `dispatched` it implies acceptance) | events with a new `seq` go to `onEvent`; resets the idle cap |
+| `timed_out / lost / unavailable / invalid_result → dispatched` | `run` on the same id | — |
 | `dispatched / accepted → completed / failed / cancelled` | `FinishJob` (on `dispatched` it implies acceptance) | the first one wins; a `last_seq` beyond the events received is logged as a gap |
-| `dispatched → unavailable` | no session accepts it within `CONNECTOR_LEASE_SECONDS` (default 120) | — |
-| `accepted → lost` | the session closed and none holding the job opened within the lease, or a new session's `held_job_ids` omitted it | — |
-| `dispatched / accepted → timed_out` | the job kind's total or idle cap | `CancelJob` sent |
-| any terminal state | a late `FinishJob` or `ReportEvents` | acknowledged and dropped; the hub keeps the id until the task's `release` finishes |
+| `dispatched / accepted → invalid_result` | `FinishJob(completed)` whose result case does not match the job's spec, or misses the outcome it must carry (a verify verdict's or a release's) | the call gets `INVALID_ARGUMENT` |
+| unchanged | `FinishJob` with no outcome | the call gets `INVALID_ARGUMENT` |
+| `dispatched → unavailable` | no session accepts it within `CONNECTOR_LEASE_SECONDS` (default 120) of its dispatch | a reconnect does not restart the lease |
+| `accepted → lost` | no session holding the job opened within the lease of its session closing, or of an acceptance (`AcceptJob`, or the `ReportEvents` that implies it) that arrived with none open; or a new session's `held_job_ids` omitted it | — |
+| `dispatched / accepted → timed_out` | the job kind's total or idle cap, or a report whose usage passes the turn's `token_budget` | `CancelJob` sent; on the budget, the job ends before the report's handlers run, and the report is still delivered to them |
+| any terminal state | a late `FinishJob` or `ReportEvents` | acknowledged and dropped; the hub keeps the id until a `release` of the task ends `completed` or `failed`, and keeps that release's id, so a retried `FinishJob` or `run` on it gets its outcome |
 | any terminal state | a late `AcceptJob` | refused with `NOT_FOUND`; the connector drops the job unstarted (rule 1) |
 
 | Job | Total cap | Idle cap |
@@ -231,9 +173,9 @@ dispatched ──► accepted ──► completed | failed | cancelled
 | `publish` | 5 min | — |
 | `release` | 10 min | — |
 
-The connector enforces `token_budget` inside the turn. The hub also cancels a turn whose reported usage passes it, which resolves `timed_out` with `cap: "token_budget"`.
+The connector enforces `token_budget` inside the turn. The hub also cancels a turn whose reported input and output tokens together pass it, which resolves `timed_out` with `cap: "token_budget"`. `Usage.input_tokens` counts input not read from or written to the prompt cache, as the Claude CLI's `result.usage.input_tokens` does, so both paths store the same figures. An absent budget is none, and an absent count adds nothing.
 
-**Session.** A session is one open `Connect` stream. When it closes, its jobs wait out the lease for a new session. A new `Connect` under the same name replaces the old session and closes its stream; its `held_job_ids` decide which jobs carry over.
+**Session.** A session is one open `Connect` stream. When it closes, its accepted jobs wait out the lease for a new session. A new `Connect` under the same name replaces the old session and closes its stream; its `held_job_ids` decide which jobs carry over.
 
 **Release converges.** A workspace is freed by the first of these:
 - the stage that ends the task dispatches `release`;
@@ -242,7 +184,7 @@ The connector enforces `token_budget` inside the turn. The hub also cancels a tu
 
 The session's held tasks are its `held_task_ids` plus the tasks it prepared since. The use case `release-ended-workspaces.ts` in `src/agent/coding/` reads their status, picks the salvage ref and dispatches through `ConnectorJobs`; the hub calls it on connect and on its timer, wired by boot. A held task with no row is released too. One that belongs to another connector is released once it is terminal, and until then only dropped from the held set. The salvage ref is `refs/cogmo-wip/<task-id>` unless the task reached `pr_open`.
 
-A release's result is logged, like the sandbox path's teardown result, and never becomes a `TaskFailure`. The hub updates the held set on every release result, whichever path dispatched it. A `removed_clean` or `salvaged_and_removed` outcome drops the task. A `kept` outcome or a failed release also drops the task from the held set, and the connector stops listing it (rule 8): the workspace is the operator's, as `wip_push_failed_kept` is on the sandbox path, and nothing retries it. A release that resolves with a hub error stays held and is dispatched again at the next connect or sweep.
+A release's result is logged, like the sandbox path's teardown result, and never becomes a `TaskFailure`. The hub updates the held set on every release result, whichever path dispatched it. A `removed_clean` or `salvaged_and_removed` outcome drops the task. A `kept` outcome or a failed release also drops the task from the held set, and the connector stops listing it (rule 8): the workspace is the operator's, as `wip_push_failed_kept` is on the sandbox path, and nothing retries it. A release that resolves with a hub error, `invalid_result` included, stays held and is dispatched again at the next connect or sweep.
 
 ## Coding on a connector `[proposed]`
 
@@ -252,8 +194,8 @@ The `coding_tasks` state machine and its claims are unchanged, along with the pl
 |-|-|
 | the plan run's `allocate-worktree`, `ensure-image-present`, `create-container`, `persist-container-id`, `provision-askpass` and `check-credentials`' Claude token | `prepare-workspace` writes the `connector` assignment (the branch is `cogmo/<idShort>`), then dispatches `prepare`. Only the plan run prepares. |
 | the execute and verify runs' `try-resume`, `check-credentials`, `ensure-image-present`, `create-container`, `persist-container-id`, `persist-sandbox-created`, `provision-askpass` | none; they find the workspace by task id |
-| `plan-cli` | dispatches `plan`. Text deltas go to the plan stream; the result's plan goes to `persist-plan` and its session handle to `session_id`. |
-| `execute-cli`, `persist-usage` | dispatches `execute` with `session_id`; usage comes from the result |
+| `plan-cli` | dispatches `plan`. Text deltas go to the plan stream; the result's plan goes to `persist-plan` and its `agent_session_id` to `session_id`. |
+| `execute-cli`, `persist-usage` | dispatches `execute` with `session_id` as its `agent_session_id`; text deltas and tool calls go to the progress stream, as `execute-cli`'s do; usage comes from the result |
 | `commit-and-push-execute-changes`, `checkout-feature-branch`, `fetch-feature-branch`, the execute hand-off's `teardown`, and every `persist-sandbox-deleted` / `persist-sandbox-deleted-after-push-failure` | none |
 | `run-verify` | dispatches `verify` |
 | `commit-and-push`, `read-head-sha` | `publish-branch` dispatches `publish` to `cogmo/<idShort>`; the head sha comes from the result |
@@ -272,9 +214,10 @@ Each dispatching step is durable for the reason its sandbox counterpart is: the 
 | `AGENT_FAILED` | `cli_exit_error` | the connector's message |
 | `NO_PLAN` | `no_plan_produced` | — |
 | `BRANCH_CONFLICT`, `PUSH_AUTH_FAILED`, `PUSH_FAILED` | `branch_conflict`, `auth_failed`, `push_failed` | the connector's message |
-| `SESSION_LOST`, `WORKSPACE_FAILED`, `JOB_CONFLICT`, `UNSUPPORTED`, `UNSPECIFIED`, and any code this build does not know | `connector_job_failed` | code and message |
+| `SESSION_LOST`, `WORKSPACE_FAILED`, `JOB_CONFLICT`, `UNSUPPORTED`, `UNSPECIFIED`, and `unknown` | `connector_job_failed` | code and message |
 | `cancelled` that the hub did not request | `connector_job_failed` | "cancelled by the connector" |
-| verify verdict | `verify_failed` / `verify_timed_out` | exit code and output tail |
+| verify verdict | `verify_failed` / `verify_timed_out` | exit code and output tail (at most 8 KiB) |
+| `invalid_result` | `connector_job_failed` | the hub's message |
 
 **Failure modes.**
 
@@ -295,14 +238,14 @@ Each dispatching step is durable for the reason its sandbox counterpart is: the 
 | Cancel during a job | task `cancelled` | the next sweep, within 10 minutes, releases the workspace, and rule 8 stops the job. The waiting step sees a `cancelled` it did not request, the failure write reads `already_terminal`, and the run reclaims. A job that ends before the sweep runs to its end, as `plan-cli` and `execute-cli` do. **Residual:** the connector works for up to 10 minutes (`todo.md`: `CancelJob` on Cancel) |
 | Cancel during `publish` | task `cancelled` | **Residual:** `cogmo/<idShort>` may already be on the remote, as on the sandbox path |
 | Cancel at `awaiting_approval` or `pending_verify` | task `cancelled` | the sweep releases the workspace within 10 minutes |
-| The connector is revoked mid-job | task `failed`, `connector_job_lost` | the stream closes within 30 s and the token is refused, so the lease runs out |
+| The connector is revoked mid-job | task `failed`, `connector_job_lost` | the session ends within 30 s (95 s while the table can't be read) and the token is refused, so the lease runs out |
 | The token is rotated mid-job | job `accepted`, if the connector reconnects with the new token within the lease | otherwise as revoked |
 | Two connector processes under one name | the newer session | each `Connect` replaces the other's session, and jobs missing from the newer `held_job_ids` are lost. **Residual:** two live processes flap until one stops |
 | A call names another connector's job | unchanged | `PERMISSION_DENIED` |
 
 ## Paseo connector `[research]`
 
-`connectors/paseo/` is a TypeScript workspace member in cogmo's release, running on the Paseo host. It maps jobs onto `@getpaseo/client`, and runs `verify`, `publish` and the salvage push itself in the worktree, so it gets exit codes and uses the host's git credentials. Its config (cogmo URL and token, Paseo URL and password, a local checkout for each remote, and the Paseo provider for each `AgentTurnSpec.agent`) is the operator's.
+`connectors/paseo/` is a TypeScript workspace member in cogmo's release, running on the Paseo host. It maps jobs onto `@getpaseo/client`, and runs `verify`, `publish` and the salvage push itself in the worktree, so it gets exit codes and uses the host's git credentials. Its config (cogmo URL and token, Paseo URL and password, a local checkout for each remote, and the Paseo provider for each `agent` a `PlanSpec` or `ExecuteSpec` names) is the operator's.
 
 | Job | Paseo |
 |-|-|
@@ -320,23 +263,23 @@ Check in a spike before building:
 
 ## Channel connectors `[proposed]`
 
-A channel connector exposes the per-channel `Transport` from [operator-facade.md](operator-facade.md) on the same session. Inbound messages arrive as a unary `Receive`, idempotent on the platform's message id; deliveries and edits go down the `Connect` stream. Its design follows that doc's split slice.
+A channel connector exposes the per-channel `Transport` from [operator-facade.md](operator-facade.md) on the same session, with its messages in `channel.proto`. Inbound messages arrive as a unary `Receive`, idempotent on the platform's message id; deliveries and edits go down the `Connect` stream, as `ConnectResponse` cases of their own rather than a reused `Job`, whose `task_id` and specs are coding's. Its design follows that doc's split slice.
 
 ## Testing `[proposed]`
 
-- **Unit:** the hub and server over `createRouterTransport` with a fake connector. Cover a matrix of the eight rules, the transition table, the caps, lease expiry, a session replaced under one name, revoke and rotate, and the mapping onto `TaskFailure`s.
-- **Contract suite:** a TypeScript kit that drives any connector over gRPC through the eight rules. The Paseo connector runs it in CI.
+- **Unit:** the hub and server over `createRouterTransport` with a fake connector. Cover a matrix of the ten rules, the transition table, the caps, lease expiry, a session replaced under one name, revoke and rotate, and the mapping onto `TaskFailure`s.
+- **Contract suite:** a TypeScript kit that drives any connector over gRPC through the ten rules. The Paseo connector runs it in CI.
 - **Integration:** one coding task end to end against the fake connector, over a real h2c socket bound to port 0.
 - **Paseo connector:** against the official Paseo image (a `dev/containers.ts` factory), with the Claude provider's `ANTHROPIC_BASE_URL` pointed at llmock. Whether replay holds across Paseo's provider launch is a spike item.
 
 ## Slices `[proposed]`
 
-1. `packages/connector-proto` and its CI checks, with the generated code excluded from Biome and knip. `src/connector/`: the server, auth, hub, store and migration, plus its place in the shutdown order. `cogmo connector add | rotate | revoke | list`, and the unit tier. Docs: the AGENTS.md module table, `store-pattern.md`, and `infrastructure.md` → Shutdown.
-2. Coding on a connector: the columns, the CHECKs and the assignment variant; the dispatching steps; the four reasons; the release sweep; the integration test. Docs: `coding-delegation.md`'s schema block, step table and failure-reason table.
-3. The Paseo spike, then `connectors/paseo` and the contract suite.
+1. `packages/connector-proto` and its CI checks, with the generated code excluded from Biome. `src/connector/`: the server, auth, hub, store and migration, plus its place in the shutdown order. `cogmo connector add | rotate | revoke | list`, and the unit tier. Docs: the AGENTS.md module table, `store-pattern.md`, and `infrastructure.md` → Shutdown.
+2. Coding on a connector: the columns, the CHECKs and the assignment variant; `revoke` refusing while a repo points at the connector; the dispatching steps; the four reasons; the session's held tasks and the release sweep; the integration test. Docs: `coding-delegation.md`'s schema block, step table and failure-reason table.
+3. The Paseo spike, then `connectors/paseo`, the contract suite, and the protovalidate annotations.
 4. Channel connectors, after operator-facade slice 3.
 
 ## Open questions
 
 - Should the Paseo connector ship as a subcommand of the cogmo image (`cogmo connector run paseo`), or as its own image?
-- `AgentTurnSpec.agent` carries `coding_tasks.backend` (`claude`, `codex`). Should a repo be able to name a model too, or is that the connector's config?
+- `PlanSpec.agent` and `ExecuteSpec.agent` carry `coding_tasks.backend` (`claude`, `codex`). Should a repo be able to name a model too, or is that the connector's config?

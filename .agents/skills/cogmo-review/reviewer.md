@@ -149,6 +149,10 @@ the rule (`file` + a short exact quote).
 - 5c JSONB through `jsonbZod` with a named schema.
 - 5d The owning design doc's schema updated in the same diff.
 - 5e `pgEnum` for closed value sets; UUIDv7 `id` + `created_at` on new tables.
+- 5f `.proto` changes, and code that reads, writes or digests connector
+  messages, follow `.agents/rules/protobuf.md` (presence, oneofs, unknown
+  values, no deletions in v1, keys over canonical JSON, message bounds,
+  regenerated code committed).
 
 **6. Tests** — `.agents/rules/testing.md`, `AGENTS.md` → Commits & PRs
 - 6a Red is behavioural: each new test would fail against the old code for the
