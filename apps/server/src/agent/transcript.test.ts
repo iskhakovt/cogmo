@@ -86,7 +86,7 @@ describe("openTranscript", () => {
     expect(transcript.openedLength).toBe(3);
     expect(log.warn).toHaveBeenCalledWith(
       expect.objectContaining({ repairCount: 1 }),
-      "agent loop history invariants repaired",
+      "transcript history invariants repaired",
     );
   });
 

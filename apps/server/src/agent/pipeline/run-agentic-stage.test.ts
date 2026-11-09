@@ -718,7 +718,7 @@ describe("runAgenticStage", () => {
 
     expect(stageLog.warn).toHaveBeenCalledWith(
       expect.objectContaining({ repairCount: 1 }),
-      "agent loop history invariants repaired",
+      "transcript history invariants repaired",
     );
   });
 

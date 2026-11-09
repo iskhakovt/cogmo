@@ -208,10 +208,11 @@ Be specific — preserve names, paths, and values, not abstractions.`;
  * the Observer. The transcript opens downstream of compaction, so a
  * summarization request is the one LLM call in a turn built from raw history
  * — and a split can land right after an assistant `tool_use` that history
- * never answered, which Anthropic rejects outright. Unrepaired, that 400 is permanent for the conversation: the manual
- * path surfaces it as `compaction_failed` on every attempt, and the turn-time
- * path swallows it into a wasted billable call plus a silent drop to
- * truncation on every turn above the threshold.
+ * never answered, which Anthropic rejects outright. Unrepaired, that 400 is
+ * permanent for the conversation: the manual path surfaces it as
+ * `compaction_failed` on every attempt, and the turn-time path swallows it
+ * into a wasted billable call plus a silent drop to truncation on every turn
+ * above the threshold.
  *
  * The cap leaves room for reasoning as well as the summary, bounded by what
  * this model accepts — asking above its ceiling is a 400 of a different kind.

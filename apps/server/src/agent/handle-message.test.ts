@@ -438,7 +438,7 @@ describe("createHandleMessage", () => {
 
       expect(childLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ repairCount: 1 }),
-        "agent loop history invariants repaired",
+        "transcript history invariants repaired",
       );
     } finally {
       childSpy.mockRestore();

@@ -62,7 +62,8 @@ export interface CompactTurnArgs {
 /**
  * What compaction did to the turn's view. `view.kind` says whether it rewrote
  * the view at all; `rewroteView` whether no stored summary reproduces the
- * rewrite. A summary this turn stored is `rewritten` with `rewroteView` false.
+ * rewrite. A view only this turn's stored summary rewrote is `rewritten` with
+ * `rewroteView` false.
  */
 export interface CompactedTurn {
   /** The view as compaction left it: unchanged, or rewritten, which only an epoch opening sends. */

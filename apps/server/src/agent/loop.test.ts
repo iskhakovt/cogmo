@@ -2910,11 +2910,9 @@ describe("the registry the loop dispatches on", () => {
 
   /** A transcript opened under a registry offering `names`, in that order. */
   function transcriptOffering(...names: string[]) {
-    const offered = new ToolRegistry();
-    for (const name of names) offered.register(echoTool(name));
     return testTranscript({
       system: "sys",
-      tools: offered,
+      tools: registryOf(...names),
       messages: [{ role: "user", content: "go" }],
       log: logger,
     });
