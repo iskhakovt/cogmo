@@ -252,7 +252,7 @@ describe("checkTurnHead", () => {
       expect(await verdict(rows, heads, EPOCH)).toMatchObject({ kind: "violated" });
     });
 
-    it("sanitized as the loop sanitizes its history", async () => {
+    it("sanitized as the turn's transcript sanitizes its history", async () => {
       // m2's call has no result; the loop sent m3 led by a synthesized one.
       const rows: Row[] = [
         { id: "m1", role: "user", content: "first" },

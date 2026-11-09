@@ -186,8 +186,8 @@ export function epochReason(
  * `messages` with the thinking blocks of every message before `end` removed;
  * text and tool calls stay. Those blocks are bound to an earlier system prompt
  * or history, and as a leading run they can be removed without invalidating
- * the ones after them. A message left empty is dropped by the loop's history
- * sanitizer.
+ * the ones after them. A message left empty is dropped by the transcript's
+ * history sanitization (`openTranscript`).
  */
 export function stripThinkingBefore(messages: ReadonlyArray<Message>, end: number): Message[] {
   return messages.map((message, i) =>

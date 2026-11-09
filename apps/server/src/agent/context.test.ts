@@ -7,6 +7,7 @@ import { expectDefined } from "../test/assertions.js";
 import {
   type CompactionEvent,
   type ContextManagerDeps,
+  compactedView,
   compactMessages,
   extractSummaryText,
   rewroteWithoutSummary,
@@ -1173,6 +1174,28 @@ describe("rewroteWithoutSummary", () => {
   });
 });
 
+describe("compactedView", () => {
+  const messages = [msg("user", "hi")];
+
+  it("is unchanged when no strategy rewrote the view", () => {
+    expect(compactedView({ messages, didCompact: false })).toEqual({ kind: "unchanged", messages });
+  });
+
+  it("is rewritten when a strategy did, whether or not its summary is stored", () => {
+    const event: CompactionEvent = {
+      strategies: ["summarize"],
+      tokensBefore: 900,
+      tokensAfter: 500,
+      requestBytesBefore: 4000,
+      messagesSummarized: 4,
+    };
+    expect(compactedView({ messages, didCompact: true, event })).toEqual({
+      kind: "rewritten",
+      messages,
+    });
+  });
+});
+
 describe("toolResultClearing", () => {
   it("clears past 60% of the budget, keeps five results, and frees at least a tenth", () => {
     expect(toolResultClearing(200_000)).toEqual({
@@ -1552,16 +1575,27 @@ describe("prefix veto", () => {
 });
 
 describe("summarizationRequest", () => {
+  /** A summarization model whose budget is 126,000 input tokens. */
+  const LIMITS = { contextWindow: 200_000, maxOutputTokens: 64_000 };
+
+  const READ_FILE: ToolDefinition = {
+    name: "read_file",
+    description: "Read a file",
+    parameters: { type: "object" },
+  };
+
   it("repairs an orphan tool_use at the prefix tail", () => {
     // A split can land right after an assistant `tool_use` that history never
-    // answered — a shape `validateHistory` exists for. Compaction runs upstream
-    // of the agent loop's sanitizer, so this is the one LLM call in a turn that
-    // would otherwise be built from raw history, and Anthropic rejects it.
+    // answered — a shape `validateHistory` exists for. Compaction runs before
+    // the turn's transcript opens and sanitizes its history, so this is the one
+    // LLM call in a turn that would otherwise be built from raw history, and
+    // Anthropic rejects it.
     const params = summarizationRequest({
       model: "m",
+      limits: LIMITS,
       system: "s",
+      tools: [],
       messages: [msg("user", "do it"), toolCallMsg("t1", "read_file")],
-      maxOutputTokens: 8192,
     });
 
     // The synthesized answer sits between the orphan call and the instruction.
@@ -1595,40 +1629,60 @@ describe("summarizationRequest", () => {
   it("appends the instruction as the final user message", () => {
     const params = summarizationRequest({
       model: "m",
+      limits: LIMITS,
       system: "s",
+      tools: [],
       messages: [msg("user", "hello"), msg("assistant", "hi")],
-      maxOutputTokens: 8192,
     });
 
     expect(params.messages.at(-1)).toEqual({ role: "user", content: SUMMARIZATION_PROMPT });
     expect(params.messages).toHaveLength(3);
   });
 
-  it("carries the turn's Strategy 1 intent, and none without one", () => {
-    const messages = [msg("user", "hello"), msg("assistant", "hi")];
+  it("sends the turn's system prompt and tools, with tool calls disabled", () => {
+    const params = summarizationRequest({
+      model: "m",
+      limits: LIMITS,
+      system: "the turn's prompt",
+      tools: [READ_FILE],
+      messages: [msg("user", "hello"), msg("assistant", "hi")],
+    });
 
-    expect(
-      summarizationRequest({
-        model: "m",
-        system: "s",
-        messages,
-        maxOutputTokens: 8192,
-        clearToolResults: CLEARING,
-      }).clearToolResults,
-    ).toEqual(CLEARING);
-    expect(
-      summarizationRequest({ model: "m", system: "s", messages, maxOutputTokens: 8192 }),
-    ).not.toHaveProperty("clearToolResults");
+    expect(params).toMatchObject({
+      system: "the turn's prompt",
+      tools: [READ_FILE],
+      toolChoice: "none",
+    });
+  });
+
+  it("clears tool results only past the fork's budget, as Strategy 1 keeps and frees", () => {
+    const params = summarizationRequest({
+      model: "m",
+      limits: LIMITS,
+      system: "s",
+      tools: [],
+      messages: [msg("user", "hello"), msg("assistant", "hi")],
+    });
+
+    // 200,000 − the 16,000 output cap − the 10,000 safety buffer.
+    expect(params.clearToolResults).toEqual({
+      triggerTokens: 174_000,
+      keep: 5,
+      clearAtLeastTokens: 17_400,
+    });
   });
 
   it("caps output at the model's own ceiling when it is below the default", () => {
-    expect(
-      summarizationRequest({ model: "m", system: "s", messages: [], maxOutputTokens: 4096 })
-        .maxTokens,
-    ).toBe(4096);
-    expect(
-      summarizationRequest({ model: "m", system: "s", messages: [], maxOutputTokens: 64_000 })
-        .maxTokens,
-    ).toBe(16_000);
+    const capped = (maxOutputTokens: number) =>
+      summarizationRequest({
+        model: "m",
+        limits: { contextWindow: 200_000, maxOutputTokens },
+        system: "s",
+        tools: [],
+        messages: [],
+      }).maxTokens;
+
+    expect(capped(4096)).toBe(4096);
+    expect(capped(64_000)).toBe(16_000);
   });
 });

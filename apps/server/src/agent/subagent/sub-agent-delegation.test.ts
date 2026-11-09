@@ -4,7 +4,7 @@ import { anthropicAttachmentLimits } from "../../llm/attachment-limits.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { LlmResponse } from "../../llm/types.js";
 import { logger } from "../../logger.js";
-import { mockFilesService, mockResolver } from "../../test/factories.js";
+import { mockFilesService, mockResolver, testTranscript } from "../../test/factories.js";
 import { runAgentLoop, type StepRunner } from "../loop.js";
 import type { Service } from "../service.js";
 import type { SubAgent } from "../store/index.js";
@@ -106,8 +106,12 @@ describe("sub-agent delegation (two models)", () => {
     const result = await runAgentLoop({
       provider: providerA,
       model: "model-a",
-      systemPrompt: "sys",
-      messages: [{ role: "user", content: "write me a haiku" }],
+      transcript: testTranscript({
+        system: "sys",
+        tools: registry,
+        messages: [{ role: "user", content: "write me a haiku" }],
+        log: logger,
+      }),
       tools: registry,
       service: stubService(),
       stepRun,
