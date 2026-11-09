@@ -35,6 +35,7 @@ apps/web/*
 !packages/
 packages/*
 !packages/contracts/
+!packages/connector-proto/
 # The ctx package both skill tiers ship; the wasm child bundle embeds it.
 !images/
 images/*
