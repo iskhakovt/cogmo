@@ -1,0 +1,102 @@
+// Payloads of coding jobs (design/connectors.md → Coding on a connector): the
+// spec each phase's `Job` carries, the events an agent turn reports, and each
+// phase's result. The session that carries them is session.proto.
+syntax = "proto3";
+
+package cogmo.connector.v1;
+
+message PrepareSpec {
+  string remote_url = 1; // carries no password, and no userinfo for http(s)
+  string base_branch = 2;
+  string work_branch = 3;
+}
+
+// A plan turn: the agent explores in plan mode and returns a plan.
+message PlanSpec {
+  string prompt = 1; // cogmo keeps the Job under the 4 MiB message limit
+  string agent = 2; // `coding_tasks.backend` (`claude`, `codex`); a connector that doesn't serve it fails the job UNSUPPORTED
+  optional uint64 token_budget = 3; // input plus output tokens, as `Usage` counts them; absent, no budget
+}
+
+// An execute turn: the agent resumes the plan's session and makes the change.
+message ExecuteSpec {
+  string prompt = 1; // cogmo keeps the Job under the 4 MiB message limit
+  string agent = 2; // as in PlanSpec
+  optional uint64 token_budget = 3; // as in PlanSpec
+  string agent_session_id = 4; // the plan's `PlanResult.agent_session_id`; a connector that lost it fails the job SESSION_LOST
+}
+
+message VerifySpec {
+  string command = 1;
+  uint32 timeout_seconds = 2;
+}
+
+message PublishSpec {
+  string commit_message = 1;
+  string work_branch = 2; // the connector pushes the workspace to `refs/heads/<work_branch>`
+}
+
+message ReleaseSpec {
+  optional string salvage_ref = 1; // absent: no salvage push, as for a task that reached pr_open
+}
+
+message ToolCall {
+  string name = 1;
+}
+
+message ToolResult {
+  string name = 1;
+  bool ok = 2;
+  string summary = 3; // at most 1 KiB, truncated by the connector
+}
+
+// Cumulative for the job. Each count is absent when the runtime reports none.
+message Usage {
+  optional uint64 input_tokens = 1; // input not read from or written to the prompt cache, as the Claude CLI's `result.usage.input_tokens` counts it
+  optional uint64 output_tokens = 2;
+  optional double cost_usd = 3;
+}
+
+message Prepared {}
+
+message PlanResult {
+  string plan = 1; // the connector keeps the FinishJob under 4 MiB, truncating the plan if it must
+  string agent_session_id = 2; // the agent's session handle, which execute passes back
+}
+
+message Executed {
+  Usage usage = 1; // absent when the runtime reports no usage
+}
+
+message VerifyVerdict {
+  oneof outcome {
+    int32 exit_code = 1;
+    VerifyTimedOut timed_out = 2;
+  }
+  string output_tail = 3; // the end of the combined output, at most 8 KiB, as the sandbox path caps it
+}
+
+message VerifyTimedOut {}
+
+message Published {
+  string head_sha = 1;
+}
+
+message Released {
+  oneof outcome {
+    RemovedClean removed_clean = 1;
+    SalvagedAndRemoved salvaged_and_removed = 2;
+    Kept kept = 3;
+  }
+}
+
+message RemovedClean {}
+
+message SalvagedAndRemoved {
+  string salvage_ref = 1;
+  string sha = 2;
+}
+
+message Kept {
+  string reason = 1; // at most 1 KiB, truncated by the connector
+}

@@ -60,6 +60,7 @@ const GROUPS: Record<string, () => Promise<CommandTree>> = {
   provider: async () => (await import("./cli/provider.js")).providerCli(CONSOLE_IO, loadCore),
   model: async () => (await import("./cli/model.js")).modelCli(CONSOLE_IO, loadModelDeps),
   subagent: async () => (await import("./cli/subagent.js")).subAgentCli(CONSOLE_IO, loadCore),
+  connector: async () => (await import("./cli/connector.js")).connectorCli(CONSOLE_IO, loadCore),
   "image-provider": async () =>
     (await import("./cli/image-provider.js")).imageProviderCli(CONSOLE_IO, loadCore),
   "image-model": async () =>
@@ -229,6 +230,7 @@ async function serve(): Promise<number> {
   const { bootstrap } = await import("./index.js");
   const { env } = await import("./env.js");
   const { startWebUi } = await import("./boot/web.js");
+  const { startConnectors } = await import("./boot/connector.js");
   const { logger } = await import("./logger.js");
   const { SERVE_SHUTDOWN_BOUNDS, logShutdownOutcomes, serveResources, shutdownServe } =
     await import("./boot/shutdown.js");
@@ -236,6 +238,7 @@ async function serve(): Promise<number> {
   const boot = await bootstrap();
   const { inngest, functions } = boot;
   const web = await startWebUi(boot);
+  const connectors = await startConnectors(boot);
 
   try {
     if (env.INNGEST_MODE === "serve") {
@@ -261,7 +264,9 @@ async function serve(): Promise<number> {
       await connection.closed;
     }
   } finally {
-    logShutdownOutcomes(await shutdownServe(serveResources(boot, web), SERVE_SHUTDOWN_BOUNDS));
+    logShutdownOutcomes(
+      await shutdownServe(serveResources(boot, web, connectors), SERVE_SHUTDOWN_BOUNDS),
+    );
   }
 
   // Zero even when a step failed: the process did stop, and its log says what didn't.

@@ -110,6 +110,7 @@ Other tracking docs:
 | `src/secrets/` | Encrypted secrets store (AES-256-GCM, HKDF), GitHub/SSH credential helpers | Domain logic — credentials at rest |
 | `src/setup/` | `cogmo setup` wizard, non-interactive setup, seed, reset | Transport edge — operator setup over the domain use cases |
 | `src/boot/` | Staged `cogmo serve` bootstrap (core → sandbox → skills → runtime) and shutdown | Composition root — wires implementations to interfaces; no domain logic |
+| `src/connector/` | Connector server — gRPC over h2c, bearer auth (`connectors`), the session hub that dispatches jobs and tracks their leases and caps | Transport edge — serves the wire contract and implements the coding `ConnectorJobs` port; no domain logic |
 | `src/web/` | Web UI server — promoted health router, oRPC admin API over `Transport`, fail-closed session auth (`web_sessions`), static SPA serving | Transport edge — a thin HTTP/RPC adapter that calls `Transport`/use-cases, no domain logic |
 | `src/util/` | Cross-cutting pure helpers (retry, etc.) | Stateless utilities only — no I/O ownership, no domain logic. If a helper needs DI, it belongs in a domain module instead. |
 
@@ -183,3 +184,7 @@ Anything with a lifecycle is an explicit state machine: a durable unit, a `pgEnu
 ## Inngest
 
 Replay model (per-boundary re-invocation on success), what belongs in a step, step-id determinism, tool durability policy. See [.agents/rules/inngest.md](.agents/rules/inngest.md).
+
+## Protobuf
+
+The connector contract's `.proto` files: presence through `optional`, alternatives as a `oneof`, unknown values handled, no deletions in v1, additive evolution, keys over canonical JSON, bounded messages. See [.agents/rules/protobuf.md](.agents/rules/protobuf.md).
