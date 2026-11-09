@@ -285,6 +285,21 @@ function redactSecrets(input: string): string {
 }
 
 /**
+ * {@link redactSecrets} on every string in `value`, before serialization: a
+ * key a text body carries on its own line follows a real newline here, where
+ * the patterns' word boundary holds, and the escape `\n` once serialized,
+ * where it does not.
+ */
+function redactStrings(value: unknown): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (Array.isArray(value)) return value.map(redactStrings);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactStrings(v)]));
+  }
+  return value;
+}
+
+/**
  * Normalize a WS message payload to a Buffer. `ws` delivers messages
  * as `Buffer`, `ArrayBuffer`, or `Buffer[]` (when `binaryType` is
  * `nodebuffer` / `arraybuffer` / `fragments`); journaling needs one
@@ -522,7 +537,7 @@ export class DaytonaMock {
     };
     const dir = dirname(this.#opts.fixturePath);
     if (!existsSync(dir)) await mkdir(dir, { recursive: true });
-    const serialized = redactSecrets(`${JSON.stringify(fixture, null, 2)}\n`);
+    const serialized = redactSecrets(`${JSON.stringify(redactStrings(fixture), null, 2)}\n`);
     await writeFile(this.#opts.fixturePath, serialized, "utf8");
     log.info({ path: this.#opts.fixturePath, callCount: fixture.calls.length }, "fixture written");
     this.#scenario = null;
