@@ -569,6 +569,68 @@ describe("runCodingTask", () => {
     expect(cut.trim()).toBe(featureTip.trim());
   });
 
+  it("allocates on a SHA-256 parent repo, saving its 64-character HEAD as the base", async () => {
+    const parentPath = join(baseDir, "repo-sha256");
+    await execFileP("git", ["init", "--object-format=sha256", "--initial-branch=main", parentPath]);
+    await execFileP("git", [
+      "-C",
+      parentPath,
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "init",
+    ]);
+    const head = (await execFileP("git", ["-C", parentPath, "rev-parse", "HEAD"])).stdout.trim();
+    expect(head).toHaveLength(64);
+    const repo = await tx((trx) =>
+      store
+        .insertRepo(trx, {
+          name: "sha256",
+          localPath: parentPath,
+          defaultBranch: "main",
+          remoteUrl: "git@github.com:user/sha256.git",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          verifyCommand: "true",
+          taskTokenBudget: 100_000,
+          taskWallTimeSeconds: 600,
+          maxConcurrentTasks: 1,
+        })
+        .then(expectOk),
+    );
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-SHA256" },
+          { kind: "plan_ready", plan: "## Plan\n" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+      }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("awaiting_approval");
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.worktreeAssignment?.baseSha).toBe(head);
+    expect(createCalls[0]?.env).toMatchObject({ COGMO_VERIFY_BASE: head });
+    const worktreePath = expectDefined(createCalls[0]?.worktreePath, "worktree path");
+    const { stdout: cut } = await execFileP("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+    expect(cut.trim()).toBe(head);
+  });
+
   it("missing CLAUDE_CODE_OAUTH_TOKEN with secretsStore wired → status=failed before container", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);

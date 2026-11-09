@@ -17,8 +17,10 @@ export const DevcontainerSpecSchema = z
   .passthrough();
 export type DevcontainerSpec = z.infer<typeof DevcontainerSpecSchema>;
 
-/** A commit as git names it: 40 lowercase hex characters. */
-const BaseShaSchema = z.string().regex(/^[0-9a-f]{40}$/, "expected 40-char lowercase hex SHA");
+/** A commit as git names it: 40 lowercase hex characters, or 64 in a SHA-256 repo. */
+const BaseShaSchema = z
+  .string()
+  .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/, "expected 40- or 64-char lowercase hex SHA");
 
 /**
  * Branch + transport-specific worktree material derived from the task id

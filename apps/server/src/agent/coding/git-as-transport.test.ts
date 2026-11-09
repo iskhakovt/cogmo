@@ -214,7 +214,12 @@ describe("pushTaskBranchToRemote", () => {
     ]);
   });
 
-  it("fetches the run branch, then the default branch, for a base the mirror lacks, and errs naming it when still missing", async () => {
+  it("fetches the run branch, then the default branch the remote lists, for a base the mirror lacks, and errs naming it when still missing", async () => {
+    gitMocks.runGit.mockImplementation(async (args) => ({
+      stdout: args.includes("ls-remote") ? `${held}\trefs/heads/main\n` : "",
+      stderr: "",
+    }));
+
     const pushed = await push(BASE_SHA);
 
     expect(pushed._unsafeUnwrapErr()).toEqual({ kind: "base_missing", baseSha: BASE_SHA });
@@ -226,6 +231,7 @@ describe("pushTaskBranchToRemote", () => {
         "https://github.com/owner/example.git",
         `+refs/heads/cogmo/run/${TASK_ID}*:refs/remotes/origin/cogmo/run/${TASK_ID}*`,
       ],
+      ["-C", mirror, "ls-remote", "https://github.com/owner/example.git", "refs/heads/main"],
       [
         "-C",
         mirror,
@@ -234,6 +240,17 @@ describe("pushTaskBranchToRemote", () => {
         "+main:refs/remotes/origin/main",
       ],
     ]);
+    // Every remote operation runs under the askpass env.
+    expect(gitMocks.runGit.mock.calls.every(([, env]) => env !== undefined)).toBe(true);
+  });
+
+  it("rejects when listing the remote's default branch fails, fetching nothing more", async () => {
+    gitMocks.runGit
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockRejectedValueOnce(new Error("ls-remote: Authentication failed"));
+
+    await expect(push(BASE_SHA)).rejects.toThrow(/Authentication failed/);
+    expect(gitMocks.runGit).toHaveBeenCalledTimes(2);
   });
 
   it("rejects when the presence check fails for another reason than a missing commit", async () => {
@@ -371,6 +388,22 @@ describe("fetchDefaultBranchTip then pushTaskBranchToRemote, against real reposi
 
     expect(pushed.isOk()).toBe(true);
     expect(await git(remote, "rev-parse", `refs/heads/cogmo/run/${taskId}`)).toBe(base);
+  });
+
+  it("errs naming a saved base on neither the mirror nor the run branch when the remote's default branch is gone", async () => {
+    const base = await commitAndPush(author, "first");
+    await rewriteRemoteMain();
+    await git(author, "push", "origin", "HEAD:refs/heads/trunk");
+    await git(remote, "symbolic-ref", "HEAD", "refs/heads/trunk");
+    await git(author, "push", "origin", "--delete", "main");
+    await git(dir, "init", "--bare", "--initial-branch=main", mirror);
+
+    const pushed = await push(base);
+
+    expect(pushed._unsafeUnwrapErr()).toEqual({ kind: "base_missing", baseSha: base });
+    await expect(
+      git(remote, "rev-parse", "--verify", `refs/heads/cogmo/run/${taskId}`),
+    ).rejects.toThrow();
   });
 
   it("errs naming a saved base neither the mirror nor the remote holds, and pushes nothing", async () => {

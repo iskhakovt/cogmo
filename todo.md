@@ -191,6 +191,7 @@ One PR per slice, in order; each later slice assumes the earlier ones.
 - [ ] `p3` Redact a bound secret's substituted value when an upstream reflects it into a response (an echoed query parameter, a `Location` header). Needs a response hook, which ends streaming (design/skills.md → Egress proxy → Substitution). (design review 2026-11-01)
 - [ ] `p3` Scrub the exact secret values issued to a run from its output, `ctx.log` lines, memory and file writes (design/skills.md → Secrets: pull model). (design review 2026-11-01)
 - [ ] `p3` Point the code comments that cite design/skills.md → "Exactly-once invocation" at its heading "At-most-once invocation" (`invoke-rejection.ts`, `invoke/start-run.ts`, `runner.ts`, `store/schema.ts` under `apps/server/src/skills/`), and correct the two that claim exactly-once execution (`store/index.ts`, `skill-tool-builder.ts`): the guarantee is at-most-once with cached-result recovery. (design review 2026-11-01)
+- [ ] `p3` Integration-test that `COGMO_VERIFY_BASE` reaches a real task container: a Local-Docker run that execs `printenv COGMO_VERIFY_BASE` and `git cat-file -e $COGMO_VERIFY_BASE^{commit}` in `/workspace` (unit tests check only the `SessionSpec.env` object; Daytona's `envVars` reaching `execStreaming` is likewise untested). (S5d-2 bug review, 2026-11-09)
 
 ### Skills, voice & transport
 
