@@ -156,6 +156,14 @@ function executeRegisterParams(
   };
 }
 
+/** The mirror singleton, `behind` at `localSha`. */
+async function seedMirror(localSha: string): Promise<void> {
+  await tx(async (trx) => {
+    await store.ensureMirror(trx);
+    await store.markMainAdvanced(trx, localSha);
+  });
+}
+
 describe("DrizzleSkillStore", () => {
   describe("skills", () => {
     it("inserts a skill and round-trips JSONB through Zod", async () => {
@@ -375,6 +383,106 @@ describe("DrizzleSkillStore", () => {
       ).toBeNull();
       expect(await tx((trx) => store.hasDeployAt(trx, SHA_EDIT))).toBe(true);
       expect(await tx((trx) => store.hasDeployAt(trx, SHA_THIRD))).toBe(false);
+    });
+
+    it("mirror state: inserts the singleton once, behind with no sha, and leaves a present row", async () => {
+      expect(await tx((trx) => store.getMirror(trx))).toBeNull();
+      expect(await tx((trx) => store.lockMirror(trx))).toBe(false);
+      await tx((trx) => store.ensureMirror(trx));
+      expect(await tx((trx) => store.lockMirror(trx))).toBe(true);
+      expect(await tx((trx) => store.getMirror(trx))).toEqual({
+        status: "behind",
+        localSha: null,
+        pushedSha: null,
+        lastFailure: null,
+      });
+      await tx((trx) => store.markMainAdvanced(trx, SHA));
+      await tx((trx) => store.ensureMirror(trx));
+      expect(await tx((trx) => store.getMirror(trx))).toEqual({
+        status: "behind",
+        localSha: SHA,
+        pushedSha: null,
+        lastFailure: null,
+      });
+    });
+
+    it("mirror state: a landed push of local_sha syncs, and an advance makes it behind again", async () => {
+      await seedMirror(SHA);
+      // A push of another sha leaves it behind.
+      expect(await tx((trx) => store.recordMirrorLanded(trx, SHA_NEW))).toBe(false);
+      await tx((trx) => store.recordMirrorFailed(trx, "unreachable"));
+      expect(await tx((trx) => store.recordMirrorLanded(trx, SHA))).toBe(true);
+      expect(await tx((trx) => store.getMirror(trx))).toEqual({
+        status: "synced",
+        localSha: SHA,
+        pushedSha: SHA,
+        lastFailure: null,
+      });
+
+      await tx((trx) => store.markMainAdvanced(trx, SHA_NEW));
+      expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+        status: "behind",
+        localSha: SHA_NEW,
+        pushedSha: SHA,
+      });
+    });
+
+    it("mirror state: marking main advanced to the sha the row already holds changes nothing", async () => {
+      await seedMirror(SHA);
+      await tx((trx) => store.recordMirrorLanded(trx, SHA));
+      await tx((trx) => store.markMainAdvanced(trx, SHA));
+      expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+        status: "synced",
+        localSha: SHA,
+      });
+    });
+
+    it("mirror state: a failed push keeps behind with its cause; a synced row records none", async () => {
+      await seedMirror(SHA);
+      await tx((trx) => store.recordMirrorFailed(trx, "auth"));
+      expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+        status: "behind",
+        lastFailure: "auth",
+      });
+      await tx((trx) => store.recordMirrorLanded(trx, SHA));
+      await tx((trx) => store.recordMirrorFailed(trx, "timeout"));
+      expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+        status: "synced",
+        lastFailure: null,
+      });
+    });
+
+    it("mirror state: diverged returns to behind only at the local_sha it was read at", async () => {
+      await seedMirror(SHA);
+      expect(await tx((trx) => store.recordMirrorBehind(trx, SHA))).toBe(false);
+      await tx((trx) => store.recordMirrorDiverged(trx));
+      expect(await tx((trx) => store.recordMirrorBehind(trx, SHA_NEW))).toBe(false);
+      expect(await tx((trx) => store.recordMirrorBehind(trx, SHA))).toBe(true);
+      expect(await tx((trx) => store.getMirror(trx))).toEqual({
+        status: "behind",
+        localSha: SHA,
+        pushedSha: null,
+        lastFailure: null,
+      });
+    });
+
+    it("mirror state: diverged is entered once from behind, kept by an advance, and left by a landed push", async () => {
+      await seedMirror(SHA);
+      expect(await tx((trx) => store.recordMirrorDiverged(trx))).toBe(true);
+      expect(await tx((trx) => store.recordMirrorDiverged(trx))).toBe(false);
+      await tx((trx) => store.markMainAdvanced(trx, SHA_NEW));
+      expect(await tx((trx) => store.getMirror(trx))).toEqual({
+        status: "diverged",
+        localSha: SHA_NEW,
+        pushedSha: null,
+        lastFailure: "rejected",
+      });
+
+      expect(await tx((trx) => store.recordMirrorLanded(trx, SHA_NEW))).toBe(true);
+      expect(await tx((trx) => store.getMirror(trx))).toMatchObject({
+        status: "synced",
+        lastFailure: null,
+      });
     });
 
     it("records the layout commit once, and forgets it", async () => {

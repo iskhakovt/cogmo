@@ -1,5 +1,7 @@
 /** `/skills`, `/disable`, `/enable`: the skill library. */
 
+import { match } from "ts-pattern";
+import type { SkillsMirrorView } from "../../../../skills/runner.js";
 import type { Transport } from "../../../transport.js";
 import { packTelegramMessages } from "../message-limit.js";
 import { errorMessage, type TelegramCommandContext } from "./reply.js";
@@ -24,10 +26,12 @@ export async function handleSkills(
     await ctx.reply(errorMessage(res.error));
     return;
   }
+  const mirror = await transport.skills.mirrorStatus(handle);
+  const remote = mirror.isOk() && mirror.value !== null ? mirrorLine(mirror.value) : null;
   if (res.value.length === 0) {
-    await ctx.reply(
-      "No skills registered. Use `cogmo skills register <branch>` from the CLI or the agent's `register_skill` tool.",
-    );
+    const none =
+      "No skills registered. Use `cogmo skills register <branch>` from the CLI or the agent's `register_skill` tool.";
+    await ctx.reply(remote === null ? none : `${none}\n${remote}`);
     return;
   }
   // Compact one-line-per-skill rendering. `gitSha` shortened to 7 chars
@@ -45,9 +49,30 @@ export async function handleSkills(
   });
   // One message when it fits; otherwise split between skills, so a pending
   // deploy id is never cut.
-  for (const part of packTelegramMessages(["Skills:", ...lines])) {
+  for (const part of packTelegramMessages([
+    "Skills:",
+    ...lines,
+    ...(remote === null ? [] : [remote]),
+  ])) {
     await ctx.reply(part);
   }
+}
+
+/** The skills remote's lag, for the listing; null while it is synced. */
+function mirrorLine(mirror: SkillsMirrorView): string | null {
+  return match(mirror.status)
+    .with("synced", () => null)
+    .with(
+      "behind",
+      () =>
+        `Skills remote: behind local main${mirror.lastFailure === null ? "" : ` (last push: ${mirror.lastFailure})`}; it is pushed every 10 minutes.`,
+    )
+    .with(
+      "diverged",
+      () =>
+        "Skills remote: diverged from local main; push local main to it by hand (`git -C $COGMO_SKILLS_PATH push origin main`).",
+    )
+    .exhaustive();
 }
 
 /**

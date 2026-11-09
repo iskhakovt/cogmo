@@ -13,6 +13,7 @@ import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { ensureFalImageDefaults, ensureWebChannel } from "../setup/seed.js";
 import { migrateSkillsLayout } from "../skills/migrate-layout.js";
+import { ensureSkillsMirror } from "../skills/mirror-reconcile.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "../skills/repo.js";
 import type { SkillStore } from "../skills/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
@@ -28,8 +29,8 @@ export interface PrepareDataLayerDeps {
 
 /**
  * `bootstrapCore`'s locked step: apply migrations, check `uuidv7()`, and bring
- * the skills bare repo, its layout and its `coding_repos` row to their
- * expected state.
+ * the skills bare repo, its mirror state, its layout and its `coding_repos`
+ * row to their expected state.
  */
 export async function prepareDataLayer(
   deps: PrepareDataLayerDeps,
@@ -53,6 +54,9 @@ export async function prepareDataLayer(
     if (skillsRepo.initialized) {
       logger.info({ path: skillsRepo.path }, "skills bare repo initialized");
     }
+
+    // The skills remote's mirror state, before anything advances main.
+    await ensureSkillsMirror({ runInTx: deps.runInTx, store: deps.skillStore }, skillsRepo.path);
 
     // Every skill in `skills/<name>/`, in one recorded layout commit; a boot
     // that finds it recorded does nothing (design/skills.md → Per-skill

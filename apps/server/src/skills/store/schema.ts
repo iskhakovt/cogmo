@@ -232,6 +232,49 @@ export const skillDeploys = pgTable(
   ],
 );
 
+/** How the skills remote's `main` stands to local `main` (design/skills.md → Repo location → Mirror state). */
+export const skillsMirrorStatus = pgEnum("skills_mirror_status", ["synced", "behind", "diverged"]);
+
+/** Why the last push of `main` to the skills remote failed. */
+export const skillsMirrorFailure = pgEnum("skills_mirror_failure", [
+  "rejected",
+  "unreachable",
+  "auth",
+  "timeout",
+]);
+
+/**
+ * The skills remote's mirror state, a singleton: every transaction that
+ * advances `main` writes `local_sha`, every push records its result, and the
+ * `skills-mirror-reconcile` cron pushes while it is `behind`.
+ */
+export const skillsRepoMirror = pgTable(
+  "skills_repo_mirror",
+  {
+    id: pk(),
+    singleton: boolean("singleton").notNull().unique(),
+    status: skillsMirrorStatus("status").notNull(),
+    /** `main` as last marked; null before `main` is born. */
+    localSha: text("local_sha"),
+    /** The sha the last recorded push landed, or the reconcile saw on the remote; null before one is recorded. */
+    pushedSha: text("pushed_sha"),
+    /** The last failed push's cause; null once one lands. */
+    lastFailure: skillsMirrorFailure("last_failure"),
+    createdAt: ts(),
+  },
+  (t) => [
+    check("chk_skills_repo_mirror_singleton", sql`${t.singleton}`),
+    check(
+      "chk_skills_repo_mirror_synced_no_failure",
+      sql`${t.status} <> 'synced' OR ${t.lastFailure} IS NULL`,
+    ),
+    check(
+      "chk_skills_repo_mirror_diverged_rejected",
+      sql`${t.status} <> 'diverged' OR ${t.lastFailure} = 'rejected'`,
+    ),
+  ],
+);
+
 /**
  * The commit that moved every skill to `skills/<name>/`, written once by
  * `migrateSkillsLayout`. A sha it is an ancestor of (or equal to) keeps a

@@ -339,27 +339,30 @@ $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable
 
 **Why local-authoritative.** Filesystem `update-ref` is atomic and needs no forge client; routing `register` through a provider API (`octokit.git.updateRef` or its Gitea twin) would couple the one operation that must stay crisp to per-forge clients. A failed push degrades to "live locally, remote behind": the database and the bare repo agree, and the next push reconciles. The remote exists for off-host backup of the skill library, at the cost of one URL in setup. Past setup every path is plain `git`, with credentials from the askpass helper; the provider-specific surfaces are the wizard's GitHub auto-provision and the PR opener ([coding-delegation.md](coding-delegation.md) → Merge gate), which knows only GitHub, so another forge gets the pushed branch and the operator opens the PR.
 
-**Mirror state** `[proposed]`, S5's. The unit is the singleton `skills_repo_mirror` row; its `status` (`skills_mirror_status`) says how the remote stands to local `main`. Each push records its result, so a remote left behind or diverged is a row the owner can see, not a warning in a log.
+**Mirror state** `[confirmed]`. The unit is the singleton `skills_repo_mirror` row; its `status` (`skills_mirror_status`) says how the remote stands to local `main`. Each push records its result, so a remote left behind or diverged is a row the owner can see in `/skills`, not a warning in a log. A push fails `unreachable`, `auth` (credentials refused, or the remote's hook or branch protection declining it), `timeout` or `rejected` (a non-fast-forward).
 
 | Transition | By | Guard | Writes |
 |-|-|-|-|
-| insert → `behind` | the bootstrap step that initialises the bare repo, under the bootstrap lock | no row | the singleton through `ON CONFLICT DO UPDATE` with a no-op SET, `local_sha` as `main` stands; the first reconcile's push, a no-op when the remote already has it, records the truth |
-| `synced`, `behind` → `behind`; `diverged` kept | a transaction that advances `main` (a deploy, the layout or toolchain commit) | — | `local_sha` |
-| `behind` → `synced` | a push that lands | the pushed sha equals `local_sha`, read in the recording transaction | `pushed_sha`, `last_failure` cleared |
+| insert → `behind` | the bootstrap step that initialises the bare repo, under the bootstrap lock | no row | the singleton through `ON CONFLICT DO UPDATE` with a no-op SET; then `local_sha` brought up to `main` as by the reconcile, below; the first reconcile's push, a no-op when the remote already has it, records the truth |
+| `synced`, `behind` → `behind`; `diverged` kept | a transaction that advances `main` (a deploy, the layout or toolchain commit), before its `update-ref`, so a conflict on the singleton retries it before `main` moves; a recovery that records a commit already on `main`; and each reconcile tick and the boot, which read `main` with the row locked (`SELECT … FOR UPDATE`), so a deploy marking it either waits for the read or retries after it | `local_sha` is not already that sha | `local_sha` |
+| `behind`, `diverged` → `synced` | a push that lands, a deploy's or the reconcile's | the pushed sha equals `local_sha`, read in the recording transaction | `pushed_sha`, `last_failure` cleared |
 | `behind` → `behind` | a push that fails unreachable, on auth or on time | — | `last_failure` |
-| `behind` → `diverged` | a push rejected, when `ls-remote` shows the remote's `main` is not an ancestor of local `main` | — | `last_failure = 'rejected'`; the owner told once |
-| `diverged` → `synced` | the owner's manual push ([Deploy lifecycle](#deploy-lifecycle-confirmed) → failure modes), seen by the reconcile | the remote's `main` equals `local_sha` | `pushed_sha`, `last_failure` cleared |
+| `behind` → `diverged` | a push rejected, when `ls-remote` shows the remote's `main` is not an ancestor of local `main` | — | `last_failure = 'rejected'`; the owner is told once when the owner channel lands (S11) |
+| `diverged` → `synced` | the owner's manual push ([Deploy lifecycle](#deploy-lifecycle-confirmed) → failure modes), seen by the reconcile | the remote's `main` equals `local_sha`, read in the recording transaction | `pushed_sha`, `last_failure` cleared |
+| `diverged` → `behind` | the reconcile, which then pushes | the remote's `main` is missing or an ancestor of `local_sha` (an older `main` pushed by hand, or a deploy after the owner's push whose own push failed); `local_sha` unchanged since the read | `last_failure` cleared |
 
-`skills-mirror-reconcile`, every 10 min, pushes when `behind` and checks the remote when `diverged`; a push is idempotent. A rejection whose remote `main` is an ancestor of local `main` lost to a newer push and changes nothing. The forward-commit rollback removes the one Cogmo-made path into `diverged`, which then needs an outside push to the remote. S9 merges local `main` into an attempt's start ref on the host and pushes that ref with the task, so a remote behind `main` never costs a draft a round.
-
-**Boot push** `[confirmed]`. `cogmo serve` pushes local `main` once at boot, in the background and best-effort as a deploy's push is, so a commit only local `main` holds (the layout commit, a deploy whose push failed) reaches the remote a git-remote backend's task branches from (`pushTaskBranchToRemote` cuts the run branch from the remote's `main`). The reconcile above replaces it.
+`skills-mirror-reconcile`, every 10 min, brings `local_sha` up to `main`, then pushes it when `behind` and reads the remote's `main` when `diverged`; a push is idempotent. Without an `origin` the tick does nothing and `/skills` shows nothing. A git-remote backend's task branches from the remote's `main` (`pushTaskBranchToRemote` cuts the run branch there), so a commit only local `main` holds, the layout commit or a deploy whose push failed, reaches its drafts within a tick. A rejection whose remote `main` is an ancestor of local `main` lost to a newer push and changes nothing. Only an outside write diverges the remote: a push to it, or a rewind of local `main`. S9 merges local `main` into an attempt's start ref on the host and pushes that ref with the task, so a remote behind `main` never costs a draft a round.
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
 | The process dies after `update-ref`, before the push | `behind` | the reconcile pushes within a tick |
+| `update-ref` lands, then the transaction fails to commit | `main` ahead of `local_sha`, in any status | the next reconcile tick, or the boot, reads `main` with the row locked and marks it, and a `behind` row is pushed: the remote mirrors `main` even while `main` holds a commit the database does not run. **Residual**: the manual rewind of such a `main` ([Deploy lifecycle](#deploy-lifecycle-confirmed) → failure modes, the `update-ref` row) leaves the remote ahead, so the next push records `diverged` until a forced push |
+| A tick fails (git, the database) | as the tick left it | `retries: 0`; the next tick repeats it. `concurrency: 1` keeps two ticks apart; a deploy's push racing a tick is the "A deploy's push and the reconcile's at once" row |
+| A push is rejected and the remote then cannot be read | `behind`, as before the push | nothing is recorded, since a diverged and a newer remote can't be told apart; the next tick pushes again |
+| A deploy commits between the reconcile's read of a hand-pushed remote and its write | `diverged`, `local_sha` past the remote's `main` | the deploy's push syncs it; if that fails, the next tick finds the remote an ancestor and records `behind` |
 | The push lands, the recording transaction fails | `behind` | the next push is a no-op that records `synced` |
 | A deploy's push and the reconcile's at once | the newer sha on the remote | the older push's rejection reads the remote as an ancestor, so it records nothing |
-| The remote stays unreachable | `behind`, `last_failure` set | local `main` and the database agree; the off-host copy lags, which `/skills` shows |
+| The remote stays unreachable | `behind`, `last_failure` set; a `diverged` row stays `diverged`, `last_failure = 'rejected'` | local `main` and the database agree; the off-host copy lags, which `/skills` shows |
 
 **Where it does not live.** Not in the Cogmo repo: skills are per-deployment, and a fork would conflict on upstream pulls, leak private workflows through a misconfigured remote and tie release cadences together. Not in one shared repo: each operator owns a private `cogmo-skills`. Not behind a git server in Cogmo: deploys go through `register`, so there is no PR UI to build, and operators bring their own forge. No base skills ship with Cogmo: the agent authors what it needs, and a pattern worth shipping would move to a `base-skills/` directory in the Cogmo repo.
 
@@ -716,13 +719,13 @@ Who repeats a deploy: the Inngest auto-register caller runs `register` in one st
 | `[proposed]` approve by merge: `update-ref` lands, then the commit fails or the process dies | `main` at the merge; the row `pending_approval` and `skills` at the old sha | as for a fast-forward (the `update-ref` row below), the database decides what runs. A repeat finds the reviewed sha an ancestor of `main` and `main`'s `skills/<name>/` equal to it, so the merge is `main` itself: no second commit, and `update-ref` is a no-op. That row's reconciliation and residual hold until then |
 | `[proposed]` approve by merge: `main` moves between the guard and `update-ref` | nothing committed; the merge commit unreachable | the compare-and-swap in `applyFilesystem` refuses, since the merge's first parent is no longer `main`, and the transaction rolls back; approve runs once more from a fresh read, so the deploy that landed is merged in, and a second loss refuses `non_fast_forward_at_approve_time` |
 | `[proposed]` two approves of one row, each writing its own merge | one `live` row, at the winner's merge; the loser's merge unreachable | the resolution race above: the loser retries on `40001` and its pre-read refuses it `deploy_not_pending` before `update-ref` |
-| `update-ref main` succeeds inside `applyFilesystem`, then the commit fails or the process dies | `main` at the deploy's sha; the database as before the transaction — for an approve of an enabled skill, the row still `pending_approval` and `skills` at the old sha; register's feature branch still exists | the database decides what runs, so the code on `main` does not execute. A repeat of register or approve converges: `isAncestor(main, sha)` holds for the sha `main` already holds, `update-ref` to it is a no-op, and register's branch survives until after the commit. A rollback's repeat finds its restoring commit (the forward-rollback row below). **Residual**, against *`main` is authoritative* below: until then `refs/heads/main` and `skills.git_sha` disagree, and every other skill's branch on the old `main` is `non_fast_forward`. If the operator denies instead, or a deny waiting on the row lock proceeds when approve's commit fails, deny writes only the row, so `main` keeps a commit whose deploy is `denied`, and the next deploy's mirror pushes it. Reconciliation is manual, before any further deploy: rewind `main` to the `skill_deploys.git_sha` with the newest `resolved_at` among `live` and `rolled_back` rows across all skills (or to the recorded layout commit if no deploy ever committed), not to this skill's `skills.git_sha`, which would drop other skills' later deploys |
+| `update-ref main` succeeds inside `applyFilesystem`, then the commit fails or the process dies | `main` at the deploy's sha; the database as before the transaction — for an approve of an enabled skill, the row still `pending_approval` and `skills` at the old sha; register's feature branch still exists | the database decides what runs, so the code on `main` does not execute. A repeat of register or approve converges: `isAncestor(main, sha)` holds for the sha `main` already holds, `update-ref` to it is a no-op, and register's branch survives until after the commit. A rollback's repeat finds its restoring commit (the forward-rollback row below). **Residual**, against *`main` is authoritative* below: until then `refs/heads/main` and `skills.git_sha` disagree, and every other skill's branch on the old `main` is `non_fast_forward`. If the operator denies instead, or a deny waiting on the row lock proceeds when approve's commit fails, deny writes only the row, so `main` keeps a commit whose deploy is `denied`, and the mirror reconcile pushes it within a tick. Reconciliation is manual, before any further deploy: rewind `main` to the `skill_deploys.git_sha` with the newest `resolved_at` among `live` and `rolled_back` rows across all skills (or to the recorded layout commit if no deploy ever committed), not to this skill's `skills.git_sha`, which would drop other skills' later deploys; then `git -C $COGMO_SKILLS_PATH push --force-with-lease=main:<dropped sha> origin main`, since the remote holds the dropped commit (the bare repo keeps no remote-tracking ref, so a bare `--force-with-lease` is refused) |
 | the feature branch delete after a committed register fails | the deploy is live; the branch lingers | logged as a warning; registering the branch again is `no_op` while its tip is `main`, and `non_fast_forward` once another skill has deployed — harmless either way; the branch can be deleted by hand |
-| `mirrorMainToRemote` fails after the commit, or the process dies between the commit and the push | local `main` and the database agree; the remote lags | every failure in the mirror — reading `origin`, resolving the identity, the push — is caught and logged as a warning, and the deploy still returns `live`. The next deploy's push, the boot push of `cogmo serve` (Repo location → Mirror state), or `git -C $COGMO_SKILLS_PATH push origin main` reconciles (Repo invariants) |
+| the mirror push fails after the commit, or the process dies between the commit and the push | local `main` and the database agree; the remote lags, `behind` | every failure in the mirror — reading `origin`, resolving the identity, the push — is recorded in the mirror state ([Repo location](#repo-location) → Mirror state) and logged, or only logged where nothing can be recorded (a rejected push whose remote then cannot be read, a failed recording transaction), and the deploy still returns `live`. The reconcile pushes within a tick, or `git -C $COGMO_SKILLS_PATH push origin main` reconciles by hand (Repo invariants) |
 | `rollback` while a deploy of the same skill is pending | a `rolled_back` row and `main` at the restoring commit; the pending row stays pending, its `prior_git_sha` stale | accepted as the owner override it is: `main` moved, so a later approve is `non_fast_forward_at_approve_time` (`[proposed]` the approve-time merge fails its tree guard, since the restoring commit changed `skills/<name>/`) until the tip merges `main`; a deny leaves the rollback in place. A rollback to the pending tip itself puts unreviewed code live with the row still pending |
 | a Roll back tap racing a deploy or rollback of the same skill, or a second tap | the winner's version live; the loser's restoring commit, if it made one, unreachable | the loser's `skills` UPDATE meets the winner's committed row and raises `40001`; the transactor's retry reads the moved sha and refuses `live_version_moved` (`skill_deploy_superseded`), and git collects the unreachable commit. A tap whose reads already saw the move refuses before any write |
 | forward rollback: `update-ref` lands, then the transaction fails or the process dies | `main` holds the restoring commit; `skills.git_sha` and the deploy rows as before, so the old version keeps running | the operator repeats the rollback. Its recovery check, as in the layout move, finds the newest first-parent commit on `main` that changes `skills/<name>/`; when that is Cogmo's restoring commit for this target (Cogmo's identity and a `Cogmo-Restores` trailer naming its `restores_git_sha`) with no deploy row, it records it instead of making a second, even when other skills have deployed since; when a merge deploy took that commit off the first-parent history, `main` already holds the target's files and the rollback records `main` itself. **Residual** until the repeat: a draft of the skill that merges `main` starts from the restored directory while its base is still the old live sha |
-| forward rollback: the mirror push fails after the commit | local `main` and the database agree; the remote lags | a plain push, so the next deploy's push or a manual `git push origin main` reconciles, as after a register |
+| forward rollback: the mirror push fails after the commit | local `main` and the database agree; the remote lags | a plain push, so the reconcile pushes within a tick, or a manual `git push origin main` reconciles, as after a register |
 | `rollback` to a sha that never had a `live` row, then `deregister`, then `enable` | `enable` is refused with `no_live_deploy` | the enable guard accepts a `rolled_back` row only when its `restores_git_sha` once had a `live` row, and the target never did; accepted and stated at the guard, which is the one place that reads it |
 | a `deregister` or `/disable` lands while a deploy is pending or a draft is open, then the deploy is approved or the draft's register goes live (the planned failure breaker lands the same way) | both write `disabled = false` (`executeRegister` and `executeApprove`), so the skill comes back live | **Decision:** register and approve put a skill live only from `awaiting_first_deploy`, or from any disabled activation for a Repair draft's deploy, and otherwise keep the activation ([Skill activation](#skill-activation-proposed)); `RegisterResult` carries `enabled: false`, so the toast, the CLI and the draft's notification say the skill stays disabled. Until implemented (todo.md → Skills autonomy S12), a residual |
 
@@ -2007,6 +2010,8 @@ CREATE TYPE skill_run_error_kind AS ENUM ('skill_raised', 'output_invalid', 'loa
   'memory_exceeded', 'skill_failed', 'input_invalid', 'skill_retryable', 'runtime_unavailable',
   'dependency_unavailable', 'egress_unavailable', 'credential_unavailable', 'host_lost', 'result_lost',
   'unknown');   -- 'unknown': migration backfill only
+CREATE TYPE skills_mirror_status AS ENUM ('synced', 'behind', 'diverged');
+CREATE TYPE skills_mirror_failure AS ENUM ('rejected', 'unreachable', 'auth', 'timeout');
 
 skills (
   id                UUID v7 PK,
@@ -2047,6 +2052,17 @@ skill_deploys (
   CHECK ((status = 'pending_approval') = (resolved_at IS NULL)),          -- chk_skill_deploys_resolved_at_iff_terminal
   CHECK (approved_by IS NULL OR status = 'live'),                          -- chk_skill_deploys_approved_by_only_live
   CHECK ((status = 'rolled_back') = (restores_git_sha IS NOT NULL))        -- chk_skill_deploys_restores_iff_rolled_back
+)
+
+skills_repo_mirror (
+  id            UUID v7 PK,
+  singleton     BOOLEAN NOT NULL UNIQUE CHECK (singleton),
+  status        skills_mirror_status NOT NULL,   -- transitions in Repo location → Mirror state
+  local_sha     TEXT,                  -- nullable: null before main is born; main as last marked
+  pushed_sha    TEXT,                  -- nullable: null before a push is recorded; the sha the last recorded push landed, or the reconcile saw on the remote
+  last_failure  skills_mirror_failure, -- nullable: the last failed push's cause; CHECK status <> 'synced' OR last_failure IS NULL,
+                                       -- CHECK status <> 'diverged' OR last_failure = 'rejected'
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
 skills_repo_layout (
@@ -2136,8 +2152,6 @@ CREATE TYPE egress_ca_status AS ENUM ('active', 'retiring', 'retired');
 CREATE TYPE calibration_run_status AS ENUM ('running', 'passed', 'stale', 'failed');
 CREATE TYPE calibration_failure_reason AS ENUM ('below_floor', 'step_error', 'lost');
 CREATE TYPE skill_shadow_fire_status AS ENUM ('owed', 'claimed', 'completed', 'superseded');
-CREATE TYPE skills_mirror_status AS ENUM ('synced', 'behind', 'diverged');
-CREATE TYPE skills_mirror_failure AS ENUM ('rejected', 'unreachable', 'auth', 'timeout');
 CREATE TYPE skill_cron_fire_status AS ENUM ('owed', 'dispatched', 'skipped', 'completed', 'retry_owed');
 CREATE TYPE skill_cron_skip_reason AS ENUM ('skill_not_found', 'not_scheduled', 'skill_disabled', 'invalid_inputs', 'sandbox_unavailable',
   'wasm_packages_unavailable', 'inflight', 'handler_failed', 'expired');
@@ -2207,17 +2221,6 @@ skill_draft_reviews (
   findings           JSONB NOT NULL,         -- SkillFindingsSchema
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (draft_id, round, attempt, reviewer)  -- written through ON CONFLICT DO UPDATE with a no-op SET
-)
-
-skills_repo_mirror (
-  id            UUID v7 PK,
-  singleton     BOOLEAN NOT NULL UNIQUE CHECK (singleton),
-  status        skills_mirror_status NOT NULL,   -- transitions in Repo location → Mirror state
-  local_sha     TEXT,                  -- nullable: null before main is born; main as the last advancing transaction left it
-  pushed_sha    TEXT,                  -- nullable: null before the first push lands
-  last_failure  skills_mirror_failure, -- nullable: the last failed push's cause; CHECK status <> 'synced' OR last_failure IS NULL,
-                                       -- CHECK status <> 'diverged' OR last_failure = 'rejected'
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
 deployment_flags (
@@ -2448,10 +2451,10 @@ In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", ou
 | Workers (wasm tier) | `worker-wasm/` | `host.ts` forks one permissioned child per task (`child-entry.ts`: IPC, interrupt, process group; `pyodide-worker.ts`: the Pyodide thread), the IPC transport, `process-groups.ts` (orphan records and the boot reap), `wheel-cache.ts` (hash-verified wheels and the built-ins' verified download), `wasm-lint.ts`; the child's Python in `py/` (the `ctx` SDK, the dependency installer), embedded in the bundle |
 | Worker channel + ctx RPC | `worker-state.ts`, `dispatcher.ts`, `ctx-handler.ts`, `protocol.ts` | Worker channel state machine and the shell that drives it, ctx RPC serving, Zod-validated frames |
 | Cron scheduler | `cron-ticker.ts`, `cron-fire-handler.ts` | Per-minute Inngest tick + per-skill cron invocation |
-| Git plumbing | `git-ops.ts`, `repo.ts`, `skill-files.ts`, `cogmo-commits.ts`, `migrate-layout.ts` | Bare-repo bootstrap, remote configuration, plumbing wrappers; a skill's files at a sha (`skills/<name>/` or, before the layout commit, the root); the commits Cogmo makes under its own identity; the boot's layout move |
+| Git plumbing | `git-ops.ts`, `repo.ts`, `skill-files.ts`, `cogmo-commits.ts`, `migrate-layout.ts`, `mirror-reconcile.ts` | Bare-repo bootstrap, remote configuration, plumbing wrappers; a skill's files at a sha (`skills/<name>/` or, before the layout commit, the root); the commits Cogmo makes under its own identity; the boot's layout move; the remote's mirror state and its 10-minute reconcile |
 | Remote configuration | `configure-remote*.ts` | Skills-repo remote setup and its prompts, shared by the setup wizard and `cogmo migrate-skills-remote` |
 | Agent surface | `skills-tool.ts`, `skills-service.ts`, `skill-tool-builder.ts`, `skills-keyboard.ts` | Per-turn tool list registration, per-conversation service, Anthropic SDK descriptor build, the Telegram approve/deny and disable keyboards (the message itself is the Telegram adapter's `skills-deploy-outcome-poster.ts`) |
-| Store | `store/` | DB schema + `SkillStore` interface (`skills`, `skill_deploys`, `skill_runs`, `skill_context_calls`, `skills_repo_layout` tables) |
+| Store | `store/` | DB schema + `SkillStore` interface (`skills`, `skill_deploys`, `skill_runs`, `skill_context_calls`, `skills_repo_layout`, `skills_repo_mirror` tables) |
 | Drafts `[proposed]` | `draft/` | The draft lifecycle: one use case per transition, the draft functions, the spec card |
 | Review `[proposed]` | `review/` | `SkillReviewer`, its Claude Code and Codex backends, the checklist, the calibration job |
 | Egress `[proposed]` | `egress/` | The egress proxy: the mockttp rules and policy, the pin tunnel, credentials, substitution, audit. The session socket's acceptor lives in the Local-Docker backend, and the in-container bridge in the image (`cogmo_skills_runtime.bridge`) |

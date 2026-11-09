@@ -8,6 +8,7 @@ import { migratePerFile } from "../db/migrate-per-file.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { ensureFalImageDefaults, ensureWebChannel } from "../setup/seed.js";
 import { migrateSkillsLayout } from "../skills/migrate-layout.js";
+import { ensureSkillsMirror } from "../skills/mirror-reconcile.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "../skills/repo.js";
 import type { SkillStore } from "../skills/store/index.js";
 import { fakeRunInTx } from "../test/factories.js";
@@ -18,6 +19,7 @@ import { prepareDataLayer, seedRuntimeDefaults } from "./locked-bootstrap.js";
 vi.mock("../db/migrate-per-file.js", () => ({ migratePerFile: vi.fn() }));
 vi.mock("./checks.js", () => ({ checkUuidv7: vi.fn() }));
 vi.mock("../skills/migrate-layout.js", () => ({ migrateSkillsLayout: vi.fn() }));
+vi.mock("../skills/mirror-reconcile.js", () => ({ ensureSkillsMirror: vi.fn() }));
 vi.mock("../skills/repo.js", () => ({
   bootstrapSkillsRepo: vi.fn(),
   ensureSkillsCodingRepo: vi.fn(),
@@ -49,6 +51,7 @@ beforeEach(() => {
   held = false;
   vi.mocked(migratePerFile).mockImplementation(async () => record("migrate"));
   vi.mocked(checkUuidv7).mockImplementation(async () => record("uuidv7"));
+  vi.mocked(ensureSkillsMirror).mockImplementation(async () => record("skills mirror"));
   vi.mocked(migrateSkillsLayout).mockImplementation(async (_deps, path) => {
     record("skills layout");
     return `layout of ${path}`;
@@ -85,6 +88,7 @@ describe("prepareDataLayer", () => {
       migrate: true,
       uuidv7: true,
       "skills repo": true,
+      "skills mirror": true,
       "skills layout": true,
       "skills row": true,
     });

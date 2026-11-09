@@ -17,7 +17,7 @@ import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { describeLocateSkillRejection, locateSkill } from "./locate-skill.js";
 import { readManifestLockfile } from "./lockfile-check.js";
-import { mirrorMainToRemote } from "./mirror.js";
+import { mirrorMain } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult } from "./register-result.js";
 import { registerSchemas } from "./schemas.js";
@@ -73,6 +73,7 @@ export async function registerSkill(
       classifierLog,
       runAs: deployRunAs(deps.defaultRunAs, opts.origin),
       applyFilesystem: async () => {
+        await deps.store.markMainAdvanced(tx, branchSha);
         await advanceMain(repoPath, branchSha, { kind: "fast_forward" });
       },
     }),
@@ -89,7 +90,7 @@ export async function registerSkill(
     // once another skill has deployed. The mirror lets a Daytona-backed
     // coding task cloning from origin see the just-registered skill.
     await deleteFeatureBranch(repoPath, opts.branch);
-    await mirrorMainToRemote(deps, repoPath, branchSha, {
+    await mirrorMain(deps, repoPath, branchSha, {
       ...(opts.signal && { signal: opts.signal }),
     });
   }

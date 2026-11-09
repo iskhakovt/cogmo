@@ -37,6 +37,61 @@ describe("handleSkills", () => {
     );
   });
 
+  it.each([
+    [
+      { status: "behind", lastFailure: "unreachable" },
+      "Skills remote: behind local main (last push: unreachable); it is pushed every 10 minutes.",
+    ],
+    [
+      { status: "diverged", lastFailure: "rejected" },
+      "Skills remote: diverged from local main; push local main to it by hand (`git -C $COGMO_SKILLS_PATH push origin main`).",
+    ],
+  ])("ends with the skills remote's lag when it is %o", async (mirror, line) => {
+    const transport = transportWith({
+      skills: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              name: "alpha",
+              tier: "wasm",
+              riskTier: "auto",
+              disabled: false,
+              gitSha: "1234567abcdef",
+              pendingDeploy: null,
+            },
+          ]),
+        ),
+        mirrorStatus: vi.fn().mockResolvedValue(ok(mirror)),
+      },
+    });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe(`Skills:\nalpha [wasm/auto] @ 1234567\n${line}`);
+  });
+
+  it("says nothing about a synced remote", async () => {
+    const transport = transportWith({
+      skills: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              name: "alpha",
+              tier: "wasm",
+              riskTier: "auto",
+              disabled: false,
+              gitSha: "1234567abcdef",
+              pendingDeploy: null,
+            },
+          ]),
+        ),
+        mirrorStatus: vi.fn().mockResolvedValue(ok({ status: "synced", lastFailure: null })),
+      },
+    });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe("Skills:\nalpha [wasm/auto] @ 1234567");
+  });
+
   it("shows a pending deploy's shas and full id on its skill's line", async () => {
     const id = "01960000-0000-7000-8000-000000000001";
     const transport = transportWith({
@@ -119,6 +174,21 @@ describe("handleSkills", () => {
     const ctx = mkCtx();
     await handleSkills(transport, ctx);
     expect(ctx.reply.mock.calls[0]?.[0]).toContain("No skills registered");
+  });
+
+  it("shows the skills remote's lag with no skills registered", async () => {
+    const transport = transportWith({
+      skills: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        mirrorStatus: vi.fn().mockResolvedValue(ok({ status: "behind", lastFailure: "auth" })),
+      },
+    });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain(
+      "Skills remote: behind local main (last push: auth)",
+    );
   });
 
   it("maps skills_disabled to a friendly message", async () => {

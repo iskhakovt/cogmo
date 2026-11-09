@@ -601,6 +601,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       list: vi.fn().mockResolvedValue(ok([])),
       disable: vi.fn().mockResolvedValue(ok({ name: "echo" })),
       disableById: vi.fn().mockResolvedValue(ok({ name: "echo" })),
+      mirrorStatus: vi.fn().mockResolvedValue(ok(null)),
       rollbackDeploy: vi.fn().mockResolvedValue(
         ok({
           kind: "restored",
