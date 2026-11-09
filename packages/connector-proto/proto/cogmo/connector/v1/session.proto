@@ -2,8 +2,8 @@
 // dials in, takes jobs, and reports their events and outcomes. This file holds
 // the service, the session, and the job envelopes, whose oneofs name each
 // kind's payloads. Each kind's payloads have a file of their own (coding.proto)
-// that imports nothing from this one; a type two kinds share goes in a file of
-// its own. The rules a connector follows are in design/connectors.md → Wire
+// that imports nothing from this one; a type a second kind may share starts in a
+// file of its own. The rules a connector follows are in design/connectors.md → Wire
 // contract, and the protobuf conventions in .agents/rules/protobuf.md.
 //
 // Every call carries `authorization: Bearer <token>`, the token

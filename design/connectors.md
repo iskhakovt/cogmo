@@ -76,7 +76,7 @@ message FinishJobRequest {
 
 A verify that runs and fails is a `completed` verdict, not a `failed` job.
 
-**The job id is the idempotency key.** cogmo computes `<spec digest>` as the SHA-256 of the spec's proto3 JSON (protobuf-es `toJson`, default options) in RFC 8785 canonical form: `sha256(canonicalJson(…))` from `src/util/canonical-json.ts`. The JSON mapping is specified, so the digest is the same across builds and languages, which no library promises for the binary encoding. A re-sent job therefore keeps its key, and a different spec for the same task and phase gets a new one ([inngest.md](../.agents/rules/inngest.md) → key the request, not the slot). Connectors treat the id as opaque.
+**The job id is the idempotency key.** cogmo computes `<spec digest>` as the SHA-256 of the spec's proto3 JSON (protobuf-es `toJson`, default options) in RFC 8785 canonical form: `sha256(canonicalJson(…))` from `src/util/canonical-json.ts`. Only cogmo computes it, and connectors treat the id as opaque, so the digest must only stay the same across cogmo's builds: the proto3 JSON mapping is specified, and no library promises that for the binary encoding. A re-sent job therefore keeps its key, and a different spec for the same task and phase gets a new one ([inngest.md](../.agents/rules/inngest.md) → key the request, not the slot). Connectors treat the id as opaque.
 
 **Connector rules**, which the contract suite (*Testing*) checks:
 
@@ -85,7 +85,7 @@ A verify that runs and fails is a `completed` verdict, not a `failed` job.
 3. **Conflict.** A `Job` for a task and phase it holds under another running `job_id` fails with `JOB_CONFLICT`.
 4. **Restarts.** It keeps persisted jobs across its own restarts and lists them in `held_job_ids`, and lists the tasks whose workspaces it holds in `held_task_ids`. An accepted job it cannot recover is left out, and cogmo reads it as lost.
 5. **Not awaited.** It stops a held job that `awaited_job_ids` omits, or whose `AcceptJob` or report comes back `NOT_FOUND`, and keeps that job's workspace until `release`.
-6. **Reports.** `seq` rises strictly from 1, and a retried report re-sends the same `seq`. Each request stays under the 4 MiB limit: a larger report is split across calls, and a plan that would not fit is truncated. The connector calls `FinishJob` only once every report for the job has been acknowledged, and passes the last `seq` it sent.
+6. **Reports.** `seq` rises strictly from 1, and a retried report re-sends the same `seq`. Each request stays under the 4 MiB limit: a larger report is split across calls, a single event stays far below the limit, and a plan that would not fit is truncated. The connector calls `FinishJob` only once every report for the job has been acknowledged, and passes the last `seq` it sent.
 7. **Cancel.** Cancelling is cooperative: it answers with `FinishJob(cancelled)`, or with the job's real outcome if that came first.
 8. **Workspaces.** `prepare` adopts an existing workspace for the task on `work_branch`. `release` stops the task's running job first, is idempotent, succeeds for a task it never prepared, and keeps the workspace when the salvage push fails. After a `kept` or failed release, the connector stops listing the task in `held_task_ids`, and the workspace becomes the operator's.
 9. **Liveness.** It reconnects when its stream has carried no message for 90 s, which is three missed `Heartbeat`s.
@@ -213,7 +213,7 @@ Each dispatching step is durable for the reason its sandbox counterpart is: the 
 | `BRANCH_CONFLICT`, `PUSH_AUTH_FAILED`, `PUSH_FAILED` | `branch_conflict`, `auth_failed`, `push_failed` | the connector's message |
 | `SESSION_LOST`, `WORKSPACE_FAILED`, `JOB_CONFLICT`, `UNSUPPORTED`, `UNSPECIFIED`, and any code this build does not know | `connector_job_failed` | code and message |
 | `cancelled` that the hub did not request | `connector_job_failed` | "cancelled by the connector" |
-| verify verdict | `verify_failed` / `verify_timed_out` | exit code and output tail |
+| verify verdict | `verify_failed` / `verify_timed_out` | exit code and output tail (at most 8 KiB) |
 | verify verdict with no `outcome` | `connector_job_failed` | "verify verdict without an outcome" |
 
 **Failure modes.**

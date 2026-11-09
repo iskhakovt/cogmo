@@ -302,6 +302,8 @@ export type VerifyVerdict = Message<"cogmo.connector.v1.VerifyVerdict"> & {
   } | { case: undefined; value?: undefined };
 
   /**
+   * the end of the combined output, at most 8 KiB, as the sandbox path caps it
+   *
    * @generated from field: string output_tail = 3;
    */
   outputTail: string;
