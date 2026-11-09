@@ -84,20 +84,20 @@ describe("size", () => {
   const pad = (n: number) => "# pad\n".repeat(n);
 
   it.each([
-    ["400 lines", `${RUN}${pad(398)}`, []],
-    ["401 lines", `${RUN}${pad(399)}`, ["size -:- 401 lines, over the limit of 400"]],
+    ["1000 lines", `${RUN}${pad(998)}`, []],
+    ["1001 lines", `${RUN}${pad(999)}`, ["size -:- 1001 lines, over the limit of 1000"]],
     [
-      "400 lines ending in \\r\\n, each counted once",
-      `${RUN}${pad(398)}`.replaceAll("\n", "\r\n"),
+      "1000 lines ending in \\r\\n, each counted once",
+      `${RUN}${pad(998)}`.replaceAll("\n", "\r\n"),
       [],
     ],
     [
-      "400 lines and a last one with no newline",
-      `${RUN}${pad(398)}x = 1`,
-      ["size -:- 401 lines, over the limit of 400"],
+      "1000 lines and a last one with no newline",
+      `${RUN}${pad(998)}x = 1`,
+      ["size -:- 1001 lines, over the limit of 1000"],
     ],
-    // A lone \r ends no line: these 401 comments are one line, which then parses.
-    ["a lone \\r between comments", `${RUN}${"# c\r".repeat(401)}\n`, []],
+    // A lone \r ends no line: these 1001 comments are one line, which then parses.
+    ["a lone \\r between comments", `${RUN}${"# c\r".repeat(1001)}\n`, []],
   ])("counts %s", async (_label, body, expected) => {
     expect(await findings(body)).toEqual(expected);
   });
@@ -105,17 +105,17 @@ describe("size", () => {
   it("counts characters as UTF-16 code units", async () => {
     // Each emoji is two code units.
     const fill = (units: number) => `${RUN}# ${"😀".repeat((units - RUN.length - 2) / 2)}`;
-    expect(await findings(fill(48_000))).toEqual([]);
-    expect(await findings(fill(48_002))).toEqual([
-      "size -:- 48002 characters, over the limit of 48000",
+    expect(await findings(fill(120_000))).toEqual([]);
+    expect(await findings(fill(120_002))).toEqual([
+      "size -:- 120002 characters, over the limit of 120000",
     ]);
   });
 
   it("reports both bounds at once, and parses nothing past them", async () => {
-    const body = `async def run(inputs, ctx)\n${`# ${"x".repeat(150)}\n`.repeat(401)}`;
+    const body = `async def run(inputs, ctx)\n${`# ${"x".repeat(150)}\n`.repeat(1001)}`;
     expect(await findings(body)).toEqual([
-      "size -:- 402 lines, over the limit of 400",
-      `size -:- ${body.length} characters, over the limit of 48000`,
+      "size -:- 1002 lines, over the limit of 1000",
+      `size -:- ${body.length} characters, over the limit of 120000`,
     ]);
   });
 });
@@ -454,7 +454,7 @@ describe("the stage after the gates", () => {
   });
 
   it.each([
-    ["a size finding", `${RUN}${"# pad\n".repeat(399)}`],
+    ["a size finding", `${RUN}${"# pad\n".repeat(999)}`],
     ["a syntax finding", `def f(:\n${RUN}`],
     ["a third-stage finding", 'async def run(inputs, ctx):\n    eval("1")\n'],
   ])("does not run after %s", async (_label, body) => {
@@ -506,9 +506,9 @@ describe("deep and long bodies", () => {
   });
 
   it("gates a body at the line bound in well under the walk's quadratic time", async () => {
-    const body = headers(400);
-    expect(body.split("\n").length - 1).toBe(400);
-    expect(body.length).toBeLessThan(48_000);
+    const body = headers(1000);
+    expect(body.split("\n").length - 1).toBe(1000);
+    expect(body.length).toBeLessThan(120_000);
 
     const started = performance.now();
     expect(await gate(body, manifestWith({ network: { allow: ["api.example.com"] } }))).toEqual([]);

@@ -3130,22 +3130,22 @@ async def run(inputs, ctx):
 
     it.each([
       [
-        "a body over 400 lines",
-        `${RUN}${"# pad\n".repeat(399)}`,
+        "a body over 1000 lines",
+        `${RUN}${"# pad\n".repeat(999)}`,
         ECHO_MANIFEST,
-        [finding("size", "", "401 lines")],
+        [finding("size", "", "1001 lines")],
       ],
       [
         "a last line with no newline, counted",
-        `${RUN}${"# pad\n".repeat(398)}# last`,
+        `${RUN}${"# pad\n".repeat(998)}# last`,
         ECHO_MANIFEST,
-        [finding("size", "", "401 lines")],
+        [finding("size", "", "1001 lines")],
       ],
       [
-        "a body over 48 000 characters",
-        `${RUN}# ${"x".repeat(48_001 - RUN.length - 2)}`,
+        "a body over 120 000 characters",
+        `${RUN}# ${"x".repeat(120_001 - RUN.length - 2)}`,
         ECHO_MANIFEST,
-        [finding("size", "", "48001 characters")],
+        [finding("size", "", "120001 characters")],
       ],
       [
         "a body tree-sitter cannot parse",
@@ -3438,8 +3438,8 @@ async def run(inputs, ctx):
     it.each([
       [
         "size, ahead of the syntax error it carries",
-        `async def run(inputs, ctx)\n${"# pad\n".repeat(400)}`,
-        [finding("size", "", "401 lines")],
+        `async def run(inputs, ctx)\n${"# pad\n".repeat(1000)}`,
+        [finding("size", "", "1001 lines")],
       ],
       [
         "syntax, ahead of the dynamic code under it",
@@ -3490,8 +3490,8 @@ async def run(inputs, ctx):
         ECHO_MANIFEST,
       ],
       [
-        "400 lines ending in \\r\\n",
-        `${RUN}${"# pad\n".repeat(398)}`.replaceAll("\n", "\r\n"),
+        "1000 lines ending in \\r\\n",
+        `${RUN}${"# pad\n".repeat(998)}`.replaceAll("\n", "\r\n"),
         ECHO_MANIFEST,
       ],
       [

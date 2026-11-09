@@ -338,9 +338,9 @@ export const ENTRYPOINT_RULE =
 export const ENTRYPOINT_SIGNATURE = "async def run(inputs: Input, ctx: Ctx) -> Output";
 
 /** `skill.py`'s bounds (design/skills.md → Register-time gates → Size). */
-export const SKILL_BODY_MAX_LINES = 400;
-/** 400 lines at the toolchain's 120-column `line-length`. */
-export const SKILL_BODY_MAX_CHARACTERS = 48_000;
+export const SKILL_BODY_MAX_LINES = 1000;
+/** 1000 lines at the toolchain's 120-column `line-length`. */
+export const SKILL_BODY_MAX_CHARACTERS = 120_000;
 
 /** The names that build code at run time, refused by the `dynamic_code` gate. */
 export const DYNAMIC_CODE_NAMES: ReadonlySet<string> = new Set([
