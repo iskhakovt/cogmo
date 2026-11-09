@@ -95,7 +95,6 @@ export interface SkillTree {
   ctxCalls: readonly CtxCall[];
 }
 
-/** `root` as the gates and the classifier read it, its ctx calls resolved once. */
 export function readSkillTree(root: Node): SkillTree {
   return { root, ctxCalls: ctxCalls(root) };
 }
@@ -512,8 +511,8 @@ const HOLDS_AUTHORITY = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]+[/?#]/;
  * Null for any other argument, or one holding an escape. An empty or
  * unparseable authority leaves the host to the field: WHATWG skips the empty
  * one in `https:///`, so the field supplies it. So does an authority that
- * WHATWG reads as running to the head's end, whose host text appended to the
- * head changes: it treats `\` as `/` and strips tabs and newlines, so in
+ * WHATWG reads as running to the head's end, so text appended to the head
+ * changes its host: it treats `\` as `/` and strips tabs and newlines, so in
  * `https://\/h.com{x}` it skips both slashes and reads `h.com` as unended.
  */
 export function literalUrl(node: Node | null): LiteralUrl | null {

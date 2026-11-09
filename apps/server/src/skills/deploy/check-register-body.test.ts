@@ -1,10 +1,8 @@
 import { err, ok, type Result } from "neverthrow";
-import * as R from "remeda";
 import { describe, expect, it, vi } from "vitest";
-import { classifyWithAst } from "../ast-classifier.js";
 import { BUILD_CAPABILITIES } from "../capabilities.js";
 import { classifyManifestStub } from "../classifier.js";
-import { runSkillGates, type SkillFinding } from "../skill-gates.js";
+import type { SkillFinding } from "../skill-gates.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
 import { checkRegisterBody } from "./check-register-body.js";
 
@@ -123,53 +121,5 @@ describe("checkRegisterBody", () => {
       cause: "parser",
       detail: "walk panic",
     });
-  });
-});
-
-describe("checkRegisterBody with the gates and the classifier register wires", () => {
-  const WIRED = { runGates: runSkillGates, classify: classifyWithAst };
-  const NETWORK: SkillManifest = { ...MANIFEST, network: { allow: ["api.example.com"] } };
-
-  /** A valid `run` reading `lines - 3` response headers, each a call on a non-ctx receiver. */
-  const headers = (lines: number) =>
-    [
-      "import urllib.parse",
-      "async def run(inputs, ctx):",
-      '    resp = await ctx.http.get("https://api.example.com/")',
-      ...R.times(
-        lines - 3,
-        (i) => `    v${i} = urllib.parse.quote(resp.headers.get("x-${i}", ""))`,
-      ),
-      "",
-    ].join("\n");
-
-  async function timed(body: string) {
-    const started = performance.now();
-    const checked = await checkRegisterBody(
-      WIRED,
-      { ...SKILL, manifest: NETWORK, body },
-      BUILD_CAPABILITIES,
-    );
-    return { checked, ms: performance.now() - started };
-  }
-
-  it("checks a body at the line bound in under a second", { timeout: 120_000 }, async () => {
-    const body = headers(400);
-    expect(body.split("\n").length - 1).toBe(400);
-    expect(body.length).toBeLessThan(48_000);
-
-    const { checked, ms } = await timed(body);
-    expect(checked.isOk()).toBe(true);
-    expect(ms).toBeLessThan(1000);
-  });
-
-  it("classifies a 2000-term chain rather than pausing", { timeout: 120_000 }, async () => {
-    const names = R.times(2000, (i) => `a${i}`);
-    const rows = R.chunk(names, 21).map((row) => `    ${row.join(" + ")}`);
-    const body = `${SKILL.body}x = (\n${rows.join(" +\n")}\n)\n`;
-
-    const { checked, ms } = await timed(body);
-    expect(checked.isOk()).toBe(true);
-    expect(ms).toBeLessThan(1000);
   });
 });

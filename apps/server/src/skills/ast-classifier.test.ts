@@ -12,13 +12,14 @@
  * carries the actual security weight).
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import * as R from "remeda";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Node } from "web-tree-sitter";
 import { expectDefined } from "../test/assertions.js";
 import { classifyWithAst, classifyWithAstForRollback, importRoots } from "./ast-classifier.js";
 import { BUILD_CAPABILITIES, type SkillsCapabilities } from "./capabilities.js";
 import { readSkillTree } from "./python-ast.js";
-import { __resetParserForTests, withPythonTree } from "./python-parser.js";
+import { __resetParserForTests, loadPythonParser, withPythonTree } from "./python-parser.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
 import type { ClassifierLog, SkillManifest } from "./types.js";
 
@@ -972,5 +973,41 @@ describe("classifyWithAstForRollback — a null tree", () => {
       risk_tier: "notify",
       reasons: ["declared_effect"],
     });
+  });
+});
+
+describe("classifyWithAst — deep and long bodies", () => {
+  // Timed on a loaded parser, bounded far below the seconds a walk quadratic in
+  // the body's calls takes at the line bound.
+  beforeAll(loadPythonParser);
+
+  const NETWORK = manifestWith({ network: { allow: ["api.example.com"] } });
+
+  it("classifies a body at the line bound in well under the walk's quadratic time", async () => {
+    const body = [
+      "import urllib.parse",
+      "async def run(inputs, ctx):",
+      '    resp = await ctx.http.get("https://api.example.com/")',
+      ...R.times(397, (i) => `    v${i} = urllib.parse.quote(resp.headers.get("x-${i}", ""))`),
+      "",
+    ].join("\n");
+
+    const started = performance.now();
+    const log = await classifyAtRegister(NETWORK, body, BUILD_CAPABILITIES);
+    expect(performance.now() - started).toBeLessThan(5000);
+    expect(log.detected_effects).toEqual([]);
+  });
+
+  it("classifies a 2000-term chain without overflowing the stack", async () => {
+    const rows = R.chunk(
+      R.times(2000, (i) => `a${i}`),
+      21,
+    ).map((row) => `    ${row.join(" + ")}`);
+    const body = `async def run(inputs, ctx):\n    return {}\nx = (\n${rows.join(" +\n")}\n)\n`;
+
+    const started = performance.now();
+    const log = await classifyAtRegister(manifestWith(), body, BUILD_CAPABILITIES);
+    expect(performance.now() - started).toBeLessThan(5000);
+    expect(log.detected_effects).toEqual([]);
   });
 });

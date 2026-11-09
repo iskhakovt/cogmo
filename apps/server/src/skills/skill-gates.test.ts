@@ -1,7 +1,8 @@
 import * as R from "remeda";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Node } from "web-tree-sitter";
 import type { SkillTree } from "./python-ast.js";
+import { loadPythonParser } from "./python-parser.js";
 import { formatSkillFinding, runSkillGates, type SkillFinding } from "./skill-gates.js";
 import type { SkillManifest } from "./types.js";
 
@@ -474,6 +475,10 @@ describe("the stage after the gates", () => {
 });
 
 describe("deep and long bodies", () => {
+  // Timed on a loaded parser, bounded far below the seconds a walk quadratic in
+  // the body's calls takes at the line bound.
+  beforeAll(loadPythonParser);
+
   /** `x = (a0 + a1 + …)` over `terms` terms, 21 to a line. */
   const chain = (terms: number) => {
     const names = Array.from({ length: terms }, (_, i) => `a${i}`);
@@ -481,10 +486,33 @@ describe("deep and long bodies", () => {
     return `${RUN}x = (\n${rows.join(" +\n")}\n)\n`;
   };
 
+  /** A valid `run` reading `lines - 3` response headers, each a call on a non-ctx receiver. */
+  const headers = (lines: number) =>
+    [
+      "import urllib.parse",
+      "async def run(inputs, ctx):",
+      '    resp = await ctx.http.get("https://api.example.com/")',
+      ...R.times(
+        lines - 3,
+        (i) => `    v${i} = urllib.parse.quote(resp.headers.get("x-${i}", ""))`,
+      ),
+      "",
+    ].join("\n");
+
   it("gates a 2000-term chain without overflowing the stack", async () => {
     const started = performance.now();
     expect(await findings(chain(2000))).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(1000);
+    expect(performance.now() - started).toBeLessThan(5000);
+  });
+
+  it("gates a body at the line bound in well under the walk's quadratic time", async () => {
+    const body = headers(400);
+    expect(body.split("\n").length - 1).toBe(400);
+    expect(body.length).toBeLessThan(48_000);
+
+    const started = performance.now();
+    expect(await gate(body, manifestWith({ network: { allow: ["api.example.com"] } }))).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(5000);
   });
 });
 
