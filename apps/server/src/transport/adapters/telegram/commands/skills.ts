@@ -75,7 +75,7 @@ function mirrorLine(mirror: SkillsMirrorView): string | null {
     .with(
       "diverged",
       () =>
-        "Skills remote: diverged from local main. Check what its main holds (`git -C $COGMO_SKILLS_PATH ls-remote origin main`), then push local main over it: `git -C $COGMO_SKILLS_PATH push --force-with-lease=main:<that sha> origin main`.",
+        "Skills remote: diverged from local main. Check what its main holds (`git -C $COGMO_SKILLS_PATH ls-remote origin main`), then push local main over it, as an identity allowed to force-push it: `git -C $COGMO_SKILLS_PATH push --force-with-lease=main:<that sha> origin main`.",
     )
     .exhaustive();
 }
