@@ -60,6 +60,7 @@ const GROUPS: Record<string, () => Promise<CommandTree>> = {
   provider: async () => (await import("./cli/provider.js")).providerCli(CONSOLE_IO, loadCore),
   model: async () => (await import("./cli/model.js")).modelCli(CONSOLE_IO, loadModelDeps),
   subagent: async () => (await import("./cli/subagent.js")).subAgentCli(CONSOLE_IO, loadCore),
+  connector: async () => (await import("./cli/connector.js")).connectorCli(CONSOLE_IO, loadCore),
   "image-provider": async () =>
     (await import("./cli/image-provider.js")).imageProviderCli(CONSOLE_IO, loadCore),
   "image-model": async () =>

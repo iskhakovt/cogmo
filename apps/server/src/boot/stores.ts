@@ -5,10 +5,10 @@
  */
 
 import { DrizzleCodingStore } from "../agent/coding/store/index.js";
-import { DrizzleConnectorStore } from "../connector/store/index.js";
 import { DrizzleModelCatalogStore } from "../agent/model-catalog/store/index.js";
 import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "../agent/pipeline/store/index.js";
 import { DrizzleAgentStore } from "../agent/store/index.js";
+import { DrizzleConnectorStore } from "../connector/store/index.js";
 import { DrizzleMcpStore } from "../mcp/store/index.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import { DrizzleSkillStore } from "../skills/store/index.js";

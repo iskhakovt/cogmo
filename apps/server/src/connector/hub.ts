@@ -209,15 +209,7 @@ export class SessionHub implements ConnectorHub {
     jobId: string,
     events: ReadonlyArray<JobEvent>,
   ): Result<void, JobCallError> {
-    return this.#lookup(connector, jobId).map((entry) => {
-      if (entry.outcome !== null) return;
-      this.#accept(entry);
-      for (const event of events) {
-        if (entry.outcome !== null) return;
-        this.#deliver(entry, event);
-      }
-      this.#restartIdle(entry);
-    });
+    return this.#lookup(connector, jobId).map((entry) => this.#report(entry, events));
   }
 
   finishJob(connector: ActiveConnector, request: FinishJobRequest): Result<void, JobCallError> {
@@ -281,6 +273,17 @@ export class SessionHub implements ConnectorHub {
   #accept(entry: JobEntry): void {
     if (entry.status !== "dispatched") return;
     entry.status = "accepted";
+    this.#restartIdle(entry);
+  }
+
+  /** Delivers the events past the last `seq`; a report on an ended job is dropped. */
+  #report(entry: JobEntry, events: ReadonlyArray<JobEvent>): void {
+    if (entry.outcome !== null) return;
+    this.#accept(entry);
+    for (const event of events) {
+      if (entry.outcome !== null) return;
+      this.#deliver(entry, event);
+    }
     this.#restartIdle(entry);
   }
 
