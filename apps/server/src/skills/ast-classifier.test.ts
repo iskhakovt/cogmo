@@ -12,11 +12,29 @@
  * carries the actual security weight).
  */
 
-import { describe, expect, it } from "vitest";
-import { __resetParserForTests, classifyWithAst, importRoots } from "./ast-classifier.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Node } from "web-tree-sitter";
+import { classifyWithAst, classifyWithAstForRollback, importRoots } from "./ast-classifier.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
+import { __resetParserForTests } from "./python-parser.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillManifest } from "./types.js";
+
+/** Whether `withPythonTree` hands its reader a null tree, as tree-sitter may. */
+const parser = vi.hoisted(() => ({ nullTree: false }));
+
+vi.mock("./python-parser.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./python-parser.js")>();
+  return {
+    ...actual,
+    withPythonTree: <T>(source: string, read: (root: Node | null) => T): Promise<T> =>
+      parser.nullTree ? Promise.resolve(read(null)) : actual.withPythonTree(source, read),
+  };
+});
+
+afterEach(() => {
+  parser.nullTree = false;
+});
 
 /** The reasons `BUILD_CAPABILITIES` adds when the table would return `auto`. */
 const CAP_REASONS: SkillRiskReason[] = ["no_review_panel"];
@@ -52,7 +70,7 @@ async def run(inputs, ctx):
     expect(log.validation_errors).toEqual([]);
   });
 
-  it("declared `reads_memory` + harmless body → notify (declared advisory effect)", async () => {
+  it("declared `reads_memory` + a recall → notify, the recall detected", async () => {
     const log = await classifyWithAst(
       manifestWith({ effects: ["reads_memory"] }),
       `
@@ -63,7 +81,8 @@ async def run(inputs, ctx):
       BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("notify");
-    expect(log.detected_effects).toEqual([]);
+    expect(log.detected_effects).toEqual(["reads_memory"]);
+    expect(log.validation_errors).toEqual([]);
   });
 
   it("string-literal mentions of dangerous names do NOT trigger detection", async () => {
@@ -699,5 +718,245 @@ describe("importRoots", () => {
 
   it("names nothing in a body with no imports", async () => {
     expect((await importRoots("async def run(inputs, ctx):\n    return 1\n")).size).toBe(0);
+  });
+});
+
+describe("classifyWithAst — ctx rows", () => {
+  it.each([
+    ["ctx.memory.recall", "reads_memory", 'await ctx.memory.recall("q")'],
+    ["ctx.memory.remember", "writes_memory", 'await ctx.memory.remember("fact")'],
+    ["ctx.files.read", "reads_filesystem", 'await ctx.files.read("notes.md")'],
+    ["ctx.files.list", "reads_filesystem", "await ctx.files.list()"],
+    ["ctx.files.write", "writes_filesystem", 'await ctx.files.write("notes.md", "x")'],
+  ])("detects %s as %s and rejects it undeclared", async (label, effect, call) => {
+    const log = await classifyWithAst(
+      manifestWith(),
+      `async def run(inputs, ctx):\n    ${call}\n`,
+      BUILD_CAPABILITIES,
+    );
+    expect(log.detected_effects).toEqual([effect]);
+    expect(log.validation_errors).toEqual([
+      `undeclared effect '${effect}' — code uses ${label} but manifest does not declare it`,
+    ]);
+  });
+
+  it("detects a declared ctx effect without a validation error", async () => {
+    const log = await classifyWithAst(
+      manifestWith({ effects: ["reads_memory", "writes_memory"] }),
+      'async def run(inputs, ctx):\n    await ctx.memory.recall("q")\n    await ctx.memory.remember("f")\n',
+      BUILD_CAPABILITIES,
+    );
+    expect(log.detected_effects).toEqual(["reads_memory", "writes_memory"]);
+    expect(log.validation_errors).toEqual([]);
+    expect(log.risk_tier).toBe("notify");
+  });
+
+  it.each([
+    ["a lambda's parameter", 'read = lambda c: c.files.read("x")\n'],
+    ["a helper's parameter", 'async def read(c):\n    return await c.files.read("x")\n'],
+    [
+      "a parameter the function reassigns",
+      'async def run(inputs, ctx):\n    ctx = wrap(ctx)\n    await ctx.files.read("x")\n',
+    ],
+    [
+      "an enclosing function's parameter",
+      'async def run(inputs, ctx):\n    async def inner():\n        return await ctx.files.read("x")\n    return await inner()\n',
+    ],
+    [
+      "a method's second parameter",
+      'class Reader:\n    async def read(self, ctx):\n        return await ctx.files.read("x")\n',
+    ],
+  ])("reads %s as a ctx receiver", async (_label, body) => {
+    const log = await classifyWithAst(manifestWith(), body, BUILD_CAPABILITIES);
+    expect(log.detected_effects).toEqual(["reads_filesystem"]);
+  });
+
+  it.each([
+    [
+      "a name bound by assignment",
+      "async def run(inputs, ctx):\n    client = make_client()\n    return client.files.list()\n",
+    ],
+    [
+      "a method's first parameter",
+      'class Fetcher:\n    async def go(self):\n        return await self.files.read("x")\n',
+    ],
+    [
+      "a @staticmethod's first parameter, the residual",
+      'class Fetcher:\n    @staticmethod\n    async def go(ctx):\n        return await ctx.files.read("x")\n',
+    ],
+    [
+      "a name bound by import",
+      'import ctx\n\n\nasync def run(inputs, c):\n    ctx.files.read("x")\n',
+    ],
+    ["a name bound by for", 'for ctx in contexts:\n    ctx.files.read("x")\n'],
+    ["a name bound by with", 'with open_ctx() as ctx:\n    ctx.files.read("x")\n'],
+    ["a deeper attribute chain", 'async def run(inputs, ctx):\n    ctx.inner.files.read("x")\n'],
+    [
+      "a comprehension target shadowing the parameter",
+      'async def run(inputs, ctx):\n    return [ctx.files.read("x") for ctx in inputs]\n',
+    ],
+  ])("does not read %s as a ctx receiver", async (_label, body) => {
+    const log = await classifyWithAst(manifestWith(), body, BUILD_CAPABILITIES);
+    expect(log.detected_effects).toEqual([]);
+  });
+});
+
+describe("classifyWithAst — write requests", () => {
+  const network = (...allow: string[]) => manifestWith({ network: { allow } });
+  const withCall = (call: string) => `async def run(inputs, ctx):\n    await ${call}\n`;
+
+  it.each([
+    ["post", 'ctx.http.post("https://api.example.com/x", body="{}")'],
+    [
+      "request with a literal method other than GET",
+      'ctx.http.request("put", "https://api.example.com/x")',
+    ],
+    ["request with method=", 'ctx.http.request(method="DELETE", url="https://api.example.com/x")'],
+    [
+      "request with a non-literal method",
+      'ctx.http.request(inputs["m"], "https://api.example.com/x")',
+    ],
+    [
+      "a GET to a Telegram send method",
+      'ctx.http.get("https://api.telegram.org/bot1:abc/sendMessage?chat_id=1")',
+    ],
+    [
+      "a GET to a Telegram method in another case",
+      'ctx.http.get("https://api.telegram.org/bot1:abc/EDITMESSAGETEXT")',
+    ],
+    [
+      "a templated Telegram send",
+      'ctx.http.get(f"https://api.telegram.org/bot{token}/deleteMessage")',
+    ],
+    [
+      "a Telegram method in a replacement field",
+      'ctx.http.get(f"https://api.telegram.org/bot{token}/{method}")',
+    ],
+    [
+      "a replacement field holding the whole path",
+      "ctx.http.get(f\"https://api.telegram.org/{inputs['p']}\")",
+    ],
+    // A field in the path on a write-capable host is a write whatever the
+    // literal text around it: `inputs = "botTOKEN/sendMessage?text=x#"` cuts
+    // the text after it, and `inputs = "../botTOKEN/sendMessage"` climbs out of
+    // the text before it.
+    [
+      "a field before a read method",
+      "ctx.http.get(f\"https://api.telegram.org/{inputs['p']}/getMe\")",
+    ],
+    [
+      "a field that normalization would erase",
+      "ctx.http.get(f\"https://api.telegram.org/{inputs['p']}/../getMe\")",
+    ],
+    ["a field after a read path", "ctx.http.get(f\"https://api.telegram.org/read/{inputs['p']}\")"],
+    [
+      "a templated token before a read method",
+      'ctx.http.get(f"https://api.telegram.org/bot{token}/getMe")',
+    ],
+  ])("detects %s as writes_user_data, which rejects nothing", async (_label, call) => {
+    const log = await classifyWithAst(
+      network("api.example.com", "api.telegram.org"),
+      withCall(call),
+      BUILD_CAPABILITIES,
+    );
+    expect(log.detected_effects).toEqual(["writes_user_data"]);
+    expect(log.validation_errors).toEqual([]);
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toContain("declared_effect");
+  });
+
+  it.each([
+    ["a GET", 'ctx.http.get("https://api.example.com/x")'],
+    ["request with a literal get", 'ctx.http.request("get", "https://api.example.com/x")'],
+    [
+      "a GET to a Telegram read method with no field",
+      'ctx.http.get("https://api.telegram.org/bot1:abc/getMe")',
+    ],
+    [
+      "a GET to a Telegram file",
+      'ctx.http.get("https://api.telegram.org/file/bot1:abc/sendMessage")',
+    ],
+    [
+      "a GET to a send path on another host",
+      'ctx.http.get("https://api.example.com/bot1/sendMessage")',
+    ],
+    [
+      "a field in the path on a host with no write endpoints",
+      'ctx.http.get(f"https://api.example.com/{inputs}/sendMessage")',
+    ],
+    [
+      "a field only in the query of a Telegram read method",
+      'ctx.http.get(f"https://api.telegram.org/bot1:abc/getMe?offset={n}")',
+    ],
+  ])("does not detect %s as a write", async (_label, call) => {
+    const log = await classifyWithAst(
+      network("api.example.com", "api.telegram.org"),
+      withCall(call),
+      BUILD_CAPABILITIES,
+    );
+    expect(log.detected_effects).toEqual([]);
+  });
+
+  it.each([
+    ["the Telegram host", ["api.telegram.org"], ["writes_user_data"]],
+    ["a wildcard over Telegram's zone", ["*.telegram.org"], ["writes_user_data"]],
+    ["only other hosts", ["api.example.com"], []],
+  ])(
+    "reads a GET with a non-literal host as a write when network.allow admits %s",
+    async (_label, allow, detected) => {
+      const log = await classifyWithAst(
+        network(...allow),
+        withCall('ctx.http.get(inputs["url"])'),
+        BUILD_CAPABILITIES,
+      );
+      expect(log.detected_effects).toEqual(detected);
+    },
+  );
+
+  it("detects no write in a skill declaring a write effect", async () => {
+    const log = await classifyWithAst(
+      manifestWith({ effects: ["sends_message"], network: { allow: ["api.example.com"] } }),
+      withCall('ctx.http.post("https://api.example.com/x")'),
+      BUILD_CAPABILITIES,
+    );
+    expect(log.detected_effects).toEqual([]);
+  });
+});
+
+describe("classifyWithAst — version", () => {
+  it("stamps the rules' version", async () => {
+    const log = await classifyWithAst(
+      manifestWith(),
+      "async def run(inputs, ctx):\n    pass\n",
+      BUILD_CAPABILITIES,
+    );
+    expect(log.classifier_version).toBe("ast-3");
+  });
+});
+
+describe("classifyWithAst — a null tree", () => {
+  const BODY = "async def run(inputs, ctx):\n    pass\n";
+
+  it("throws at register, which deploys no body the AST path did not read", async () => {
+    parser.nullTree = true;
+    await expect(classifyWithAst(manifestWith(), BODY, BUILD_CAPABILITIES)).rejects.toThrow(
+      "tree-sitter returned no tree for the skill body",
+    );
+  });
+
+  it("classifies from the declarations alone at rollback", async () => {
+    parser.nullTree = true;
+    const log = await classifyWithAstForRollback(
+      manifestWith({ effects: ["reads_memory"] }),
+      BODY,
+      BUILD_CAPABILITIES,
+    );
+    expect(log).toMatchObject({
+      classifier_version: "ast-3",
+      detected_effects: [],
+      validation_errors: [],
+      risk_tier: "notify",
+      reasons: ["declared_effect"],
+    });
   });
 });

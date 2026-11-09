@@ -4,6 +4,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { __resetParserForTests, __setWasmPathForTests } from "../skills/python-parser.js";
 import {
   type ChildGroupRecord,
   parseStartTime,
@@ -108,5 +109,21 @@ describe("bootstrapSkillRunner", () => {
     expect(orphan.exitCode).toBeNull();
     expect(orphan.signalCode).toBeNull();
     expect(await readdir(childrenDir)).toEqual([`${pid}.json`]);
+  });
+});
+
+describe("bootstrapSkillRunner's grammar check", () => {
+  afterEach(() => {
+    __setWasmPathForTests(null);
+    __resetParserForTests();
+  });
+
+  it("fails the boot when the grammar the gates and the classifier share cannot load", async () => {
+    __setWasmPathForTests(join(skillsPath, "no-such-grammar.wasm"));
+    __resetParserForTests();
+
+    await expect(
+      bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapWasmChildren: false }),
+    ).rejects.toThrow(/no-such-grammar\.wasm/);
   });
 });

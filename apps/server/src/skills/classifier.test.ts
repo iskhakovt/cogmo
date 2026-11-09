@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { __resetParserForTests, __setWasmPathForTests } from "./ast-classifier.js";
 import type { SkillsCapabilities } from "./capabilities.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
 import {
@@ -8,6 +7,7 @@ import {
   classifyManifestStub,
   STUB_CLASSIFIER_VERSION,
 } from "./classifier.js";
+import { __resetParserForTests, __setWasmPathForTests } from "./python-parser.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillEffect, SkillManifest } from "./types.js";
 
@@ -335,5 +335,32 @@ describe("classifyManifestStub — reasons and capabilities", () => {
     const log = classifyManifestStub(makeManifest(), ALL_CAPABILITIES);
     expect(log.risk_tier).toBe("notify");
     expect(log.reasons).toEqual(["classifier_fallback"]);
+  });
+});
+
+describe("classifyManifest — rollback's ctx-row provenance", () => {
+  it("records effects only ctx rows detect, and counts them in the tier, without rejecting", async () => {
+    const log = await classifyManifest(
+      makeManifest(),
+      'async def run(inputs, ctx):\n    await ctx.files.write("n.md", "x")\n    await ctx.memory.recall("q")\n',
+      BUILD_CAPABILITIES,
+    );
+    expect(log.classifier_version).toBe(AST_CLASSIFIER_VERSION);
+    expect(log.detected_effects).toEqual(["reads_memory", "writes_filesystem"]);
+    expect(log.validation_errors).toEqual([]);
+    expect(log.risk_tier).toBe("approve");
+    expect(log.reasons).toEqual(["approve_gating_effect", "declared_effect"]);
+  });
+
+  it("rejects an undeclared effect a row other than a ctx row also detects, naming only that row", async () => {
+    const log = await classifyManifest(
+      makeManifest(),
+      'import shutil\n\n\nasync def run(inputs, ctx):\n    await ctx.files.write("n.md", "x")\n    shutil.rmtree("d")\n',
+      BUILD_CAPABILITIES,
+    );
+    expect(log.detected_effects).toEqual(["writes_filesystem"]);
+    expect(log.validation_errors).toEqual([
+      "undeclared effect 'writes_filesystem' — code uses shutil.rmtree but manifest does not declare it",
+    ]);
   });
 });

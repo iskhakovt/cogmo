@@ -1,10 +1,11 @@
 /**
  * AST-based risk classifier for skill bodies. Walks the Python source
  * via tree-sitter and detects undeclared effects (process spawn,
- * filesystem mutation, external messaging, financial APIs) that the
- * manifest didn't list. Detection promotes the deploy's risk tier and,
- * for "dangerous-when-undeclared" categories, *rejects* the deploy
- * with `validation_errors` describing the manifest-vs-code mismatch.
+ * filesystem mutation, external messaging, financial APIs, and the
+ * `ctx` calls that need an effect) that the manifest didn't list.
+ * Detection promotes the deploy's risk tier and, for
+ * "dangerous-when-undeclared" categories, *rejects* the deploy with
+ * `validation_errors` describing the manifest-vs-code mismatch.
  *
  * **THIS IS NOT A SECURITY BOUNDARY.** A skill can `getattr(
  * __import__("os"), "system")(...)`, alias a module under a different
@@ -23,110 +24,53 @@
  *      human tap, ships immediately), capped at `notify` until the wasm tier
  *      is hardened and a review panel is set ({@link computeRiskTier}).
  *
- * Rules live in `ast-rules.ts` as pure data — adding "rule X marks
- * effect Y" is a new row, no logic change. Parser load and walking
- * happen in this file.
+ * Rules live in `ast-rules.ts` as pure data: a rule of an existing shape
+ * is one row, and a new shape is a change to the walker in this file, which
+ * runs on the parser `python-parser.ts` shares with the register-time gates.
  *
- * Failure mode: any unhandled error in this path (parser load, walk,
- * unexpected node shape) is caught at the call site in `classifier.ts`
- * and falls back to the declaration-only stub. We log the throw with
- * a `skill_classifier_fallback_total` counter so an operator can see
- * when the AST path is silently degrading.
+ * Failure mode: a throw here (parser load, walk, unexpected node shape)
+ * propagates. Register rejects on it as the pausing `registrar_unavailable`
+ * (`parser`) and deploys no body this path did not read; rollback's
+ * `classifyManifest` falls back to the declaration-only stub
+ * (design/skills.md → Classifier → Failure mode).
  */
 
-import { readFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
 import * as R from "remeda";
 import { match } from "ts-pattern";
-import { Language, type Node, Parser } from "web-tree-sitter";
-import { logger } from "../logger.js";
+import type { Node } from "web-tree-sitter";
 import {
   APPROVE_GATING_EFFECTS,
   APPROVE_SECRETS_THRESHOLD,
+  admitsWriteEndpoint,
   CALL_RULES,
   categoriseDependency,
   IMPORT_RULES,
+  isWriteRequest,
   REJECT_ON_UNDECLARED,
+  type RequestPath,
+  WRITE_EFFECTS,
 } from "./ast-rules.js";
 import type { SkillsCapabilities } from "./capabilities.js";
+import { parseHttpUrl } from "./http-destination.js";
+import {
+  type CtxRequest,
+  callArgument,
+  ctxCalls,
+  ctxRequest,
+  literalText,
+  literalUrl,
+} from "./python-ast.js";
+import { withPythonTree } from "./python-parser.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
 import type { ClassifierLog, SkillEffect, SkillManifest } from "./types.js";
 
-export const AST_CLASSIFIER_VERSION = "ast-2";
-
-const log = logger.child({ component: "skills.ast-classifier" });
-
-/**
- * Resolve `vendor/tree-sitter-python/tree-sitter-python.wasm` from
- * `process.cwd()`. Bootstrap convention is "cwd is project root" — see
- * `loadHindsightCompat` in `src/boot/checks.ts` for the precedent.
- * tsup flattens the build output and breaks `import.meta.url`-relative
- * resolution from `dist/`, so we don't try to chase the source-tree
- * path; the vendor directory is shipped to `/app/vendor` in the Docker
- * image alongside `dist/`.
- */
-const DEFAULT_WASM_PATH = resolvePath(
-  process.cwd(),
-  "vendor",
-  "tree-sitter-python",
-  "tree-sitter-python.wasm",
-);
-
-/**
- * Mutable parser-init configuration. Tests override `wasmPath` via
- * {@link __setWasmPathForTests} to exercise the load-failure path; the
- * production code path never touches it.
- */
-let wasmPath = DEFAULT_WASM_PATH;
-
-/**
- * Lazy-init parser, single shared instance per process. Concurrent
- * `classifyWithAst` calls await the same promise, which is safe under
- * Node's single-threaded event loop — the parser's WASM heap is not
- * mutated outside `parser.parse()`, which runs to completion before
- * yielding. If `register` ever moves to Worker threads, this becomes a
- * sharing hazard and each worker needs its own `Parser` instance.
- */
-let parserPromise: Promise<Parser> | null = null;
-
-async function getParser(): Promise<Parser> {
-  if (!parserPromise) {
-    parserPromise = (async () => {
-      await Parser.init();
-      const langBytes = readFileSync(wasmPath);
-      const Python = await Language.load(langBytes);
-      const parser = new Parser();
-      parser.setLanguage(Python);
-      return parser;
-    })().catch((err) => {
-      // Reset on failure so a transient init error (e.g., missing
-      // wasm file at runtime in some pathological deploy) gets
-      // retried on the next register, not cached forever.
-      parserPromise = null;
-      throw err;
-    });
-  }
-  return parserPromise;
-}
-
-/** Test-only — drop the cached parser so next call re-initializes. */
-export function __resetParserForTests(): void {
-  parserPromise = null;
-}
-
-/**
- * Test-only — point the parser at a different WASM file (or at a
- * missing path to force a load failure). Pass `null` to restore the
- * production default. Combine with {@link __resetParserForTests} so
- * the next call re-runs `getParser` against the new path.
- */
-export function __setWasmPathForTests(path: string | null): void {
-  wasmPath = path ?? DEFAULT_WASM_PATH;
-}
+export const AST_CLASSIFIER_VERSION = "ast-3";
 
 interface DetectedHit {
   effect: SkillEffect;
   label: string;
+  /** Whether a ctx row detected it: rollback does not reject on those alone. */
+  ctx: boolean;
 }
 
 /**
@@ -136,7 +80,12 @@ interface DetectedHit {
  * specific labels in `validation_errors` ("undeclared effect:
  * sends_email — saw `smtplib`").
  */
-function detectHits(rootNode: Node): DetectedHit[] {
+function detectHits(rootNode: Node, manifest: SkillManifest): DetectedHit[] {
+  return [...moduleHits(rootNode), ...ctxHits(rootNode, manifest)];
+}
+
+/** The import and call rows' hits, on any receiver but a ctx one. */
+function moduleHits(rootNode: Node): DetectedHit[] {
   const hits: DetectedHit[] = [];
 
   // Walk via cursor — far cheaper than recursive `namedChild(i)` on
@@ -153,7 +102,7 @@ function detectHits(rootNode: Node): DetectedHit[] {
           for (const name of extractImportModules(node)) {
             for (const rule of IMPORT_RULES) {
               if (rule.module === name) {
-                hits.push({ effect: rule.effect, label: rule.label });
+                hits.push({ effect: rule.effect, label: rule.label, ctx: false });
               }
             }
           }
@@ -163,7 +112,7 @@ function detectHits(rootNode: Node): DetectedHit[] {
           if (module) {
             for (const rule of IMPORT_RULES) {
               if (rule.module === module) {
-                hits.push({ effect: rule.effect, label: rule.label });
+                hits.push({ effect: rule.effect, label: rule.label, ctx: false });
               }
             }
           }
@@ -243,9 +192,9 @@ function matchCall(node: Node, hits: DetectedHit[]): void {
   if (fn.type === "identifier") {
     const name = fn.text;
     for (const rule of CALL_RULES) {
-      if (rule.object === null && rule.attr === name) {
+      if (!("namespace" in rule) && rule.object === null && rule.attr === name) {
         if (rule.argPredicate === undefined || matchesArgPredicate(node, rule.argPredicate)) {
-          hits.push({ effect: rule.effect, label: rule.label });
+          hits.push({ effect: rule.effect, label: rule.label, ctx: false });
         }
       }
     }
@@ -265,7 +214,7 @@ function matchCall(node: Node, hits: DetectedHit[]): void {
     const objectName = objectNode?.type === "identifier" ? objectNode.text : null;
 
     for (const rule of CALL_RULES) {
-      if (rule.attr !== attrName) continue;
+      if ("namespace" in rule || rule.attr !== attrName) continue;
       // Two match modes against `rule.object`:
       //   - rule.object === objectName (with both non-null) — qualified call
       //   - rule.object === null — attribute call where receiver is anything;
@@ -274,10 +223,66 @@ function matchCall(node: Node, hits: DetectedHit[]): void {
         rule.object === null || (objectName !== null && rule.object === objectName);
       if (!objectMatches) continue;
       if (rule.argPredicate === undefined || matchesArgPredicate(node, rule.argPredicate)) {
-        hits.push({ effect: rule.effect, label: rule.label });
+        hits.push({ effect: rule.effect, label: rule.label, ctx: false });
       }
     }
   }
+}
+
+/**
+ * The ctx rows' hits: each `CALL_RULES` row with a `namespace` its call
+ * matches, and each `ctx.http` write request as `writes_user_data` in a
+ * skill declaring no write effect (design/skills.md → Register-time gates →
+ * ctx rows).
+ */
+function ctxHits(rootNode: Node, manifest: SkillManifest): DetectedHit[] {
+  const calls = ctxCalls(rootNode);
+  const ruleHits = calls.flatMap((call) =>
+    CALL_RULES.filter((rule) => "namespace" in rule)
+      .filter((rule) => rule.namespace === call.namespace && rule.attr === call.method)
+      .map((rule): DetectedHit => ({ effect: rule.effect, label: rule.label, ctx: true })),
+  );
+  if (manifest.effects.some((effect) => WRITE_EFFECTS.has(effect))) return ruleHits;
+  const allow = manifest.network?.allow ?? [];
+  const writeHits = calls
+    .map(ctxRequest)
+    .filter(R.isNonNullish)
+    .filter((request) => isWriteCall(request, allow))
+    .map(
+      (request): DetectedHit => ({
+        effect: "writes_user_data",
+        label: `ctx.http.${request.method}`,
+        ctx: true,
+      }),
+    );
+  return [...ruleHits, ...writeHits];
+}
+
+/**
+ * Whether a `ctx.http` request is a write. Its method is the call's: `get`
+ * and `post`, or `request`'s first argument or `method=`, uppercased as
+ * `cogmo_ctx` sends it, a non-literal one a write. A `GET` whose URL is not
+ * literal is a write when `network.allow` admits a `WRITE_ENDPOINTS` host;
+ * one whose literal URL is not an http(s) URL sends nothing.
+ */
+function isWriteCall(request: CtxRequest, allow: ReadonlyArray<string>): boolean {
+  const method = match(request.method)
+    .with("get", () => "GET")
+    .with("post", () => "POST")
+    .with(
+      "request",
+      () => literalText(callArgument(request.call, 0, "method"))?.toUpperCase() ?? null,
+    )
+    .exhaustive();
+  if (method === null) return true;
+  const url = literalUrl(request.url);
+  if (url === null) return method !== "GET" || admitsWriteEndpoint(allow);
+  const head = parseHttpUrl(url.head);
+  if (head.isErr()) return method !== "GET";
+  const path: RequestPath = url.templatedPath
+    ? { kind: "templated" }
+    : { kind: "literal", path: head.value.pathname };
+  return isWriteRequest(method, head.value.hostname, path);
 }
 
 /**
@@ -429,70 +434,84 @@ export function computeRiskTier(input: RiskTierInput): RiskTierResult {
  * `import a.b` and `from a.b import c` both name `a`. Throws when the parser
  * cannot load or returns no tree, as the classifier treats both.
  */
-export async function importRoots(body: string): Promise<ReadonlySet<string>> {
-  const parser = await getParser();
-  const tree = parser.parse(body);
-  if (!tree) throw new Error("tree-sitter returned no tree for the skill body");
-  try {
+export function importRoots(body: string): Promise<ReadonlySet<string>> {
+  return withPythonTree(body, (root) => {
+    if (root === null) throw new Error("tree-sitter returned no tree for the skill body");
     return new Set(
-      tree.rootNode
-        .descendantsOfType(["import_statement", "import_from_statement"])
-        .flatMap((node) => {
-          if (node === null) return [];
-          if (node.type === "import_statement") return extractImportModules(node);
-          const module = extractImportFromModule(node);
-          return module ? [module] : [];
-        }),
+      root.descendantsOfType(["import_statement", "import_from_statement"]).flatMap((node) => {
+        if (node.type === "import_statement") return extractImportModules(node);
+        const module = extractImportFromModule(node);
+        return module ? [module] : [];
+      }),
     );
-  } finally {
-    tree.delete();
-  }
+  });
 }
 
 /**
- * Run the AST classifier. Throws on parser-load or walk failure; the
- * caller is responsible for catching and falling back to the stub.
+ * The AST classifier as register runs it: every undeclared effect in
+ * `REJECT_ON_UNDECLARED` rejects, whichever row detected it. Throws on a
+ * parser-load or walk failure, and on a null tree, since register deploys no
+ * body this path did not read.
  */
-export async function classifyWithAst(
+export function classifyWithAst(
   manifest: SkillManifest,
   body: string,
   capabilities: SkillsCapabilities,
 ): Promise<ClassifierLog> {
-  const parser = await getParser();
-  const tree = parser.parse(body);
-  if (!tree) {
-    // Defensive — parse() returns null only on extremely malformed
-    // input that the WASM allocator rejects. Fall back to "no hits"
-    // and let the manifest declarations alone drive the tier.
-    log.warn(
-      { bodyLength: body.length },
-      "tree-sitter returned null tree; classifying as no-detect",
-    );
-    return classifyFromDeclarationsOnly(manifest, capabilities);
-  }
+  return classify(manifest, body, capabilities, "register");
+}
 
-  // `tree.delete()` releases the WASM-heap allocation backing the
-  // tree. JS GC can't see it; pair the call with the parse in a
-  // try/finally so a throw inside `detectHits` can't leak.
-  let hits: DetectedHit[];
-  try {
-    hits = detectHits(tree.rootNode);
-  } finally {
-    tree.delete();
+/**
+ * The AST classifier as rollback runs it, which must not put a version that
+ * worked out of reach: an undeclared effect rejects only when a row other than
+ * a ctx row detected it, and a null tree classifies from the declarations
+ * alone. Throws on a parser-load or walk failure, for `classifyManifest`'s
+ * stub fallback.
+ */
+export function classifyWithAstForRollback(
+  manifest: SkillManifest,
+  body: string,
+  capabilities: SkillsCapabilities,
+): Promise<ClassifierLog> {
+  return classify(manifest, body, capabilities, "rollback");
+}
+
+async function classify(
+  manifest: SkillManifest,
+  body: string,
+  capabilities: SkillsCapabilities,
+  occasion: "register" | "rollback",
+): Promise<ClassifierLog> {
+  const hits = await withPythonTree(body, (root) =>
+    root === null ? null : detectHits(root, manifest),
+  );
+  if (hits === null) {
+    return match(occasion)
+      .with("register", () => {
+        throw new Error("tree-sitter returned no tree for the skill body");
+      })
+      .with("rollback", () => classifyFromDeclarationsOnly(manifest, capabilities))
+      .exhaustive();
   }
 
   const detectedSet = new Set<SkillEffect>(hits.map((h) => h.effect));
   const declaredSet = new Set<SkillEffect>(manifest.effects);
+  // At rollback, effects only ctx rows detected count in the tier and stay
+  // out of the validation errors.
+  const rejecting = match(occasion)
+    .with("register", () => hits)
+    .with("rollback", () => hits.filter((h) => !h.ctx))
+    .exhaustive();
 
   // Validation: dangerous effect detected but not declared → reject.
   // Build error messages from the per-rule labels so the operator
   // sees `undeclared effect 'sends_email' — found smtplib import`
   // instead of just the effect name.
-  const validation_errors = [...detectedSet]
+  const validation_errors = R.unique(rejecting.map((h) => h.effect))
     .filter((effect) => REJECT_ON_UNDECLARED.has(effect) && !declaredSet.has(effect))
     .map((effect) => {
       const labels = [
-        ...new Set(hits.filter((h) => h.effect === effect).map((h) => h.label)),
+        ...new Set(rejecting.filter((h) => h.effect === effect).map((h) => h.label)),
       ].sort();
       return `undeclared effect '${effect}' — code uses ${labels.join(", ")} but manifest does not declare it`;
     });
@@ -525,9 +544,9 @@ export async function classifyWithAst(
 }
 
 /**
- * Minimal "declaration-only" tier computation, used inside
- * {@link classifyWithAst} when tree-sitter returns no tree. NOT the
- * fallback path — that's `classifier.ts`'s catch block calling the
+ * Minimal "declaration-only" tier computation, used by
+ * {@link classifyWithAstForRollback} when tree-sitter returns no tree. NOT
+ * the fallback path — that's `classifier.ts`'s catch block calling the
  * stub. This is a defensive degenerate case.
  */
 function classifyFromDeclarationsOnly(

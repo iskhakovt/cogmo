@@ -17,6 +17,7 @@ import {
   isCtxMethod,
 } from "./ctx-contract.js";
 import type { CtxFailure, CtxHandler } from "./dispatcher.js";
+import { hostAllowed, parseHttpUrl } from "./http-destination.js";
 import type { SkillRunServices } from "./run-as.js";
 import type { SkillManifest } from "./types.js";
 import { wallClockSOf } from "./wall-clock.js";
@@ -86,28 +87,6 @@ const DEFAULT_HTTP_TIMEOUT_MS = 10_000;
  * method promises — the skill just disappears mid-call.
  */
 const HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS = 5_000;
-
-/**
- * Whether a hostname is covered by a manifest's `network.allow` list. An entry
- * matches exactly, or — written `*.example.com` — matches any host under that
- * zone at any depth, so `a.b.example.com` is admitted alongside
- * `api.example.com`. The apex is not implied: a skill wanting `example.com`
- * itself lists it. An empty list matches nothing, which is what makes "no
- * `network:` block" mean "no network" rather than "no restriction".
- *
- * Depth is deliberate rather than incidental — a CDN or bucket host is
- * routinely several labels deep, and a single-label rule would push authors
- * toward listing a bare apex, which is broader. It does mean a wildcard over a
- * zone with third-party sub-labels admits those too; that property belongs to
- * the zone, not the depth, and is a reason to name hosts exactly where the
- * zone is shared.
- */
-function hostAllowed(hostname: string, allow: ReadonlyArray<string>): boolean {
-  const host = hostname.toLowerCase();
-  return allow.some((entry) =>
-    entry.startsWith("*.") ? host.endsWith(entry.slice(1)) : host === entry,
-  );
-}
 
 /**
  * Bound a promise that has no abort signal of its own. `dns.lookup` takes
@@ -247,7 +226,7 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#declaredSecrets = new Set(
       opts.manifest.secrets.map((s) => (typeof s === "string" ? s : s.name)),
     );
-    this.#allowedHosts = opts.manifest.network?.allow.map((h) => h.toLowerCase()) ?? [];
+    this.#allowedHosts = opts.manifest.network?.allow ?? [];
   }
 
   async handle(call: { method: string; args: unknown }): Promise<Result<unknown, CtxFailure>> {
@@ -485,19 +464,22 @@ export class DefaultCtxHandler implements CtxHandler {
     }
     const { method, url, headers, body, timeoutMs } = parsed.data;
 
-    // `z.string().url()` accepts any parseable URL, including `file:` and
-    // `data:`, which would turn a network call into a host-filesystem read.
-    const parsedUrl = URL.parse(url);
-    if (parsedUrl === null) {
-      return refused("invalid_args", `http.request could not parse url: ${url}`, null);
+    const destination = parseHttpUrl(url);
+    if (destination.isErr()) {
+      return match(destination.error)
+        .with({ kind: "unparseable" }, () =>
+          refused("invalid_args", `http.request could not parse url: ${url}`, null),
+        )
+        .with({ kind: "not_http" }, ({ protocol }) =>
+          refused(
+            "invalid_args",
+            `http.request supports http and https, got '${protocol}'`,
+            protocol,
+          ),
+        )
+        .exhaustive();
     }
-    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-      return refused(
-        "invalid_args",
-        `http.request supports http and https, got '${parsedUrl.protocol}'`,
-        parsedUrl.protocol,
-      );
-    }
+    const parsedUrl = destination.value;
     // Query strings routinely carry API keys, so the audit records origin
     // and path only — enough to see where a skill reached, without
     // persisting the credential that got it there.

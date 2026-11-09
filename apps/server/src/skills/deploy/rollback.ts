@@ -93,11 +93,11 @@ export async function rollbackSkill(
     };
   }
 
+  // No register-time gate runs: a gate added since must not put a version
+  // that worked out of reach. The classifier rejects an undeclared effect
+  // only when a row other than a ctx row detected it.
   const classifierLog = await classifyManifest(manifest, body, deps.capabilities);
   if (classifierLog.validation_errors.length > 0) {
-    // Same UX-gate semantics as `register`: a target sha whose body
-    // declares effects out of sync with the manifest is a foot-gun
-    // operators want flagged before it goes live.
     return rejectedResult(targetSha, classifierLog.validation_errors.join("; "));
   }
 

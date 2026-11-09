@@ -24,6 +24,7 @@ import { hashLockfileContents } from "./deps.js";
 import { migrateSkillsLayout } from "./migrate-layout.js";
 import { ensureSkillsMirror } from "./mirror-reconcile.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
+import { __resetParserForTests, __setWasmPathForTests } from "./python-parser.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
@@ -1971,6 +1972,60 @@ effects:
       assertStatus(result, "no_op");
     });
 
+    describe("ctx rows' provenance", () => {
+      /** A live echo, and a commit of `body` under ECHO_MANIFEST that no register judged. */
+      async function targetOf(runner: SkillRunnerImpl, body: string): Promise<string> {
+        await pushFeatureBranch({
+          work: repo.work,
+          branch: "skill/echo",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+        assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+        return pushFeatureBranch({
+          work: repo.work,
+          branch: "skill/echo-old",
+          manifest: ECHO_MANIFEST,
+          body,
+        });
+      }
+
+      it("puts a target live whose undeclared effects only ctx rows detect, recording them as detected", async () => {
+        const runner = await makeRunner();
+        // `eval` fails a gate as well: rollback runs none.
+        const target = await targetOf(
+          runner,
+          `async def run(inputs, ctx):\n    await ctx.files.read("notes.md")\n    await ctx.files.write("notes.md", "x")\n    await ctx.memory.remember("fact")\n    return {"echo": eval("1")}\n`,
+        );
+
+        const result = await runner.rollback({ name: "echo", toGitSha: target, origin: OWNER });
+
+        assertStatus(result, "live");
+        const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+        expect(deploy?.classifierLog).toMatchObject({
+          detected_effects: ["reads_filesystem", "writes_filesystem", "writes_memory"],
+          validation_errors: [],
+          risk_tier: "approve",
+        });
+        expect(deploy?.classifierLog.reasons).toContain("approve_gating_effect");
+      });
+
+      it("rejects a target whose undeclared effect a row other than a ctx row detects, naming that row", async () => {
+        const runner = await makeRunner();
+        const target = await targetOf(
+          runner,
+          `import os\n\n\nasync def run(inputs, ctx):\n    await ctx.files.write("notes.md", "x")\n    os.remove("notes.md")\n    return {"echo": 1}\n`,
+        );
+
+        const result = await runner.rollback({ name: "echo", toGitSha: target, origin: OWNER });
+
+        assertStatus(result, "rejected");
+        expect(result.errors).toEqual([
+          "undeclared effect 'writes_filesystem' — code uses os.remove but manifest does not declare it",
+        ]);
+      });
+    });
+
     it("rollback succeeds even if a fresh compile would resolver_fail (yanked wheel)", async () => {
       // Compiler stub: register/approve calls succeed; any rollback-time
       // call would trip the resolver_failed path. Rollback MUST skip
@@ -2834,8 +2889,9 @@ async def run(inputs, ctx):
       const result = await runner.register({ branch: "skill/echo", origin: OWNER });
 
       assertStatus(result, "rejected");
-      expect(result.errors?.[0]).toMatch(/stdlib networking/);
-      expect(result.errors?.[0]).toMatch(/line 2/);
+      expect(result.errors).toEqual([
+        expect.stringMatching(/^wasm_lint: skills\/echo\/skill\.py:2: stdlib networking/),
+      ]);
       expect(await getMainSha(repo.bare)).toBe(before);
       expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
     });
@@ -2856,6 +2912,439 @@ async def run(inputs, ctx):
       const result = await runner.register({ branch: "skill/echo", origin: OWNER });
       assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/subprocess/);
+    });
+  });
+
+  describe("register-time gates", () => {
+    /** ECHO_MANIFEST allowing `api.example.com` and declaring the secret `api_key`. */
+    const NETWORK_MANIFEST = ECHO_MANIFEST.replace(
+      "tier: wasm\n",
+      "tier: wasm\nnetwork:\n  allow:\n    - api.example.com\nsecrets:\n  - api_key\n",
+    );
+    const RUN = 'async def run(inputs, ctx):\n    return {"echo": 1}\n';
+    const MODELS = "from pydantic import BaseModel\n\n\nclass Input(BaseModel):\n    x: int\n\n\n";
+
+    async function registerBody(body: string, manifest: string) {
+      const runner = await makeRunner();
+      await pushFeatureBranch({ work: repo.work, branch: "skill/echo", manifest, body });
+      const before = await getMainSha(repo.bare);
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+      return { result, before };
+    }
+
+    /** A gate's finding: `<id>: skills/echo/skill.py[:<line>:<column>]: <message>`. */
+    function finding(id: string, at: string, message: RegExp | string): RegExp {
+      const text = typeof message === "string" ? message : message.source;
+      const position = at === "" ? "" : `:${at}`;
+      return new RegExp(`^${id}: skills/echo/skill\\.py${position}: .*${text}`);
+    }
+
+    it.each([
+      [
+        "a body over 400 lines",
+        `${RUN}${"# pad\n".repeat(399)}`,
+        ECHO_MANIFEST,
+        [finding("size", "", "401 lines")],
+      ],
+      [
+        "a last line with no newline, counted",
+        `${RUN}${"# pad\n".repeat(398)}# last`,
+        ECHO_MANIFEST,
+        [finding("size", "", "401 lines")],
+      ],
+      [
+        "a body over 48 000 characters",
+        `${RUN}# ${"x".repeat(48_001 - RUN.length - 2)}`,
+        ECHO_MANIFEST,
+        [finding("size", "", "48001 characters")],
+      ],
+      [
+        "a body tree-sitter cannot parse",
+        'async def run(inputs, ctx)\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+        [finding("syntax", "1:1", "")],
+      ],
+      [
+        "a lone \\r between statements",
+        'async def run(inputs, ctx):\n    x = 1\r    return {"echo": x}\n',
+        ECHO_MANIFEST,
+        [finding("syntax", "2:5", "")],
+      ],
+      [
+        "an error after a two-unit character, its column in UTF-16 code units",
+        'async def run(inputs, ctx):\n    return {"e": "😀" + }\n',
+        ECHO_MANIFEST,
+        [finding("syntax", "2:23", "")],
+      ],
+      [
+        "a PEP 696 type-parameter default, which the vendored grammar refuses",
+        `def f[T = int](): pass\n\n\n${RUN}`,
+        ECHO_MANIFEST,
+        [finding("syntax", "1:7", "")],
+      ],
+      [
+        "no run",
+        'async def main(inputs, ctx):\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+        [finding("entrypoint", "", "binds no `run`")],
+      ],
+      [
+        "a synchronous run",
+        'def run(inputs, ctx):\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+        [finding("entrypoint", "1:1", "undecorated `async def`")],
+      ],
+      [
+        "a decorated run",
+        `import functools\n\n\n@functools.cache\n${RUN}`,
+        ECHO_MANIFEST,
+        [finding("entrypoint", "4:1", "undecorated `async def`")],
+      ],
+      [
+        "a run inside a block",
+        'if True:\n    async def run(inputs, ctx):\n        return {"echo": 1}\n',
+        ECHO_MANIFEST,
+        [finding("entrypoint", "2:5", "undecorated `async def`")],
+      ],
+      [
+        "a third parameter",
+        'async def run(inputs, ctx, extra):\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+        [finding("entrypoint", "1:14", "exactly two parameters")],
+      ],
+      [
+        "*args",
+        'async def run(inputs, *args):\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+        [finding("entrypoint", "1:14", "\\*args")],
+      ],
+      [
+        "**kwargs",
+        'async def run(inputs, **kwargs):\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+        [finding("entrypoint", "1:14", "\\*\\*kwargs")],
+      ],
+      [
+        "a keyword-only parameter",
+        'async def run(inputs, *, ctx):\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+        [finding("entrypoint", "1:14", "keyword-only")],
+      ],
+      [
+        "run rebound by an assignment",
+        `${RUN}\n\nrun = staticmethod(run)\n`,
+        ECHO_MANIFEST,
+        [finding("entrypoint", "5:1", "rebound")],
+      ],
+      [
+        "run bound by an import",
+        `from functools import cache as run\n\n\n${RUN}`,
+        ECHO_MANIFEST,
+        [finding("entrypoint", "1:32", "rebound")],
+      ],
+      [
+        "run bound by `global run` in a function",
+        `${RUN}\n\ndef rebind():\n    global run\n    run = None\n`,
+        ECHO_MANIFEST,
+        [finding("entrypoint", "6:12", "rebound")],
+      ],
+      [
+        "an Input class with run's first parameter unannotated",
+        `${MODELS}async def run(inputs, ctx):\n    return {"echo": inputs.x + 1}\n`,
+        ECHO_MANIFEST,
+        [finding("entrypoint", "8:15", "annotated `Input`")],
+      ],
+      [
+        "an Input class with run's first parameter annotated by a string",
+        `${MODELS}async def run(inputs: "Input", ctx):\n    return {"echo": inputs.x + 1}\n`,
+        ECHO_MANIFEST,
+        [finding("entrypoint", "8:23", "annotated `Input`")],
+      ],
+      [
+        "an Output class with run's return unannotated",
+        `from pydantic import BaseModel\n\n\nclass Output(BaseModel):\n    echo: int\n\n\n${RUN}`,
+        ECHO_MANIFEST,
+        [finding("entrypoint", "8:1", "-> Output")],
+      ],
+      [
+        "eval",
+        'async def run(inputs, ctx):\n    return {"echo": eval("1")}\n',
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "2:21", "`eval`")],
+      ],
+      [
+        "exec",
+        `async def run(inputs, ctx):\n    exec("x = 1")\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "2:5", "`exec`")],
+      ],
+      [
+        "compile",
+        `async def run(inputs, ctx):\n    code = compile("1", "s", "eval")\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "2:12", "`compile`")],
+      ],
+      [
+        "__import__",
+        `async def run(inputs, ctx):\n    os = __import__("os")\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "2:10", "`__import__`")],
+      ],
+      [
+        "builtins.exec",
+        `import builtins\n\n\nasync def run(inputs, ctx):\n    builtins.exec("x = 1")\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "5:5", "`builtins.exec`")],
+      ],
+      [
+        "importlib.import_module",
+        `import importlib\n\n\nasync def run(inputs, ctx):\n    importlib.import_module(inputs["m"])\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "5:5", "`importlib.import_module`")],
+      ],
+      [
+        "import_module on importlib's alias",
+        `import importlib as il\n\n\nasync def run(inputs, ctx):\n    il.import_module(inputs["m"])\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "5:5", "`il.import_module`")],
+      ],
+      [
+        "import_module from importlib, at its import and its use",
+        `from importlib import import_module\n\n\nasync def run(inputs, ctx):\n    import_module(inputs["m"])\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [
+          finding("dynamic_code", "1:23", "`import_module`"),
+          finding("dynamic_code", "5:5", "`import_module`"),
+        ],
+      ],
+      [
+        "getattr on an imported module with a computed name",
+        `import os\n\n\nasync def run(inputs, ctx):\n    getattr(os, inputs["f"])()\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "5:5", "`getattr`")],
+      ],
+      [
+        "getattr on the name `import a as b` binds",
+        `import os as o\n\n\nasync def run(inputs, ctx):\n    getattr(o, inputs["f"])()\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("dynamic_code", "5:5", "`getattr`")],
+      ],
+      [
+        "a literal URL to a host network.allow does not admit",
+        `async def run(inputs, ctx):\n    await ctx.http.get("https://evil.example.org/x")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [
+          finding(
+            "effects",
+            "2:24",
+            "'evil.example.org' is not in this skill's network.allow list",
+          ),
+        ],
+      ],
+      [
+        "a literal URL in a skill with no network block",
+        `async def run(inputs, ctx):\n    await ctx.http.get("https://api.example.com/x")\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+        [finding("effects", "2:24", "declares no 'network:' block")],
+      ],
+      [
+        "a literal URL that is not http or https",
+        `async def run(inputs, ctx):\n    await ctx.http.get("ftp://api.example.com/x")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "2:24", "supports http and https, got 'ftp:'")],
+      ],
+      [
+        "a literal URL that does not parse",
+        `async def run(inputs, ctx):\n    await ctx.http.get("not a url")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "2:24", "could not parse")],
+      ],
+      [
+        "an f-string whose literal authority names a host outside network.allow",
+        `async def run(inputs, ctx):\n    await ctx.http.get(f"https://evil.example.org/v1/{inputs['x']}")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "2:24", "'evil.example.org'")],
+      ],
+      [
+        "an allowed host as userinfo before another host",
+        `async def run(inputs, ctx):\n    await ctx.http.get("https://api.example.com@evil.example.org/")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "2:24", "'evil.example.org'")],
+      ],
+      [
+        "request's URL, its second argument",
+        `async def run(inputs, ctx):\n    await ctx.http.request("GET", "https://evil.example.org/")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "2:35", "'evil.example.org'")],
+      ],
+      [
+        "a URL passed as url=",
+        `async def run(inputs, ctx):\n    await ctx.http.get(url="https://evil.example.org/")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "2:28", "'evil.example.org'")],
+      ],
+      [
+        "a literal secret name secrets: does not declare",
+        `async def run(inputs, ctx):\n    await ctx.secrets.get("other")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "2:27", "secret 'other' is not declared")],
+      ],
+      [
+        "a secret name passed as name=",
+        `async def run(inputs, ctx):\n    await ctx.secrets.get(name="other")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "2:32", "secret 'other'")],
+      ],
+      [
+        "a ctx call through a lambda's parameter",
+        `fetch = lambda c: c.http.get("https://evil.example.org/")\n\n\nasync def run(inputs, ctx):\n    await fetch(ctx)\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "1:30", "'evil.example.org'")],
+      ],
+      [
+        "a ctx call through a reassigned parameter",
+        `async def run(inputs, ctx):\n    ctx = ctx\n    await ctx.http.get("https://evil.example.org/")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+        [finding("effects", "3:24", "'evil.example.org'")],
+      ],
+    ])("rejects %s", async (_label, body, manifest, expected) => {
+      const { result, before } = await registerBody(body, manifest);
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual(expected.map((pattern) => expect.stringMatching(pattern)));
+      expect(await getMainSha(repo.bare)).toBe(before);
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    });
+
+    it.each([
+      ["ctx.memory.recall", "reads_memory", 'await ctx.memory.recall("q")'],
+      ["ctx.memory.remember", "writes_memory", 'await ctx.memory.remember("fact")'],
+      ["ctx.files.read", "reads_filesystem", 'await ctx.files.read("notes.md")'],
+      ["ctx.files.list", "reads_filesystem", "await ctx.files.list()"],
+      ["ctx.files.write", "writes_filesystem", 'await ctx.files.write("notes.md", "x")'],
+    ])("the classifier rejects an undeclared %s as %s", async (label, effect, call) => {
+      const { result } = await registerBody(
+        `async def run(inputs, ctx):\n    ${call}\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+      );
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        `undeclared effect '${effect}' — code uses ${label} but manifest does not declare it`,
+      ]);
+    });
+
+    it("the classifier reads a helper's parameter as a ctx receiver", async () => {
+      const { result } = await registerBody(
+        `async def load(c):\n    return await c.files.read("notes.md")\n\n\nasync def run(inputs, ctx):\n    await load(ctx)\n    return {"echo": 1}\n`,
+        ECHO_MANIFEST,
+      );
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        expect.stringMatching(/^undeclared effect 'reads_filesystem'/),
+      ]);
+    });
+
+    it.each([
+      [
+        "size, ahead of the syntax error it carries",
+        `async def run(inputs, ctx)\n${"# pad\n".repeat(400)}`,
+        [finding("size", "", "401 lines")],
+      ],
+      [
+        "syntax, ahead of the dynamic code under it",
+        'async def run(inputs, ctx)\n    return eval("1")\n',
+        [finding("syntax", "1:1", "")],
+      ],
+      [
+        "the third stage, ahead of the classifier's undeclared effect",
+        'def run(inputs, ctx):\n    return await ctx.memory.recall("q")\n',
+        [finding("entrypoint", "1:1", "")],
+      ],
+      [
+        "the third stage with every finding, wasm-lint's beside the entrypoint's",
+        'import smtplib\n\n\ndef run(inputs, ctx):\n    return {"echo": 1}\n',
+        [
+          finding("entrypoint", "4:1", ""),
+          /^wasm_lint: skills\/echo\/skill\.py:1: stdlib networking/,
+        ],
+      ],
+    ])("rejects at the first failing stage only: %s", async (_label, body, expected) => {
+      const { result } = await registerBody(body, ECHO_MANIFEST);
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual(expected.map((pattern) => expect.stringMatching(pattern)));
+    });
+
+    it.each([
+      [
+        "a `/` separator, which is not a parameter",
+        'async def run(inputs, /, ctx):\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+      ],
+      [
+        "Input and Output with run annotated by their bare names",
+        `${MODELS}class Output(BaseModel):\n    echo: int\n\n\nasync def run(inputs: Input, ctx) -> Output:\n    return Output(echo=inputs.x + 1)\n`,
+        // The container tier, whose schemas come from the frontmatter here, so
+        // the pydantic import needs no Pyodide packages.
+        ECHO_MANIFEST.replace("tier: wasm", "tier: container"),
+      ],
+      [
+        "PEP 758's unparenthesized except, which the vendored grammar parses",
+        'async def run(inputs, ctx):\n    try:\n        pass\n    except ValueError, TypeError:\n        pass\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+      ],
+      [
+        "a PEP 750 t-string, which the vendored grammar parses",
+        'async def run(inputs, ctx):\n    t"hello {inputs}"\n    return {"echo": 1}\n',
+        ECHO_MANIFEST,
+      ],
+      [
+        "400 lines ending in \\r\\n",
+        `${RUN}${"# pad\n".repeat(398)}`.replaceAll("\n", "\r\n"),
+        ECHO_MANIFEST,
+      ],
+      [
+        "an f-string whose literal authority names an allowed host",
+        `async def run(inputs, ctx):\n    await ctx.http.get(f"https://api.example.com/v1/{inputs['x']}")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+      ],
+      [
+        "a declared secret by its literal name",
+        `async def run(inputs, ctx):\n    await ctx.secrets.get("api_key")\n    return {"echo": 1}\n`,
+        NETWORK_MANIFEST,
+      ],
+    ])("accepts %s", async (_label, body, manifest) => {
+      const { result } = await registerBody(body, manifest);
+
+      expect(result.status === "rejected" ? result.errors : []).toEqual([]);
+      expect(["live", "pending_approval"]).toContain(result.status);
+    });
+
+    describe("when the grammar cannot load", () => {
+      afterEach(() => {
+        __setWasmPathForTests(null);
+        __resetParserForTests();
+      });
+
+      it("rejects with the pausing registrar_unavailable, and a repeat after the fix goes live", async () => {
+        __setWasmPathForTests(join(tmpdir(), "cogmo-no-such-grammar.wasm"));
+        __resetParserForTests();
+
+        const { result, before } = await registerBody(ECHO_BODY, ECHO_MANIFEST);
+
+        assertStatus(result, "rejected");
+        expect(result.errors).toEqual([
+          expect.stringMatching(/^registrar_unavailable: parser: .+; retry the register$/),
+        ]);
+        expect(await getMainSha(repo.bare)).toBe(before);
+
+        __setWasmPathForTests(null);
+        __resetParserForTests();
+        const runner = await makeRunner();
+        assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+      });
     });
   });
 

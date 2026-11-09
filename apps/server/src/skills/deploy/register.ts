@@ -2,17 +2,18 @@ import { err, ok, type Result } from "neverthrow";
 import { match, P } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
-import { classifyManifest } from "../classifier.js";
+import { classifyWithAst } from "../ast-classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
 import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
 import type { SkillsRepo } from "../skill-files.js";
+import { formatSkillFinding, runSkillGates } from "../skill-gates.js";
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest, SkillSchemas } from "../types.js";
 import { describeWasmPackagesError, type SkillSchemaImportError } from "../worker-wasm/wasm.js";
-import { lintWasmCompat } from "../worker-wasm/wasm-lint.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
+import { checkRegisterBody, type RegisterBodyRejection } from "./check-register-body.js";
 import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { describeLocateSkillRejection, locateSkill } from "./locate-skill.js";
@@ -120,8 +121,9 @@ async function deleteFeatureBranch(repoPath: string, branch: string): Promise<vo
 
 /**
  * Every check `register` makes before its transaction: the branch, its
- * manifest and body, the classifier, the lockfile and its runtime pins,
- * Pyodide compatibility, and the schemas it puts live.
+ * manifest and body, the register-time gates and the classifier, the
+ * lockfile and its runtime pins, Pyodide compatibility, and the schemas it
+ * puts live.
  * Errs with the rejection `register` returns.
  */
 async function prepareRegister(
@@ -196,28 +198,18 @@ async function prepareRegister(
     );
   }
 
-  // Wasm bodies get the Pyodide-compatibility scan before anything is
-  // written. Its whole purpose is turning "imports fine, dies on first
-  // invoke" into a rejection here, which only holds if it actually runs
-  // on the register path.
-  if (manifest.tier === "wasm") {
-    const lint = lintWasmCompat(body);
-    if (lint.isErr()) {
-      return err(
-        rejectedResult(branchSha, lint.error.map((e) => `line ${e.line}: ${e.reason}`).join("; ")),
-      );
-    }
+  // The register-time gates, wasm-lint among them, then the classifier: no
+  // body reaches the lockfile compile's sandbox session, or deploys, unless
+  // the AST path read it (design/skills.md → Register-time gates).
+  const checked = await checkRegisterBody(
+    { runGates: runSkillGates, classify: classifyWithAst },
+    { name, manifest, body },
+    deps.capabilities,
+  );
+  if (checked.isErr()) {
+    return err(rejectedResult(branchSha, ...describeBodyRejection(checked.error)));
   }
-
-  const classifierLog = await classifyManifest(manifest, body, deps.capabilities);
-  if (classifierLog.validation_errors.length > 0) {
-    // Undeclared dangerous effects → reject the deploy outright with
-    // the per-effect labels surfaced to the user. Don't even insert
-    // a `denied` deploy row: the AST path is a pre-flight, not a
-    // human approval, and storing a denied row for "manifest typo"
-    // pollutes the audit log meant for real approval-gate events.
-    return err(rejectedResult(branchSha, classifierLog.validation_errors.join("; ")));
-  }
+  const classifierLog = checked.value;
 
   const lockfileResult = await readManifestLockfile(
     deps.lockfileCompiler,
@@ -275,6 +267,17 @@ async function prepareRegister(
   }
 
   return ok({ branchSha, manifest, body, classifierLog, lockfile, schemas: schemas.value });
+}
+
+/** A body-check rejection as `RegisterResult.errors`: one string per gate finding. */
+function describeBodyRejection(rejection: RegisterBodyRejection): readonly string[] {
+  return match(rejection)
+    .with({ kind: "lint_failed" }, ({ findings }) => findings.map(formatSkillFinding))
+    .with({ kind: "classifier_rejected" }, ({ validationErrors }) => [validationErrors.join("; ")])
+    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) => [
+      `registrar_unavailable: ${cause}: ${detail}; retry the register`,
+    ])
+    .exhaustive();
 }
 
 /**

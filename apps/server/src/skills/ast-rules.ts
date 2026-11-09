@@ -1,10 +1,13 @@
+import { match } from "ts-pattern";
+import { hostAllowed } from "./http-destination.js";
 import type { SkillEffect } from "./types.js";
 
 /**
- * Pure data backing {@link classifyWithAst}. Two tables — imports we
- * recognise as side-effecting and call sites we recognise as side-
- * effecting — are walked per skill. Adding a rule is "drop a row";
- * no code change in the classifier.
+ * Pure data backing {@link classifyWithAst} and the register-time gates
+ * (`skill-gates.ts`). Two tables — imports we recognise as side-effecting
+ * and call sites we recognise as side-effecting — are walked per skill. A
+ * rule of an existing shape is one row; a new shape is a change to the
+ * walker. A change to any row or gate bumps `AST_CLASSIFIER_VERSION`.
  *
  * Rule scope is intentionally narrow: this is a UX gate, not a
  * security boundary. A skill body can `getattr(__import__("os"),
@@ -25,16 +28,20 @@ export interface ImportRule {
   label: string;
 }
 
-export interface CallRule {
+interface CallRuleBase {
+  attr: string;
+  effect: SkillEffect;
+  label: string;
+}
+
+/** A call on a module, or on any receiver. */
+interface ModuleCallRule extends CallRuleBase {
   /**
    * Dotted prefix on the receiver. `subprocess.run(...)` matches
    * `{object: "subprocess", attr: "run"}`. `null` matches a bare
    * function call (`open(...)`, `__import__(...)`).
    */
   object: string | null;
-  attr: string;
-  effect: SkillEffect;
-  label: string;
   /**
    * Optional positional-arg predicate. `OPEN_WRITE_MODE` only fires if
    * the call has a string-literal second arg whose value contains a
@@ -43,6 +50,16 @@ export interface CallRule {
    */
   argPredicate?: "open_write_mode";
 }
+
+/**
+ * A ctx row: matches only `<receiver>.<namespace>.<attr>(...)` on a ctx
+ * receiver (`python-ast.ts` → `ctxCalls`).
+ */
+interface CtxCallRule extends CallRuleBase {
+  namespace: string;
+}
+
+export type CallRule = ModuleCallRule | CtxCallRule;
 
 /**
  * Top-level imports → effect. Matched against every `import` /
@@ -158,16 +175,52 @@ export const CALL_RULES: readonly CallRule[] = [
     label: "open(..., write_mode)",
     argPredicate: "open_write_mode",
   },
+  // ctx rows: the effect `ctx-handler` requires of each method, which it
+  // refuses at run time (`missing_effect`) when the manifest lacks it.
+  {
+    namespace: "memory",
+    attr: "recall",
+    effect: "reads_memory",
+    label: "ctx.memory.recall",
+  },
+  {
+    namespace: "memory",
+    attr: "remember",
+    effect: "writes_memory",
+    label: "ctx.memory.remember",
+  },
+  {
+    namespace: "files",
+    attr: "read",
+    effect: "reads_filesystem",
+    label: "ctx.files.read",
+  },
+  {
+    namespace: "files",
+    attr: "list",
+    effect: "reads_filesystem",
+    label: "ctx.files.list",
+  },
+  {
+    namespace: "files",
+    attr: "write",
+    effect: "writes_filesystem",
+    label: "ctx.files.write",
+  },
 ];
 
 /**
  * Effects whose detection-without-declaration rejects the deploy
  * outright (writes a `validation_errors` entry, classifier returns
  * `risk_tier: "approve"` regardless). This is the "you forgot to
- * declare what you do" UX gate. Reads (memory / filesystem / user
- * data) are advisory — they bump the tier, they don't reject.
+ * declare what you do" UX gate. The memory and filesystem reads are here
+ * because `ctx-handler` refuses those calls without them; `reads_user_data`
+ * and `writes_user_data` are advisory — they bump the tier, they don't reject.
  */
 export const REJECT_ON_UNDECLARED: ReadonlySet<SkillEffect> = new Set<SkillEffect>([
+  "reads_memory",
+  "writes_memory",
+  "reads_filesystem",
   "spawns_subprocess",
   "writes_filesystem",
   "deletes_external",
@@ -192,6 +245,93 @@ export const APPROVE_GATING_EFFECTS: ReadonlySet<SkillEffect> = new Set<SkillEff
   "spawns_subprocess",
   "writes_filesystem",
 ]);
+
+/**
+ * The effects a write request falls under (design/skills.md → Register-time
+ * gates → ctx rows): a skill declaring none of them has each write request
+ * detected as `writes_user_data`.
+ */
+export const WRITE_EFFECTS: ReadonlySet<SkillEffect> = new Set<SkillEffect>([
+  "writes_user_data",
+  "sends_email",
+  "sends_message",
+  "posts_public",
+  "deletes_external",
+  "financial",
+]);
+
+/**
+ * A request's path: the literal path it sends, or `templated` when an f-string
+ * replacement field falls in it, read from the template before any URL
+ * normalization, since a field can hold `/`, `..`, `?` or `#`.
+ */
+export type RequestPath = { kind: "literal"; path: string } | { kind: "templated" };
+
+/** A host whose API acts on `GET`, and the paths that do. */
+interface WriteEndpoint {
+  host: string;
+  /** Literal text and `*`, a `*` matching any text within one segment; compared without case. */
+  paths: readonly string[];
+}
+
+/** The APIs that act on `GET` (design/skills.md → Write requests). */
+const WRITE_ENDPOINTS: readonly WriteEndpoint[] = [
+  // The Telegram Bot API, `/bot<token>/<method>`, whose method names are
+  // case-insensitive.
+  { host: "api.telegram.org", paths: ["/bot*/send*", "/bot*/edit*", "/bot*/delete*"] },
+];
+
+/**
+ * Whether a request is a write: a method other than `GET`; a `GET` to a host
+ * with `WRITE_ENDPOINTS` entries whose path is templated, since a field can
+ * form any of them; or a `GET` whose literal path matches one. `method` is
+ * uppercased, as `cogmo_ctx` sends it.
+ */
+export function isWriteRequest(method: string, host: string, path: RequestPath): boolean {
+  if (method !== "GET") return true;
+  const endpoints = WRITE_ENDPOINTS.filter((endpoint) => endpoint.host === host.toLowerCase());
+  return match(path)
+    .with({ kind: "templated" }, () => endpoints.length > 0)
+    .with({ kind: "literal" }, ({ path: sent }) =>
+      endpoints.some((endpoint) =>
+        endpoint.paths.some((pattern) => globRegExp(pattern).test(sent)),
+      ),
+    )
+    .exhaustive();
+}
+
+/** Whether `network.allow` admits a `WRITE_ENDPOINTS` host, for a request whose host is not literal. */
+export function admitsWriteEndpoint(allow: ReadonlyArray<string>): boolean {
+  return WRITE_ENDPOINTS.some((endpoint) => hostAllowed(endpoint.host, allow));
+}
+
+/** A `WRITE_ENDPOINTS` path pattern as a whole-path, case-insensitive match, `*` within one segment. */
+function globRegExp(pattern: string): RegExp {
+  const source = pattern
+    .split("*")
+    .map((text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[^/]*");
+  return new RegExp(`^${source}$`, "i");
+}
+
+/** `skill.py`'s bounds (design/skills.md → Register-time gates → Size). */
+export const SKILL_BODY_MAX_LINES = 400;
+/** 400 lines at the toolchain's 120-column `line-length`. */
+export const SKILL_BODY_MAX_CHARACTERS = 48_000;
+
+/** The names that build code at run time, refused by the `dynamic_code` gate. */
+export const DYNAMIC_CODE_NAMES: ReadonlySet<string> = new Set([
+  "exec",
+  "eval",
+  "compile",
+  "__import__",
+]);
+
+/** The modules whose attributes are the builtins `DYNAMIC_CODE_NAMES` names. */
+export const BUILTINS_MODULES: ReadonlySet<string> = new Set(["builtins", "__builtins__"]);
+
+/** `importlib`'s attributes that import a module by a name built at run time. */
+export const DYNAMIC_IMPORT_NAMES: ReadonlySet<string> = new Set(["import_module", "__import__"]);
 
 /** A declared secret count at or above this threshold forces `approve`. */
 export const APPROVE_SECRETS_THRESHOLD = 3;

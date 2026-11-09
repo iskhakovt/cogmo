@@ -15,6 +15,7 @@ import {
   type SkillsMirrorReconcileDeps,
 } from "../skills/mirror-reconcile.js";
 import { loadBundledPackages } from "../skills/pyodide-compat.js";
+import { loadPythonParser } from "../skills/python-parser.js";
 import { resolveSkillRunAs } from "../skills/run-as.js";
 import { SkillRunnerImpl } from "../skills/runner.js";
 import { createSkillRunsSweeper } from "../skills/runs-sweeper.js";
@@ -59,6 +60,10 @@ export async function bootstrapSkillRunner(
   ownership: SkillRunnerOwnership,
   opts: BootstrapOptions = {},
 ): Promise<SkillRunnerHandle> {
+  // The grammar register's gates and classifier share: a broken image stops
+  // here rather than pausing every register (design/skills.md →
+  // Register-time gates → A gate that cannot run).
+  await loadPythonParser();
   const wasmChildrenDir = `${env.COGMO_SKILLS_PATH}/.wasm-children`;
   if (ownership.reapWasmChildren) {
     await reapWasmChildGroups(
