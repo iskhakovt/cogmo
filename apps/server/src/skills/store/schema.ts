@@ -206,11 +206,21 @@ export const skillDeploys = pgTable(
      * sha's frontmatter carries them.
      */
     schemas: jsonbZod("schemas", SkillSchemasSchema),
+    /**
+     * A rollback's target: the commit whose skill files the row's restoring
+     * commit put back, never itself a restoring commit. Set iff the row is
+     * `rolled_back`.
+     */
+    restoresGitSha: text("restores_git_sha"),
     createdAt: ts(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   },
   (t) => [
     index("idx_skill_deploys_skill_id").on(t.skillId),
+    check(
+      "chk_skill_deploys_restores_iff_rolled_back",
+      sql`(${t.status} = 'rolled_back') = (${t.restoresGitSha} IS NOT NULL)`,
+    ),
     check(
       "chk_skill_deploys_resolved_at_iff_terminal",
       sql`(${t.status} = 'pending_approval') = (${t.resolvedAt} IS NULL)`,
@@ -220,6 +230,23 @@ export const skillDeploys = pgTable(
       sql`${t.approvedBy} IS NULL OR ${t.status} = 'live'`,
     ),
   ],
+);
+
+/**
+ * The commit that moved every skill to `skills/<name>/`, written once by
+ * `migrateSkillsLayout`. A sha it is an ancestor of (or equal to) keeps a
+ * skill's files in `skills/<name>/`; any other keeps them at the repo root
+ * (design/skills.md → Per-skill structure).
+ */
+export const skillsRepoLayout = pgTable(
+  "skills_repo_layout",
+  {
+    id: pk(),
+    singleton: boolean("singleton").notNull().unique(),
+    layoutCommitSha: text("layout_commit_sha").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [check("chk_skills_repo_layout_singleton", sql`${t.singleton}`)],
 );
 
 /**

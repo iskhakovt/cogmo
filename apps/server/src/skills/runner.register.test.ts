@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -21,6 +21,7 @@ import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
 import { hashLockfileContents } from "./deps.js";
+import { migrateSkillsLayout } from "./migrate-layout.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
@@ -139,6 +140,8 @@ async def run(inputs, ctx):
 interface RepoSetup {
   bare: string;
   work: string;
+  /** Boot's layout commit, main before any deploy. */
+  layout: string;
   cleanup: () => Promise<void>;
 }
 
@@ -147,23 +150,39 @@ interface RepoSetup {
  * working clone the test can push feature branches from. Mirrors what the
  * agent's worktree would look like in production.
  */
-async function setupRepo(): Promise<RepoSetup> {
+async function setupRepo(
+  opts: { beforeLayout?: (bare: string) => Promise<void> } = {},
+): Promise<RepoSetup> {
   const root = await mkdtemp(join(tmpdir(), "skills-register-"));
   const bare = join(root, "skills.git");
   const work = join(root, "work");
   await bootstrapSkillsRepo({ path: bare });
+  await opts.beforeLayout?.(bare);
   await mkdir(work);
   await execFileP("git", ["init", "-b", "main", work]);
   await execFileP("git", ["-C", work, "config", "user.email", "test@cogmo.dev"]);
   await execFileP("git", ["-C", work, "config", "user.name", "test"]);
   await execFileP("git", ["-C", work, "config", "commit.gpgsign", "false"]);
   await execFileP("git", ["-C", work, "remote", "add", "origin", bare]);
+  // Boot's layout commit, which every branch descends from. A test that
+  // makes a second repo records that repo's in place of the first.
+  await db.execute(sql`DELETE FROM skills_repo_layout`);
+  const layout = await migrateSkillsLayout({ runInTx: tx, store }, bare);
+  await execFileP("git", ["-C", work, "fetch", "-q", "origin", "main"]);
+  await execFileP("git", ["-C", work, "reset", "-q", "--hard", "FETCH_HEAD"]);
 
   return {
     bare,
     work,
+    layout,
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
+}
+
+/** A skill file's path in the working clone, `skills/<name>/<file>`, its directory made. */
+function skillFile(work: string, file: string, name: string): string {
+  mkdirSync(join(work, "skills", name), { recursive: true });
+  return join(work, "skills", name, file);
 }
 
 /**
@@ -176,8 +195,9 @@ async function pushFeatureBranch(opts: {
   manifest: string;
   body: string;
 }): Promise<string> {
-  await writeFile(join(opts.work, "SKILL.md"), opts.manifest);
-  await writeFile(join(opts.work, "skill.py"), opts.body);
+  const name = expectDefined(/^name:\s*(\S+)/m.exec(opts.manifest)?.[1], "manifest name");
+  await writeFile(skillFile(opts.work, "SKILL.md", name), opts.manifest);
+  await writeFile(skillFile(opts.work, "skill.py", name), opts.body);
   await execFileP("git", ["-C", opts.work, "add", "."]);
   await execFileP("git", [
     "-C",
@@ -208,6 +228,29 @@ async function getMainSha(bare: string): Promise<string | null> {
   }
 }
 
+/** Point the working clone at the bare repo's main, as a fresh branch would start. */
+async function resetToMain(repo: RepoSetup): Promise<void> {
+  await execFileP("git", ["-C", repo.work, "fetch", "-q", "origin", "main"]);
+  await execFileP("git", ["-C", repo.work, "reset", "-q", "--hard", "FETCH_HEAD"]);
+}
+
+async function git(repoPath: string, ...args: string[]): Promise<string> {
+  return (await execFileP("git", ["-C", repoPath, ...args])).stdout.trim();
+}
+
+async function isAncestorIn(
+  repoPath: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  try {
+    await execFileP("git", ["-C", repoPath, "merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
   let repo: RepoSetup;
 
@@ -232,6 +275,10 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       ...offlineWasm(repo.bare),
       ...overrides,
     });
+  }
+
+  async function makeRunnerFor(skillsRepoPath: string) {
+    return makeRunner({ skillsRepoPath, ...offlineWasm(skillsRepoPath) });
   }
 
   it("registers a fresh skill — advances main, writes DB rows, deletes branch", async () => {
@@ -442,8 +489,11 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     // Build a divergent branch: reset work to a fresh root commit (no
     // ancestor of main), push as `divergent`.
     await execFileP("git", ["-C", repo.work, "checkout", "--orphan", "fresh"]);
-    await writeFile(join(repo.work, "SKILL.md"), ECHO_MANIFEST.replace("name: echo", "name: alt"));
-    await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
+    await writeFile(
+      skillFile(repo.work, "SKILL.md", "echo"),
+      ECHO_MANIFEST.replace("name: echo", "name: alt"),
+    );
+    await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
     await execFileP("git", ["-C", repo.work, "add", "."]);
     await execFileP("git", ["-C", repo.work, "commit", "-m", "fresh root"]);
     await execFileP("git", ["-C", repo.work, "push", "origin", "fresh:refs/heads/divergent"]);
@@ -527,7 +577,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
 
   it("rejects a branch missing SKILL.md", async () => {
     const runner = await makeRunner();
-    await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
+    await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
     await execFileP("git", ["-C", repo.work, "add", "."]);
     await execFileP("git", ["-C", repo.work, "commit", "-m", "no manifest"]);
     await execFileP("git", ["-C", repo.work, "push", "origin", "main:refs/heads/no-manifest"]);
@@ -581,7 +631,7 @@ outputs:
       "invalid_inputs_schema: $async schemas are not supported",
       expect.stringMatching(/^invalid_outputs_schema: /),
     ]);
-    expect(await getMainSha(repo.bare)).toBeNull();
+    expect(await getMainSha(repo.bare)).toBe(repo.layout);
   });
 
   describe("dependencies", () => {
@@ -605,9 +655,9 @@ outputs:
 
     it("rejects when requirements.lock is committed but empty", async () => {
       const runner = await makeRunner();
-      await writeFile(join(repo.work, "SKILL.md"), ECHO_WITH_DEPS);
-      await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
-      await writeFile(join(repo.work, "requirements.lock"), "   \n");
+      await writeFile(skillFile(repo.work, "SKILL.md", "echo"), ECHO_WITH_DEPS);
+      await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+      await writeFile(skillFile(repo.work, "requirements.lock", "echo"), "   \n");
       await execFileP("git", ["-C", repo.work, "add", "."]);
       await execFileP("git", [
         "-C",
@@ -632,9 +682,9 @@ outputs:
 
     it("stores lockfile_hash on success when deps + lockfile are committed", async () => {
       const runner = await makeRunner();
-      await writeFile(join(repo.work, "SKILL.md"), ECHO_WITH_DEPS);
-      await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
-      await writeFile(join(repo.work, "requirements.lock"), ECHO_LOCKFILE);
+      await writeFile(skillFile(repo.work, "SKILL.md", "echo"), ECHO_WITH_DEPS);
+      await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+      await writeFile(skillFile(repo.work, "requirements.lock", "echo"), ECHO_LOCKFILE);
       await execFileP("git", ["-C", repo.work, "add", "."]);
       await execFileP("git", [
         "-C",
@@ -663,10 +713,13 @@ outputs:
       // Bundled by Pyodide at this version and pure Python: the compatibility
       // check asks neither PyPI nor the probe.
       async function pushBundledDeps(branch: string, spec: string): Promise<void> {
-        await writeFile(join(repo.work, "SKILL.md"), ECHO_WITH_DEPS.replace("httpx==0.27.0", spec));
-        await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
         await writeFile(
-          join(repo.work, "requirements.lock"),
+          skillFile(repo.work, "SKILL.md", "echo"),
+          ECHO_WITH_DEPS.replace("httpx==0.27.0", spec),
+        );
+        await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+        await writeFile(
+          skillFile(repo.work, "requirements.lock", "echo"),
           `${spec} \\\n    --hash=sha256:${"0".repeat(64)}\n`,
         );
         await execFileP("git", ["-C", repo.work, "add", "."]);
@@ -725,7 +778,7 @@ outputs:
         expect(result.errors).toEqual([
           expect.stringMatching(/^wasm_dependency_unavailable: hash_mismatch: idna==3\.10: /),
         ]);
-        expect(await getMainSha(repo.bare)).toBeNull();
+        expect(await getMainSha(repo.bare)).toBe(repo.layout);
       });
 
       // The schema import loads what a run loads, so a register that cannot
@@ -773,11 +826,11 @@ outputs:
       // A dependency Pyodide doesn't bundle, so the compatibility check asks PyPI.
       const lockfile = "cogmo-unbundled==1.0.0 \\\n    --hash=sha256:0\n";
       await writeFile(
-        join(repo.work, "SKILL.md"),
+        skillFile(repo.work, "SKILL.md", "echo"),
         ECHO_WITH_DEPS.replace("httpx==0.27.0", "cogmo-unbundled==1.0.0"),
       );
-      await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
-      await writeFile(join(repo.work, "requirements.lock"), lockfile);
+      await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+      await writeFile(skillFile(repo.work, "requirements.lock", "echo"), lockfile);
       await execFileP("git", ["-C", repo.work, "add", "."]);
       await execFileP("git", ["-C", repo.work, "commit", "-m", "unbundled dep", "--allow-empty"]);
       await execFileP("git", [
@@ -826,9 +879,9 @@ outputs:
 
     describe("compiler verification", () => {
       async function commitWithLockfile(branch: string, lockfile: string): Promise<string> {
-        await writeFile(join(repo.work, "SKILL.md"), ECHO_WITH_DEPS);
-        await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
-        await writeFile(join(repo.work, "requirements.lock"), lockfile);
+        await writeFile(skillFile(repo.work, "SKILL.md", "echo"), ECHO_WITH_DEPS);
+        await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+        await writeFile(skillFile(repo.work, "requirements.lock", "echo"), lockfile);
         await execFileP("git", ["-C", repo.work, "add", "."]);
         await execFileP("git", [
           "-C",
@@ -1079,8 +1132,377 @@ outputs:
     expect(defs[0]?.description).toContain("v2 now adds two instead");
   });
 
+  describe("skills/<name>/ layout", () => {
+    /** Commit `files` (paths from the repo root) on a branch off main and push it. */
+    async function pushFiles(
+      branch: string,
+      files: Record<string, string>,
+      opts: { message?: string; env?: Record<string, string> } = {},
+    ): Promise<string> {
+      await resetToMain(repo);
+      for (const [path, content] of Object.entries(files)) {
+        mkdirSync(join(repo.work, path, ".."), { recursive: true });
+        await writeFile(join(repo.work, path), content);
+      }
+      await execFileP("git", ["-C", repo.work, "add", "-A"]);
+      await execFileP("git", ["-C", repo.work, "commit", "-q", "-m", opts.message ?? branch], {
+        env: { ...process.env, ...opts.env },
+      });
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "push",
+        "-q",
+        "-f",
+        "origin",
+        `HEAD:refs/heads/${branch}`,
+      ]);
+      return git(repo.work, "rev-parse", "HEAD");
+    }
+
+    it("refuses skill files at the repo root as layout_violation", async () => {
+      const runner = await makeRunner();
+      await pushFiles("skill/root", { "SKILL.md": ECHO_MANIFEST, "skill.py": ECHO_BODY });
+
+      const result = await runner.register({ branch: "skill/root", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "layout_violation: SKILL.md, skill.py at the repo root; a skill's files live in skills/<name>/",
+      ]);
+      expect(await getMainSha(repo.bare)).toBe(repo.layout);
+    });
+
+    it("refuses a path outside the skill's own files", async () => {
+      const runner = await makeRunner();
+      await pushFiles("skill/extra", {
+        "skills/echo/SKILL.md": ECHO_MANIFEST,
+        "skills/echo/skill.py": ECHO_BODY,
+        "skills/echo/helpers.py": "x = 1\n",
+        "pyproject.toml": "",
+      });
+
+      const result = await runner.register({ branch: "skill/extra", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors?.[0]).toMatch(
+        /^owned_paths: pyproject.toml, skills\/echo\/helpers.py outside/,
+      );
+    });
+
+    it("refuses a branch that changes two skills", async () => {
+      const runner = await makeRunner();
+      await pushFiles("skill/two", {
+        "skills/echo/SKILL.md": ECHO_MANIFEST,
+        "skills/echo/skill.py": ECHO_BODY,
+        "skills/other/SKILL.md": ECHO_MANIFEST.replace("name: echo", "name: other"),
+        "skills/other/skill.py": ECHO_BODY,
+      });
+
+      const result = await runner.register({ branch: "skill/two", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "owned_paths: the branch changes more than one skill: echo, other",
+      ]);
+    });
+
+    it("refuses a commit made under Cogmo's identity", async () => {
+      const runner = await makeRunner();
+      const sha = await pushFiles(
+        "skill/forged",
+        { "skills/echo/SKILL.md": ECHO_MANIFEST, "skills/echo/skill.py": ECHO_BODY },
+        { env: { GIT_COMMITTER_NAME: "Cogmo", GIT_COMMITTER_EMAIL: "skills@cogmo.invalid" } },
+      );
+
+      const result = await runner.register({ branch: "skill/forged", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors?.[0]).toBe(
+        `layout_violation: ${sha.slice(0, 7)} carry Cogmo's commit identity or a Cogmo- trailer, which only Cogmo's own commits may`,
+      );
+    });
+
+    it("refuses a commit carrying a Cogmo- trailer", async () => {
+      const runner = await makeRunner();
+      await pushFiles(
+        "skill/trailer",
+        { "skills/echo/SKILL.md": ECHO_MANIFEST, "skills/echo/skill.py": ECHO_BODY },
+        { message: `add echo\n\nCogmo-Restores: ${repo.layout}` },
+      );
+
+      const result = await runner.register({ branch: "skill/trailer", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors?.[0]).toMatch(
+        /^layout_violation: [0-9a-f]{7} carry Cogmo's commit identity/,
+      );
+    });
+
+    it("refuses any Cogmo- trailer, not only the ones Cogmo writes today", async () => {
+      const runner = await makeRunner();
+      await pushFiles(
+        "skill/trailer-any",
+        { "skills/echo/SKILL.md": ECHO_MANIFEST, "skills/echo/skill.py": ECHO_BODY },
+        { message: "add echo\n\nCogmo-Reviewed: abc" },
+      );
+
+      const result = await runner.register({ branch: "skill/trailer-any", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors?.[0]).toMatch(/^layout_violation: /);
+    });
+
+    it("refuses a branch at main where more than one skill differs from its live version", async () => {
+      const runner = await makeRunner();
+      for (const name of ["echo", "other"]) {
+        await resetToMain(repo);
+        await pushFeatureBranch({
+          work: repo.work,
+          branch: `skill/${name}`,
+          manifest: ECHO_MANIFEST.replace("name: echo", `name: ${name}`),
+          body: ECHO_BODY,
+        });
+        assertStatus(await runner.register({ branch: `skill/${name}`, origin: OWNER }), "live");
+      }
+      // The database falls behind main for both, as two crashed commits would leave it.
+      await db.execute(sql`UPDATE skills SET git_sha = ${repo.layout}`);
+      await git(repo.bare, "update-ref", "refs/heads/skill/at-main", "main");
+
+      const result = await runner.register({ branch: "skill/at-main", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "owned_paths: more than one skill differs from its live version at the tip: echo, other",
+      ]);
+    });
+
+    it("refuses a directory whose manifest names another skill", async () => {
+      const runner = await makeRunner();
+      await pushFiles("skill/misnamed", {
+        "skills/echo/SKILL.md": ECHO_MANIFEST.replace("name: echo", "name: other"),
+        "skills/echo/skill.py": ECHO_BODY,
+      });
+
+      const result = await runner.register({ branch: "skill/misnamed", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "skill_name_mismatch: skills/echo/SKILL.md names the skill 'other'; its directory must be skills/other/",
+      ]);
+    });
+
+    it("a repeat after update-ref landed and the commit failed puts the tip live", async () => {
+      const runner = await makeRunner();
+      const sha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const real = DrizzleSkillStore.prototype.executeRegister.bind(store);
+      const failing = vi
+        .spyOn(store, "executeRegister")
+        .mockImplementationOnce(async (trx, params) => {
+          await real(trx, params);
+          throw new Error("commit failed");
+        });
+      await expect(runner.register({ branch: "skill/echo", origin: OWNER })).rejects.toThrow(
+        "commit failed",
+      );
+      failing.mockRestore();
+      // main holds the tip, the database nothing, and the branch survives.
+      expect(await getMainSha(repo.bare)).toBe(sha);
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+
+      const repeat = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(repeat, "live");
+      expect(repeat.gitSha).toBe(sha);
+      expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(sha);
+    });
+
+    it("a branch left at a live tip is no_op", async () => {
+      const runner = await makeRunner();
+      const sha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+      await git(repo.bare, "update-ref", "refs/heads/skill/left", sha);
+
+      const left = await runner.register({ branch: "skill/left", origin: OWNER });
+
+      assertStatus(left, "no_op");
+      expect(left.name).toBe("echo");
+    });
+
+    it("refuses a branch at main that changes no skill", async () => {
+      const runner = await makeRunner();
+      await git(repo.bare, "update-ref", "refs/heads/skill/empty", repo.layout);
+
+      const result = await runner.register({ branch: "skill/empty", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual(["nothing_to_register: the branch changes no skill"]);
+    });
+
+    it("enable accepts a forward rollback to a target that went live", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v1", origin: OWNER });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      const rolled = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+      assertStatus(rolled, "live");
+      await runner.deregister({ name: "echo" });
+
+      const enabled = await runner.enable({ name: "echo", origin: OWNER });
+
+      expect(enabled).toMatchObject({ kind: "enabled", gitSha: rolled.gitSha });
+    });
+  });
+
+  describe("shas from before the layout commit", () => {
+    let legacyAlpha = "";
+    let legacyBeta = "";
+
+    /** alpha, then beta, deployed at the repo root before the layout move. */
+    async function setupLegacyRepo(): Promise<RepoSetup> {
+      return setupRepo({
+        beforeLayout: async (bare) => {
+          const seed = await mkdtemp(join(tmpdir(), "skills-legacy-"));
+          try {
+            await execFileP("git", ["init", "-q", "-b", "main", seed]);
+            const commit = async (name: string, body: string) => {
+              await writeFile(
+                join(seed, "SKILL.md"),
+                ECHO_MANIFEST.replace("name: echo", `name: ${name}`),
+              );
+              await writeFile(join(seed, "skill.py"), body);
+              await execFileP("git", ["-C", seed, "add", "-A"]);
+              await execFileP("git", [
+                "-C",
+                seed,
+                "-c",
+                "user.email=legacy@test",
+                "-c",
+                "user.name=legacy",
+                "commit",
+                "-q",
+                "-m",
+                name,
+              ]);
+              const sha = await git(seed, "rev-parse", "HEAD");
+              await execFileP("git", ["-C", seed, "push", "-q", bare, `HEAD:refs/heads/${name}`]);
+              await git(bare, "update-ref", "refs/heads/main", sha);
+              await tx((trx) =>
+                store.insertSkill(trx, {
+                  name,
+                  tier: "wasm",
+                  riskTier: "notify",
+                  effects: [],
+                  schedule: null,
+                  scheduleNextRunAt: null,
+                  gitSha: sha,
+                  lockfileHash: null,
+                  inputs: { type: "object" },
+                  outputs: null,
+                  scheduleRunAs: null,
+                }),
+              );
+              return sha;
+            };
+            legacyAlpha = await commit("alpha", ECHO_BODY);
+            legacyBeta = await commit("beta", ECHO_BODY_BAD_OUTPUT);
+          } finally {
+            await rm(seed, { recursive: true, force: true });
+          }
+        },
+      });
+    }
+
+    it("rolls back to a legacy sha by restoring skills/<name>/ from its root files", async () => {
+      const legacy = await setupLegacyRepo();
+      try {
+        const runner = await makeRunnerFor(legacy.bare);
+        await execFileP("git", ["-C", legacy.work, "fetch", "-q", "origin", "main"]);
+        await execFileP("git", ["-C", legacy.work, "reset", "-q", "--hard", "FETCH_HEAD"]);
+        await pushFeatureBranch({
+          work: legacy.work,
+          branch: "skill/alpha-v2",
+          manifest: ECHO_MANIFEST.replace("name: echo", "name: alpha").replace(
+            "echoes one int field",
+            "v2",
+          ),
+          body: ECHO_BODY,
+        });
+        assertStatus(await runner.register({ branch: "skill/alpha-v2", origin: OWNER }), "live");
+
+        const rolled = await runner.rollback({
+          name: "alpha",
+          toGitSha: legacyAlpha,
+          origin: OWNER,
+        });
+
+        assertStatus(rolled, "live");
+        expect(await git(legacy.bare, "rev-parse", `${rolled.gitSha}:skills/alpha/SKILL.md`)).toBe(
+          await git(legacy.bare, "rev-parse", `${legacyAlpha}:SKILL.md`),
+        );
+        expect(
+          (await runner.listToolDefs()).find((d) => d.name === "alpha")?.description,
+        ).toContain("echoes one int field");
+      } finally {
+        await legacy.cleanup();
+      }
+    });
+
+    it("refuses a legacy sha whose root files belong to another skill", async () => {
+      const legacy = await setupLegacyRepo();
+      try {
+        const runner = await makeRunnerFor(legacy.bare);
+
+        const result = await runner.rollback({
+          name: "alpha",
+          toGitSha: legacyBeta,
+          origin: OWNER,
+        });
+
+        assertStatus(result, "rejected");
+        expect(result.errors?.[0]).toMatch(
+          /^target_skill_mismatch: target sha belongs to skill 'beta'/,
+        );
+      } finally {
+        await legacy.cleanup();
+      }
+    });
+
+    it("reads a skill still at its legacy sha from the repo root", async () => {
+      const legacy = await setupLegacyRepo();
+      try {
+        const runner = await makeRunnerFor(legacy.bare);
+        const defs = await runner.listToolDefs();
+        expect(defs.map((d) => d.name).sort()).toEqual(["alpha", "beta"]);
+      } finally {
+        await legacy.cleanup();
+      }
+    });
+  });
+
   describe("rollback", () => {
-    it("rewinds main + skills.git_sha to a prior commit", async () => {
+    it("restores a prior version in a forward commit on main", async () => {
       const runner = await makeRunner();
       const v1 = await pushFeatureBranch({
         work: repo.work,
@@ -1102,21 +1524,280 @@ outputs:
       });
       await runner.register({ branch: "skill/echo-v2", origin: OWNER });
 
-      const v2 = await getMainSha(repo.bare);
+      const v2 = expectDefined(await getMainSha(repo.bare), "main");
       const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
       assertStatus(result, "live");
-      expect(result.gitSha).toBe(v1);
       // The facts are the restored version's, replacing v2.
       expect(result.facts).toMatchObject({
         description: "a wasm skill that echoes one int field",
         priorGitSha: v2,
       });
+      const restoring = result.gitSha;
       const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
-      expect(deploy?.status).toBe("rolled_back");
+      expect(deploy).toMatchObject({
+        status: "rolled_back",
+        gitSha: restoring,
+        restoresGitSha: v1,
+      });
 
+      // main fast-forwards to the restoring commit: Cogmo's, on top of v2,
+      // with v1's files in skills/echo/.
+      expect(await getMainSha(repo.bare)).toBe(restoring);
+      expect(await git(repo.bare, "rev-parse", `${restoring}^`)).toBe(v2);
+      expect(await git(repo.bare, "log", "-1", "--format=%ae %ce%n%B", restoring)).toMatch(
+        new RegExp(`^skills@cogmo.invalid skills@cogmo.invalid\n[^]*\nCogmo-Restores: ${v1}$`),
+      );
+      expect(await git(repo.bare, "rev-parse", `${restoring}:skills/echo`)).toBe(
+        await git(repo.bare, "rev-parse", `${v1}:skills/echo`),
+      );
+      const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+      expect(skill?.gitSha).toBe(restoring);
+    });
+
+    it("leaves another skill's later deploy on main", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v1", origin: OWNER });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      const other = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/other",
+        manifest: ECHO_MANIFEST.replace("name: echo", "name: other"),
+        body: ECHO_BODY,
+      });
+      assertStatus(await runner.register({ branch: "skill/other", origin: OWNER }), "live");
+
+      const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+      assertStatus(result, "live");
+
+      expect(await git(repo.bare, "rev-parse", `${result.gitSha}^`)).toBe(other);
+      expect(await git(repo.bare, "rev-parse", `${result.gitSha}:skills/other`)).toBe(
+        await git(repo.bare, "rev-parse", `${other}:skills/other`),
+      );
+      const otherRow = await tx((trx) => store.getSkillByName(trx, "other"));
+      expect(otherRow?.gitSha).toBe(other);
+      expect(await isAncestorIn(repo.bare, other, result.gitSha)).toBe(true);
+    });
+
+    it("a rollback to a restoring commit restores that commit's own target", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v1", origin: OWNER });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      const v2 = expectDefined(await getMainSha(repo.bare), "main");
+      const first = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+      assertStatus(first, "live");
+      // Forward again to v2, then back to the first restoring commit.
+      assertStatus(await runner.rollback({ name: "echo", toGitSha: v2, origin: OWNER }), "live");
+
+      const again = await runner.rollback({ name: "echo", toGitSha: first.gitSha, origin: OWNER });
+
+      assertStatus(again, "live");
+      const deploy = await tx((trx) => store.getDeployById(trx, again.deployId));
+      expect(deploy?.restoresGitSha).toBe(v1);
+      expect(
+        await git(
+          repo.bare,
+          "log",
+          "-1",
+          "--format=%(trailers:key=Cogmo-Restores,valueonly)",
+          again.gitSha,
+        ),
+      ).toBe(v1);
+    });
+
+    it("a repeat after the restoring commit landed with no row records that commit", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v1", origin: OWNER });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      const v2 = expectDefined(await getMainSha(repo.bare), "main");
+      // The transaction fails after `update-ref` moved main.
+      const real = DrizzleSkillStore.prototype.executeRollback.bind(store);
+      const failing = vi
+        .spyOn(store, "executeRollback")
+        .mockImplementationOnce(async (trx, params) => {
+          await real(trx, params);
+          throw new Error("commit failed");
+        });
+      await expect(runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER })).rejects.toThrow(
+        "commit failed",
+      );
+      failing.mockRestore();
+      const landed = expectDefined(await getMainSha(repo.bare), "main");
+      expect(landed).not.toBe(v2);
+      expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(v2);
+
+      const repeat = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+      assertStatus(repeat, "live");
+      expect(repeat.gitSha).toBe(landed);
+      expect(await getMainSha(repo.bare)).toBe(landed);
+    });
+
+    it("a rollback to a denied first deploy's sha puts its files on main", async () => {
+      const runner = await makeRunner();
+      const denied = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/notifier",
+        manifest: `---
+name: notifier
+description: a skill that sends notifications to the user
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+effects:
+  - sends_message
+---
+`,
+        body: ECHO_BODY,
+      });
+      const pending = await runner.register({ branch: "skill/notifier", origin: OWNER });
+      assertStatus(pending, "pending_approval");
+      expect(await runner.denyDeploy({ pendingId: pending.deployId })).toEqual(ok(undefined));
+
+      const rolled = await runner.rollback({ name: "notifier", toGitSha: denied, origin: OWNER });
+
+      assertStatus(rolled, "live");
+      const main = expectDefined(await getMainSha(repo.bare), "main");
+      expect(main).toBe(rolled.gitSha);
+      expect(await git(repo.bare, "rev-parse", `${main}:skills/notifier`)).toBe(
+        await git(repo.bare, "rev-parse", `${denied}:skills/notifier`),
+      );
+    });
+
+    it("a recovered restoring commit is refused when main moves under the rollback", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v1", origin: OWNER });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      const v2 = expectDefined(await getMainSha(repo.bare), "main");
+      const real = DrizzleSkillStore.prototype.executeRollback.bind(store);
+      vi.spyOn(store, "executeRollback").mockImplementationOnce(async (trx, params) => {
+        await real(trx, params);
+        throw new Error("commit failed");
+      });
+      await expect(runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER })).rejects.toThrow(
+        "commit failed",
+      );
+      // The repeat finds the restoring commit; another deploy lands on main
+      // before its transaction.
+      vi.spyOn(store, "executeRollback").mockImplementationOnce(async (trx, params) => {
+        const tree = await git(repo.bare, "rev-parse", "main^{tree}");
+        const moved = (
+          await execFileP(
+            "git",
+            ["-C", repo.bare, "commit-tree", tree, "-p", "main", "-m", "moved"],
+            {
+              env: {
+                ...process.env,
+                GIT_AUTHOR_NAME: "t",
+                GIT_AUTHOR_EMAIL: "t@t",
+                GIT_COMMITTER_NAME: "t",
+                GIT_COMMITTER_EMAIL: "t@t",
+              },
+            },
+          )
+        ).stdout.trim();
+        await git(repo.bare, "update-ref", "refs/heads/main", moved);
+        return real(trx, params);
+      });
+
+      const repeat = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+      assertStatus(repeat, "rejected");
+      expect(repeat.errors).toEqual(["main_moved: main changed during the rollback; retry"]);
+      expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(v2);
+    });
+
+    it("a disabled skill rolled back to its own version is enabled with main left as is", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo", origin: OWNER });
+      await runner.deregister({ name: "echo" });
+
+      const rolled = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+      assertStatus(rolled, "live");
       expect(await getMainSha(repo.bare)).toBe(v1);
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
-      expect(skill?.gitSha).toBe(v1);
+      expect(skill).toMatchObject({ gitSha: v1, disabled: false });
+    });
+
+    it("a target whose files the live version already holds is a no-op", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v1",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v1", origin: OWNER });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      assertStatus(await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER }), "live");
+      const main = await getMainSha(repo.bare);
+
+      // v1 again: the restoring commit already holds its files.
+      const repeat = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+      assertStatus(repeat, "no_op");
+      expect(await getMainSha(repo.bare)).toBe(main);
     });
 
     it("rollback to current sha is a no-op", async () => {
@@ -1136,7 +1817,7 @@ outputs:
     it("rollback succeeds even if a fresh compile would resolver_fail (yanked wheel)", async () => {
       // Compiler stub: register/approve calls succeed; any rollback-time
       // call would trip the resolver_failed path. Rollback MUST skip
-      // verifyFresh so an upstream yank doesn't block rewinding to a
+      // verifyFresh so an upstream yank doesn't block rolling back to a
       // known-good revision.
       const compiler = {
         compile: vi
@@ -1149,9 +1830,9 @@ outputs:
       const runner = await makeRunner({ lockfileCompiler: compiler });
 
       const lockfile = "httpx==0.27.0 --hash=sha256:OK\n";
-      await writeFile(join(repo.work, "SKILL.md"), ECHO_WITH_DEPS);
-      await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
-      await writeFile(join(repo.work, "requirements.lock"), lockfile);
+      await writeFile(skillFile(repo.work, "SKILL.md", "echo"), ECHO_WITH_DEPS);
+      await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+      await writeFile(skillFile(repo.work, "requirements.lock", "echo"), lockfile);
       await execFileP("git", ["-C", repo.work, "add", "."]);
       await execFileP("git", ["-C", repo.work, "commit", "-m", "v1 with deps", "--allow-empty"]);
       await execFileP("git", [
@@ -1171,7 +1852,7 @@ outputs:
         "a wasm skill that echoes one int field",
         "v2 description that is reasonably long",
       );
-      await writeFile(join(repo.work, "SKILL.md"), v2Manifest);
+      await writeFile(skillFile(repo.work, "SKILL.md", "echo"), v2Manifest);
       await execFileP("git", ["-C", repo.work, "add", "."]);
       await execFileP("git", ["-C", repo.work, "commit", "-m", "v2 with same deps"]);
       await execFileP("git", [
@@ -1193,7 +1874,8 @@ outputs:
         origin: OWNER,
       });
       assertStatus(rollbackResult, "live");
-      expect(rollbackResult.gitSha).toBe(v1Sha);
+      const deploy = await tx((trx) => store.getDeployById(trx, rollbackResult.deployId));
+      expect(deploy?.restoresGitSha).toBe(v1Sha);
     });
   });
 
@@ -1533,6 +2215,7 @@ effects:
 
       // A second, unrelated auto-tier skill lands first → main advances.
       // (`echo` declares no destructive effects, so it lands live.)
+      await resetToMain(repo);
       await pushFeatureBranch({
         work: repo.work,
         branch: "skill/echo-leap",
@@ -1585,7 +2268,13 @@ effects:
       const pendingId = await makePendingDeploy(runner);
 
       // Push a commit with no SKILL.md to a parallel branch.
-      await execFileP("git", ["-C", repo.work, "rm", "SKILL.md", "skill.py"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "rm",
+        "skills/notifier/SKILL.md",
+        "skills/notifier/skill.py",
+      ]);
       await execFileP("git", [
         "-C",
         repo.work,
@@ -1696,7 +2385,13 @@ effects:
       await runner.register({ branch: "skill/echo", origin: OWNER });
 
       // Push a commit with no SKILL.md to a parallel branch.
-      await execFileP("git", ["-C", repo.work, "rm", "SKILL.md", "skill.py"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "rm",
+        "skills/echo/SKILL.md",
+        "skills/echo/skill.py",
+      ]);
       await execFileP("git", [
         "-C",
         repo.work,
@@ -2008,7 +2703,7 @@ async def run(inputs, ctx):
   });
 
   describe("safety: rollback verifies target sha belongs to this skill", () => {
-    it("refuses to rollback skill A to a sha that belongs to skill B", async () => {
+    it("rolls skill A back to another skill's sha from A's own directory there", async () => {
       const runner = await makeRunner();
       // Register skill A.
       const aSha = await pushFeatureBranch({
@@ -2028,11 +2723,10 @@ async def run(inputs, ctx):
       });
       await runner.register({ branch: "skill/beta", origin: OWNER });
 
-      // Try to roll back A to B's sha — must reject; otherwise A would
-      // silently start running B's code.
+      // B's sha holds A's files in skills/alpha/, as A's deploy left them:
+      // rolling A back to it reads those, never B's code.
       const result = await runner.rollback({ name: "alpha", toGitSha: bSha, origin: OWNER });
-      assertStatus(result, "rejected");
-      expect(result.errors?.[0]).toMatch(/target_skill_mismatch/);
+      assertStatus(result, "no_op");
 
       // A's sha is unchanged.
       const skillA = await tx((trx) => store.getSkillByName(trx, "alpha"));
@@ -2140,7 +2834,7 @@ inputs:
       assertStatus(result, "live");
 
       const skill = await tx((trx) => store.getSkillByName(trx, "shape"));
-      expect(skill?.gitSha).toBe(v1Sha);
+      expect(skill?.gitSha).toBe(result.gitSha);
       // inputs match v1's schema (x: integer), not v2's (different: string).
       expect(skill?.inputs).toMatchObject({
         properties: { x: { type: "integer" } },
@@ -2355,14 +3049,14 @@ tier: wasm
     async function pushContainerWithDeps(): Promise<void> {
       const branch = "skill/weather";
       await writeFile(
-        join(repo.work, "SKILL.md"),
+        skillFile(repo.work, "SKILL.md", "weather"),
         CONTAINER_MANIFEST.replace(
           "tier: container\n",
           "tier: container\ndependencies:\n  - idna==3.10\n",
         ),
       );
-      await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
-      await writeFile(join(repo.work, "requirements.lock"), IDNA_LOCK);
+      await writeFile(skillFile(repo.work, "skill.py", "weather"), ECHO_BODY);
+      await writeFile(skillFile(repo.work, "requirements.lock", "weather"), IDNA_LOCK);
       await execFileP("git", ["-C", repo.work, "add", "."]);
       await execFileP("git", ["-C", repo.work, "commit", "-m", branch, "--allow-empty"]);
       await execFileP("git", [
@@ -2558,7 +3252,11 @@ tier: wasm
 
       assertStatus(rolled, "live");
       const skill = await tx((trx) => store.getSkillByName(trx, "weather"));
-      expect(skill).toMatchObject({ gitSha: v1, inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS });
+      expect(skill).toMatchObject({
+        gitSha: rolled.gitSha,
+        inputs: CITY_INPUTS,
+        outputs: TEMP_OUTPUTS,
+      });
       const deploy = await tx((trx) => store.getDeployById(trx, rolled.deployId));
       expect(deploy?.schemas).toEqual({ inputs: CITY_INPUTS, outputs: TEMP_OUTPUTS });
       expect(schemaImporter.importSchemas).not.toHaveBeenCalled();
@@ -2778,32 +3476,25 @@ effects:
      * coding flow would clone a stale skill set.
      */
     async function setupRepoWithRemote(): Promise<RepoSetup & { remote: string }> {
-      const base = await setupRepo();
-      // Stand-in for the GitHub/Gitea URL Cogmo would attach as origin in
-      // production. Built via the shared bare-repo fixture so the seed
-      // shape stays consistent with configure-remote.test.ts.
-      const { path: remote } = await makePopulatedBareRepo(
-        join(base.bare, ".."),
-        "skills-remote",
-        "skills-remote.git",
-      );
-      // Attach the remote as `origin` on the skills bare repo, then fetch
-      // main so local matches remote — mirrors what configureSkillsRemote
-      // does at wizard time.
-      await execFileP("git", ["-C", base.bare, "remote", "add", "origin", remote]);
-      await execFileP("git", [
-        "-C",
-        base.bare,
-        "fetch",
-        remote,
-        "+refs/heads/main:refs/heads/main",
-      ]);
-      // Also pull main into the work clone so feature branches descend from
-      // the seed commit — otherwise the branch sha has no ancestry with
-      // main and register rejects with `non_fast_forward`. Mirrors the
-      // production sandbox flow where the agent clones from the remote and
-      // commits on top of main.
-      await execFileP("git", ["-C", base.work, "pull", base.bare, "main"]);
+      let remote = "";
+      const base = await setupRepo({
+        beforeLayout: async (bare) => {
+          // Stand-in for the GitHub/Gitea URL Cogmo would attach as origin
+          // in production. Built via the shared bare-repo fixture so the
+          // seed shape stays consistent with configure-remote.test.ts.
+          ({ path: remote } = await makePopulatedBareRepo(
+            join(bare, ".."),
+            "skills-remote",
+            "skills-remote.git",
+          ));
+          // Attach the remote as `origin` and fetch its main, as
+          // configureSkillsRemote does at wizard time, before the boot
+          // whose layout commit goes on top of it.
+          await execFileP("git", ["-C", bare, "remote", "add", "origin", remote]);
+          await execFileP("git", ["-C", bare, "fetch", remote, "+refs/heads/main:refs/heads/main"]);
+        },
+      });
+      // The layout commit reaches the remote with the first deploy's push.
       return { ...base, remote };
     }
 
@@ -3038,7 +3729,7 @@ effects:
       }
     });
 
-    it("rollback pushes the rewound SHA to remote via --force-with-lease", async () => {
+    it("rollback pushes the restoring commit to the remote", async () => {
       const repoWithRemote = await setupRepoWithRemote();
       try {
         const runner = await makeRunnerForRepo(repoWithRemote.bare);
@@ -3071,28 +3762,67 @@ effects:
           ).stdout.trim(),
         ).toBe(v2);
 
-        // Rollback to v1 — rewinds local main backwards. The mirror push
-        // uses --force-with-lease so the remote follows.
+        // Rollback to v1 — a restoring commit fast-forwards local main, and
+        // a plain push takes the remote with it.
         const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
         assertStatus(result, "live");
-        expect(result.gitSha).toBe(v1);
 
-        expect(await getMainSha(repoWithRemote.bare)).toBe(v1);
+        expect(await getMainSha(repoWithRemote.bare)).toBe(result.gitSha);
         expect(
           (
             await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
           ).stdout.trim(),
-        ).toBe(v1);
+        ).toBe(result.gitSha);
       } finally {
         await repoWithRemote.cleanup();
       }
     });
 
-    it("rollback's --force-with-lease refuses to overwrite a divergent remote", async () => {
+    it("a recovered rollback pushes main to the remote", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      try {
+        const runner = await makeRunnerForRepo(repoWithRemote.bare);
+        const v1 = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo-v1",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+        await runner.register({ branch: "skill/echo-v1", origin: OWNER });
+        await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo-v2",
+          manifest: ECHO_MANIFEST.replace("echoes one int field", "v2"),
+          body: ECHO_BODY,
+        });
+        await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+        const real = DrizzleSkillStore.prototype.executeRollback.bind(store);
+        vi.spyOn(store, "executeRollback").mockImplementationOnce(async (trx, params) => {
+          await real(trx, params);
+          throw new Error("commit failed");
+        });
+        await expect(
+          runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER }),
+        ).rejects.toThrow("commit failed");
+
+        const repeat = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+        assertStatus(repeat, "live");
+        expect(
+          (
+            await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
+          ).stdout.trim(),
+        ).toBe(repeat.gitSha);
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("rollback's push refuses to overwrite a divergent remote", async () => {
       // After register but before rollback, manually move remote main to a
-      // sha unrelated to the local-observed sha. The lease check should
-      // fail; remote main stays put; local rollback still succeeds (local
-      // is authoritative per the design contract).
+      // sha unrelated to local main. The push should fail; remote main
+      // stays put; local rollback still succeeds (local is authoritative
+      // per the design contract).
       const repoWithRemote = await setupRepoWithRemote();
       try {
         const runner = await makeRunnerForRepo(repoWithRemote.bare);
@@ -3136,18 +3866,16 @@ effects:
           `${divergent}:refs/heads/main`,
         ]);
 
-        // Now rollback. Local rolls back to v1; remote push uses
-        // --force-with-lease=refs/heads/main:<v2> (our observed local-pre-
-        // rollback sha). Remote is at `divergent`, lease check fails,
-        // push aborts. The mirror is non-blocking, so rollback still
-        // reports `live`.
+        // Now rollback. Local main fast-forwards to the restoring commit;
+        // the plain push is rejected, since the remote's main is not its
+        // ancestor. The mirror is non-blocking, so rollback still reports
+        // `live`.
         const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
         assertStatus(result, "live");
-        expect(result.gitSha).toBe(v1);
 
-        // Local rolled back as expected.
-        expect(await getMainSha(repoWithRemote.bare)).toBe(v1);
-        // Remote retained the divergent sha — lease check did its job.
+        // Local rolled forward as expected.
+        expect(await getMainSha(repoWithRemote.bare)).toBe(result.gitSha);
+        // Remote retained the divergent sha — the push refused to overwrite it.
         expect(
           (
             await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])

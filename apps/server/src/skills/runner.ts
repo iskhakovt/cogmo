@@ -39,6 +39,7 @@ import {
 import { loadBundledPackages } from "./pyodide-compat.js";
 import type { SkillRunAs } from "./run-as.js";
 import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests.js";
+import { recordedSkillsRepo } from "./skill-files.js";
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
 import { wallClockSOf } from "./wall-clock.js";
@@ -185,10 +186,11 @@ export interface SkillRunnerOptions {
   defaultRunAs: SkillRunIdentity;
   /**
    * Path to the bare skills repo (`$COGMO_SKILLS_PATH`). Required for the
-   * register / rollback flows that read SKILL.md from git and advance
-   * `refs/heads/main` via `git update-ref`. Tests that only exercise
-   * `__registerForTests` + `invoke` may omit this; calling `register` /
-   * `rollback` without it throws a clear error.
+   * register / rollback flows that read skills from git and advance
+   * `refs/heads/main` via `git update-ref`; reads go through the layout
+   * commit boot recorded. Tests that only exercise `__registerForTests` +
+   * `invoke` may omit this; calling `register` / `rollback` without it
+   * throws a clear error.
    */
   skillsRepoPath?: string;
   /** Pyodide package cache directory, which the host fills and wasm children read. */
@@ -314,7 +316,13 @@ export class SkillRunnerImpl implements SkillRunner {
       );
     }
     const clock = opts.clock ?? (() => new Date());
-    const sourceCache = new SkillSourceCache(opts.skillsRepoPath);
+    const skillsRepo =
+      opts.skillsRepoPath === undefined
+        ? undefined
+        : recordedSkillsRepo(opts.skillsRepoPath, () =>
+            opts.runInTx((tx) => opts.store.getLayoutCommitSha(tx)),
+          );
+    const sourceCache = new SkillSourceCache(skillsRepo);
     const packageCacheDir = opts.pyodidePackageCacheDir;
     const wasm = opts.wasm;
     const distDir = pyodideDistDir();
@@ -412,7 +420,7 @@ export class SkillRunnerImpl implements SkillRunner {
       capabilities: BUILD_CAPABILITIES,
       containerSchemas,
       wasm: { fetchImpl, probe, fillBuiltins, packageCacheDir, importSchemas },
-      skillsRepoPath: opts.skillsRepoPath,
+      skillsRepo,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed
       // compiler when the runtime has both a sandbox and a container image

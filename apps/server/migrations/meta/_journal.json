@@ -603,6 +603,13 @@
       "when": 1794145346851,
       "tag": "0085_skill_deploy_schemas",
       "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1794179563039,
+      "tag": "0086_skills_layout_restores",
+      "breakpoints": true
     }
   ]
 }

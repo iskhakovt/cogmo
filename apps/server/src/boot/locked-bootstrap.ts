@@ -12,7 +12,9 @@ import { migratePerFile } from "../db/migrate-per-file.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { ensureFalImageDefaults, ensureWebChannel } from "../setup/seed.js";
+import { migrateSkillsLayout } from "../skills/migrate-layout.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "../skills/repo.js";
+import type { SkillStore } from "../skills/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { checkUuidv7 } from "./checks.js";
 
@@ -21,11 +23,13 @@ export interface PrepareDataLayerDeps {
   db: Database;
   runInTx: Transactor;
   codingStore: CodingStore;
+  skillStore: SkillStore;
 }
 
 /**
  * `bootstrapCore`'s locked step: apply migrations, check `uuidv7()`, and bring
- * the skills bare repo and its `coding_repos` row to their expected state.
+ * the skills bare repo, its layout and its `coding_repos` row to their
+ * expected state.
  */
 export async function prepareDataLayer(
   deps: PrepareDataLayerDeps,
@@ -49,6 +53,11 @@ export async function prepareDataLayer(
     if (skillsRepo.initialized) {
       logger.info({ path: skillsRepo.path }, "skills bare repo initialized");
     }
+
+    // Every skill in `skills/<name>/`, in one recorded layout commit; a boot
+    // that finds it recorded does nothing (design/skills.md → Per-skill
+    // structure).
+    await migrateSkillsLayout({ runInTx: deps.runInTx, store: deps.skillStore }, skillsRepo.path);
 
     // DB half of the skills-repo bootstrap: keep `coding_repos.skills.remote_url`
     // in sync with the bare repo's `origin`. Idempotent — inserts on first run,

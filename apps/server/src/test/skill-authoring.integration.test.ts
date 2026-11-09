@@ -67,7 +67,7 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -615,12 +615,12 @@ function makeStubOctokitFactory(opts: {
 }
 
 /**
- * Commit the fixture files onto `branch` in `repoPath` — the sandbox push
- * the cassette swallows, replayed against the bare remote.
+ * Commit the fixture files into `skills/<name>/` on `branch` in `repoPath` —
+ * the sandbox push the cassette swallows, replayed against the bare remote.
  *
  * Sole writer of that branch, and re-entrant: an existing ref is left alone
- * rather than replaced. Each call mints a fresh commit off the remote's
- * `main`, so a second call for one branch offers a sibling of the first,
+ * rather than replaced. Each call mints a fresh commit off the task's run
+ * branch, so a second call for one branch offers a sibling of the first,
  * which `git push` refuses as a non-fast-forward. That refusal escapes
  * through the PR stub and `runOpenPr` reports it as `kind: "failed"`, so the
  * task lands in `failAndTeardown` carrying a git error that reads nothing
@@ -653,15 +653,44 @@ async function materializeBranchFromFixture(opts: {
   const tmpRoot = await mkdtemp(join(tmpdir(), "skill-auth-fixture-"));
   try {
     await execFileP("git", ["clone", repoPath, tmpRoot]);
-    await execFileP("git", ["-C", tmpRoot, "checkout", "-b", "fixture-staging"]);
+    // The sandbox commits on the run branch the host pushed from the skills
+    // repo's main (allocate-task-worktree), so the branch descends from it.
+    const runBranches = (
+      await execFileP("git", [
+        "-C",
+        repoPath,
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/heads/cogmo/run/",
+      ])
+    ).stdout
+      .split("\n")
+      .filter((ref) => ref.length > 0);
+    if (runBranches.length !== 1) {
+      throw new Error(`expected one run branch on the remote, found: ${runBranches.join(", ")}`);
+    }
+    await execFileP("git", [
+      "-C",
+      tmpRoot,
+      "checkout",
+      "-b",
+      "fixture-staging",
+      `origin/${expectDefined(runBranches[0], "run branch")}`,
+    ]);
     const entries = await readdir(fixtureDir);
     if (entries.length === 0) {
       throw new Error(
         `branch fixture dir ${fixtureDir} is empty — refresh it alongside the Daytona cassette`,
       );
     }
+    const name = expectDefined(
+      /^name:\s*(\S+)/m.exec(await readFile(join(fixtureDir, "SKILL.md"), "utf8"))?.[1],
+      "the fixture manifest's name",
+    );
+    const skillDir = join(tmpRoot, "skills", name);
+    await mkdir(skillDir, { recursive: true });
     await Promise.all(
-      entries.map((entry) => copyFile(join(fixtureDir, entry), join(tmpRoot, entry))),
+      entries.map((entry) => copyFile(join(fixtureDir, entry), join(skillDir, entry))),
     );
     await execFileP("git", ["-C", tmpRoot, "add", "."]);
     await execFileP(

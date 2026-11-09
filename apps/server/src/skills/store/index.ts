@@ -35,6 +35,7 @@ import {
   skillRuns,
   type skillRunTrigger,
   skills,
+  skillsRepoLayout,
   type skillTier,
 } from "./schema.js";
 
@@ -130,6 +131,8 @@ export interface SkillDeployRow {
   classifierLog: ClassifierLog;
   /** The schemas register checked; null only on rows from before they were recorded. */
   schemas: SkillSchemas | null;
+  /** A rollback's target; set iff `status` is `rolled_back`. */
+  restoresGitSha: string | null;
   createdAt: Date;
   resolvedAt: Date | null;
 }
@@ -214,7 +217,8 @@ export interface InsertDeployParams {
   gitSha: string;
   priorGitSha: string | null;
   riskTier: SkillRiskTier;
-  status: SkillDeployStatus;
+  /** A `rolled_back` row comes only from {@link SkillStore.executeRollback}, which records what it restored. */
+  status: Exclude<SkillDeployStatus, "rolled_back">;
   classifierLog: ClassifierLog;
   /** The schemas register checked, which approve and rollback put live. */
   schemas: SkillSchemas;
@@ -348,14 +352,20 @@ export interface ExecuteApproveParams {
  */
 export interface ExecuteRollbackParams {
   name: string;
-  toGitSha: string;
+  /**
+   * The commit the skill runs from once rolled back: the restoring commit on
+   * `main`, or the live sha itself when its files already equal the target's.
+   */
+  restoringGitSha: string;
+  /** The rollback's target, never itself a restoring commit: what the row's `restores_git_sha` records. */
+  restoresGitSha: string;
   tier: SkillTier;
   riskTier: SkillRiskTier;
   effects: SkillEffects;
   schedule: string | null;
   /** Non-null iff `schedule` is non-null. See {@link InsertSkillParams}. */
   scheduleNextRunAt: Date | null;
-  /** sha256 of `requirements.lock` at `toGitSha`, or null when no deps. */
+  /** sha256 of `requirements.lock` at the target, or null when no deps. */
   lockfileHash: string | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
@@ -467,13 +477,14 @@ export interface SkillStore {
    */
   listReachableLockfileHashes(tx: Transaction): Promise<ReadonlySet<string>>;
   /**
-   * True iff at least one `skill_deploys` row exists with the given
-   * `(skill_id, git_sha)` and `status = 'live'`. Used by `enable` to gate
+   * True iff `(skill_id, git_sha)` has a `live` row, or a `rolled_back` row
+   * whose `restores_git_sha` has one. Used by `enable` to gate
    * re-activation: a never-approved-then-denied first deploy leaves the
    * skills row at `disabled=true` with the rejected sha; `/enable foo`
    * without this check would smuggle code past the approval gate.
-   * A rollback target that once had a `live` row passes; one that never
-   * did is refused (design/skills.md → Deploy lifecycle, failure modes).
+   * A rollback to a target that once had a `live` row passes; one to a
+   * target that never did is refused (design/skills.md → Deploy lifecycle,
+   * failure modes).
    */
   hasLiveDeployForSkill(
     tx: Transaction,
@@ -527,11 +538,34 @@ export interface SkillStore {
    */
   denyPendingDeploy(tx: Transaction, params: { pendingId: string }): Promise<DenyDeployTransition>;
   /**
-   * P3.3: atomic rollback — re-points `main` and `skills.git_sha` to a prior
-   * sha while inserting a new `skill_deploys` row with status `rolled_back`
-   * and `prior_git_sha` set to the previous live sha.
+   * Atomic rollback: points `skills.git_sha` at the restoring commit and
+   * inserts a `rolled_back` row recording it, its target and, as
+   * `prior_git_sha`, the version it replaced; `applyFilesystem` then moves
+   * `main` onto a new restoring commit.
    */
   executeRollback(tx: Transaction, params: ExecuteRollbackParams): Promise<ExecuteRegisterResult>;
+  /**
+   * The target a `rolled_back` row of skill `name` at `gitSha` restored, or
+   * null when no such row exists: a rollback to a restoring commit restores
+   * that commit's own target.
+   */
+  restoredTargetAt(
+    tx: Transaction,
+    params: { name: string; gitSha: string },
+  ): Promise<string | null>;
+  /** Whether any deploy row records `gitSha`, the forward rollback's recovery check. */
+  hasDeployAt(tx: Transaction, gitSha: string): Promise<boolean>;
+
+  // --- skills_repo_layout ---
+  /** The recorded layout commit (design/skills.md → Per-skill structure), or null before one is. */
+  getLayoutCommitSha(tx: Transaction): Promise<string | null>;
+  /** Record the layout commit, the singleton row; returns the sha the row holds. */
+  recordLayoutCommit(tx: Transaction, layoutCommitSha: string): Promise<string>;
+  /**
+   * Drop the recorded layout commit, so the layout move runs again: after an
+   * adopt replaced the bare layout commit, or when the recorded one is stale.
+   */
+  forgetLayoutCommit(tx: Transaction): Promise<void>;
 
   // --- skill_deploys ---
   insertDeploy(tx: Transaction, params: InsertDeployParams): Promise<SkillDeployRow>;
@@ -768,18 +802,32 @@ export class DrizzleSkillStore implements SkillStore {
     tx: Transaction,
     params: { skillId: string; gitSha: string },
   ): Promise<boolean> {
-    const rows = await tx
-      .select({ id: skillDeploys.id })
+    const restored = await tx
+      .select({ restoresGitSha: skillDeploys.restoresGitSha })
       .from(skillDeploys)
       .where(
         and(
           eq(skillDeploys.skillId, params.skillId),
           eq(skillDeploys.gitSha, params.gitSha),
+          eq(skillDeploys.status, "rolled_back"),
+        ),
+      );
+    const shas = [
+      params.gitSha,
+      ...restored.flatMap((r) => (r.restoresGitSha === null ? [] : [r.restoresGitSha])),
+    ];
+    const live = await tx
+      .select({ id: skillDeploys.id })
+      .from(skillDeploys)
+      .where(
+        and(
+          eq(skillDeploys.skillId, params.skillId),
+          inArray(skillDeploys.gitSha, shas),
           eq(skillDeploys.status, "live"),
         ),
       )
       .limit(1);
-    return rows.length > 0;
+    return live.length > 0;
   }
 
   /**
@@ -1147,7 +1195,7 @@ export class DrizzleSkillStore implements SkillStore {
       return { kind: "rejected", reason: "skill_not_found" } as const;
     }
     const existing = skillRowRaw;
-    if (existing.gitSha === params.toGitSha && !existing.disabled) {
+    if (existing.gitSha === params.restoringGitSha && !existing.disabled) {
       return { kind: "no_op", skill: existing } as const;
     }
 
@@ -1158,7 +1206,7 @@ export class DrizzleSkillStore implements SkillStore {
     const updatedRows = await tx
       .update(skills)
       .set({
-        gitSha: params.toGitSha,
+        gitSha: params.restoringGitSha,
         lockfileHash: params.lockfileHash,
         disabled: false,
         tier: params.tier,
@@ -1178,7 +1226,8 @@ export class DrizzleSkillStore implements SkillStore {
       .insert(skillDeploys)
       .values({
         skillId: existing.id,
-        gitSha: params.toGitSha,
+        gitSha: params.restoringGitSha,
+        restoresGitSha: params.restoresGitSha,
         priorGitSha: (await this.#versionWentLive(tx, {
           skillId: existing.id,
           gitSha: existing.gitSha,
@@ -1252,6 +1301,59 @@ export class DrizzleSkillStore implements SkillStore {
       .orderBy(desc(skillDeploys.createdAt), desc(skillDeploys.id))
       .limit(1);
     return rows[0]?.schemas ?? null;
+  }
+
+  async restoredTargetAt(
+    tx: Transaction,
+    params: { name: string; gitSha: string },
+  ): Promise<string | null> {
+    const rows = await tx
+      .select({ restoresGitSha: skillDeploys.restoresGitSha })
+      .from(skillDeploys)
+      .innerJoin(skills, eq(skills.id, skillDeploys.skillId))
+      .where(
+        and(
+          eq(skills.name, params.name),
+          eq(skillDeploys.gitSha, params.gitSha),
+          eq(skillDeploys.status, "rolled_back"),
+        ),
+      )
+      .orderBy(desc(skillDeploys.createdAt), desc(skillDeploys.id))
+      .limit(1);
+    return rows[0]?.restoresGitSha ?? null;
+  }
+
+  async hasDeployAt(tx: Transaction, gitSha: string): Promise<boolean> {
+    const rows = await tx
+      .select({ id: skillDeploys.id })
+      .from(skillDeploys)
+      .where(eq(skillDeploys.gitSha, gitSha))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async getLayoutCommitSha(tx: Transaction): Promise<string | null> {
+    const rows = await tx
+      .select({ layoutCommitSha: skillsRepoLayout.layoutCommitSha })
+      .from(skillsRepoLayout)
+      .limit(1);
+    return rows[0]?.layoutCommitSha ?? null;
+  }
+
+  async recordLayoutCommit(tx: Transaction, layoutCommitSha: string): Promise<string> {
+    // A row committed after this transaction's snapshot raises 40001 in the
+    // conflict arm, which the transactor retries; a row the snapshot sees is
+    // returned unchanged.
+    const rows = await tx
+      .insert(skillsRepoLayout)
+      .values({ singleton: true, layoutCommitSha })
+      .onConflictDoUpdate({ target: skillsRepoLayout.singleton, set: { singleton: true } })
+      .returning({ layoutCommitSha: skillsRepoLayout.layoutCommitSha });
+    return single(rows).layoutCommitSha;
+  }
+
+  async forgetLayoutCommit(tx: Transaction): Promise<void> {
+    await tx.delete(skillsRepoLayout);
   }
 
   async listPendingDeploys(tx: Transaction): Promise<readonly SkillDeployRow[]> {

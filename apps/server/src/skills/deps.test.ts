@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
 import { expectDefined } from "../test/assertions.js";
+import { skillsRepoAt } from "../test/skills-repo.js";
 import {
   ensureVenvPopulated,
   makeSandboxLockfileCompiler,
@@ -18,12 +19,15 @@ import {
   readLockfileAtSha,
 } from "./deps.js";
 import { bootstrapSkillsRepo } from "./repo.js";
+import type { SkillsRepo } from "./skill-files.js";
 
 const execFileP = promisify(execFile);
 
 interface Setup {
   bare: string;
   work: string;
+  /** The working clone as a skills repo, its first commit the layout commit. */
+  repo: SkillsRepo;
 }
 
 describe("readLockfileAtSha", () => {
@@ -41,7 +45,9 @@ describe("readLockfileAtSha", () => {
     await execFileP("git", ["-C", work, "config", "user.name", "test"]);
     await execFileP("git", ["-C", work, "config", "commit.gpgsign", "false"]);
     await execFileP("git", ["-C", work, "remote", "add", "origin", bare]);
-    setup = { bare, work };
+    await execFileP("git", ["-C", work, "commit", "-q", "--allow-empty", "-m", "layout"]);
+    const { stdout } = await execFileP("git", ["-C", work, "rev-parse", "HEAD"]);
+    setup = { bare, work, repo: skillsRepoAt(work, stdout.trim()) };
   });
 
   afterAll(async () => {
@@ -49,8 +55,9 @@ describe("readLockfileAtSha", () => {
   });
 
   async function commit(files: Record<string, string>): Promise<string> {
+    await mkdir(join(setup.work, "skills", "echo"), { recursive: true });
     for (const [name, content] of Object.entries(files)) {
-      await writeFile(join(setup.work, name), content);
+      await writeFile(join(setup.work, "skills", "echo", name), content);
     }
     await execFileP("git", ["-C", setup.work, "add", "."]);
     await execFileP("git", ["-C", setup.work, "commit", "-m", "test", "--allow-empty"]);
@@ -61,7 +68,7 @@ describe("readLockfileAtSha", () => {
   it("returns the sha256 hash and contents when the lockfile is present", async () => {
     const contents = "httpx==0.27.0 --hash=sha256:abc\n";
     const sha = await commit({ [REQUIREMENTS_LOCK_FILE]: contents });
-    const result = await readLockfileAtSha(setup.work, sha);
+    const result = await readLockfileAtSha(setup.repo, "echo", sha);
     expect(result.isOk()).toBe(true);
     if (!result.isOk()) return;
     expect(result.value.contents).toBe(contents);
@@ -72,8 +79,8 @@ describe("readLockfileAtSha", () => {
     const contents = "pydantic==2.5.3 --hash=sha256:def\n";
     const sha1 = await commit({ [REQUIREMENTS_LOCK_FILE]: contents, "extra.txt": "a" });
     const sha2 = await commit({ [REQUIREMENTS_LOCK_FILE]: contents, "extra.txt": "b" });
-    const r1 = await readLockfileAtSha(setup.work, sha1);
-    const r2 = await readLockfileAtSha(setup.work, sha2);
+    const r1 = await readLockfileAtSha(setup.repo, "echo", sha1);
+    const r2 = await readLockfileAtSha(setup.repo, "echo", sha2);
     expect(r1.isOk()).toBe(true);
     expect(r2.isOk()).toBe(true);
     if (!r1.isOk() || !r2.isOk()) return;
@@ -93,7 +100,11 @@ describe("readLockfileAtSha", () => {
       await execFileP("git", ["-C", dir, "add", "."]);
       await execFileP("git", ["-C", dir, "commit", "-m", "no lockfile"]);
       const { stdout } = await execFileP("git", ["-C", dir, "rev-parse", "HEAD"]);
-      const result = await readLockfileAtSha(dir, stdout.trim());
+      const result = await readLockfileAtSha(
+        skillsRepoAt(dir, stdout.trim()),
+        "echo",
+        stdout.trim(),
+      );
       expect(result.isErr()).toBe(true);
       if (!result.isErr()) return;
       expect(result.error.kind).toBe("missing");
@@ -104,7 +115,7 @@ describe("readLockfileAtSha", () => {
 
   it("returns 'empty' when the lockfile is committed but blank", async () => {
     const sha = await commit({ [REQUIREMENTS_LOCK_FILE]: "  \n\n" });
-    const result = await readLockfileAtSha(setup.work, sha);
+    const result = await readLockfileAtSha(setup.repo, "echo", sha);
     expect(result.isErr()).toBe(true);
     if (!result.isErr()) return;
     expect(result.error.kind).toBe("empty");

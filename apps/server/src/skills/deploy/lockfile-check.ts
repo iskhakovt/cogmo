@@ -1,6 +1,7 @@
 import { err, ok, type Result } from "neverthrow";
 import { type LockfileCompiler, type LockfileSnapshot, readLockfileAtSha } from "../deps.js";
 import { checkRuntimePins } from "../runtime-packages.js";
+import type { SkillsRepo } from "../skill-files.js";
 import type { SkillManifest } from "../types.js";
 
 /**
@@ -29,13 +30,13 @@ import type { SkillManifest } from "../types.js";
  * `verifyFresh` checks presence, hash and the runtime pins. `verifyFresh: false` is the rollback
  * mode: the target lockfile was valid at deploy time, hashes are
  * still pinned, and a wheel yanked from PyPI since shouldn't block
- * the operator from rewinding to a known-good revision.
+ * the operator from rolling back to a known-good revision.
  *
  * Aborting `signal` stops the compile, which then errs as `transport_failed`.
  */
 export async function readManifestLockfile(
   compiler: LockfileCompiler | undefined,
-  repoPath: string,
+  repo: SkillsRepo,
   gitSha: string,
   manifest: SkillManifest,
   opts: { verifyFresh: boolean; signal?: AbortSignal },
@@ -43,7 +44,7 @@ export async function readManifestLockfile(
   if (manifest.dependencies.length === 0) {
     return ok(null);
   }
-  const snapshot = await readLockfileAtSha(repoPath, gitSha);
+  const snapshot = await readLockfileAtSha(repo, manifest.name, gitSha);
   if (snapshot.isErr()) {
     return err(
       `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes --no-header' and commit the result.`,

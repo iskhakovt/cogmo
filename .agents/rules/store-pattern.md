@@ -16,7 +16,7 @@ Each domain module owns its DB access in a `store/` subdirectory:
 | `mcp/store/` | mcp_servers, mcp_server_tools |
 | `sandbox/store/` | cogmo_instances, containers, networks, volumes |
 | `secrets/store/` | secrets |
-| `skills/store/` | skills, skill_deploys, skill_runs, skill_context_calls |
+| `skills/store/` | skills, skill_deploys, skill_runs, skill_context_calls, skills_repo_layout |
 | `web/store/` | web_sessions |
 
 **Interface boundary, not table boundary.** A store implementation can import schemas from any module — JOINs and cross-table transactions are fine. Consumers depend on the store interface and mock it in tests. The schema defines ownership (who creates/migrates the table); the interface defines access (who can read/write what).

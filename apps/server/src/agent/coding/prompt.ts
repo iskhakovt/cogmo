@@ -2,18 +2,19 @@ import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
 /**
- * Repo-specific guidance for the skills library. `register` reads
- * `SKILL.md` + `skill.py` from the repo root at the branch tip, so claude
- * must place both files at `/workspace` — not in a `skills/<name>/`
- * subdirectory. One feature branch = one skill.
+ * Repo-specific guidance for the skills library. `register` reads a skill
+ * from `skills/<name>/` at the branch tip and refuses a branch that changes
+ * anything else (design/skills.md → Per-skill structure). One feature
+ * branch = one skill.
  */
 const SKILLS_REPO_CONVENTION = [
   "# Skills repo convention",
   "- This is the skills library. One feature branch = exactly one skill.",
-  "- Place SKILL.md (the manifest), skill.py (the implementation), and (if",
-  "  the skill imports any third-party package) requirements.lock at /workspace root.",
-  "  Do NOT put them in a `skills/<name>/` subdirectory — registration reads them from the",
-  "  repo root and rejects layouts that hide them inside subdirs.",
+  "- Each skill lives in `skills/<name>/`, `<name>` being its manifest's name: SKILL.md",
+  "  (the manifest), skill.py (the implementation), and (if the skill imports any",
+  "  third-party package) requirements.lock. Change only those files of the one skill:",
+  "  registration refuses skill files at the repo root, any other path, and a branch",
+  "  that changes more than one skill.",
   "- skill.py must export `async def run(inputs, ctx) -> dict`.",
   "",
   "SKILL.md frontmatter contract — these are validated structurally, not free-form:",
@@ -64,15 +65,15 @@ const SKILLS_REPO_CONVENTION = [
   "",
   "",
   "Lockfile contract — if dependencies is non-empty:",
-  "- Generate requirements.lock with `uv pip compile --no-header --generate-hashes",
-  "  -o requirements.lock -` reading specs from stdin, e.g.:",
+  "- Generate requirements.lock in the skill's directory with `uv pip compile --no-header",
+  "  --generate-hashes -o skills/<name>/requirements.lock -` reading specs from stdin, e.g.:",
   "    `printf 'httpx==0.27.2\\n' | uv pip compile --no-header --generate-hashes",
-  "    -o requirements.lock -`",
+  "    -o skills/example-skill/requirements.lock -`",
   "  uv is on PATH in the sandbox. The lockfile resolves transitive deps with",
   "  hashes — register byte-compares against a fresh re-resolve, so `--no-header`",
   "  is required (the header is non-deterministic).",
   "",
-  "Minimal valid SKILL.md (no deps):",
+  "Minimal valid skills/example-skill/SKILL.md (no deps):",
   "```",
   "---",
   "name: example-skill",
@@ -115,8 +116,8 @@ function repoConvention(repo: CodingRepoRow): string {
  * `~/.claude/CLAUDE.md`, and `/etc/claude-code/CLAUDE.md` natively from its
  * memory tiers. See design/coding-delegation.md → "Injected context".
  * Exception: the skills library has a layout convention that's load-bearing
- * for register (root-only files), surfaced via {@link repoConvention} until
- * a CLAUDE.md ships in the bare repo.
+ * for register (one skill's directory per branch), surfaced via
+ * {@link repoConvention} until a CLAUDE.md ships in the bare repo.
  */
 export function buildPlanPrompt(task: CodingTaskRow, repo: CodingRepoRow): string {
   if (!task.worktreeAssignment) {

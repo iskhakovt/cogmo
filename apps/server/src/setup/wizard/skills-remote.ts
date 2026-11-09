@@ -13,6 +13,7 @@ import {
   renderConfigureError,
 } from "../../skills/configure-remote-prompts.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, readOriginUrl } from "../../skills/repo.js";
+import { DrizzleSkillStore } from "../../skills/store/index.js";
 import { cancelGuard, WizardCancelled, type WizardDeps } from "./step.js";
 
 export async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
@@ -63,7 +64,7 @@ export async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void>
     throw new WizardCancelled();
   });
   const result = await configureSkillsRemote(
-    { runInTx: deps.runInTx, codingStore, skillsRepoPath },
+    { runInTx: deps.runInTx, codingStore, skillStore: new DrizzleSkillStore(), skillsRepoPath },
     mode,
   );
   if (result.isErr()) {

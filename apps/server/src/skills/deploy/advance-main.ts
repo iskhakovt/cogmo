@@ -7,10 +7,10 @@ import { ZERO_SHA } from "./deploy-deps.js";
  * What `main` must look like for a deploy to move it:
  * - `fast_forward`: main precedes the new tip (register, approve);
  * - `unchanged`: main still holds the sha the deploy checked before its
- *   transaction (rollback, which rewinds main and would otherwise discard
- *   a deploy that landed in between).
+ *   transaction (rollback, whose restoring commit is built on that sha and
+ *   would otherwise drop a deploy that landed in between).
  */
-export type MainGuard = { kind: "fast_forward" } | { kind: "unchanged"; expected: string | null };
+export type MainGuard = { kind: "fast_forward" } | { kind: "unchanged"; expected: string };
 
 /** Thrown inside a deploy transaction to roll it back when main moved. */
 class MainMovedError extends Error {

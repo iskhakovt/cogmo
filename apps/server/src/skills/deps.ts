@@ -10,7 +10,7 @@ import {
   type SandboxSession,
 } from "../sandbox/index.js";
 import { abortable } from "../util/abortable.js";
-import { gitShow } from "./git-ops.js";
+import { readSkillFile, type SkillsRepo } from "./skill-files.js";
 
 const log = logger.child({ component: "skills.deps" });
 
@@ -48,10 +48,11 @@ export type LockfileReadError =
  * `errors[]`.
  */
 export async function readLockfileAtSha(
-  repoPath: string,
+  repo: SkillsRepo,
+  name: string,
   gitSha: string,
 ): Promise<Result<LockfileSnapshot, LockfileReadError>> {
-  const shown = await gitShow(repoPath, gitSha, REQUIREMENTS_LOCK_FILE);
+  const shown = await readSkillFile(repo, name, gitSha, REQUIREMENTS_LOCK_FILE);
   if (shown.isErr()) {
     if (shown.error.kind === "ref_not_found") {
       throw new Error(`readLockfileAtSha: commit ${gitSha} not found`);

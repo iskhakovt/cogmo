@@ -37,6 +37,7 @@ import type { GitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
+import { migrateSkillsLayout } from "./migrate-layout.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, SKILLS_CODING_REPO_NAME } from "./repo.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -153,8 +154,10 @@ async function pushFeatureBranchToRemote(opts: {
   manifest: string;
   body: string;
 }): Promise<string> {
-  await writeFile(join(opts.worktree, "SKILL.md"), opts.manifest);
-  await writeFile(join(opts.worktree, "skill.py"), opts.body);
+  const dir = join(opts.worktree, "skills", "hn_digest");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "SKILL.md"), opts.manifest);
+  await writeFile(join(dir, "skill.py"), opts.body);
   await execFileP("git", ["-C", opts.worktree, "add", "."]);
   await execFileP("git", ["-C", opts.worktree, "commit", "-m", `add ${opts.branch}`]);
   const sha = (await execFileP("git", ["-C", opts.worktree, "rev-parse", "HEAD"])).stdout.trim();
@@ -222,9 +225,30 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
     expect(row?.allowedBackends).toEqual(["claude"]);
     expect(row?.maxConcurrentTasks).toBe(1);
 
+    // The boot's layout commit, then the run branch the host pushes from
+    // local main for the sandbox to clone (allocate-task-worktree).
+    await migrateSkillsLayout({ runInTx: tx, store: skillStore }, repos.skillsBare);
+    await execFileP("git", [
+      "-C",
+      repos.skillsBare,
+      "push",
+      "-q",
+      repos.daytonaRemoteBare,
+      "main:refs/heads/cogmo/run/hn-digest",
+    ]);
+    await execFileP("git", [
+      "-C",
+      repos.sandboxWorktree,
+      "fetch",
+      "-q",
+      "origin",
+      "cogmo/run/hn-digest",
+    ]);
+    await execFileP("git", ["-C", repos.sandboxWorktree, "reset", "-q", "--hard", "FETCH_HEAD"]);
+
     // ─── Sandbox push ───────────────────────────────────────────────
     // Simulate what Daytona does on a successful coding task: commit
-    // SKILL.md + skill.py on a feature branch, push to origin.
+    // the skill's files on a feature branch, push to origin.
     const branch = "skill/hn-digest";
     const sha = await pushFeatureBranchToRemote({
       worktree: repos.sandboxWorktree,

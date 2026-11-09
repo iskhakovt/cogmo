@@ -410,6 +410,7 @@ function makeDeployRow(overrides: Partial<SkillDeployRow> = {}): SkillDeployRow 
     schemas: { inputs: { type: "object", properties: {} }, outputs: null },
     createdAt: new Date("2026-05-01T00:00:00Z"),
     resolvedAt: null,
+    restoresGitSha: null,
     ...overrides,
   };
 }

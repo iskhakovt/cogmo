@@ -1,0 +1,353 @@
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+import { sql } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Database, Transactor } from "../db/index.js";
+import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import { migrateSkillsLayout } from "./migrate-layout.js";
+import { bootstrapSkillsRepo } from "./repo.js";
+import { DrizzleSkillStore, type InsertSkillParams } from "./store/index.js";
+
+const execFileP = promisify(execFile);
+
+let db: Database;
+let tx: Transactor;
+let close: () => Promise<void>;
+let store: DrizzleSkillStore;
+
+beforeAll(async () => {
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleSkillStore();
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await truncateAll(db);
+});
+
+afterAll(async () => {
+  await close();
+});
+
+let root: string;
+let bare: string;
+let work: string;
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), "skills-layout-"));
+  bare = join(root, "skills.git");
+  work = join(root, "work");
+  await bootstrapSkillsRepo({ path: bare });
+  await execFileP("git", ["init", "-q", "-b", "main", work]);
+  await execFileP("git", ["-C", work, "config", "user.email", "author@test"]);
+  await execFileP("git", ["-C", work, "config", "user.name", "author"]);
+  await execFileP("git", ["-C", work, "config", "commit.gpgsign", "false"]);
+});
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+async function git(repo: string, ...args: string[]): Promise<string> {
+  return (await execFileP("git", ["-C", repo, ...args])).stdout.trim();
+}
+
+/**
+ * Commit `files` (paths from the root; null deletes) in the working clone and
+ * move the bare repo's `main` to it, as a register did before the layout.
+ */
+async function commitOnMain(
+  files: Record<string, string | null>,
+  message: string,
+): Promise<string> {
+  for (const [path, content] of Object.entries(files)) {
+    if (content === null) {
+      await rm(join(work, path), { force: true });
+    } else {
+      await mkdir(dirname(join(work, path)), { recursive: true });
+      await writeFile(join(work, path), content);
+    }
+  }
+  await execFileP("git", ["-C", work, "add", "-A"]);
+  await execFileP("git", ["-C", work, "commit", "-q", "--allow-empty", "-m", message]);
+  const sha = await git(work, "rev-parse", "HEAD");
+  await execFileP("git", ["-C", work, "push", "-q", bare, "HEAD:refs/heads/staging"]);
+  await git(bare, "update-ref", "refs/heads/main", sha);
+  return sha;
+}
+
+function manifest(name: string): string {
+  return `---\nname: ${name}\ndescription: the ${name} skill\ntier: wasm\n---\n`;
+}
+
+async function seedSkill(name: string, gitSha: string, disabled: boolean): Promise<void> {
+  const params: InsertSkillParams = {
+    name,
+    tier: "wasm",
+    riskTier: "auto",
+    effects: [],
+    schedule: null,
+    scheduleNextRunAt: null,
+    gitSha,
+    lockfileHash: null,
+    inputs: { type: "object", properties: {} },
+    outputs: null,
+    scheduleRunAs: null,
+  };
+  const row = await tx((trx) => store.insertSkill(trx, params));
+  if (disabled) await tx((trx) => store.disableSkill(trx, row.id));
+}
+
+const migrate = () => migrateSkillsLayout({ runInTx: tx, store }, bare);
+
+describe("migrateSkillsLayout", () => {
+  it("records a parentless layout commit on an unborn main", async () => {
+    const layout = await migrate();
+
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(layout);
+    expect(await git(bare, "log", "-1", "--format=%P|%ae|%ce|%B", layout)).toBe(
+      "|skills@cogmo.invalid|skills@cogmo.invalid|chore(skills): move each skill to skills/<name>/\n\nCogmo-Layout: v1",
+    );
+    expect(await git(bare, "ls-tree", "-r", "--name-only", layout)).toBe("");
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
+  });
+
+  it("copies each skill on main from its own sha to skills/<name>/ and drops the root files", async () => {
+    const alpha = await commitOnMain(
+      {
+        "README.md": "the library\n",
+        "SKILL.md": manifest("alpha"),
+        "skill.py": "alpha = 1\n",
+        // Nothing read skills/ before the move.
+        "skills/stray/notes.md": "x\n",
+      },
+      "c",
+    );
+    const beta = await commitOnMain(
+      {
+        "SKILL.md": manifest("beta"),
+        "skill.py": "beta = 1\n",
+        "requirements.lock": "idna==3.10\n",
+      },
+      "c",
+    );
+    // A pending first deploy's sha is not on main.
+    await execFileP("git", ["-C", work, "checkout", "-q", "-b", "pending"]);
+    await commitOnMain({ "SKILL.md": manifest("delta"), "skill.py": "delta = 1\n" }, "c");
+    const delta = await git(work, "rev-parse", "HEAD");
+    await git(bare, "update-ref", "refs/heads/main", beta);
+    await seedSkill("alpha", alpha, true);
+    await seedSkill("beta", beta, false);
+    await seedSkill("delta", delta, true);
+
+    const layout = await migrate();
+
+    expect(await git(bare, "rev-parse", `${layout}^`)).toBe(beta);
+    expect((await git(bare, "ls-tree", "-r", "--name-only", layout)).split("\n")).toEqual([
+      "README.md",
+      "skills/alpha/SKILL.md",
+      "skills/alpha/skill.py",
+      "skills/beta/SKILL.md",
+      "skills/beta/requirements.lock",
+      "skills/beta/skill.py",
+    ]);
+    expect(await git(bare, "show", `${layout}:skills/alpha/skill.py`)).toBe("alpha = 1");
+    expect(await git(bare, "rev-parse", `${layout}:skills/beta/requirements.lock`)).toBe(
+      await git(bare, "rev-parse", `${beta}:requirements.lock`),
+    );
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(layout);
+  });
+
+  it("does nothing once the layout commit is recorded", async () => {
+    const layout = await migrate();
+    await execFileP("git", ["-C", work, "fetch", "-q", bare, "main"]);
+    await execFileP("git", ["-C", work, "reset", "-q", "--hard", "FETCH_HEAD"]);
+    await commitOnMain({ "skills/echo/SKILL.md": manifest("echo") }, "c");
+    const main = await git(bare, "rev-parse", "refs/heads/main");
+
+    expect(await migrate()).toBe(layout);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(main);
+  });
+
+  it("records a layout commit already on main instead of making a second", async () => {
+    const alpha = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", alpha, false);
+    const layout = await migrate();
+    // The process died after update-ref, before the row committed.
+    await db.execute(sql`DELETE FROM skills_repo_layout`);
+
+    expect(await migrate()).toBe(layout);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(layout);
+    expect(await git(bare, "rev-list", "--count", "refs/heads/main")).toBe("2");
+  });
+
+  it("skips a commit carrying the layout trailer under another identity", async () => {
+    const forged = await commitOnMain({ "README.md": "x\n" }, "c\n\nCogmo-Layout: v1");
+
+    const layout = await migrate();
+
+    expect(layout).not.toBe(forged);
+    expect(await git(bare, "rev-parse", `${layout}^`)).toBe(forged);
+  });
+
+  it("rebuilds the move from a fresh main when a register moves main under it", async () => {
+    const alpha = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", alpha, false);
+    const record = store.recordLayoutCommit.bind(store);
+    let moved = "";
+    vi.spyOn(store, "recordLayoutCommit").mockImplementationOnce(async (trx, sha) => {
+      // A deploy lands between the reads and the compare-and-swap.
+      moved = await commitOnMain({ "README.md": "moved\n" }, "c");
+      return record(trx, sha);
+    });
+
+    const layout = await migrate();
+
+    expect(await git(bare, "rev-parse", `${layout}^`)).toBe(moved);
+    expect(await git(bare, "show", `${layout}:skills/alpha/skill.py`)).toBe("a");
+    expect(await git(bare, "show", `${layout}:README.md`)).toBe("moved");
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
+  });
+
+  it("skips a Cogmo layout commit whose tree keeps skill files at the root", async () => {
+    const legacy = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", legacy, false);
+    const tree = await git(bare, "rev-parse", `${legacy}^{tree}`);
+    const forged = (
+      await execFileP(
+        "git",
+        ["-C", bare, "commit-tree", tree, "-p", legacy, "-m", "c", "-m", "Cogmo-Layout: v1"],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Cogmo",
+            GIT_AUTHOR_EMAIL: "skills@cogmo.invalid",
+            GIT_COMMITTER_NAME: "Cogmo",
+            GIT_COMMITTER_EMAIL: "skills@cogmo.invalid",
+          },
+        },
+      )
+    ).stdout.trim();
+    await git(bare, "update-ref", "refs/heads/main", forged);
+
+    const layout = await migrate();
+
+    expect(layout).not.toBe(forged);
+    expect(await git(bare, "rev-parse", `${layout}^`)).toBe(forged);
+    expect(await git(bare, "show", `${layout}:skills/alpha/skill.py`)).toBe("a");
+  });
+
+  it("skips a Cogmo layout commit whose tree lacks a skill on its history", async () => {
+    const legacy = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", legacy, false);
+    const emptyTree = await git(bare, "hash-object", "-t", "tree", "-w", "/dev/null");
+    const forged = (
+      await execFileP(
+        "git",
+        ["-C", bare, "commit-tree", emptyTree, "-p", legacy, "-m", "c", "-m", "Cogmo-Layout: v1"],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Cogmo",
+            GIT_AUTHOR_EMAIL: "skills@cogmo.invalid",
+            GIT_COMMITTER_NAME: "Cogmo",
+            GIT_COMMITTER_EMAIL: "skills@cogmo.invalid",
+          },
+        },
+      )
+    ).stdout.trim();
+    await git(bare, "update-ref", "refs/heads/main", forged);
+
+    const layout = await migrate();
+
+    expect(layout).not.toBe(forged);
+    expect(await git(bare, "rev-parse", `${layout}^`)).toBe(forged);
+  });
+
+  it("moves again when a recorded bare layout commit is no longer under main", async () => {
+    const recordedBare = await migrate();
+    // An adopt replaced main while a boot recorded the bare commit again.
+    const adopted = await commitOnMain({ "README.md": "adopted\n" }, "c");
+    await git(bare, "update-ref", "refs/heads/main", await git(work, "rev-parse", "HEAD"));
+    expect(adopted).not.toBe(recordedBare);
+    const orphanMain = (
+      await execFileP(
+        "git",
+        [
+          "-C",
+          bare,
+          "commit-tree",
+          await git(bare, "rev-parse", `${adopted}^{tree}`),
+          "-m",
+          "remote",
+        ],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@t",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@t",
+          },
+        },
+      )
+    ).stdout.trim();
+    await git(bare, "update-ref", "refs/heads/main", orphanMain);
+
+    const layout = await migrate();
+
+    expect(layout).not.toBe(recordedBare);
+    expect(await git(bare, "rev-parse", `${layout}^`)).toBe(orphanMain);
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
+  });
+
+  it("moves again when the repo no longer has the recorded layout commit", async () => {
+    await tx((trx) => store.recordLayoutCommit(trx, "f".repeat(40)));
+
+    const layout = await migrate();
+
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(layout);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(layout);
+  });
+
+  it("fails the boot, leaving main and the row as they were, when the row holds another commit", async () => {
+    const alpha = await commitOnMain({ "SKILL.md": manifest("alpha"), "skill.py": "a\n" }, "c");
+    await seedSkill("alpha", alpha, false);
+    const record = DrizzleSkillStore.prototype.recordLayoutCommit.bind(store);
+    vi.spyOn(store, "recordLayoutCommit").mockImplementationOnce(async (trx, sha) => {
+      // The row is written, so the null below shows the throw rolled it back.
+      await record(trx, sha);
+      return "f".repeat(40);
+    });
+
+    await expect(migrate()).rejects.toThrow(/the row holds f{40}/);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(alpha);
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBeNull();
+  });
+
+  it("fails the boot when main moves under every attempt", { timeout: 30_000 }, async () => {
+    const record = store.recordLayoutCommit.bind(store);
+    let deploys = 0;
+    const spy = vi.spyOn(store, "recordLayoutCommit").mockImplementation(async (trx, sha) => {
+      deploys += 1;
+      await commitOnMain({ "README.md": `deploy ${deploys}\n` }, "c");
+      return record(trx, sha);
+    });
+
+    await expect(migrate()).rejects.toThrow(/main moved under each of 5 attempts/);
+    expect(spy).toHaveBeenCalledTimes(5);
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBeNull();
+  });
+
+  it("fails the boot when a skill on main has no files at its sha", async () => {
+    const empty = await commitOnMain({ "README.md": "x\n" }, "c");
+    await seedSkill("ghost", empty, false);
+
+    await expect(migrate()).rejects.toThrow(/skill 'ghost' at [0-9a-f]+ has no skill files/);
+    expect(await git(bare, "rev-parse", "refs/heads/main")).toBe(empty);
+    expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBeNull();
+  });
+});

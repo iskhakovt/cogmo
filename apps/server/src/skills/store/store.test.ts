@@ -13,7 +13,6 @@ import {
   type InsertDeployParams,
   type InsertSkillParams,
   type NewRunParams,
-  type SkillDeployStatus,
   type SkillRow,
   type SkillRunIdentity,
 } from "./index.js";
@@ -213,7 +212,11 @@ describe("DrizzleSkillStore", () => {
         inputs: { type: "object", title },
         outputs: null,
       });
-      const insert = (status: SkillDeployStatus, schemas: SkillSchemas, gitSha: string) =>
+      const insert = (
+        status: InsertDeployParams["status"],
+        schemas: SkillSchemas,
+        gitSha: string,
+      ) =>
         tx((trx) =>
           store.insertDeploy(trx, {
             skillId: row.id,
@@ -234,7 +237,10 @@ describe("DrizzleSkillStore", () => {
       expect(await read("echo")).toBeNull();
 
       await insert("live", schemasOf("live"), SHA);
-      const rolledBack = await insert("rolled_back", schemasOf("rolled back"), SHA);
+      const rolledBack = await insert("live", schemasOf("rolled back"), SHA);
+      await db.execute(
+        sql`UPDATE skill_deploys SET status = 'rolled_back', restores_git_sha = ${SHA} WHERE id = ${rolledBack.id}`,
+      );
       await insert("live", schemasOf("other sha"), "b".repeat(40));
       expect(await read("echo")).toEqual(schemasOf("rolled back"));
       expect(await read("other-skill")).toBeNull();
@@ -289,6 +295,73 @@ describe("DrizzleSkillStore", () => {
       expect(
         await tx((trx) => store.hasLiveDeployForSkill(trx, { skillId: row.id, gitSha: SHA_NEW })),
       ).toBe(false);
+    });
+
+    it("hasLiveDeployForSkill accepts a rolled_back row whose target went live, and only that", async () => {
+      const row = await seedSkill({ name: "echo", gitSha: SHA });
+      const guard = (gitSha: string) =>
+        tx((trx) => store.hasLiveDeployForSkill(trx, { skillId: row.id, gitSha }));
+      const rollback = (restoring: string, restores: string) =>
+        tx((trx) =>
+          store.executeRollback(trx, {
+            ...executeRegisterParams({}),
+            restoringGitSha: restoring,
+            restoresGitSha: restores,
+          }),
+        );
+      await tx((trx) =>
+        store.insertDeploy(trx, {
+          skillId: row.id,
+          gitSha: SHA_NEW,
+          priorGitSha: null,
+          riskTier: "auto",
+          status: "live",
+          classifierLog: STUB_LOG,
+          schemas: STUB_SCHEMAS,
+          resolvedAt: new Date(),
+        }),
+      );
+
+      // A restoring commit for a target that went live passes.
+      await rollback(SHA_EDIT, SHA_NEW);
+      expect(await guard(SHA_EDIT)).toBe(true);
+      // One for a target that never did is refused.
+      await rollback(SHA_THIRD, SHA);
+      expect(await guard(SHA_THIRD)).toBe(false);
+    });
+
+    it("restoredTargetAt names a rolled_back row's target, and hasDeployAt any row's sha", async () => {
+      await seedSkill({ name: "echo", gitSha: SHA });
+      await tx((trx) =>
+        store.executeRollback(trx, {
+          ...executeRegisterParams({}),
+          restoringGitSha: SHA_EDIT,
+          restoresGitSha: SHA_NEW,
+        }),
+      );
+
+      expect(
+        await tx((trx) => store.restoredTargetAt(trx, { name: "echo", gitSha: SHA_EDIT })),
+      ).toBe(SHA_NEW);
+      expect(
+        await tx((trx) => store.restoredTargetAt(trx, { name: "echo", gitSha: SHA_NEW })),
+      ).toBeNull();
+      expect(
+        await tx((trx) => store.restoredTargetAt(trx, { name: "other", gitSha: SHA_EDIT })),
+      ).toBeNull();
+      expect(await tx((trx) => store.hasDeployAt(trx, SHA_EDIT))).toBe(true);
+      expect(await tx((trx) => store.hasDeployAt(trx, SHA_THIRD))).toBe(false);
+    });
+
+    it("records the layout commit once, and forgets it", async () => {
+      expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBeNull();
+      expect(await tx((trx) => store.recordLayoutCommit(trx, SHA))).toBe(SHA);
+      expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(SHA);
+      // The singleton keeps the first: a second insert meets it in the conflict arm.
+      expect(await tx((trx) => store.recordLayoutCommit(trx, SHA_NEW))).toBe(SHA);
+      expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBe(SHA);
+      await tx((trx) => store.forgetLayoutCommit(trx));
+      expect(await tx((trx) => store.getLayoutCommitSha(trx))).toBeNull();
     });
 
     it("updateSkillSha changes git_sha", async () => {
@@ -388,7 +461,7 @@ describe("DrizzleSkillStore", () => {
 
     function deployParams(
       skillId: string,
-      status: SkillDeployStatus,
+      status: InsertDeployParams["status"],
       resolvedAt: Date | null,
     ): InsertDeployParams {
       return {
@@ -1822,7 +1895,8 @@ describe("DrizzleSkillStore", () => {
       return tx((trx) =>
         store.executeRollback(trx, {
           name: "cron-skill",
-          toGitSha,
+          restoringGitSha: toGitSha,
+          restoresGitSha: toGitSha,
           tier: "wasm",
           riskTier: "notify",
           effects: [],
@@ -1984,7 +2058,8 @@ describe("DrizzleSkillStore", () => {
       const rolledBack = await tx((trx) =>
         store.executeRollback(trx, {
           name: base.name,
-          toGitSha: SHA_EDIT,
+          restoringGitSha: SHA_EDIT,
+          restoresGitSha: SHA_EDIT,
           tier: base.tier,
           riskTier: base.riskTier,
           effects: base.effects,
