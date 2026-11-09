@@ -6,6 +6,8 @@ import type { CoreDeps, RuntimeDeps, SandboxDeps, SkillRunnerHandle } from "./st
 export interface ServeResources {
   /** Ends open chat streams, then drains requests for up to `drainMs`. */
   web: { close(drainMs: number): Promise<void> };
+  /** Ends every connector session and closes the connector server; `null` when none runs. */
+  connectors: { close(): Promise<void> } | null;
   adapters: ReadonlyArray<{ channelType: string; adapter: { stop(): Promise<void> } }>;
   /** Stops the sweep of coding progress streams. */
   codingStreams: { close(): void };
@@ -37,8 +39,9 @@ export type StepOutcome =
 
 /**
  * Tear down `cogmo serve`: the web server first, so no request reaches a
- * stopped dependency, then the channel adapters concurrently, the coding
- * streams' sweep, MCP, the skills pool, the sandbox, and the instance row.
+ * stopped dependency, then the connector server, the channel adapters
+ * concurrently, the coding streams' sweep, MCP, the skills pool, the sandbox,
+ * and the instance row.
  * Each step is bounded, and one that overruns or throws doesn't stop the
  * next. The instance row stays open when the skills pool or sandbox step
  * didn't finish, so the next boot reaps the containers they left. Never
@@ -48,9 +51,13 @@ export async function shutdownServe(
   resources: ServeResources,
   bounds: ShutdownBounds,
 ): Promise<ReadonlyArray<StepOutcome>> {
-  const { web, adapters, codingStreams, mcpRegistry, skills, sandbox, closeInstance } = resources;
+  const { web, connectors, adapters, codingStreams, mcpRegistry, skills, sandbox, closeInstance } =
+    resources;
   const { webDrainMs, stepMs } = bounds;
   const webOutcome = await bounded("web server", webDrainMs + stepMs, () => web.close(webDrainMs));
+  const connectorOutcomes = connectors
+    ? [await bounded("connector server", stepMs, () => connectors.close())]
+    : [];
   const adapterOutcomes = await Promise.all(
     adapters.map(({ channelType, adapter }) =>
       bounded(`${channelType} adapter`, stepMs, () => adapter.stop()),
@@ -78,6 +85,7 @@ export async function shutdownServe(
   }
   return [
     webOutcome,
+    ...connectorOutcomes,
     ...adapterOutcomes,
     streamsOutcome,
     mcpOutcome,
@@ -87,17 +95,19 @@ export async function shutdownServe(
   ];
 }
 
-/** What `cogmo serve` tears down, from what the bootstrap and the web UI started. */
+/** What `cogmo serve` tears down, from what the bootstrap, the web UI and the connector server started. */
 export function serveResources(
   boot: Pick<CoreDeps, "runInTx" | "sandboxStore"> &
     Pick<SandboxDeps, "sandbox" | "sandboxInstanceId"> &
     Pick<RuntimeDeps, "adapters" | "codingStreams" | "mcpRegistry"> &
     SkillRunnerHandle,
   web: ServeResources["web"],
+  connectors: ServeResources["connectors"],
 ): ServeResources {
   const { runInTx, sandboxStore, sandboxInstanceId } = boot;
   return {
     web,
+    connectors,
     adapters: boot.adapters,
     codingStreams: boot.codingStreams,
     mcpRegistry: boot.mcpRegistry,
