@@ -1,0 +1,7 @@
+A coding agent's `.cogmo/verify` now runs the checks register runs, so a register refusal is one the agent can see and fix before its branch is done (design/skills.md → The gates in verify).
+
+- **Register's gates in the session.** The server build bundles register's host-side gates (size, syntax, entrypoint, dynamic code, effects, wasm-lint and the classifier's refusals) with their tree-sitter grammar. Every plan, execute and verify session on the skills repo receives the running release's bundle at `/tmp/cogmo-gates`, named by `COGMO_GATES_DIR`: Local-Docker bind-mounts it read-only from `SANDBOX_GATES_DIR`, which the boot publishes; Daytona uploads it. Verify runs it under Node's permission model, and register and the bundle share one function, so they print the same findings.
+- **Imports in verify.** The Imports rule moves to the toolchain's `.cogmo/imports.py`, which register and verify both apply; verify reads the declared dependencies through the bundle and checks over an environment holding only the lockfile's distributions. The bespoke check stays over `deptry`, which matches imports by top-level name only.
+- **Formatting.** Register and verify run `ruff format --check`, and formatter pragmas (`# fmt: off`, `# fmt: skip`, `# yapf: disable`) are refused.
+- **Unused suppressions.** ruff's `RUF100` and `RUF102` and pyrefly's `unused-ignore` make a suppression that suppresses nothing a finding.
+- Verify runs gates, suppressions, ruff, format, pyrefly, imports and pytest, in that order.
