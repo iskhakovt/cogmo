@@ -1057,6 +1057,7 @@ Until the draft machine (S10) runs this stage, the checks Cogmo can decide on th
 - **Pre-layout reads.** A register tip descends from the layout commit, and one with skill files at the root is `layout_violation`, so the gates read only `skills/<name>/`. The root-path read serves an approve of a deploy pending across the move and a rollback to a target before it, and neither is gated.
 - **Tiers.** The gates run on both tiers; `wasm-lint` stays the wasm tier's. A container-tier skill's own HTTP client is not read for hosts: the egress proxy's allowlist bounds it (S7).
 - `[proposed]` **S10** runs the same gate functions in `verifying`, as `revise` findings before review, and register keeps them as its floor, so a CLI register, which no draft verifies, meets them; under one build, a tip that passed verify passes register. In `verifying`, a gate that cannot run, a classifier throw included since its `ctx` rows feed the Effects check, parks the draft at `blocked: verifier_unavailable` (`parser`) and spends no round.
+- `[proposed]` **The author's verify** runs the gates and the classifier's refusals before register does, from this code bundled for Node ([The gates in verify](#the-gates-in-verify-proposed)).
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
@@ -1086,14 +1087,15 @@ The Verify stage table's checks that need CPython also run inside `register`, as
 | Check (id) | Runs | Rejects |
 |-|-|-|
 | `syntax` | `ast.parse(body, "skill.py")`, then `compile` of its tree, in the image's CPython, writing no bytecode | a `SyntaxError`, or a `RecursionError` or `MemoryError` from either |
-| `ruff` | `ruff check --output-format json` with the toolchain's `pyproject.toml` as `--config`: `E`, `F`, `B`, `BLE`, `S`, `ASYNC`, `PGH004`, 120 columns | any diagnostic, its rule code leading the message |
-| `pyrefly` | `pyrefly check --output-format json` with that configuration, so `.cogmo/` and its `cogmo_ctx` are on the search path and only pyrefly's own pragmas suppress (`enabled-ignores = ["pyrefly"]`); on the site-package path, the skill's venv, then the tools venv's (pydantic) | any error, its name leading the message |
-| `imports` | CPython's `ast` over the body | an import outside the allowed set below; a relative import, which a skill module cannot resolve |
+| `ruff` | `ruff check --output-format json` with the toolchain's `pyproject.toml` as `--config`: `E`, `F`, `B`, `BLE`, `S`, `ASYNC`, `PGH004`, 120 columns; `[proposed]` with `RUF100` and `RUF102` (Suppressions) | any diagnostic, its rule code leading the message |
+| `format` `[proposed]` | `ruff format --check --output-format json` with that configuration (Format) | a body `ruff format` would change: one finding at its first difference |
+| `pyrefly` | `pyrefly check --output-format json` with that configuration, so `.cogmo/` and its `cogmo_ctx` are on the search path and only pyrefly's own pragmas suppress (`enabled-ignores = ["pyrefly"]`), `[proposed]` with `unused-ignore` an error (Suppressions); on the site-package path, the skill's venv, then the tools venv's (pydantic) | any error, its name leading the message |
+| `imports` | CPython's `ast` over the body; `[proposed]` the rule is the toolchain's `.cogmo/imports.py` (Imports) | an import outside the allowed set below; a relative import, which a skill module cannot resolve |
 | `suppression` | the toolchain's `.cogmo/suppressions.py` over the body's comments, as `tokenize` reads them | a pragma wider than its line, one naming no rule, or more than 100 suppressions (Suppressions) |
 
-A `syntax` finding rejects alone, since the other tools cannot read the file either; otherwise ruff, pyrefly, Imports and Suppressions report together.
+A `syntax` finding rejects alone, since the other tools cannot read the file either; otherwise ruff, `format`, pyrefly, Imports and Suppressions report together.
 
-**Imports.** `import a.b` imports `a.b`, at any depth; an absolute `from a.b import c` reads `c` from `a.b` first, so it passes when a declared distribution's `RECORD` alone lists `a.b`'s file (its `__init__` or module file), and otherwise it imports `a.b.c`. **Residual:** when that `__init__` does not define `c` and only a transitive dependency installs `a/b/c.py`, the from-import still passes, since telling an attribute from a submodule would mean reading the `__init__`; it refuses nothing valid, and `import a.b.c` is refused. One is allowed when its first segment is in `sys.stdlib_module_names` (the image's 3.14) or is `pydantic`, `pydantic_core` or `cogmo_ctx` (the runtime's), or when a declared dependency installs it. Which distributions install a module comes from the lockfile's venv, never from the lockfile compile, which resolves from metadata and installs nothing: the runner reads every `RECORD` in the venv's site-packages, each distribution by its PEP 503 name. Each path names the module its file is: a `.py` file, or one with a suffix in `importlib.machinery.EXTENSION_SUFFIXES`, without the suffix, and an `__init__` its directory. A directory whose `__init__` no `RECORD` lists is a PEP 420 namespace and names no module, so `protobuf`'s and `google-auth`'s modules sit beneath `google/` (`google.protobuf`, `google.auth`); one whose `__init__` several list (pkgutil-style) is each one's, so none's alone. Other files (`py.typed`, `LICENSE`, a `.pth`), paths under `*.dist-info/`, `*.data/` and `__pycache__/`, paths leaving site-packages, and names that are not identifiers name none. An import is installed by the distributions installing its deepest prefix that any distribution installs, or, for a namespace itself, by every distribution installing a module beneath it. **Decided:** a module only a transitive dependency installs is refused, since a skill declares what it imports; so `import google.auth` is refused where only `protobuf` is declared. Nothing is stored: the venv, keyed by lockfile hash, is the cache.
+**Imports.** `import a.b` imports `a.b`, at any depth; an absolute `from a.b import c` reads `c` from `a.b` first, so it passes when a declared distribution's `RECORD` alone lists `a.b`'s file (its `__init__` or module file), and otherwise it imports `a.b.c`. **Residual:** when that `__init__` does not define `c` and only a transitive dependency installs `a/b/c.py`, the from-import still passes, since telling an attribute from a submodule would mean reading the `__init__`; it refuses nothing valid, and `import a.b.c` is refused. One is allowed when its first segment is in `sys.stdlib_module_names` (the image's 3.14) or is `pydantic`, `pydantic_core` or `cogmo_ctx` (the runtime's), or when a declared dependency installs it. Which distributions install a module comes from the lockfile's venv, never from the lockfile compile, which resolves from metadata and installs nothing: the runner reads every `RECORD` in the venv's site-packages, each distribution by its PEP 503 name. Each path names the module its file is: a `.py` file, or one with a suffix in `importlib.machinery.EXTENSION_SUFFIXES`, without the suffix, and an `__init__` its directory. A directory whose `__init__` no `RECORD` lists is a PEP 420 namespace and names no module, so `protobuf`'s and `google-auth`'s modules sit beneath `google/` (`google.protobuf`, `google.auth`); one whose `__init__` several list (pkgutil-style) is each one's, so none's alone. Other files (`py.typed`, `LICENSE`, a `.pth`), paths under `*.dist-info/`, `*.data/` and `__pycache__/`, paths leaving site-packages, and names that are not identifiers name none. An import is installed by the distributions installing its deepest prefix that any distribution installs, or, for a namespace itself, by every distribution installing a module beneath it. **Decided:** a module only a transitive dependency installs is refused, since a skill declares what it imports; so `import google.auth` is refused where only `protobuf` is declared. Nothing is stored: the venv, keyed by lockfile hash, is the cache. `[proposed]` The rule is `.cogmo/imports.py`, which the runner loads from the toolchain as it loads `suppressions.py`, and which `.cogmo/verify` applies to the author's skills (The skills repo toolchain → `.cogmo/verify`). **Decided:** our own `RECORD` walk over `deptry`. deptry maps an import to a distribution by its top-level name, so it passes `import google.auth` with only `protobuf` declared; it resolves distributions only from its own interpreter's path, so reading the lockfile's venv either puts the tools venv's distributions in the lookup or, through `PYTHONPATH`, runs the dependencies' code; it honours a blanket `# deptry: ignore` that cannot be turned off; and it exits 1 for findings and for a crash alike. It refuses nothing this rule misses.
 
 **Suppressions.** **Decided:** a suppression names its rule and covers one line: ruff's `# noqa: <code>` on the line, ruff's `# ruff: ignore[<code>]` and pyrefly's `# pyrefly: ignore[<error>]` on it or on their own line above it. Refused, at the pragma's `#`:
 
@@ -1101,7 +1103,11 @@ A `syntax` finding rejects alone, since the other tools cannot read the file eit
 - a pragma naming no rule: pyrefly's bare `# pyrefly: ignore`; ruff's bare `# noqa`, and `# noqa <code>`, which ruff reads as bare, are its own `PGH004` findings;
 - more than 100 suppressions in the file, at the 101st, so the record and the reply stay bounded.
 
+`[proposed]` A suppression that suppresses nothing is a finding, so none outlives the finding it covered: ruff's `RUF100` for an unused `# noqa` or `# ruff: ignore`, or one naming a rule the configuration does not select (a `# noqa: S101` in `test_skill.py`, which the configuration ignores), `RUF102` for one naming no rule ruff knows, and pyrefly's `unused-ignore`. Only a `# noqa` naming `RUF100` silences RUF100, and it is recorded as any suppression is; nothing silences `unused-ignore`.
+
 pyrefly honors only its own pragmas (`enabled-ignores = ["pyrefly"]`), so `# type: ignore`, which it would otherwise read as blanket, and other checkers' forms suppress nothing. The rule is `.cogmo/suppressions.py`, which `.cogmo/verify` applies to the author's files too ([Verify stage](#verify-stage) → The skills repo toolchain), so a branch that passes verify passes it at register; verify's tests and register's assert one table of pragmas (`images/skills/tests/pragma_cases.py`). It reads comments from `tokenize`, as ruff and pyrefly read them from their lexers, so a pragma in a string is none, and it splits a comment at each `#`, as both do. Each accepted suppression is recorded on the classifier log as `{ tool, code, line }` (`SkillSuppressionSchema`), one per rule it names, at the comment's line; a code no rule can have (not ruff's `[A-Z]+[0-9]+` or pyrefly's kebab-case, or over 64 characters) suppresses nothing and is not recorded. `[proposed]` The approve-tier notification and the deploy's details are to show them next, for the owner and later reviewers.
+
+**Format** `[proposed]`. `ruff format`, at the version `uv.lock` pins and with the toolchain's configuration, decides a skill's layout, so the layout reviewers and the owner read is the formatter's, never the author's. ruff reports one diagnostic per file, at its first difference; the finding names the fix, `uv run ruff format skills/<name>`. ruff changes its stable style only in minor releases. **Residual:** a release that bumps ruff's minor can restyle, so a skill's next tip fails `format` until it is reformatted; live skills are not checked again, and rollback and approve run no checks.
 
 **Which session.** One check session per register, with register's `signal`, deleted whatever the outcome. Its bounds are Cogmo's, never the skill's `resources`:
 
@@ -1232,13 +1238,13 @@ Re-entry above covers a crash after each step's move; the table adds the rest.
 | `uv.lock` | `uv lock` of that project |
 | `CLAUDE.md` | the authoring convention, generated from `SkillManifestSchema` and `SKILL_EFFECTS` so it cannot drift from them: `SkillError`, `ctx.run()["key"]` as an `Idempotency-Key`, the toolchain entries as read-only, and no `uv add` or `uv lock`; the check to run, `.cogmo/verify`; the rules of the [Register-time gates](#register-time-gates-confirmed-except-where-marked) and the suppression rule |
 | `.gitignore` | `__pycache__/`, `*.py[co]`, `.venv/`, `.pytest_cache/`, `.ruff_cache/`, so nothing a check writes reaches a branch |
-| `.cogmo/` | `verify` (below); `suppressions.py`, the suppression rule `verify` and register's checks both apply ([Register-time CPython checks](#register-time-cpython-checks-confirmed-except-where-marked) → Suppressions); `skill.schema.json`, the JSON Schema of `SkillManifestSchema`; `cogmo_ctx/`, the typed `ctx` package ([Contracts](#contracts-proposed)); `paths`, the list of these five entries |
+| `.cogmo/` | `verify` (below); `suppressions.py`, the suppression rule `verify` and register's checks both apply ([Register-time CPython checks](#register-time-cpython-checks-confirmed-except-where-marked) → Suppressions); `[proposed]` `imports.py`, the Imports rule both apply (→ Imports); `skill.schema.json`, the JSON Schema of `SkillManifestSchema`; `cogmo_ctx/`, the typed `ctx` package ([Contracts](#contracts-proposed)); `paths`, the list of these five entries; `[proposed]` `gates.mjs`, `web-tree-sitter.wasm` and `tree-sitter-python.wasm`, register's gates bundled for Node ([The gates in verify](#the-gates-in-verify-proposed)) |
 
-Everything but `.cogmo/cogmo_ctx/` is checked in under `images/skills/toolchain/`, generated where derived, each derived file with a drift test: `CLAUDE.md`, `skill.schema.json`, and `pyproject.toml`'s uv, Python and pydantic pins (from `UV_VERSION`, `images/skills/.python-version` and the Dockerfile's Python image, and `RUNTIME_PACKAGES`). CI fails a stale `uv.lock` (`uv lock --check`). `cogmo_ctx/` joins it from `images/skills/src/cogmo_ctx/`, the files git does not ignore, when the boot reads the release's toolchain; the server image keeps both directories under `images/skills/` as the source tree does, so a boot from either reads them the same way. The boot copies bytes, so the comparison below is stable, and the tools virtualenv register's checks run (and, `[proposed]`, the verify stage's) is built from the same lock ([Register-time CPython checks](#register-time-cpython-checks-confirmed-except-where-marked)).
+Everything but `.cogmo/cogmo_ctx/` is checked in under `images/skills/toolchain/`, generated where derived, each derived file with a drift test: `CLAUDE.md`, `skill.schema.json`, and `pyproject.toml`'s uv, Python and pydantic pins (from `UV_VERSION`, `images/skills/.python-version` and the Dockerfile's Python image, and `RUNTIME_PACKAGES`). CI fails a stale `uv.lock` (`uv lock --check`). `cogmo_ctx/` joins it from `images/skills/src/cogmo_ctx/`, the files git does not ignore, when the boot reads the release's toolchain; the server image keeps both directories under `images/skills/` as the source tree does, so a boot from either reads them the same way. `[proposed]` The gates bundle joins `.cogmo/` from the server's build ([The gates in verify](#the-gates-in-verify-proposed)). The boot copies bytes, so the comparison below is stable, and the tools virtualenv register's checks run (and, `[proposed]`, the verify stage's) is built from the same lock ([Register-time CPython checks](#register-time-cpython-checks-confirmed-except-where-marked)).
 
 A bump of the image's Python patch (the Dockerfile's `FROM`) changes `pyproject.toml`'s `python-version`: its drift test fails until `codegen:toolchain` runs, and the next boot commits the new toolchain. `required-version` makes an author's uv that differs from the image's refuse to run. `python-version` makes the author's compile resolve for the image's interpreter version, which register's compile runs on ([Lockfile](#lockfile)). So neither a uv nor a Python skew makes a `requirements.lock` stale.
 
-`.cogmo/verify` is the repo's `verifyCommand` (`uv run --locked --group dev .cogmo/verify`), run inside the coding task, on its network, by the task's `run-verify` and by the author. It checks only what the author can fix. Its base is `COGMO_VERIFY_BASE`, the commit the task's branch was cut from (with S9, the `main` merged into its start ref): allocate-worktree reads it (the local repo's `HEAD`, `main` for the skills repo, or the remote's freshly fetched default branch), saves it as `worktree_assignment.baseSha` with the assignment, and cuts the branch at exactly that sha, so a retry cuts again at the same sha ([coding-delegation.md](coding-delegation.md) → `coding_tasks`); every session the task runs code in (plan, execute, verify) receives it through `SessionSpec.env`. Unset or unknown, it fails naming the variable. Its skills are those with a path under `skills/` that differs from the base in the working tree, tracked, or untracked and not ignored (`git ls-files --others --exclude-standard`); none, and it passes. It reads the working tree because the attempt's work is committed only after `run-verify`. Each is checked with `.cogmo/suppressions.py` over its `skill.py` and `test_skill.py`, refusing what register's `suppression` check refuses, then ruff (whose configuration carries `PGH004`), then pyrefly with the skill's directory on its search path and `pytest` of its `test_skill.py`, both under `uv run --no-build --with-requirements` of its `requirements.lock` when it has one, so its dependencies import. It sets `PYTHONDONTWRITEBYTECODE=1`.
+`.cogmo/verify` is the repo's `verifyCommand` (`uv run --locked --group dev .cogmo/verify`), run inside the coding task, on its network, by the task's `run-verify` and by the author. It checks only what the author can fix. Its base is `COGMO_VERIFY_BASE`, the commit the task's branch was cut from (with S9, the `main` merged into its start ref): allocate-worktree reads it (the local repo's `HEAD`, `main` for the skills repo, or the remote's freshly fetched default branch), saves it as `worktree_assignment.baseSha` with the assignment, and cuts the branch at exactly that sha, so a retry cuts again at the same sha ([coding-delegation.md](coding-delegation.md) → `coding_tasks`); every session the task runs code in (plan, execute, verify) receives it through `SessionSpec.env`. Unset or unknown, it fails naming the variable. Its skills are those with a path under `skills/` that differs from the base in the working tree, tracked, or untracked and not ignored (`git ls-files --others --exclude-standard`); none, and it passes. It reads the working tree because the attempt's work is committed only after `run-verify`. Each is checked with `.cogmo/suppressions.py` over its `skill.py` and `test_skill.py`, refusing what register's `suppression` check refuses, then ruff (whose configuration carries `PGH004`; `[proposed]` and `RUF100` and `RUF102`), `[proposed]` then `ruff format --check`, then pyrefly with the skill's directory on its search path, `[proposed]` then `.cogmo/imports.py` over its `skill.py` against the dependencies its `SKILL.md` declares (`node .cogmo/gates.mjs --dependencies`), and `pytest` of its `test_skill.py`, all under `uv run --no-build --with-requirements` of its `requirements.lock` when it has one, so its dependencies import and their `RECORD`s are installed. **Residual** `[proposed]`: that environment holds the tools' distributions too. They grant no import, since only a declared distribution does, but one sharing a package's `__init__` makes it no distribution's alone, so verify can refuse a from-import register accepts; never the reverse. It sets `PYTHONDONTWRITEBYTECODE=1`. `[proposed]` Register's gates run first ([The gates in verify](#the-gates-in-verify-proposed)).
 
 Cogmo owns the skills repo's `verify_command` and writes it at each boot, after the toolchain commit. Cogmo's verify stage is the authority: it takes only `skills/<name>/`'s files from the tip and runs its tools with the image's configuration and `cogmo_ctx`, so a branch carrying an older toolchain changes nothing it judges.
 
@@ -1262,6 +1268,115 @@ The commit carries Cogmo's identity, as author and committer, and a `Cogmo-Toolc
 | Two boots, or a boot and an adopt, at once | one commit | the bootstrap lock serializes them; the second finds the entries equal |
 | A boot of an older release after a newer one committed | `main` at the older release's toolchain | the toolchain follows the running release: the commit deletes the entries only the newer list names, and the newer release's next boot commits its own again |
 | A boot of a release from before the toolchain | `main` keeps the toolchain, and `verify_command` its value | that release reads neither. **Residual**: its devbase's uv may fail the toolchain's `required-version`, as may a checkout carrying a newer release's toolchain after a downgrade; then every skills-repo task fails verify until the operator upgrades |
+
+#### The gates in verify `[proposed]`
+
+`.cogmo/verify` runs register's host-side checks of a skill before the author is done. These are the [Register-time gates](#register-time-gates-confirmed-except-where-marked) (Size, Syntax's tree-sitter half, Entrypoint, Dynamic code, Effects, `wasm-lint`) and the classifier's refusals: every undeclared effect in `REJECT_ON_UNDECLARED`, the `ctx.memory` and `ctx.files` rows' among them. It runs register's own code, bundled for Node. **Decided:** one copy of the rules. A Python port would duplicate them, and a Cogmo API for sandboxes would be a new authenticated surface.
+
+**The bundle.** `.cogmo/gates.mjs` is an esbuild bundle of one entry, `src/skills/gates-cli.ts`. The two files it loads by path sit beside it: `web-tree-sitter.wasm`, web-tree-sitter's runtime from `node_modules`, and `tree-sitter-python.wasm`, the vendored grammar. The entry runs what register's step 4 runs after `locateSkill`: the manifest parse, the name check, then `checkRegisterBody` with `runSkillGates` and `classifyWithAst`. It prints no tier or reasons, since they refuse nothing. Three changes let that code run outside the server:
+
+- Register's step 4 after `locateSkill` becomes one function of the skill's name and its two files' text or absence, returning the strings `RegisterResult.errors` carries. Register calls it on the tip's files, the CLI on the working tree's.
+- `python-parser.ts` takes the grammar's path from its composition root: the server passes `vendor/` under the working directory, as now, and the CLI the file beside the bundle (`import.meta.url`). web-tree-sitter finds its runtime beside the bundled module unaided.
+- `checkRegisterBody`'s error log moves to register, so the bundle carries no logger. pino would add about 150 KB and write its JSON to stdout.
+
+The build is `child-bundle.ts`'s (`bundle`, `platform: "node"`, `format: "esm"`, `target: "node26"`) plus three settings:
+
+- `minify`, which drops the module-path comments that would tie the bytes to the checkout's location;
+- no source map, for the same reason;
+- a banner defining `require` through `createRequire`. `yaml`'s CommonJS build requires `process`, which an ESM bundle cannot otherwise resolve, so without it the bundle fails at load.
+
+**Size**, measured on a trial bundle of these modules:
+
+| File | Bytes | gzip |
+|-|-|-|
+| `gates.mjs`, minified | 696 KB | 164 KB |
+| `tree-sitter-python.wasm` | 458 KB | 65 KB |
+| `web-tree-sitter.wasm` | 210 KB | 83 KB |
+| Total | 1.36 MB | 312 KB |
+
+Unminified, the bundle is 1.29 MB:
+
+- zod, 752 KB, half of it the locales `import { z }` keeps;
+- yaml, 266 KB;
+- web-tree-sitter's JavaScript, 156 KB;
+- Cogmo's modules, 65 KB.
+
+A run takes about 90 ms. Each release that changes the bundle adds one `gates.mjs` blob to every skills repo's history, through the toolchain commit. The wasm files change only with a grammar refresh or a web-tree-sitter bump.
+
+**Built, not committed.** tsup's `onSuccess` writes the three files to `dist/skills-gates/`, beside the wasm child. `loadReleaseToolchain` joins them into `.cogmo/` as it joins `cogmo_ctx/`. Running from source, it bundles them first into a temporary directory named by their digest, as `wasmChildEntry` does. The alternative is to commit them under `images/skills/toolchain/.cogmo/` with a drift test, as `CLAUDE.md` is. Churn decides against it:
+
+- **Churn.** In the 90 days to 2026-11-09, 13 commits on `main` changed the bundle's sources. 12 Dependabot PRs bumped one of its packages, 5 of them `zod`, `yaml` or `web-tree-sitter`. Committed, each change to the bytes would rewrite a minified file no reviewer reads, about 165 KB compressed in history per rewrite. A Dependabot PR would fail the drift test until someone pushed the regeneration. Built, none of them touches git.
+- **The boot's comparison.** The toolchain commit compares object ids, and each commit it makes costs every branch cut before it a `non_fast_forward`. So the bytes must not move while the sources stand still. Minified esbuild output depends only on the sources, the lockfile and the settings: two builds from different working directories gave identical bytes. The image builds once per release, and a boot from source of the same tree builds the same bytes. Committed bytes are stable by construction; built ones are stable by test (Parity).
+- **Tests.** The parity test bundles into a temporary directory in its setup, in well under a second. `.cogmo/verify`'s Python tests stub `node`, so the skills job in CI needs no Node. Committed, they could run the real bundle, but only with Node added to that job.
+- **The skills image** copies its toolchain from `images/skills/toolchain/`, so `/opt/cogmo-skills/toolchain/` lacks the bundle. Nothing there reads it: the image has no Node, and register's CPython checks read only `pyproject.toml` and `suppressions.py`.
+
+Committing would spare the loader one joined directory and its from-source build, which reuses the wasm child's.
+
+**The command.** `node .cogmo/gates.mjs skills/<name>`, from any working directory. `[proposed]` `node .cogmo/gates.mjs --dependencies skills/<name>` prints instead the manifest's declared dependency names, PEP 503-normalized, one per line, exit 0, so verify's Imports reads the manifest as register parses it; a manifest that does not parse exits 1 with its issues, as the gates run does. The path resolves against the repo root, the parent of the bundle's directory, as `verify`'s `ROOT` does.
+
+- **Reads:** `skills/<name>/SKILL.md` and `skills/<name>/skill.py` from the working tree, decoded as UTF-8 as register's `git show` read is.
+- **Reads nothing else:** no network, clock, environment or git, so the output is a function of the two files and the release.
+- **Enforced:** verify runs it under Node's permission model, with read access to `.cogmo/` and `skills/<name>/` and no other grant. A spawn, a worker, another read or, from Node 25, a network call fails instead of happening.
+
+On stdout it prints one line per string `RegisterResult.errors` would carry for those files, in register's order:
+
+- `missing_skill_md` or `missing_skill_py`, register's ids, naming the working-tree path;
+- each issue `parseManifest` reports, for a manifest that does not parse;
+- `skill_name_mismatch`;
+- the gates' and `wasm-lint`'s findings, as `<id>: skills/<name>/skill.py:<line>:<column>: <message>` ([Register-time gates](#register-time-gates-confirmed-except-where-marked) → Outcomes). Each stage rejects alone, as at register, so a Size finding hides the parse;
+- the classifier's refusal, once the gates pass: one line, its validation errors joined by `; `, as register reports it. The classifier's errors are not `SkillFinding`s, so the line has no id or position.
+
+| Exit | When | Output |
+|-|-|-|
+| 0 | every check passes | nothing |
+| 1 | a refusal terminal for the tip: any line above | one line or more on stdout |
+| 2 | the checks cannot run: anything but one argument naming a directory `skills/<name>/`; a file present but unreadable; a wasm file that does not load; a parse or walk that throws, register's `registrar_unavailable` (`parser`) | nothing on stdout; `gates: <detail>` on stderr |
+
+Node exits 1 with nothing on stdout when it fails before the entry runs or past its handlers: a missing or truncated bundle, a Node too old for its syntax, an uncaught error. So verify reads an exit 1 without a line as exit 2.
+
+**Capabilities.** The entry passes `BUILD_CAPABILITIES`. Capabilities reach only `computeRiskTier`'s tier and reasons, never `validation_errors`, so the verdict is register's whatever a deployment's flags.
+
+**In verify.** For each changed skill, in order:
+
+1. the gates;
+2. the suppression rule, over `skill.py` and `test_skill.py`;
+3. ruff;
+4. pyrefly;
+5. `pytest`.
+
+That is register's order: its host-side gates, then its CPython checks. Every check runs whatever an earlier one found, as now, so one run reports everything. The gates' lines print under `verify: <name>: gates`, as the suppression rule's print under its own label. verify exits 2 when the gates could not run for a skill, else 1 when any check failed, else 0.
+
+Without `node` on `PATH`, verify checks no skill. It prints `verify: node is not on PATH; register's gates need it` to stderr and exits 2, as it does for a missing base. A finding would tell the author to fix code that may be fine, and a pass would hide register's refusals. With no skill changed it passes without looking.
+
+`.cogmo/verify` runs in the coding task's sandbox (`devbase`, with Node 26 and uv) and wherever an author runs it. The skills image has no Node and never runs the bundle: S10's `verifying` runs the gate functions in-process on the host ([Register-time gates](#register-time-gates-confirmed-except-where-marked) → Interplay).
+
+**Parity.** One case table, `src/skills/gates-cases.ts`, holds per case a `SKILL.md`, a `skill.py`, and the lines and exit code expected. It covers each gate id, each stage's stop, `wasm_lint`, a classifier refusal, a manifest that does not parse, a name mismatch, a missing file, a pass, a column after non-ASCII text and a `\r\n` body. Two tests assert it:
+
+- in-process, each case through the shared step-4 function, as register calls it;
+- the CLI, bundled into a temporary directory by the release's build function, each case run under `node` with verify's grants, comparing stdout and the exit code.
+
+Both assert one table, so the bundle and register agree on every case in it. The CLI's test also pins exit 2 (a bad argument, a missing grammar). It also pins that two builds from different working directories give identical bytes, which the boot's comparison needs. `test_toolchain_verify.py` pins verify's side with a stub `node` on `PATH`: the order, each exit's mapping, and `node` missing. With no committed bundle there is no drift test.
+
+**`CLAUDE.md`.** The generated Checks section names the gates first in verify's list. Verify runs register's gates (`node .cogmo/gates.mjs`), the suppression rule, ruff, `ruff format --check`, pyrefly, Imports and pytest over each skill changed since `COGMO_VERIFY_BASE`, and a gates finding is the refusal register would make. The rules list under `skill.py` stays: it says what the gates refuse, and verify now checks it.
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| The checkout's `.cogmo/` lacks `gates.mjs` or a wasm file (an operator's edit; the toolchain commit writes `.cogmo/` as one tree) | verify exits 2, naming the file | not the author's to fix. **Residual:** `run-verify` spends the round, as for any verify failure, until the verify outcome separates an environment fault (todo.md → Skills autonomy) |
+| The checkout's toolchain is another release's: a branch cut before a release, a remote the boot's push did not reach, a toolchain commit by `cogmo setup` or `cogmo migrate-skills-remote` of a release other than serve's; or register runs in a `cogmo skills` of another release | verify judges with the checkout's release, register with its own process's | under one release they agree. **Residual:** verify passes what register refuses, and the attempt spends a round on register's rejection; or it refuses what register takes, and the author changes code needlessly. Serve's next boot commits its own toolchain again (the toolchain's failure modes), and each attempt merges `main` (S9) |
+| `node` missing | verify exits 2 before any skill | as the first row; `devbase` has Node |
+| Node too old for the bundle, or killed (out of memory, a signal) | exit 1 without a line, or another status | verify reads it as exit 2, never as findings or a pass |
+| A wasm file does not load (truncated, another web-tree-sitter's runtime) | the CLI exits 2, `gates:` naming it | as the first row. Register loads the server's own copies at boot (`bootstrapSkillRunner`), so it is unaffected |
+| A parse or walk throws, in a gate or the classifier | the CLI exits 2 with the parser's detail | register pauses on the same body as `registrar_unavailable` (`parser`): nothing is wrong with the tip, and a release fixes it |
+| `skills/<name>/` without `SKILL.md` or `skill.py` | `missing_skill_md` or `missing_skill_py`, exit 1 | register refuses the same tip the same way; the author adds the file |
+| The working tree differs from the commit (an edit after verify, a git filter or `eol` conversion) | verify's verdict covers bytes register does not read | register judges the tip and stays the floor |
+| The bundle's bytes vary between builds of one tree | a rebuilt image, or a boot from source, commits a toolchain that changes only the bundle, costing branches cut before it a `non_fast_forward` | the parity test's two-build comparison fails such a change before it ships |
+
+**Residuals.** The bundle holds what the shared step-4 function holds, nothing more:
+
+- **Imports**, which reads the lockfile's venv, stays register's CPython check and moves into `.cogmo/verify` on its own. CPython's compile, Syntax's other half, stays register's too; ruff's parse catches most of what it refuses.
+- **The lockfile compile, Pyodide compatibility and the schema import** need a sandbox, the index or a runtime.
+- **Owned paths and the layout checks** read commits (`main..tip`), which a working tree does not have. verify's changed-skill list is not register's `locateSkill`.
+- **A check register adds to step 4 outside the shared function** is register's alone.
 
 ### Review stage
 
