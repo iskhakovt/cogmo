@@ -50,10 +50,11 @@ const MAX_SUPPRESSIONS = 100;
 
 /**
  * The verify stage's ruff rule set (design/skills.md → Verify stage, Types and
- * lint), with PGH004, which refuses a `noqa` that names no rule
- * (Register-time CPython checks → Suppressions).
+ * lint), with PGH004, which refuses a `noqa` that names no rule, and RUF100
+ * and RUF102, which refuse one that suppresses nothing or names no rule ruff
+ * knows (Register-time CPython checks → Suppressions).
  */
-const RUFF_RULES = ["E", "F", "B", "BLE", "S", "ASYNC", "PGH004"];
+const RUFF_RULES = ["E", "F", "B", "BLE", "S", "ASYNC", "PGH004", "RUF100", "RUF102"];
 
 /** The pins `pyproject.toml` derives from the skills image's build. */
 export interface ToolchainPins {
@@ -137,6 +138,9 @@ export function renderToolchainPyproject(pins: ToolchainPins): string {
     "[tool.pyrefly]",
     'search-path = [".cogmo"]',
     'enabled-ignores = ["pyrefly"]',
+    "",
+    "[tool.pyrefly.errors]",
+    "unused-ignore = true",
     "",
     "[tool.pytest.ini_options]",
     'pythonpath = [".cogmo"]',
@@ -325,9 +329,11 @@ export function renderToolchainClaudeMd(): string {
     "",
     "## Checks",
     "",
-    `${code(SKILLS_VERIFY_COMMAND)} runs ruff, pyrefly and pytest over each skill changed since \`COGMO_VERIFY_BASE\`, the commit the branch was cut from, and refuses the suppressions register refuses. It must pass before the work is done.`,
+    `${code(SKILLS_VERIFY_COMMAND)} checks each skill changed since \`COGMO_VERIFY_BASE\`, the commit the branch was cut from, in this order: register's gates, whose findings are the refusals register would make; the suppression rule below; ruff; \`ruff format --check\`; pyrefly; its imports, each from the standard library, the runtime's pydantic and \`cogmo_ctx\`, or a declared dependency; and pytest. It must pass before the work is done. It reads the gates from \`COGMO_GATES_DIR\`, which a Cogmo session sets, and runs them with \`node\`.`,
     "",
-    `Fix a finding rather than suppress it. A suppression names its rule and covers one line: \`# noqa: <code>\` or \`# ruff: ignore[<code>]\` for ruff, \`# pyrefly: ignore[<error>]\` for pyrefly; pyrefly ignores \`# type: ignore\`. Register refuses a pragma that covers more (\`# ruff: noqa\`, \`# ruff: file-ignore\`, \`# ruff: disable\`, \`# pyrefly: ignore-errors\`), one that names no rule (\`# noqa\`, \`# pyrefly: ignore\`), and more than ${MAX_SUPPRESSIONS} in a file, and records each suppression on the deploy for review.`,
+    "The layout is the formatter's: `uv run ruff format skills/<name>` writes it.",
+    "",
+    `Fix a finding rather than suppress it. A suppression names its rule and covers one line: \`# noqa: <code>\` or \`# ruff: ignore[<code>]\` for ruff, \`# pyrefly: ignore[<error>]\` for pyrefly; pyrefly ignores \`# type: ignore\`. One that suppresses nothing, or names no rule the tool knows, is itself a finding. Register refuses a pragma that covers more (\`# ruff: noqa\`, \`# ruff: file-ignore\`, \`# ruff: disable\`, \`# pyrefly: ignore-errors\`), one that names no rule (\`# noqa\`, \`# pyrefly: ignore\`), the formatter's (\`# fmt: off\`, \`# fmt: on\`, \`# fmt: skip\`, \`# yapf: disable\`, \`# yapf: enable\`), and more than ${MAX_SUPPRESSIONS} in a file, and records each suppression on the deploy for review.`,
     "",
   ].join("\n");
 }

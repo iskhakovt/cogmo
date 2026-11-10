@@ -4,8 +4,9 @@ A suppression names its rule and covers one line: ruff's `# noqa: <code>` and `#
 `# pyrefly: ignore[<error>]`. A pragma that covers more is refused: ruff's `# ruff: noqa` and `# flake8: noqa` with
 or without codes, `# ruff: file-ignore[...]` and `# ruff: disable[...]`, and pyrefly's `# pyrefly: ignore-errors`;
 so is pyrefly's bare `# pyrefly: ignore`, which names no error. ruff's own PGH004 refuses a bare `# noqa`, and the
-configuration has pyrefly honor only its own pragmas, so `# type: ignore` suppresses nothing. A file carries at most
-`MAX_SUPPRESSIONS`.
+configuration has pyrefly honor only its own pragmas, so `# type: ignore` suppresses nothing. The formatter's pragmas
+(`# fmt: off`, `# fmt: on`, `# fmt: skip`, `# yapf: disable`, `# yapf: enable`) are refused and recorded as no
+suppression, since a skill's layout is `ruff format`'s. A file carries at most `MAX_SUPPRESSIONS`.
 
 Part of Cogmo's toolchain, which Cogmo replaces on each release.
 """
@@ -26,6 +27,7 @@ _NOQA = re.compile(r"#\s*[Nn][Oo][Qq][Aa]")
 _NOQA_CODES = re.compile(r"\s*:(.*)", re.DOTALL)
 _PYREFLY_FILE = re.compile(r"#\s*pyrefly:\s*ignore-errors")
 _PYREFLY = re.compile(r"#\s*pyrefly:\s*ignore(.*)", re.DOTALL)
+_FORMATTER = re.compile(r"#\s*(fmt:\s*(?:off|on|skip)|yapf:\s*(?:disable|enable))(?![\w-])")
 
 # The codes a rule can have; another names no rule, so suppresses nothing and is not recorded.
 _RUFF_CODE = re.compile(r"[A-Z]+[0-9]+")
@@ -112,6 +114,8 @@ def _refusal(comment: str) -> str | None:
         return f"`# pyrefly: ignore-errors` exempts the whole file; {_PYREFLY_PER_LINE}"
     if (matched := _PYREFLY.match(comment)) and _pyrefly_blanket(matched.group(1)):
         return f"`# pyrefly: ignore` names no error; {_PYREFLY_PER_LINE}"
+    if matched := _FORMATTER.match(comment):
+        return f"`# {matched.group(1)}` exempts code from `ruff format`, whose layout every skill keeps"
     return None
 
 

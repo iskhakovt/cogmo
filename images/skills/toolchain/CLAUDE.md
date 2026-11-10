@@ -92,6 +92,8 @@ printf '%s\n' httpx==0.27.0 | uv pip compile - > skills/<name>/requirements.lock
 
 ## Checks
 
-`uv run --locked --group dev .cogmo/verify` runs ruff, pyrefly and pytest over each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, and refuses the suppressions register refuses. It must pass before the work is done.
+`uv run --locked --group dev .cogmo/verify` checks each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, in this order: register's gates, whose findings are the refusals register would make; the suppression rule below; ruff; `ruff format --check`; pyrefly; its imports, each from the standard library, the runtime's pydantic and `cogmo_ctx`, or a declared dependency; and pytest. It must pass before the work is done. It reads the gates from `COGMO_GATES_DIR`, which a Cogmo session sets, and runs them with `node`.
 
-Fix a finding rather than suppress it. A suppression names its rule and covers one line: `# noqa: <code>` or `# ruff: ignore[<code>]` for ruff, `# pyrefly: ignore[<error>]` for pyrefly; pyrefly ignores `# type: ignore`. Register refuses a pragma that covers more (`# ruff: noqa`, `# ruff: file-ignore`, `# ruff: disable`, `# pyrefly: ignore-errors`), one that names no rule (`# noqa`, `# pyrefly: ignore`), and more than 100 in a file, and records each suppression on the deploy for review.
+The layout is the formatter's: `uv run ruff format skills/<name>` writes it.
+
+Fix a finding rather than suppress it. A suppression names its rule and covers one line: `# noqa: <code>` or `# ruff: ignore[<code>]` for ruff, `# pyrefly: ignore[<error>]` for pyrefly; pyrefly ignores `# type: ignore`. One that suppresses nothing, or names no rule the tool knows, is itself a finding. Register refuses a pragma that covers more (`# ruff: noqa`, `# ruff: file-ignore`, `# ruff: disable`, `# pyrefly: ignore-errors`), one that names no rule (`# noqa`, `# pyrefly: ignore`), the formatter's (`# fmt: off`, `# fmt: on`, `# fmt: skip`, `# yapf: disable`, `# yapf: enable`), and more than 100 in a file, and records each suppression on the deploy for review.

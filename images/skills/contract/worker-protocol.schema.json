@@ -488,6 +488,7 @@
                     "enum": [
                       "syntax",
                       "ruff",
+                      "format",
                       "pyrefly",
                       "imports",
                       "suppression"

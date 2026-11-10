@@ -4,25 +4,36 @@
 Run from the skills repo as `uv run --locked --group dev .cogmo/verify`.
 `COGMO_VERIFY_BASE` names the commit the branch was cut from. A skill is
 checked when a path under `skills/<name>/` differs from that commit in the
-working tree: tracked, or untracked and not ignored. Each is checked with
-the suppression rule register applies (`.cogmo/suppressions.py`), ruff,
-then pyrefly with the skill's directory on its search path, then pytest
-of its `test_skill.py`; pyrefly and pytest run with the skill's
-`requirements.lock` installed when it has one. Exits 0 when every check
+working tree: tracked, or untracked and not ignored. Each is checked, every
+check running whatever an earlier one found, with register's gates
+(`gates.mjs` in `COGMO_GATES_DIR`, under `node`), the suppression rule
+register applies (`.cogmo/suppressions.py`), ruff, `ruff format --check`,
+pyrefly with the skill's directory on its search path, the Imports rule
+register applies (`.cogmo/imports.py`) against the dependencies its
+`SKILL.md` declares, then pytest of its `test_skill.py`. pyrefly and pytest
+run with the skill's `requirements.lock` installed when it has one, and the
+Imports rule reads that lockfile's environment. Exits 0 when every check
 passes or no skill changed, 1 when a check fails, 2 when the base is
-missing or unknown.
+missing or unknown, when a skill changed and `COGMO_GATES_DIR` or `node` is
+missing, or when the gates could not run.
 
 Part of Cogmo's toolchain, which Cogmo replaces on each release.
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import tokenize
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE_VARIABLE = "COGMO_VERIFY_BASE"
+GATES_VARIABLE = "COGMO_GATES_DIR"
+# The gates bundle and the two files it loads by path.
+GATES_FILES = ("gates.mjs", "web-tree-sitter.wasm", "tree-sitter-python.wasm")
 SKILLS_DIR = "skills"
 
 
@@ -41,6 +52,20 @@ def resolve_base() -> str | None:
         print(f"verify: {BASE_VARIABLE}={base} names no commit in this repo", file=sys.stderr)
         return None
     return resolved.stdout.strip()
+
+
+def resolve_gates() -> Path | None:
+    """The directory `COGMO_GATES_DIR` names, holding the gates' three files, or None after saying why it does not."""
+    value = os.environ.get(GATES_VARIABLE, "")
+    if not value:
+        print(f"verify: {GATES_VARIABLE} is not set; it names the directory holding register's gates", file=sys.stderr)
+        return None
+    gates = Path(value).resolve()
+    missing = [name for name in GATES_FILES if not (gates / name).is_file()]
+    if missing:
+        print(f"verify: {GATES_VARIABLE}={value} holds no {', '.join(missing)}", file=sys.stderr)
+        return None
+    return gates
 
 
 def listed(*args: str) -> list[str]:
@@ -67,6 +92,33 @@ def with_requirements(skill: Path, command: list[str]) -> list[str]:
     return command
 
 
+def run_gates(node: str, gates: Path, skill: Path, *options: str) -> tuple[int, list[str]] | None:
+    """`gates.mjs` on the skill, as its exit, 0 or 1, and its stdout's lines; None, after saying why, when it could
+    not run.
+
+    It runs with `NODE_OPTIONS` cleared and under Node's permission model, reading only its own directory and the
+    skill's. Node exits 1 with nothing on stdout when it fails before the bundle runs, so only an exit 1 with a line
+    is a refusal.
+    """
+    env = {key: value for key, value in os.environ.items() if key != "NODE_OPTIONS"}
+    command = [
+        node,
+        "--permission",
+        f"--allow-fs-read={gates}",
+        f"--allow-fs-read={ROOT / skill}",
+        str(gates / "gates.mjs"),
+        *options,
+        str(skill),
+    ]
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, check=False)
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode == 0 or (result.returncode == 1 and lines):
+        return result.returncode, lines
+    detail = result.stderr.strip() or f"node exited {result.returncode}" + ("" if lines else " with nothing on stdout")
+    print(f"verify: {skill.name}: the gates could not run: {detail}", file=sys.stderr, flush=True)
+    return None
+
+
 def refused_pragmas(skill: Path) -> list[str]:
     """Each pragma the suppression rule refuses in the skill's Python files, as `path:line:column: message`."""
     # The rule register applies, beside this script; importing it writes no bytecode into the repo.
@@ -85,31 +137,110 @@ def refused_pragmas(skill: Path) -> list[str]:
     return refused
 
 
-def check(name: str) -> list[str]:
-    """Run each check on skill `name`, returning the ones that failed."""
-    skill = Path(SKILLS_DIR) / name
-    failed = []
-    print(f"verify: {name}: suppressions", flush=True)
-    refused = refused_pragmas(skill)
-    for line in refused:
-        print(line, flush=True)
-    if refused:
-        failed.append("suppressions")
-    checks = [
-        ("ruff", ["ruff", "check", str(skill)]),
-        (
-            "pyrefly",
-            with_requirements(skill, ["pyrefly", "check", "--search-path", str(skill), str(skill)]),
-        ),
-        # Through the interpreter first on PATH, which sees the skill's
-        # dependencies; the `pytest` script runs the project's alone.
-        ("pytest", with_requirements(skill, ["python", "-m", "pytest", "-q", str(skill / "test_skill.py")])),
+def lockfile_site_packages(lockfile: Path, directory: str) -> str | None:
+    """The site-packages of a fresh environment holding the lockfile's distributions and nothing else, built in
+    `directory` on this interpreter as register builds the skill's venv; or None after saying why it was not built.
+
+    The environment's own interpreter names it (`sysconfig`, under `-I -S`, so no `.pth` a distribution installs runs).
+    """
+    env = os.path.join(directory, "env")
+    python = os.path.join(env, "bin", "python")
+    commands = [
+        ["uv", "venv", "--quiet", "--no-project", "--python", sys.executable, env],
+        ["uv", "pip", "sync", "--quiet", "--python", python, "--require-hashes", "--only-binary=:all:", str(lockfile)],
+        [python, "-I", "-S", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
     ]
-    for label, command in checks:
+    output = ""
+    for command in commands:
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            print(f"{lockfile}: its environment was not built: {result.stderr.strip()}", flush=True)
+            return None
+        output = result.stdout.strip()
+    return output
+
+
+def refused_imports(skill: Path, dependencies: list[str]) -> list[str]:
+    """Each import the Imports rule refuses in the skill's `skill.py`, as `path:line:column: message`."""
+    # The rule register applies, beside this script, as the suppression rule is.
+    sys.dont_write_bytecode = True
+    from imports import installed_modules, scan
+
+    path = skill / "skill.py"
+    if not (ROOT / path).is_file():
+        return []
+    installed: dict[str, frozenset[str]] = {}
+    lockfile = skill / "requirements.lock"
+    with tempfile.TemporaryDirectory(prefix="cogmo-verify-") as directory:
+        if (ROOT / lockfile).is_file():
+            site_packages = lockfile_site_packages(lockfile, directory)
+            if site_packages is None:
+                return [f"{path}: the Imports rule cannot read the lockfile's environment"]
+            installed = installed_modules(site_packages)
+        try:
+            refusals = scan((ROOT / path).read_text(encoding="utf-8"), dependencies, installed)
+        except (SyntaxError, RecursionError, MemoryError, UnicodeDecodeError) as e:
+            return [f"{path}: the Imports rule cannot read it: {e!r}"]
+    return [f"{path}:{r.line}:{r.column}: {r.message}" for r in refusals]
+
+
+@dataclass
+class Checked:
+    """A skill's checks that failed, and those that could not run."""
+
+    failed: list[str] = field(default_factory=list)
+    unrun: list[str] = field(default_factory=list)
+
+
+def check(name: str, node: str, gates: Path) -> Checked:
+    """Run each check on skill `name`, in verify's order, recording the ones that failed or could not run."""
+    skill = Path(SKILLS_DIR) / name
+    checked = Checked()
+
+    def report(label: str, lines: list[str]) -> None:
+        for line in lines:
+            print(line, flush=True)
+        if lines:
+            checked.failed.append(label)
+
+    def run(label: str, command: list[str]) -> None:
         print(f"verify: {name}: {label}", flush=True)
         if subprocess.run(command, cwd=ROOT, check=False).returncode != 0:
-            failed.append(label)
-    return failed
+            checked.failed.append(label)
+
+    print(f"verify: {name}: gates", flush=True)
+    ran = run_gates(node, gates, skill)
+    if ran is None:
+        checked.unrun.append("gates")
+    else:
+        status, lines = ran
+        for line in lines:
+            print(line, flush=True)
+        if status == 1:
+            checked.failed.append("gates")
+
+    print(f"verify: {name}: suppressions", flush=True)
+    report("suppressions", refused_pragmas(skill))
+
+    run("ruff", ["ruff", "check", str(skill)])
+    files = [str(skill / file) for file in ("skill.py", "test_skill.py") if (ROOT / skill / file).is_file()]
+    if files:
+        run("format", ["ruff", "format", "--check", *files])
+    run("pyrefly", with_requirements(skill, ["pyrefly", "check", "--search-path", str(skill), str(skill)]))
+
+    print(f"verify: {name}: imports", flush=True)
+    declared = run_gates(node, gates, skill, "--dependencies")
+    if declared is None:
+        checked.unrun.append("imports")
+    elif declared[0] == 1:
+        print(f"verify: {name} skipped imports: the gates refused its SKILL.md", flush=True)
+    else:
+        report("imports", refused_imports(skill, declared[1]))
+
+    # Through the interpreter first on PATH, which sees the skill's
+    # dependencies; the `pytest` script runs the project's alone.
+    run("pytest", with_requirements(skill, ["python", "-m", "pytest", "-q", str(skill / "test_skill.py")]))
+    return checked
 
 
 def main() -> int:
@@ -121,10 +252,22 @@ def main() -> int:
     if not skills:
         print("verify: no skill changed")
         return 0
-    failures = {name: failed for name in skills if (failed := check(name))}
-    for name, failed in failures.items():
-        print(f"verify: {name} failed {', '.join(failed)}", file=sys.stderr)
-    if failures:
+    gates = resolve_gates()
+    if gates is None:
+        return 2
+    node = shutil.which("node")
+    if node is None:
+        print("verify: node is not on PATH; register's gates run under it, so no skill is checked", file=sys.stderr)
+        return 2
+    results = {name: check(name, node, gates) for name in skills}
+    for name, checked in results.items():
+        if checked.unrun:
+            print(f"verify: {name} could not run {', '.join(checked.unrun)}", file=sys.stderr)
+        if checked.failed:
+            print(f"verify: {name} failed {', '.join(checked.failed)}", file=sys.stderr)
+    if any(checked.unrun for checked in results.values()):
+        return 2
+    if any(checked.failed for checked in results.values()):
         return 1
     print(f"verify: {', '.join(skills)} passed")
     return 0
