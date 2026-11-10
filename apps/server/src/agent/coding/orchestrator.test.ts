@@ -11,6 +11,7 @@ import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
   LocalDockerSessionStateSchema,
+  type ReadOnlyDirSpec,
   type SandboxClient,
   type SandboxSession,
 } from "../../sandbox/index.js";
@@ -30,6 +31,7 @@ import {
   type PlanStreamHandle,
 } from "./progress-stream.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
+import type { RepoSessionDir } from "./task-sandbox.js";
 
 const execFileP = promisify(execFile);
 
@@ -79,6 +81,18 @@ const stepRun = makeStepRun();
 
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 
+/** The skills repo's gates bundle, as the composition root hands it over. */
+const GATES_DIR: ReadOnlyDirSpec = {
+  hostDir: "/var/lib/cogmo/gates/d1",
+  containerDir: "/tmp/cogmo-gates",
+  digest: "d1",
+};
+
+/** {@link GATES_DIR} and its variable, for the sessions of `repoName`'s tasks. */
+function repoSessionDir(repoName: string): RepoSessionDir {
+  return { repoName, readOnlyDir: GATES_DIR, env: { COGMO_GATES_DIR: "/tmp/cogmo-gates" } };
+}
+
 async function seedRepo(name = "cogmo"): Promise<CodingRepoRow> {
   return tx((trx) =>
     store
@@ -121,6 +135,7 @@ interface FakeSandboxResult {
     image: string;
     worktreePath: string | undefined;
     env: Readonly<Record<string, string>> | undefined;
+    readOnlyDir: ReadOnlyDirSpec | undefined;
   }[];
   stopCalls: string[];
   /** When non-null, `tryResumeByTaskId` returns a session derived from this state. */
@@ -168,6 +183,7 @@ function fakeSandbox(opts: FakeContainerOpts = {}): FakeSandboxResult {
         image: spec.image,
         worktreePath: spec.worktree?.hostPath,
         env: spec.env,
+        readOnlyDir: spec.readOnlyDir,
       });
       // Insert a real `containers` row so coding_tasks.container_id FK is
       // satisfied. Uses the per-test instanceId seeded in beforeEach.
@@ -352,6 +368,7 @@ function makeDeps(
     taskTtlMs: 60_000,
     worktreesDir: join(baseDir, "worktrees"),
     askpassBaseDir: join(baseDir, "askpass"),
+    repoSessionDir: null,
     openPlanStream: async () => NULL_PLAN_STREAM,
     ...overrides,
   };
@@ -459,6 +476,58 @@ describe("runCodingTask", () => {
     });
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.worktreeAssignment?.baseSha).toBe(head.trim());
+  });
+
+  it("gives the plan container of a task on the directory's repo the directory and its variable, and passes it to every resume", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-GATES" },
+      { kind: "plan_ready", plan: "## Plan\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+    const deps = makeDeps({ sandbox, backend, repoSessionDir: repoSessionDir(repo.name) });
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("awaiting_approval");
+    expect(sessionCreates(createCalls).map((c) => c.readOnlyDir)).toEqual([GATES_DIR]);
+    expect(createCalls[0]?.env).toMatchObject({ COGMO_GATES_DIR: "/tmp/cogmo-gates" });
+    expect(vi.mocked(sandbox.resume).mock.calls.map((call) => call[1])).toEqual([
+      { readOnlyDir: GATES_DIR },
+    ]);
+  });
+
+  it("gives the plan container of another repo's task neither, and its resumes nothing", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-OTHER" },
+      { kind: "plan_ready", plan: "## Plan\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+    const deps = makeDeps({ sandbox, backend, repoSessionDir: repoSessionDir("skills") });
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("awaiting_approval");
+    expect(createCalls.map((c) => c.readOnlyDir)).toEqual([undefined]);
+    expect(createCalls[0]?.env).not.toHaveProperty("COGMO_GATES_DIR");
+    expect(vi.mocked(sandbox.resume).mock.calls.map((call) => call[1])).toEqual([{}]);
   });
 
   it("allocates on an empty parent repo, saving no base and giving the session no COGMO_VERIFY_BASE", async () => {
@@ -1653,6 +1722,63 @@ describe("runCodingExecute", () => {
     ]);
     expect(stream.completed).toEqual([true]);
     expect(stream.failed).toEqual([]);
+  });
+
+  it("passes a task on the directory's repo its directory at the try-resume and the session's resume", async () => {
+    const repo = await seedRepo();
+    const { task, dockerId } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    vi.mocked(sandbox.tryResumeByTaskId).mockImplementation(async (taskId) => ({
+      state: { type: "local-docker", taskId, containerRowId: "row-x", dockerId },
+      execStreaming: vi.fn(async () => noopExec()),
+      exec: vi.fn(),
+    }));
+    const backend = executeBackendYielding([
+      { kind: "session_started", sessionId: "sess-from-plan" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, repoSessionDir: repoSessionDir(repo.name) }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("pending_verify");
+    expect(vi.mocked(sandbox.tryResumeByTaskId).mock.calls).toEqual([
+      [task.id, { readOnlyDir: GATES_DIR }],
+    ]);
+    expect(vi.mocked(sandbox.resume).mock.calls.map((call) => call[1])).toEqual([
+      { readOnlyDir: GATES_DIR },
+    ]);
+  });
+
+  it("gives a recreated container of a task on the directory's repo the directory and its variable", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+    const backend = executeBackendYielding([
+      { kind: "session_started", sessionId: "sess-from-plan" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, repoSessionDir: repoSessionDir(repo.name) }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("pending_verify");
+    expect(sessionCreates(createCalls).map((c) => c.readOnlyDir)).toEqual([GATES_DIR]);
+    expect(sessionCreates(createCalls)[0]?.env).toMatchObject({
+      COGMO_GATES_DIR: "/tmp/cogmo-gates",
+    });
   });
 
   it("records a non-Error throw as the failure reason", async () => {

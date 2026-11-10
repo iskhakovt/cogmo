@@ -16,13 +16,35 @@ import {
 import { createCodingTaskReconcile } from "../agent/coding/reconcile-on-failure.js";
 import { createCodingService } from "../agent/coding/service.js";
 import { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
+import type { RepoSessionDir } from "../agent/coding/task-sandbox.js";
 import { createCodingVerifyOrchestrator } from "../agent/coding/verify-orchestrator.js";
 import { env } from "../env.js";
 import { inngest } from "../inngest/index.js";
 import { createSandboxReaper } from "../sandbox/reaper.js";
+import { GATES_DIR_VARIABLE, GATES_SESSION_DIR } from "../skills/gates-files.js";
+import type { PublishedGatesBundle } from "../skills/publish-gates-bundle.js";
+import { SKILLS_CODING_REPO_NAME } from "../skills/repo.js";
 import type { SkillRunnerImpl } from "../skills/runner.js";
 import { DEFAULT_CODING_RESOURCE_LIMITS } from "./limits.js";
 import type { BootstrapOptions, CoreDeps, SandboxDeps } from "./stages.js";
+
+/**
+ * What every session of a skills-repo task receives: the release's gates
+ * bundle at `/tmp/cogmo-gates/`, and `COGMO_GATES_DIR` naming it, which the
+ * repo's `.cogmo/verify` runs register's gates from (design/skills.md → The
+ * gates in verify → Delivery).
+ */
+function skillsRepoGates(bundle: PublishedGatesBundle): RepoSessionDir {
+  return {
+    repoName: SKILLS_CODING_REPO_NAME,
+    readOnlyDir: {
+      hostDir: bundle.hostDir,
+      containerDir: GATES_SESSION_DIR,
+      digest: bundle.digest,
+    },
+    env: { [GATES_DIR_VARIABLE]: GATES_SESSION_DIR },
+  };
+}
 
 export function createCodingRuntime(
   core: CoreDeps,
@@ -55,6 +77,9 @@ export function createCodingRuntime(
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const codingFunctions: any[] = [];
   if (sandbox.codingSandbox) {
+    if (sandbox.gatesBundle === null) {
+      throw new Error("a coding sandbox is configured but the boot published no gates bundle");
+    }
     // Every coding function reads tasks and repos, and authenticates to
     // GitHub through the stored identity: the plan/execute orchestrators use
     // it to push dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on
@@ -73,6 +98,7 @@ export function createCodingRuntime(
       defaultResourceLimits: DEFAULT_CODING_RESOURCE_LIMITS,
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
+      repoSessionDir: skillsRepoGates(sandbox.gatesBundle),
       ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
     };
     const orchestratorDeps = {

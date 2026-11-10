@@ -78,6 +78,31 @@ export interface AskpassSpec {
   containerDir: string;
 }
 
+/**
+ * A directory of files the session reads at `containerDir`. It is the
+ * caller's and outlives every session, so no backend provisions or cleans it
+ * per task: Local-Docker binds `hostDir` there read-only at create, and
+ * Daytona uploads each regular file directly in it, at create and again at a
+ * resume that asks for another `digest`.
+ */
+export interface ReadOnlyDirSpec {
+  /** On the host: the Docker daemon's path to bind, and the one Cogmo reads to upload. */
+  hostDir: string;
+  containerDir: string;
+  /** Names the directory's content; a session records the one it last received. */
+  digest: string;
+}
+
+/** What a caller re-attaching to a session passes beside its state. */
+export interface ResumeOptions {
+  /**
+   * The session's current read-only directory. Daytona uploads it when its
+   * digest differs from the one the state records, an absent record
+   * included; Local-Docker ignores it, since a bind cannot change.
+   */
+  readOnlyDir?: ReadOnlyDirSpec;
+}
+
 /** Logical specification for a brand-new sandbox session. */
 export interface SessionSpec {
   /** Logical task id — propagates to backend lineage tracking and labels. */
@@ -108,6 +133,12 @@ export interface SessionSpec {
    */
   depsCacheVolume?: DepsCacheVolumeSpec;
   askpass?: AskpassSpec;
+  /**
+   * Files the session reads (`ReadOnlyDirSpec`). Daytona uploads them after
+   * `askpass` and before the clone; a failed upload deletes the sandbox and
+   * fails `create`, as a failed askpass upload does.
+   */
+  readOnlyDir?: ReadOnlyDirSpec;
   /**
    * Per-task escape hatch: drop sysbox isolation and run under plain `runc`.
    * Reserved for workloads that break under sysbox (rare). Local-Docker
@@ -191,6 +222,11 @@ export const DaytonaSessionStateSchema = z.object({
   taskId: z.string().min(1),
   /** Daytona's primary key for the sandbox. Stable across stop/start cycles. */
   sandboxId: z.string().min(1),
+  /**
+   * The digest of the `readOnlyDir` last uploaded into the sandbox; absent
+   * when none was, which a resume given one treats as a different digest.
+   */
+  readOnlyDirDigest: z.string().min(1).optional(),
 });
 export type DaytonaSessionState = z.infer<typeof DaytonaSessionStateSchema>;
 
@@ -262,9 +298,12 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
    * factory — verifies the underlying sandbox is still reachable, throws
    * if it's gone. Used by orchestrators that crossed an Inngest
    * `step.run` boundary (which can only return JSON-serializable values,
-   * not handles).
+   * not handles). Given `opts.readOnlyDir`, Daytona uploads it when its
+   * digest differs from the state's and returns a session whose state
+   * records the one the sandbox now holds; a failed upload is logged and
+   * keeps the session, its state recording the digest it had.
    */
-  resume(state: TState): Promise<SandboxSession<TState>>;
+  resume(state: TState, opts?: ResumeOptions): Promise<SandboxSession<TState>>;
 
   /**
    * Discover the live root session (the depth-0 container the
@@ -276,9 +315,11 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
    * a prior session may or may not still exist. Child containers
    * spawned by the task (testcontainers etc.) are deliberately
    * ignored — the orchestrator wants the root, not whatever the task
-   * spawned underneath it.
+   * spawned underneath it. It cannot see the digest an earlier create
+   * uploaded, so Daytona, given `opts.readOnlyDir`, always uploads it, as
+   * `resume` does an absent record.
    */
-  tryResumeByTaskId(taskId: string): Promise<SandboxSession<TState> | null>;
+  tryResumeByTaskId(taskId: string, opts?: ResumeOptions): Promise<SandboxSession<TState> | null>;
 
   /** Tear down the session and its underlying sandbox (cascade). Idempotent. */
   delete(session: SandboxSession<TState>): Promise<void>;

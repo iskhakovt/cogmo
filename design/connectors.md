@@ -107,7 +107,7 @@ When cogmo ends a session, nothing more is sent on it, and the stream closes wit
 | Table / column | Shape | Why |
 |-|-|-|
 | `connectors` | `id`; `name TEXT NOT NULL`, unique among `active` rows; `kind connector_kind NOT NULL` (`coding`); `status connector_status NOT NULL` (`active`, `revoked`); `token_hash TEXT NOT NULL UNIQUE`; `revoked_at TIMESTAMPTZ`, set exactly when `revoked` (CHECK); `created_at` | Registry and auth. A revoked row stays, so the tasks that ran on it keep their foreign key, and its name can be added again. Whether a connector is connected is process memory, not a column. |
-| `coding_repos.connector_id` | `uuid` FK → `connectors.id`, nullable, `ON DELETE RESTRICT` | Null runs the repo's tasks in the built-in sandbox. |
+| `coding_repos.connector_id` | `uuid` FK → `connectors.id`, nullable, `ON DELETE RESTRICT` | Null runs the repo's tasks in the built-in sandbox. Setting it on the skills repo is refused: its sessions need `COGMO_VERIFY_BASE` and `COGMO_GATES_DIR`, which no connector job carries yet ([skills.md → The gates in verify](skills.md#the-gates-in-verify-proposed) → Delivery). |
 | `coding_tasks.connector_id` | `uuid` FK → `connectors.id`, nullable, `ON DELETE RESTRICT` | Copied from the repo at insert, so repointing a repo never moves a running task. |
 | `coding_tasks.session_id` | unchanged column | Holds `PlanResult.agent_session_id`, which execute passes back as `ExecuteSpec.agent_session_id`. |
 | `WorktreeAssignmentSchema` | new variant `{ type: "connector", branch }` | The work branch. The workspace path is the connector's. |
@@ -275,7 +275,7 @@ A channel connector exposes the per-channel `Transport` from [operator-facade.md
 ## Slices `[proposed]`
 
 1. `packages/connector-proto` and its CI checks, with the generated code excluded from Biome. `src/connector/`: the server, auth, hub, store and migration, plus its place in the shutdown order. `cogmo connector add | rotate | revoke | list`, and the unit tier. Docs: the AGENTS.md module table, `store-pattern.md`, and `infrastructure.md` → Shutdown.
-2. Coding on a connector: the columns, the CHECKs and the assignment variant; `revoke` refusing while a repo points at the connector; the dispatching steps; the four reasons; the session's held tasks and the release sweep; the integration test. Docs: `coding-delegation.md`'s schema block, step table and failure-reason table.
+2. Coding on a connector: the columns, the CHECKs and the assignment variant; refusing a connector for the skills repo, with a test; `revoke` refusing while a repo points at the connector; the dispatching steps; the four reasons; the session's held tasks and the release sweep; the integration test. Docs: `coding-delegation.md`'s schema block, step table and failure-reason table.
 3. The Paseo spike, then `connectors/paseo`, the contract suite, and the protovalidate annotations.
 4. Channel connectors, after operator-facade slice 3.
 

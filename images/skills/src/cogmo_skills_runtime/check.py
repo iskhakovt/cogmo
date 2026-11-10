@@ -41,8 +41,8 @@ MAX_MESSAGE = 400
 # Lines end where CPython, ruff and pyrefly all end them.
 _NEWLINE = re.compile(r"\r\n|\r|\n")
 
-# What a `format` finding tells the author to run; the request does not carry the skill's name.
-_FORMAT_FIX = "`uv run ruff format skills/<name>`"
+# What a `format` finding tells the author to run on the file its prefix names.
+_FORMAT_FIX = "`uv run ruff format` on it"
 
 
 @dataclass(frozen=True)

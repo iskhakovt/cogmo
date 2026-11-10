@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { defineConfig, type Options } from "tsup";
-import { buildGatesBundle, GATES_BUNDLE_DIR } from "./src/skills/gates-bundle.js";
+import { buildGatesBundle } from "./src/skills/gates-bundle.js";
+import { GATES_BUNDLE_DIR } from "./src/skills/gates-files.js";
 import { buildWasmChild } from "./src/skills/worker-wasm/child-bundle.js";
 
 const OUT_DIR = "dist";

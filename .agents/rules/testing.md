@@ -77,6 +77,7 @@ Each integration file gets its own state from `test/integration-setup-per-file.t
 | Seeded user | that seed; the owner `bootstrap()` resolves, and the id of its Hindsight bank | `fileDefaultUserId()` |
 | llmock | loads `suites/<file>/` (Cassettes above) | `fileLlmockUrl()` |
 | Skills bare repo | a fresh directory under `inject("skillsRoot")`, since every `bootstrap()` initializes and registers the repo there | `COGMO_SKILLS_PATH` |
+| Gates root | a fresh directory under `SANDBOX_ASKPASS_DIR`, since every `bootstrap()` with a sandbox publishes the gates bundle there and removes the temporary directories it finds | `SANDBOX_GATES_DIR` |
 
 Per worker slot, `globalSetup` starts an Inngest dev server — a container, so one per slot rather than per file — and the per-file setup points the file at its slot's by `VITEST_POOL_ID`. Read it with `workerInngestBaseUrl()`. Every file shares one Hindsight (partitioned by bank, so by user), Redis, RustFS, the Docker daemon, and the MCP echo and Telegram mocks.
 

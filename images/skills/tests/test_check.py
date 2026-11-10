@@ -30,7 +30,7 @@ _UNTRACKED = shutil.ignore_patterns("__pycache__", "*.py[co]")
 _BIN = Path(sys.executable).parent
 _HASH = "c" * 64
 _MINOR = f"{sys.version_info.major}.{sys.version_info.minor}"
-_FORMAT_FIX = "`uv run ruff format skills/<name>`"
+_FORMAT_FIX = "`uv run ruff format` on it"
 
 
 @pytest.fixture

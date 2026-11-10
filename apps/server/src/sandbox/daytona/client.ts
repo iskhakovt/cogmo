@@ -12,11 +12,14 @@ import {
 } from "@daytona/sdk";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
+import { describeError } from "../../util/describe-error.js";
 import { withRetry } from "../../util/with-retry.js";
 import {
   type DaytonaSessionState,
   DaytonaSessionStateSchema,
+  type ReadOnlyDirSpec,
   type ResourceLimits,
+  type ResumeOptions,
   type SandboxCapabilities,
   type SandboxClient,
   type SandboxSession,
@@ -25,6 +28,7 @@ import {
 import { uploadAskpassToSandbox } from "./askpass-upload.js";
 import { disposeDaytona } from "./dispose.js";
 import { daytonaHealthProbe } from "./probe.js";
+import { uploadReadOnlyDir } from "./read-only-dir-upload.js";
 import { DaytonaSandboxSession } from "./session.js";
 
 /**
@@ -663,11 +667,11 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // created sandbox before rethrowing so we don't leak provider
     // resources — Daytona's per-sandbox billing makes orphaning expensive.
     //
-    // Order: askpass upload runs before clone. The two are independent on
-    // SDK 0.173.0 (clone takes auth via positional args, not via the
-    // helper), but the upload is bytes-small and clone is the long pole;
-    // failing fast on the cheap step avoids paying clone time when auth
-    // is misconfigured.
+    // Order: the uploads (askpass, then the read-only directory) run before
+    // the clone. They are independent of it on SDK 0.173.0 (clone takes auth
+    // via positional args, not via the helper), but they are small and
+    // clone is the long pole; failing fast on the cheap steps avoids paying
+    // clone time when auth is misconfigured.
     try {
       if (spec.askpass) {
         await uploadAskpassToSandbox({
@@ -675,6 +679,9 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
           hostDir: spec.askpass.hostDir,
           containerDir: spec.askpass.containerDir,
         });
+      }
+      if (spec.readOnlyDir) {
+        await uploadReadOnlyDir({ sandbox: sdkSandbox, dir: spec.readOnlyDir });
       }
       if (spec.worktree?.type === "git-remote") {
         const wt = spec.worktree;
@@ -705,10 +712,17 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       throw err;
     }
 
-    return this.#wrap(sdkSandbox, spec.taskId, spec.expiresAt);
+    return this.#wrap(sdkSandbox, {
+      taskId: spec.taskId,
+      readOnlyDirDigest: spec.readOnlyDir?.digest,
+      expiresAt: spec.expiresAt,
+    });
   }
 
-  async resume(state: DaytonaSessionState): Promise<SandboxSession<DaytonaSessionState>> {
+  async resume(
+    state: DaytonaSessionState,
+    opts?: ResumeOptions,
+  ): Promise<SandboxSession<DaytonaSessionState>> {
     const sdkSandbox = await this.#daytona.get(state.sandboxId);
     const action = reattachAction(sdkSandbox.state);
     if (action === "terminal") {
@@ -717,16 +731,32 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       );
     }
     await bringUpForReattach(sdkSandbox, action);
-    return this.#wrap(sdkSandbox, state.taskId);
+    return this.#wrap(sdkSandbox, {
+      taskId: state.taskId,
+      readOnlyDirDigest: await refreshReadOnlyDir(
+        sdkSandbox,
+        state.readOnlyDirDigest,
+        opts?.readOnlyDir,
+      ),
+      expiresAt: undefined,
+    });
   }
 
-  async tryResumeByTaskId(taskId: string): Promise<SandboxSession<DaytonaSessionState> | null> {
+  async tryResumeByTaskId(
+    taskId: string,
+    opts?: ResumeOptions,
+  ): Promise<SandboxSession<DaytonaSessionState> | null> {
     const matches = this.#daytona.list({ labels: { [LABEL_TASK]: taskId, [LABEL_ROLE]: "root" } });
     for await (const sdkSandbox of matches) {
       const action = reattachAction(sdkSandbox.state);
       if (action === "terminal") continue;
       await bringUpForReattach(sdkSandbox, action);
-      return this.#wrap(sdkSandbox, taskId);
+      // No state to read: the sandbox's copy may be any release's.
+      return this.#wrap(sdkSandbox, {
+        taskId,
+        readOnlyDirDigest: await refreshReadOnlyDir(sdkSandbox, undefined, opts?.readOnlyDir),
+        expiresAt: undefined,
+      });
     }
     return null;
   }
@@ -820,14 +850,28 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
 
   // ── internals ───────────────────────────────────────────────────────
 
+  /**
+   * The session over `sdkSandbox`. `readOnlyDirDigest` is the read-only
+   * directory's digest the sandbox holds, if any; `expiresAt` bounds the
+   * keepalive (`#startKeepalive`).
+   */
   #wrap(
     sdkSandbox: DaytonaSdkSandbox,
-    taskId: string,
-    expiresAt?: Date,
+    args: {
+      taskId: string;
+      readOnlyDirDigest: string | undefined;
+      expiresAt: Date | undefined;
+    },
   ): SandboxSession<DaytonaSessionState> {
-    this.#startKeepalive(sdkSandbox, expiresAt);
+    this.#startKeepalive(sdkSandbox, args.expiresAt);
+    const { readOnlyDirDigest } = args;
     return new DaytonaSandboxSession({
-      state: { type: "daytona", taskId, sandboxId: sdkSandbox.id },
+      state: {
+        type: "daytona",
+        taskId: args.taskId,
+        sandboxId: sdkSandbox.id,
+        ...(readOnlyDirDigest !== undefined && { readOnlyDirDigest }),
+      },
       sdkSandbox,
       ...(this.#random && { random: this.#random }),
     });
@@ -889,6 +933,36 @@ function reattachAction(state: SandboxState | undefined): ReattachAction {
   if (state === undefined) return "settle";
   const known: ReattachAction | undefined = REATTACH_ACTIONS[state];
   return known ?? "settle";
+}
+
+/**
+ * Upload `dir` into a re-attached sandbox unless it already holds `dir`'s
+ * digest, `recorded`, and return the digest it holds after. A failed upload
+ * keeps the session: it is logged, and `recorded` returned, so the next
+ * resume tries again. Until one succeeds, the session reads whatever the
+ * failed upload left (design/skills.md → The gates in verify).
+ */
+async function refreshReadOnlyDir(
+  sdkSandbox: DaytonaSdkSandbox,
+  recorded: string | undefined,
+  dir: ReadOnlyDirSpec | undefined,
+): Promise<string | undefined> {
+  if (dir === undefined || dir.digest === recorded) return recorded;
+  try {
+    await uploadReadOnlyDir({ sandbox: sdkSandbox, dir });
+    return dir.digest;
+  } catch (err) {
+    log.warn(
+      {
+        err: describeError(err),
+        sandboxId: sdkSandbox.id,
+        digest: dir.digest,
+        recorded: recorded ?? null,
+      },
+      "uploading the read-only directory at resume failed; the session keeps the copy it has",
+    );
+    return recorded;
+  }
 }
 
 /**

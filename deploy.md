@@ -89,9 +89,9 @@ Cogmo writes runtime state under `/var/lib/cogmo` inside the container:
 | `/var/lib/cogmo/worktrees` | Ephemeral working trees for skill execution. Regenerable. |
 | `/var/lib/cogmo/askpass` | Short-lived credential helpers for git over HTTPS. Regenerable. |
 | `/var/lib/cogmo/sockets` | Per-task Docker API proxy sockets. Regenerable. |
-| `/var/lib/cogmo/gates` | Once register's gates reach coding sessions ([design/skills.md](design/skills.md) → The gates in verify): the gates bundle, one directory per release, which each skills-repo coding session binds read-only. Regenerable. |
+| `/var/lib/cogmo/gates` | Register's gates, bundled for each skills-repo coding session's verify ([design/skills.md](design/skills.md) → The gates in verify): one directory per release, which a session binds read-only (Local-Docker) or receives as an upload (Daytona). Regenerable. |
 
-The image pre-creates each of these with `node:node` ownership. If you don't bind-mount, state lives inside the container's writable layer and is lost when the container is removed — fine for kicking the tires, **never for production**: the skills repo is irreplaceable.
+The image pre-creates all six with `node:node` ownership. If you don't bind-mount, state lives inside the container's writable layer and is lost when the container is removed — fine for kicking the tires, **never for production**: the skills repo is irreplaceable.
 
 ### Bind-mount permissions
 
@@ -212,7 +212,7 @@ Required by `serve`, which checks the bucket at boot. With `S3_ENDPOINT` unset t
 | `SANDBOX_PROXY_SOCKET_DIR` | `/var/lib/cogmo/sockets` | Host directory for per-task Docker proxy sockets. Each task container gets `<dir>/<taskId>.sock` bind-mounted at `/var/run/docker.sock` so child-container creation flows through the proxy (label injection, runtime override, deny rules). Created at boot if missing. |
 | `SANDBOX_HOST_DOCKER_SOCKET` | `/var/run/docker.sock` | Host Docker socket the proxy forwards to. Override only for rootless Docker / snap / unusual installs. |
 | `SANDBOX_ASKPASS_DIR` | `/var/lib/cogmo/askpass` | Host root for per-task git-askpass material (PAT, SSH signing key, helper script). Bind-mounted at `/tmp/cogmo-askpass` per task; wiped on task stop. |
-| `SANDBOX_GATES_DIR` | `/var/lib/cogmo/gates` | Once register's gates reach coding sessions ([design/skills.md](design/skills.md) → The gates in verify): host root where the boot publishes the gates bundle, at `<dir>/<digest>/`, for each skills-repo coding session to bind read-only at `/tmp/cogmo-gates` (Local-Docker) or receive as an upload (Daytona). It must sit at the same path on the host as in the container, as the other sandbox directories do; otherwise the bind's source is empty and every skills-repo verify exits 2. Checked writable at boot. |
+| `SANDBOX_GATES_DIR` | `/var/lib/cogmo/gates` | Host root where the boot publishes the gates bundle ([design/skills.md](design/skills.md) → The gates in verify), at `<dir>/<digest>/`, for each skills-repo coding session to bind read-only at `/tmp/cogmo-gates` (Local-Docker) or receive as an upload (Daytona). It must sit at the same path on the host as in the container, as the other sandbox directories do; otherwise the bind's source is empty and every skills-repo verify exits 2. Give each deployment on a host its own: a boot removes every other release's directory no container binds, another deployment's included. Checked writable at boot. |
 
 #### Coding delegation
 

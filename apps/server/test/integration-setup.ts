@@ -115,7 +115,8 @@ export async function setup({ provide, config }: GlobalSetupContext) {
   // the cogmo runtime user). Tests run as the developer's user, who
   // has no write access there; redirect both to a tmpdir we can mkdir
   // into. The sockets dir is nested under the askpass tmpdir so it
-  // gets cleaned up by the same teardown.
+  // gets cleaned up by the same teardown, as is each file's
+  // `SANDBOX_GATES_DIR` (`integration-setup-per-file.ts`).
   askpassPath = await mkdtemp(join(tmpdir(), "cogmo-askpass-it-"));
   process.env.SANDBOX_ASKPASS_DIR = askpassPath;
   process.env.SANDBOX_PROXY_SOCKET_DIR = join(askpassPath, "sockets");

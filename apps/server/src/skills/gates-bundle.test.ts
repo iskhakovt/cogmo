@@ -1,13 +1,9 @@
-import { chmod, cp, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  buildGatesBundle,
-  buildGatesBundleFromSource,
-  GATES_BUNDLE_FILES,
-  gatesBundleDigest,
-} from "./gates-bundle.js";
+import { buildGatesBundle, buildGatesBundleFromSource } from "./gates-bundle.js";
+import { GATES_BUNDLE_FILES, gatesBundleDigest } from "./gates-files.js";
 
 /** Building the bundle; generous so a loaded runner doesn't fail it on time. */
 const BUILD_TIMEOUT_MS = 120_000;
@@ -40,36 +36,6 @@ describe("buildGatesBundle", () => {
     },
     BUILD_TIMEOUT_MS,
   );
-});
-
-describe("gatesBundleDigest", () => {
-  it("is a sha256 in hex", async () => {
-    expect(await gatesBundleDigest(built)).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  it.each(GATES_BUNDLE_FILES)("changes with a byte of %s", async (file) => {
-    const copy = await mkdtemp(join(root, "copy-"));
-    await cp(built, copy, { recursive: true });
-    await writeFile(join(copy, file), "changed");
-
-    expect(await gatesBundleDigest(copy)).not.toBe(await gatesBundleDigest(built));
-  });
-
-  it("reads only the bundle's files", async () => {
-    const copy = await mkdtemp(join(root, "copy-"));
-    await cp(built, copy, { recursive: true });
-    await writeFile(join(copy, "notes.txt"), "not the bundle's");
-
-    expect(await gatesBundleDigest(copy)).toBe(await gatesBundleDigest(built));
-  });
-
-  it("throws naming a file the directory lacks", async () => {
-    const copy = await mkdtemp(join(root, "copy-"));
-    await cp(built, copy, { recursive: true });
-    await rm(join(copy, "tree-sitter-python.wasm"));
-
-    await expect(gatesBundleDigest(copy)).rejects.toThrow(join(copy, "tree-sitter-python.wasm"));
-  });
 });
 
 describe("buildGatesBundleFromSource", () => {

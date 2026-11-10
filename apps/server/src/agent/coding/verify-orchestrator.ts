@@ -49,6 +49,8 @@ import {
   checkoutFeatureBranchStep,
   lazySession,
   loadSandboxEnv,
+  type RepoSessionDir,
+  resumeOptionsFor,
   taskImage,
   taskSessionSpec,
 } from "./task-sandbox.js";
@@ -71,6 +73,8 @@ export interface VerifyOrchestratorDeps {
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;
   taskTtlMs: number;
+  /** Same role as `CodingOrchestratorDeps.repoSessionDir`. */
+  repoSessionDir: RepoSessionDir | null;
   /**
    * Optional Octokit factory. Tests inject a stub; production omits it
    * and `runOpenPr` constructs a real client from the resolved PAT.
@@ -175,7 +179,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       askpass,
       env,
     });
-    const container = lazySession(deps.sandbox, state);
+    const container = lazySession(deps.sandbox, state, resumeOptionsFor(deps.repoSessionDir, repo));
 
     const verdict = await runVerifyStage(run, inngest, { repo, container });
     if (!verdict.ok) return await failVerify(run, deps, failure, verifyFailure(verdict));
@@ -388,6 +392,7 @@ async function createVerifySandbox(
         assignment: args.assignment,
         identityPat: args.identity.pat,
         askpass: args.askpass,
+        repoDir: deps.repoSessionDir,
         image,
         resourceLimits: deps.defaultResourceLimits,
         taskTtlMs: deps.taskTtlMs,
@@ -397,7 +402,10 @@ async function createVerifySandbox(
     return session.state;
   });
   if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-    await checkoutFeatureBranchStep(run, sandbox, state, args.assignment.branch);
+    await checkoutFeatureBranchStep(run, sandbox, state, {
+      branch: args.assignment.branch,
+      resume: resumeOptionsFor(deps.repoSessionDir, args.repo),
+    });
   }
   return state;
 }

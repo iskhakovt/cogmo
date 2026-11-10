@@ -27,6 +27,13 @@ process.env.INNGEST_APP_ID = `cogmo-test-${randomUUID()}`;
 
 process.env.COGMO_SKILLS_PATH = mkdtempSync(join(inject("skillsRoot"), "file-"));
 
+// Every boot with a sandbox publishes the gates bundle there, removing each
+// temporary directory it finds, which may be another file's boot in flight;
+// so each file gets its own, under the askpass root `globalSetup` removes.
+const askpassRoot = process.env.SANDBOX_ASKPASS_DIR;
+if (askpassRoot === undefined) throw new Error("globalSetup set no SANDBOX_ASKPASS_DIR");
+process.env.SANDBOX_GATES_DIR = mkdtempSync(join(askpassRoot, "gates-"));
+
 const testFile = expect.getState().testPath;
 if (testFile === undefined) throw new Error("per-file setup ran outside a test file");
 const suite = basename(testFile, ".integration.test.ts");

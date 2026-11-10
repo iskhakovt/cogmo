@@ -97,7 +97,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
            /usr/local/lib/node_modules/npm \
            /usr/local/bin/npm /usr/local/bin/npx \
- && mkdir -p /var/lib/cogmo/skills /var/lib/cogmo/repos /var/lib/cogmo/worktrees /var/lib/cogmo/askpass /var/lib/cogmo/sockets \
+ && mkdir -p /var/lib/cogmo/skills /var/lib/cogmo/repos /var/lib/cogmo/worktrees /var/lib/cogmo/askpass /var/lib/cogmo/sockets /var/lib/cogmo/gates \
  && git init --bare /var/lib/cogmo/skills \
  && chown -R node:node /var/lib/cogmo
 

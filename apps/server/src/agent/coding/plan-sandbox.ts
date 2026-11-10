@@ -17,6 +17,8 @@ import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import {
   checkoutFeatureBranchStep,
   loadSandboxEnvOrThrow,
+  type RepoSessionDir,
+  resumeOptionsFor,
   type SandboxAuthDeps,
   taskImage,
   taskSessionSpec,
@@ -28,6 +30,7 @@ interface PlanSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;
   taskTtlMs: number;
+  repoSessionDir: RepoSessionDir | null;
 }
 
 /**
@@ -87,6 +90,7 @@ export async function preparePlanSandbox(
         assignment,
         identityPat: identity ? (await identity()).pat : undefined,
         askpass: askpassMaterials,
+        repoDir: deps.repoSessionDir,
         image,
         resourceLimits: deps.defaultResourceLimits,
         taskTtlMs: deps.taskTtlMs,
@@ -106,7 +110,10 @@ export async function preparePlanSandbox(
     );
   }
   if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-    await checkoutFeatureBranchStep(run, sandbox, state, assignment.branch);
+    await checkoutFeatureBranchStep(run, sandbox, state, {
+      branch: assignment.branch,
+      resume: resumeOptionsFor(deps.repoSessionDir, repo),
+    });
   }
   return state;
 }

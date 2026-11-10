@@ -184,6 +184,7 @@ function makeDeps(overrides: Partial<CodingOrchestratorDeps>): CodingOrchestrato
     taskTtlMs: 60_000,
     worktreesDir: join(baseDir, "worktrees"),
     askpassBaseDir: join(baseDir, "askpass"),
+    repoSessionDir: null,
     ...overrides,
   };
 }

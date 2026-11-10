@@ -352,6 +352,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         taskTtlMs: 60_000,
         worktreesDir: join(baseDir, "worktrees"),
         askpassBaseDir: join(baseDir, "askpass"),
+        repoSessionDir: null,
         openPlanStream: async (id) => registry.planStream(id),
       },
       stepRun,
@@ -427,6 +428,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         taskTtlMs: 60_000,
         worktreesDir: join(baseDir, "worktrees"),
         askpassBaseDir: join(baseDir, "askpass"),
+        repoSessionDir: null,
         openExecuteStream: async (id) => registry.executeStream(id),
       },
       stepRun,
@@ -516,6 +518,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       taskTtlMs: 60_000,
       worktreesDir: join(baseDir, "worktrees"),
       askpassBaseDir: join(baseDir, "askpass"),
+      repoSessionDir: null,
     };
 
     const sentEvents: { name: string; data: unknown }[] = [];
@@ -708,6 +711,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         taskTtlMs: 60_000,
         worktreesDir: join(baseDir, "worktrees"),
         askpassBaseDir: join(baseDir, "askpass"),
+        repoSessionDir: null,
         openPlanStream: async (id) => registry.planStream(id),
       },
       stepRun,

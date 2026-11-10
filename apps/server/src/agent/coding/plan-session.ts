@@ -10,11 +10,13 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { PlanStreamHandle } from "./progress-stream.js";
 import { fromSessionResult, type SessionResult } from "./session-result.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
+import { type RepoSessionDir, resumeOptionsFor } from "./task-sandbox.js";
 import type { TaskFailure } from "./types.js";
 
 interface PlanSessionDeps extends TaskStoreDeps {
   sandbox: Pick<SandboxClient, "resume">;
   backend: CodingBackend;
+  repoSessionDir: RepoSessionDir | null;
 }
 
 /**
@@ -35,7 +37,10 @@ export async function runPlanSession(
   },
 ): Promise<SessionResult> {
   const memo = await run.stepRun("plan-cli", async () => {
-    const container = await deps.sandbox.resume(args.state);
+    const container = await deps.sandbox.resume(
+      args.state,
+      resumeOptionsFor(deps.repoSessionDir, args.repo),
+    );
     // Re-read so the prompt sees the row as allocation left it
     // (worktree assignment populated, container id stamped), not the
     // pre-allocation snapshot the run opened with.

@@ -27,6 +27,7 @@ import type { HindsightMemoryProvider } from "../memory/hindsight.js";
 import type { SandboxClient, SessionSandbox } from "../sandbox/index.js";
 import type { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import type { DrizzleSecretsStore } from "../secrets/store/index.js";
+import type { PublishedGatesBundle } from "../skills/publish-gates-bundle.js";
 import type { SkillRunnerImpl, SkillRunnerOptions } from "../skills/runner.js";
 import type { DrizzleSkillStore } from "../skills/store/index.js";
 import type { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
@@ -206,6 +207,11 @@ export interface SandboxDeps {
   codingSandbox: SandboxClient | null;
   sandboxInstanceId: string | null;
   sandboxDocker: Docker | null;
+  /**
+   * The release's gates bundle, published under `SANDBOX_GATES_DIR` for the
+   * skills repo's coding sessions; non-null whenever `codingSandbox` is.
+   */
+  gatesBundle: PublishedGatesBundle | null;
 }
 
 export const NO_SANDBOX: SandboxDeps = {
@@ -213,6 +219,7 @@ export const NO_SANDBOX: SandboxDeps = {
   codingSandbox: null,
   sandboxInstanceId: null,
   sandboxDocker: null,
+  gatesBundle: null,
 };
 
 /**

@@ -105,6 +105,12 @@ describe.skipIf(RUNTIME === undefined)("register's CPython checks in the skills 
       },
       { id: "ruff", line: 5, column: 20, message: "F821 Undefined name `undefined_name`" },
       {
+        id: "format",
+        line: 5,
+        column: 14,
+        message: "unformatted File would be reformatted: run `uv run ruff format` on it",
+      },
+      {
         id: "pyrefly",
         line: 1,
         column: 8,

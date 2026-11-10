@@ -513,6 +513,35 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     );
   });
 
+  it("bind-mounts the read-only directory at its container path, read-only", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, calls } = fakeDocker({ dockerId: "docker-read-only-dir" });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-000000000f0f",
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+      network: "bridge",
+      readOnlyDir: {
+        hostDir: "/var/lib/cogmo/gates/d1",
+        containerDir: "/tmp/cogmo-gates",
+        digest: "d1",
+      },
+    });
+
+    const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
+    expect(binds).toContain("/var/lib/cogmo/gates/d1:/tmp/cogmo-gates:ro");
+  });
+
   it("stopTask wipes the askpass dir when askpassBaseDir is configured", async () => {
     const { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");

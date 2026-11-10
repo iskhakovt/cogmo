@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import Docker from "dockerode";
+import { ok } from "neverthrow";
 import { match } from "ts-pattern";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
@@ -18,8 +19,15 @@ import {
   type SandboxClient,
   type SessionSandbox,
 } from "../sandbox/index.js";
+import { managedBindSources } from "../sandbox/managed-binds.js";
 import type { SandboxRuntime } from "../sandbox/runtime.js";
 import { LOCAL_DOCKER_CAPABILITIES } from "../sandbox/supervisor.js";
+import {
+  type PublishedGatesBundle,
+  type PublishGatesBundleDeps,
+  publishGatesBundle,
+  releaseGatesBundle,
+} from "../skills/publish-gates-bundle.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "../skills/worker-sysbox/host.js";
 import { describeError } from "../util/describe-error.js";
 import { checkDirWritable } from "./checks.js";
@@ -111,11 +119,17 @@ export function scheduleReconcileCrashedInstances(client: SandboxClient, instanc
  * Returns `NO_SANDBOX` (all-null) when the configured backend is
  * unavailable: `local-docker` requires `SANDBOX_RUNTIME`; `daytona`
  * requires `daytona_api_key` in the encrypted secrets table.
+ *
+ * Whatever the backend, it first finds the release's gates bundle and fails
+ * the boot without it; with a backend, it publishes the bundle under
+ * `SANDBOX_GATES_DIR` for the skills repo's coding sessions (design/skills.md
+ * → The gates in verify → Delivery).
  */
 export async function bootstrapSandbox(
   core: CoreDeps,
   opts: BootstrapOptions = {},
 ): Promise<SandboxDeps> {
+  const gatesSource = await releaseGatesBundle(import.meta.url);
   // Test-only injection — see `BootstrapOptions.sandboxClientOverride`
   // for shape + intent. `sandboxDocker` stays null because the override
   // may not be a Docker-based backend; the reaper Inngest function is
@@ -123,6 +137,8 @@ export async function bootstrapSandbox(
   // registration when `sandboxDocker === null`.
   if (opts.sandboxClientOverride) {
     const sandbox = opts.sandboxClientOverride;
+    // No daemon to ask which directories its containers bind.
+    const gatesBundle = await publishGates(gatesSource, NOTHING_BOUND);
     const sandboxInstanceId = randomUUID();
     scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId);
     logger.info(
@@ -134,6 +150,7 @@ export async function bootstrapSandbox(
       codingSandbox: sandbox,
       sandboxInstanceId,
       sandboxDocker: null,
+      gatesBundle,
     };
   }
   // Both backends are coding-capable: local-docker via host-bind-mount
@@ -160,13 +177,37 @@ export async function bootstrapSandbox(
         .exhaustive();
       return NO_SANDBOX;
     })
-    .with({ backend: "local-docker" }, ({ runtime }) => bootstrapLocalDocker(core, runtime))
-    .with({ backend: "daytona" }, ({ apiKey }) => bootstrapDaytona(apiKey))
+    .with({ backend: "local-docker" }, ({ runtime }) =>
+      bootstrapLocalDocker(core, runtime, gatesSource),
+    )
+    .with({ backend: "daytona" }, ({ apiKey }) => bootstrapDaytona(apiKey, gatesSource))
     .exhaustive();
 }
 
-/** Stage 2 on Local-Docker: the instance row, the socket proxy, and the crash reconcile. */
-async function bootstrapLocalDocker(core: CoreDeps, runtime: SandboxRuntime): Promise<SandboxDeps> {
+/** The bind sources of a backend whose sessions bind nothing on this host. */
+const NOTHING_BOUND: PublishGatesBundleDeps["boundSources"] = async () => ok(new Set<string>());
+
+/**
+ * Publish the release's gates bundle, from `sourceDir`, under
+ * `SANDBOX_GATES_DIR`, checked writable first as the askpass root is.
+ */
+async function publishGates(
+  sourceDir: string,
+  boundSources: PublishGatesBundleDeps["boundSources"],
+): Promise<PublishedGatesBundle> {
+  await checkDirWritable(env.SANDBOX_GATES_DIR, "SANDBOX_GATES_DIR");
+  return publishGatesBundle({ boundSources }, { sourceDir, root: env.SANDBOX_GATES_DIR });
+}
+
+/**
+ * Stage 2 on Local-Docker: the gates bundle, the instance row, the socket
+ * proxy, and the crash reconcile.
+ */
+async function bootstrapLocalDocker(
+  core: CoreDeps,
+  runtime: SandboxRuntime,
+  gatesSource: string,
+): Promise<SandboxDeps> {
   // Fail-fast: both dirs receive per-task writes (proxy sockets,
   // askpass material) and a permission problem on either surfaces as
   // a generic EACCES on the first task otherwise. Askpass is also
@@ -178,6 +219,9 @@ async function bootstrapLocalDocker(core: CoreDeps, runtime: SandboxRuntime): Pr
     checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR"),
   ]);
   const docker = new Docker();
+  // A graceful stop leaves its containers running until the reaper's orphan
+  // pass, still binding their release's bundle, so that one stays.
+  const gatesBundle = await publishGates(gatesSource, () => managedBindSources(docker));
   const instance = await core.runInTx((trx) =>
     core.sandboxStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
   );
@@ -210,14 +254,18 @@ async function bootstrapLocalDocker(core: CoreDeps, runtime: SandboxRuntime): Pr
     codingSandbox,
     sandboxInstanceId: instance.id,
     sandboxDocker: docker,
+    gatesBundle,
   };
 }
 
-/** Stage 2 on Daytona: the client, the crash reconcile and the image warm. */
-async function bootstrapDaytona(apiKey: string): Promise<SandboxDeps> {
+/** Stage 2 on Daytona: the gates bundle, the client, the crash reconcile and the image warm. */
+async function bootstrapDaytona(apiKey: string, gatesSource: string): Promise<SandboxDeps> {
   // Host-side: `provisionAskpass` writes the per-task files that
   // `askpass-upload.ts` then ships into the daytona sandbox.
   await checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR");
+  // Each session's create, and a resume after a deploy, uploads the bundle
+  // from here; nothing binds it.
+  const gatesBundle = await publishGates(gatesSource, NOTHING_BOUND);
   // Daytona needs a process-run id for label-stamping orphan
   // detection in a future reconcile pass. We don't insert into
   // sandbox_instances (that table FK's to local-docker
@@ -252,7 +300,7 @@ async function bootstrapDaytona(apiKey: string): Promise<SandboxDeps> {
     },
     "daytona sandbox initialized",
   );
-  return { sandbox, codingSandbox: sandbox, sandboxInstanceId, sandboxDocker: null };
+  return { sandbox, codingSandbox: sandbox, sandboxInstanceId, sandboxDocker: null, gatesBundle };
 }
 
 /** The process whose `SIGINT` or `SIGTERM` closes the CLI sandbox's instance row. */

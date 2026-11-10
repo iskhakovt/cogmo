@@ -10,6 +10,8 @@ import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import type {
   AskpassSpec,
+  ReadOnlyDirSpec,
+  ResumeOptions,
   SandboxClient,
   SandboxSession,
   SandboxSessionState,
@@ -28,6 +30,40 @@ export const WORKTREE_DIR_IN_CONTAINER = "/workspace";
 
 /** Carries the assignment's `baseSha` to the skills repo's `.cogmo/verify`. */
 const VERIFY_BASE_ENV = "COGMO_VERIFY_BASE";
+
+/**
+ * What every session of one repo's tasks receives beside the rest: a
+ * read-only directory and the env naming it. The composition root passes the
+ * skills repo's gates bundle (design/skills.md → The gates in verify →
+ * Delivery), so neither the sandbox nor the coding stages know what it holds.
+ */
+export interface RepoSessionDir {
+  /** The `coding_repos.name` whose tasks' sessions receive it. */
+  repoName: string;
+  readOnlyDir: ReadOnlyDirSpec;
+  env: Readonly<Record<string, string>>;
+}
+
+/** `dir` when the sessions of `repo`'s tasks receive it. */
+function repoDirOf(
+  dir: RepoSessionDir | null,
+  repo: Pick<CodingRepoRow, "name">,
+): RepoSessionDir | null {
+  return dir !== null && dir.repoName === repo.name ? dir : null;
+}
+
+/**
+ * What a re-attach to a session of `repo`'s task passes beside its state: the
+ * repo's read-only directory, so a Daytona sandbox an older release created
+ * receives the running release's.
+ */
+export function resumeOptionsFor(
+  dir: RepoSessionDir | null,
+  repo: Pick<CodingRepoRow, "name">,
+): ResumeOptions {
+  const own = repoDirOf(dir, repo);
+  return own === null ? {} : { readOnlyDir: own.readOnlyDir };
+}
 
 /**
  * Build the `WorktreeSpec` the sandbox backend wants. Bind-mount backends
@@ -145,7 +181,8 @@ export function taskImage(repo: CodingRepoRow, devbaseImage: string): string {
  * `create-container` step body: `expiresAt` is stamped from the clock, and
  * the PAT inside the worktree spec must never reach a step's return value.
  * Its env adds `COGMO_VERIFY_BASE` when the assignment has a base; every exec
- * in the session inherits it, as the Claude token does.
+ * in the session inherits it, as the Claude token does. A task on `repoDir`'s
+ * repo also gets its read-only directory, and its env.
  */
 export function taskSessionSpec(args: {
   sandbox: Pick<SandboxClient, "capabilities">;
@@ -154,12 +191,14 @@ export function taskSessionSpec(args: {
   assignment: WorktreeAssignment;
   identityPat: string | undefined;
   askpass: AskpassSpec | undefined;
+  repoDir: RepoSessionDir | null;
   image: string;
   resourceLimits: ResourceLimits;
   taskTtlMs: number;
   env: Readonly<Record<string, string>>;
 }): SessionSpec {
   const transport = args.sandbox.capabilities.workingTreeTransport;
+  const repoDir = repoDirOf(args.repoDir, args.repo);
   return {
     taskId: args.task.id,
     worktree: buildWorktreeSpec({
@@ -177,6 +216,7 @@ export function taskSessionSpec(args: {
     ...(args.askpass && {
       askpass: { hostDir: args.askpass.hostDir, containerDir: args.askpass.containerDir },
     }),
+    ...(repoDir && { readOnlyDir: repoDir.readOnlyDir }),
     image: args.image,
     resourceLimits: args.resourceLimits,
     expiresAt: new Date(Date.now() + args.taskTtlMs),
@@ -186,6 +226,7 @@ export function taskSessionSpec(args: {
       ...(args.assignment.baseSha !== undefined && {
         [VERIFY_BASE_ENV]: args.assignment.baseSha,
       }),
+      ...repoDir?.env,
     },
     // The coding CLI reaches its provider, the git remote and package indexes.
     network: "bridge",
@@ -197,32 +238,35 @@ export function taskSessionSpec(args: {
  * handles can't cross a step boundary, and `sandbox.resume` is a live
  * provider call, so the round-trips scale with container work rather than
  * with replay count. Memoizes the promise, not the resolved handle — two
- * concurrent callers would otherwise both see null and both resume.
+ * concurrent callers would otherwise both see null and both resume. `opts`
+ * goes to the resume (`resumeOptionsFor`).
  */
 export function lazySession(
   sandbox: Pick<SandboxClient, "resume">,
   state: SandboxSessionState,
+  opts: ResumeOptions,
 ): () => Promise<SandboxSession> {
   let resumed: Promise<SandboxSession> | null = null;
   return () => {
-    resumed ??= sandbox.resume(state);
+    resumed ??= sandbox.resume(state, opts);
     return resumed;
   };
 }
 
 /**
  * The `checkout-feature-branch` step, git-remote only: the sandbox cloned
- * `cogmo/run/<task-id>`, and commit-and-push works on `branch`.
+ * `cogmo/run/<task-id>`, and commit-and-push works on `branch`. `resume`
+ * goes to the resume (`resumeOptionsFor`).
  */
 export async function checkoutFeatureBranchStep(
   run: CodingRun,
   sandbox: Pick<SandboxClient, "resume">,
   state: SandboxSessionState,
-  branch: string,
+  args: { branch: string; resume: ResumeOptions },
 ): Promise<void> {
   await run.stepRun("checkout-feature-branch", async () => {
-    const session = await sandbox.resume(state);
-    await checkoutFeatureBranchInSandbox(session, branch);
+    const session = await sandbox.resume(state, args.resume);
+    await checkoutFeatureBranchInSandbox(session, args.branch);
   });
 }
 

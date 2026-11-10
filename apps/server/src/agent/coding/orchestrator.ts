@@ -50,7 +50,13 @@ import {
   recordTaskFailed,
 } from "./task-failure.js";
 import { CLAIMS, claimTask, reclaimEndedTask } from "./task-lifecycle.js";
-import { checkTaskCredentials, lazySession, reapTaskSandbox } from "./task-sandbox.js";
+import {
+  checkTaskCredentials,
+  lazySession,
+  type RepoSessionDir,
+  reapTaskSandbox,
+  resumeOptionsFor,
+} from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
@@ -83,6 +89,12 @@ export interface CodingOrchestratorDeps {
    * on the host and need no execute-side push.
    */
   askpassBaseDir: string;
+  /**
+   * The read-only directory the sessions of one repo's tasks receive, at
+   * create and every resume: the skills repo's gates bundle (design/skills.md
+   * → The gates in verify → Delivery); null when none does.
+   */
+  repoSessionDir: RepoSessionDir | null;
   /** The task's plan progress. Bootstrap passes the registry's; defaults to `NULL_PLAN_STREAM`. */
   openPlanStream?: (taskId: string) => Promise<PlanStreamHandle>;
   /** The task's execute progress. Bootstrap passes the registry's; defaults to `NULL_EXECUTE_STREAM`. */
@@ -510,7 +522,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     const acquired = await acquireExecuteSandbox(run, deps, { task, repo, assignment, askpass });
     if (acquired.isErr()) return await failSession(acquired.error);
     const sandbox = acquired.value;
-    const container = lazySession(deps.sandbox, sandbox.state);
+    const container = lazySession(
+      deps.sandbox,
+      sandbox.state,
+      resumeOptionsFor(deps.repoSessionDir, repo),
+    );
     const session = await runExecuteSession(run, deps, {
       task,
       repo,

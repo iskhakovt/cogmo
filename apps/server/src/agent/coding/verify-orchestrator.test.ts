@@ -213,6 +213,7 @@ function makeDeps(handle: SandboxSession<LocalDockerSessionState>): VerifyOrches
     sandbox: fakeSandbox(handle),
     secretsStore: secrets as unknown as SecretsStore,
     askpassBaseDir: "/tmp/cogmo-test-askpass",
+    repoSessionDir: null,
     devbaseImage: "alpine",
     defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
     taskTtlMs: 60_000,
@@ -635,6 +636,51 @@ describe("runCodingVerify", () => {
       CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-code-oauth-token",
       COGMO_VERIFY_BASE: baseSha,
     });
+  });
+
+  it("gives the verify container of a task on the directory's repo the directory and its variable, and passes it to every resume", async () => {
+    const readOnlyDir = {
+      hostDir: "/var/lib/cogmo/gates/d1",
+      containerDir: "/tmp/cogmo-gates",
+      digest: "d1",
+    };
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    deps.repoSessionDir = {
+      repoName: "fixture",
+      readOnlyDir,
+      env: { COGMO_GATES_DIR: "/tmp/cogmo-gates" },
+    };
+    deps.octokitFactory = fakeOctokitFactory(
+      vi.fn(async () => ({
+        data: { html_url: "https://github.com/user/cogmo/pull/1", number: 1 },
+      })),
+    );
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+    const { taskId } = await seedTask();
+
+    const result = await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result.status).toBe("pr_open");
+    const createCall = vi.mocked(deps.sandbox.create).mock.calls[0]?.[0];
+    expect(createCall?.readOnlyDir).toEqual(readOnlyDir);
+    expect(createCall?.env).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-code-oauth-token",
+      COGMO_GATES_DIR: "/tmp/cogmo-gates",
+    });
+    const resumes = vi.mocked(deps.sandbox.resume).mock.calls.map((call) => call[1]);
+    expect(resumes.length).toBeGreaterThan(0);
+    expect(resumes.every((opts) => opts?.readOnlyDir === readOnlyDir)).toBe(true);
   });
 
   it("missing CLAUDE_CODE_OAUTH_TOKEN → status=failed before container creation", async () => {

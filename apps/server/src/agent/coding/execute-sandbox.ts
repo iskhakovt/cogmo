@@ -20,6 +20,8 @@ import {
   checkoutFeatureBranchStep,
   checkTaskCredentials,
   loadSandboxEnvOrThrow,
+  type RepoSessionDir,
+  resumeOptionsFor,
   type SandboxAuthDeps,
   taskImage,
   taskSessionSpec,
@@ -31,6 +33,7 @@ interface ExecuteSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;
   taskTtlMs: number;
+  repoSessionDir: RepoSessionDir | null;
 }
 
 /**
@@ -79,8 +82,9 @@ export async function acquireExecuteSandbox(
   },
 ): Promise<Result<ExecuteSandbox, TaskFailure>> {
   const { sandbox } = deps;
+  const resume = resumeOptionsFor(deps.repoSessionDir, args.repo);
   const resumed = await run.stepRun("try-resume", async () => {
-    const existing = await sandbox.tryResumeByTaskId(run.taskId);
+    const existing = await sandbox.tryResumeByTaskId(run.taskId, resume);
     return existing?.state ?? null;
   });
 
@@ -113,7 +117,10 @@ export async function acquireExecuteSandbox(
     );
   }
   if (gitRemote) {
-    await checkoutFeatureBranchStep(run, sandbox, state, args.assignment.branch);
+    await checkoutFeatureBranchStep(run, sandbox, state, {
+      branch: args.assignment.branch,
+      resume,
+    });
   }
   return ok({ state, push });
 }
@@ -144,6 +151,7 @@ async function createExecuteSandbox(
         assignment: args.assignment,
         identityPat: args.push ? (await args.push.identity()).pat : undefined,
         askpass: args.push?.askpass,
+        repoDir: deps.repoSessionDir,
         image,
         resourceLimits: defaultResourceLimits,
         taskTtlMs: deps.taskTtlMs,

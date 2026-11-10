@@ -1,12 +1,12 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "tsup";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { tsupOptions } from "../../tsup.config.js";
-import { GATES_BUNDLE_DIR, GATES_BUNDLE_FILES, gatesBundleDigest } from "../skills/gates-bundle.js";
+import { GATES_BUNDLE_DIR, GATES_BUNDLE_FILES, gatesBundleDigest } from "../skills/gates-files.js";
 
 /**
  * `tsup.config.ts` against the layout the bundled skills host depends on.
@@ -66,6 +66,33 @@ function computedImports(source: string): ReadonlyArray<string> {
   );
 }
 
+/**
+ * The specifiers a bundle imports as it loads: `import … from`, `export … from`
+ * and a bare `import "…"`, never an `import(…)`.
+ */
+function staticSpecifiers(source: string): ReadonlyArray<string> {
+  return [...source.matchAll(/(?:\bfrom\s*|\bimport\s*)["']([^"']+)["']/g)].flatMap(
+    ([, specifier]) => (specifier === undefined ? [] : [specifier]),
+  );
+}
+
+/** `entries` and every bundle they load as they load, transitively. */
+function loadedAtStart(entries: ReadonlyArray<string>): ReadonlySet<string> {
+  const loaded = new Set<string>();
+  const pending = [...entries];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    if (loaded.has(next)) continue;
+    loaded.add(next);
+    const from = dirname(next);
+    pending.push(
+      ...staticSpecifiers(readFileSync(next, "utf8"))
+        .filter((specifier) => specifier.startsWith("./"))
+        .map((specifier) => join(from, specifier)),
+    );
+  }
+  return loaded;
+}
+
 /** `pyodide-worker.ts` loads Pyodide by path from the granted distribution. */
 const PYODIDE_IMPORT = /^pathToFileURL\(join\(\w+\.pyodideDistDir, "pyodide\.mjs"\)\)\.href\)/;
 
@@ -101,6 +128,18 @@ describe("tsup build", () => {
     expect(sources[1]).toContain("async def call_run(");
     expect(sources[1]).toContain("class _CogmoBridge:");
     expect(sources[1]).toContain("async def _install_wheels(mount, files):");
+  });
+
+  it("reaches esbuild, which a deployed server lacks, only through a dynamic import", () => {
+    const importsEsbuild = (f: string) =>
+      staticSpecifiers(readFileSync(f, "utf8")).includes("esbuild");
+    const entries = ["main.js", "index.js", "otel.js"].map((f) => join(outDir, f));
+
+    expect(
+      [...loadedAtStart(entries)].filter(importsEsbuild).map((f) => relative(outDir, f)),
+    ).toEqual([]);
+    // The bundlers a server from source runs are in the build, behind an `import(…)`.
+    expect(emittedBundles().some(importsEsbuild)).toBe(true);
   });
 
   it("writes the gates bundle's files into their own directory", async () => {

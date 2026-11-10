@@ -918,6 +918,238 @@ describe("DaytonaSandboxClient", () => {
     });
   });
 
+  describe("readOnlyDir", () => {
+    let hostDir: string;
+
+    beforeEach(() => {
+      hostDir = mkdtempSync(join(tmpdir(), "cogmo-read-only-dir-client-"));
+      writeFileSync(join(hostDir, "gates.mjs"), "// the bundle\n");
+      writeFileSync(join(hostDir, "grammar.wasm"), "\0asm");
+    });
+
+    afterEach(() => {
+      rmSync(hostDir, { recursive: true, force: true });
+    });
+
+    function readOnlyDir(digest: string) {
+      return { hostDir, containerDir: "/tmp/cogmo-gates", digest };
+    }
+
+    /** The destinations of each `fs.uploadFiles` call, sorted within the call. */
+    function uploadedDestinations(sb: FakeSandbox): string[][] {
+      return sb.__spies.fsUploadFiles.mock.calls.map((call) =>
+        (call[0] as Array<{ destination: string }>).map((u) => u.destination).sort(),
+      );
+    }
+
+    const GATES_DESTINATIONS = ["/tmp/cogmo-gates/gates.mjs", "/tmp/cogmo-gates/grammar.wasm"];
+
+    it("uploads the directory's files at create, after askpass and before the clone, and records its digest", async () => {
+      const sb = fakeSandbox({ id: "sb-gates", state: SandboxState.STARTED });
+      daytonaCalls.create.mockResolvedValue(sb);
+      const askpassDir = mkdtempSync(join(tmpdir(), "cogmo-read-only-dir-askpass-"));
+      try {
+        for (const file of ["helper", "pat", "signing-key", "signing-key.pub"]) {
+          writeFileSync(join(askpassDir, file), file);
+        }
+        const client = await makeClient();
+        const session = await client.create({
+          ...BASE_SPEC,
+          worktree: {
+            type: "git-remote",
+            url: "https://github.com/cogmo/example.git",
+            branch: "cogmo/run/x",
+            auth: { username: "x-access-token", password: "ghp_x" },
+          },
+          askpass: { hostDir: askpassDir, containerDir: "/tmp/cogmo-askpass" },
+          readOnlyDir: readOnlyDir("d1"),
+        });
+
+        expect(uploadedDestinations(sb)[1]).toEqual(GATES_DESTINATIONS);
+        const uploads = sb.__spies.fsUploadFiles.mock.invocationCallOrder;
+        const clone = expectDefined(sb.__spies.gitClone.mock.invocationCallOrder[0], "the clone");
+        expect(uploads).toHaveLength(2);
+        expect(uploads.every((order) => order < clone)).toBe(true);
+        expect(session.state).toEqual({
+          type: "daytona",
+          taskId: BASE_SPEC.taskId,
+          sandboxId: "sb-gates",
+          readOnlyDirDigest: "d1",
+        });
+      } finally {
+        rmSync(askpassDir, { recursive: true, force: true });
+      }
+    });
+
+    it("uploads the files' bytes", async () => {
+      const sb = fakeSandbox({ id: "sb-bytes", state: SandboxState.STARTED });
+      daytonaCalls.create.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.create({ ...BASE_SPEC, readOnlyDir: readOnlyDir("d1") });
+
+      const uploads = sb.__spies.fsUploadFiles.mock.calls[0]?.[0] as Array<{
+        source: Buffer;
+        destination: string;
+      }>;
+      expect(
+        Object.fromEntries(uploads.map((u) => [u.destination, u.source.toString("utf8")])),
+      ).toEqual({
+        "/tmp/cogmo-gates/gates.mjs": "// the bundle\n",
+        "/tmp/cogmo-gates/grammar.wasm": "\0asm",
+      });
+    });
+
+    it("deletes the sandbox and fails create when the upload fails", async () => {
+      const sb = fakeSandbox({ id: "sb-gates-fail", state: SandboxState.STARTED });
+      sb.__spies.fsUploadFiles.mockRejectedValue(new Error("upload 503"));
+      daytonaCalls.create.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      await expect(client.create({ ...BASE_SPEC, readOnlyDir: readOnlyDir("d1") })).rejects.toThrow(
+        /upload 503/,
+      );
+      expect(sb.__spies.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it("records no digest for a session created without one", async () => {
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-none", state: SandboxState.STARTED }),
+      );
+      const client = await makeClient();
+
+      const session = await client.create(BASE_SPEC);
+
+      expect(session.state).not.toHaveProperty("readOnlyDirDigest");
+    });
+
+    it("uploads nothing on a resume whose digest matches the state's", async () => {
+      const sb = fakeSandbox({ id: "sb-same", state: SandboxState.STARTED });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      const session = await client.resume(
+        { type: "daytona", taskId: "t1", sandboxId: "sb-same", readOnlyDirDigest: "d1" },
+        { readOnlyDir: readOnlyDir("d1") },
+      );
+
+      expect(sb.__spies.fsUploadFiles).not.toHaveBeenCalled();
+      expect(session.state.readOnlyDirDigest).toBe("d1");
+    });
+
+    it("uploads again on a resume whose digest differs, and records the new one", async () => {
+      const sb = fakeSandbox({ id: "sb-new", state: SandboxState.STARTED });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      const session = await client.resume(
+        { type: "daytona", taskId: "t1", sandboxId: "sb-new", readOnlyDirDigest: "d1" },
+        { readOnlyDir: readOnlyDir("d2") },
+      );
+
+      expect(uploadedDestinations(sb)).toEqual([GATES_DESTINATIONS]);
+      expect(session.state).toEqual({
+        type: "daytona",
+        taskId: "t1",
+        sandboxId: "sb-new",
+        readOnlyDirDigest: "d2",
+      });
+    });
+
+    it("uploads on a resume of a state that records no digest", async () => {
+      const sb = fakeSandbox({ id: "sb-unrecorded", state: SandboxState.STARTED });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      const session = await client.resume(
+        { type: "daytona", taskId: "t1", sandboxId: "sb-unrecorded" },
+        { readOnlyDir: readOnlyDir("d1") },
+      );
+
+      expect(uploadedDestinations(sb)).toEqual([GATES_DESTINATIONS]);
+      expect(session.state.readOnlyDirDigest).toBe("d1");
+    });
+
+    it("uploads only once the sandbox is started", async () => {
+      const sb = fakeSandbox({ id: "sb-stopped-gates", state: SandboxState.STOPPED });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      await client.resume(
+        { type: "daytona", taskId: "t1", sandboxId: "sb-stopped-gates" },
+        { readOnlyDir: readOnlyDir("d1") },
+      );
+
+      const start = expectDefined(vi.mocked(sb.start).mock.invocationCallOrder[0], "the start");
+      const upload = expectDefined(
+        sb.__spies.fsUploadFiles.mock.invocationCallOrder[0],
+        "the upload",
+      );
+      expect(start).toBeLessThan(upload);
+    });
+
+    it("keeps the session on a failed upload at resume, its state recording the digest it had", async () => {
+      const warnSpy = vi.spyOn(logger, "warn");
+      try {
+        const sb = fakeSandbox({ id: "sb-upload-fails", state: SandboxState.STARTED });
+        sb.__spies.fsUploadFiles.mockRejectedValue(new Error("upload 503"));
+        daytonaCalls.get.mockResolvedValue(sb);
+        const client = await makeClient();
+
+        const session = await client.resume(
+          { type: "daytona", taskId: "t1", sandboxId: "sb-upload-fails", readOnlyDirDigest: "d1" },
+          { readOnlyDir: readOnlyDir("d2") },
+        );
+
+        expect(session.state.readOnlyDirDigest).toBe("d1");
+        expect(sb.__spies.delete).not.toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ sandboxId: "sb-upload-fails", digest: "d2" }),
+          expect.stringContaining("read-only directory"),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("leaves the state's digest alone on a resume given no directory", async () => {
+      const sb = fakeSandbox({ id: "sb-no-opts", state: SandboxState.STARTED });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      const session = await client.resume({
+        type: "daytona",
+        taskId: "t1",
+        sandboxId: "sb-no-opts",
+        readOnlyDirDigest: "d1",
+      });
+
+      expect(sb.__spies.fsUploadFiles).not.toHaveBeenCalled();
+      expect(session.state.readOnlyDirDigest).toBe("d1");
+    });
+
+    it("always uploads at tryResumeByTaskId, which sees no recorded digest, and records it", async () => {
+      const sb = fakeSandbox({ id: "sb-by-task", state: SandboxState.STARTED });
+      daytonaCalls.list.mockImplementation(() => asyncIterableOf([sb]));
+      const client = await makeClient();
+
+      const session = await client.tryResumeByTaskId("t1", { readOnlyDir: readOnlyDir("d1") });
+
+      expect(uploadedDestinations(sb)).toEqual([GATES_DESTINATIONS]);
+      expect(session?.state.readOnlyDirDigest).toBe("d1");
+    });
+
+    it("uploads nothing at tryResumeByTaskId given no directory", async () => {
+      const sb = fakeSandbox({ id: "sb-by-task-none", state: SandboxState.STARTED });
+      daytonaCalls.list.mockImplementation(() => asyncIterableOf([sb]));
+      const client = await makeClient();
+
+      const session = await client.tryResumeByTaskId("t1");
+
+      expect(sb.__spies.fsUploadFiles).not.toHaveBeenCalled();
+      expect(session?.state).not.toHaveProperty("readOnlyDirDigest");
+    });
+  });
+
   describe("deleteByTaskId", () => {
     it("calls .delete() on every matching sandbox", async () => {
       const a = fakeSandbox({ id: "sb-a", state: SandboxState.STARTED });

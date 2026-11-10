@@ -150,6 +150,7 @@ function setup(task: CodingTaskRow): Harness {
       sandbox: sandbox.sandbox,
       secretsStore: fakeSecrets(),
       askpassBaseDir: "/tmp/cogmo-replay-askpass",
+      repoSessionDir: null,
       devbaseImage: "alpine",
       defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
       taskTtlMs: 60_000,

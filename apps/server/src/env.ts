@@ -352,6 +352,16 @@ export const env = createEnv({
      */
     SANDBOX_ASKPASS_DIR: z.string().default("/var/lib/cogmo/askpass"),
     /**
+     * Host root where the boot publishes the release's gates bundle, at
+     * `${SANDBOX_GATES_DIR}/<digest>/`, which every coding session on the
+     * skills repo reads at `/tmp/cogmo-gates/`: bind-mounted on Local-Docker,
+     * uploaded on Daytona (design/skills.md → The gates in verify →
+     * Delivery). At the same path on the host as in the container, as the
+     * askpass and socket roots are. Default rationale matches
+     * `SANDBOX_PROXY_SOCKET_DIR` above.
+     */
+    SANDBOX_GATES_DIR: z.string().default("/var/lib/cogmo/gates"),
+    /**
      * Host path of the bare git repo backing the skill library. Initialized
      * on first boot via `bootstrapSkillsRepo`; advanced exclusively by the
      * `register` RPC (direct pushes to `main` are rejected by a pre-receive

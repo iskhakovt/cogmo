@@ -3,13 +3,19 @@ import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ExecStreamingHandle,
+  ReadOnlyDirSpec,
+  ResumeOptions,
   SandboxCapabilities,
   SandboxSession,
+  SandboxSessionState,
 } from "../../sandbox/index.js";
 import { codingRepoRow } from "../../test/coding-fixtures.js";
 import {
   buildWorktreeSpec,
   checkoutFeatureBranchInSandbox,
+  lazySession,
+  type RepoSessionDir,
+  resumeOptionsFor,
   taskSessionSpec,
 } from "./task-sandbox.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -118,11 +124,33 @@ describe("buildWorktreeSpec", () => {
 
 // --- taskSessionSpec ---------------------------------------------------------
 
+const GATES_DIR: ReadOnlyDirSpec = {
+  hostDir: "/var/lib/cogmo/gates/d1",
+  containerDir: "/tmp/cogmo-gates",
+  digest: "d1",
+};
+
+/** {@link GATES_DIR} and its variable, for the sessions of the `skills` repo's tasks. */
+const SKILLS_GATES: RepoSessionDir = {
+  repoName: "skills",
+  readOnlyDir: GATES_DIR,
+  env: { COGMO_GATES_DIR: "/tmp/cogmo-gates" },
+};
+
 describe("taskSessionSpec", () => {
   const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
   const AUTH_ENV = { CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" };
+  const ASSIGNMENT: WorktreeAssignment = {
+    type: "host-path",
+    branch: "cogmo/abc12345",
+    worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+    baseSha: BASE_SHA,
+  };
 
-  function specFor(assignment: WorktreeAssignment) {
+  function specFor(
+    assignment: WorktreeAssignment,
+    opts: { repoName?: string; repoDir?: RepoSessionDir } = {},
+  ) {
     const capabilities: SandboxCapabilities = {
       siblingContainers: "host-proxy",
       hostBindMount: true,
@@ -135,10 +163,11 @@ describe("taskSessionSpec", () => {
     return taskSessionSpec({
       sandbox: { capabilities },
       task: { id: TASK_ID, allowPrivilegedRunc: false },
-      repo: codingRepoRow(),
+      repo: codingRepoRow(opts.repoName === undefined ? {} : { name: opts.repoName }),
       assignment,
       identityPat: undefined,
       askpass: undefined,
+      repoDir: opts.repoDir ?? null,
       image: "cogmo/devbase:test",
       resourceLimits: { cpus: 1, memory_bytes: 1024, pids: 64 },
       taskTtlMs: 60_000,
@@ -165,6 +194,57 @@ describe("taskSessionSpec", () => {
     });
 
     expect(spec.env).toEqual(AUTH_ENV);
+  });
+
+  it("gives a session of the directory's repo the directory, and its env beside the rest", () => {
+    const spec = specFor(ASSIGNMENT, { repoName: "skills", repoDir: SKILLS_GATES });
+
+    expect(spec.readOnlyDir).toEqual(GATES_DIR);
+    expect(spec.env).toEqual({
+      ...AUTH_ENV,
+      COGMO_VERIFY_BASE: BASE_SHA,
+      COGMO_GATES_DIR: "/tmp/cogmo-gates",
+    });
+  });
+
+  it("gives a session of another repo neither", () => {
+    const spec = specFor(ASSIGNMENT, { repoName: "cogmo", repoDir: SKILLS_GATES });
+
+    expect(spec).not.toHaveProperty("readOnlyDir");
+    expect(spec.env).toEqual({ ...AUTH_ENV, COGMO_VERIFY_BASE: BASE_SHA });
+  });
+});
+
+// --- resumeOptionsFor / lazySession -------------------------------------------
+
+describe("resumeOptionsFor", () => {
+  it("passes the directory to a resume of a session of its repo", () => {
+    expect(resumeOptionsFor(SKILLS_GATES, codingRepoRow({ name: "skills" }))).toEqual({
+      readOnlyDir: GATES_DIR,
+    });
+  });
+
+  it("passes nothing for another repo's session, or with no directory", () => {
+    expect(resumeOptionsFor(SKILLS_GATES, codingRepoRow({ name: "cogmo" }))).toEqual({});
+    expect(resumeOptionsFor(null, codingRepoRow({ name: "skills" }))).toEqual({});
+  });
+});
+
+describe("lazySession", () => {
+  it("resumes once, with the options it was given", async () => {
+    const state: SandboxSessionState = {
+      type: "daytona",
+      taskId: TASK_ID,
+      sandboxId: "sb-1",
+    };
+    const { session } = fakeSession({ exitCode: 0 });
+    const resume = vi.fn(async (_state: SandboxSessionState, _opts?: ResumeOptions) => session);
+    const container = lazySession({ resume }, state, { readOnlyDir: GATES_DIR });
+
+    await container();
+    await container();
+
+    expect(resume.mock.calls).toEqual([[state, { readOnlyDir: GATES_DIR }]]);
   });
 });
 

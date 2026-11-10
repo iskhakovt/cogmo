@@ -260,6 +260,11 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       // Read-only — the in-container helper only `cat`s the secret file.
       binds.push(`${spec.askpass.hostDir}:${spec.askpass.containerDir}:ro`);
     }
+    if (spec.readOnlyDir) {
+      // The caller's directory, which outlives the session: bound, never
+      // provisioned or cleaned up here. A resume cannot rebind it.
+      binds.push(`${spec.readOnlyDir.hostDir}:${spec.readOnlyDir.containerDir}:ro`);
+    }
 
     // Home volume mounted at /home/vscode — coding-delegation contract:
     // task images run as user `vscode` (devbase inherits this from
