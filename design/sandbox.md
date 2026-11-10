@@ -50,15 +50,26 @@ interface SandboxClient<TState> {
   ensureImagePresent(image: string): Promise<void>;
 
   create(spec: SessionSpec): Promise<SandboxSession<TState>>;
-  resume(state: TState): Promise<SandboxSession<TState>>;
+  /**
+   * `[proposed]` `opts.readOnlyDir` is the caller's current read-only
+   * directory (SessionSpec.readOnlyDir). Daytona uploads it again when its
+   * digest differs from the one the state records, and returns a session
+   * whose state records the new one; Local-Docker ignores it.
+   */
+  resume(state: TState, opts?: { readOnlyDir?: ReadOnlyDirSpec }): Promise<SandboxSession<TState>>;
 
   /**
    * Discover the live root session (depth-0 container created by the
    * orchestrator) for `taskId`, or null when none is currently alive.
    * Used in the orchestrator's get-or-create path after an idle TTL
-   * where a prior session may or may not still exist.
+   * where a prior session may or may not still exist. `[proposed]` It cannot
+   * see the digest an earlier create uploaded, so Daytona, given
+   * `opts.readOnlyDir`, uploads it and records its digest.
    */
-  tryResumeByTaskId(taskId: string): Promise<SandboxSession<TState> | null>;
+  tryResumeByTaskId(
+    taskId: string,
+    opts?: { readOnlyDir?: ReadOnlyDirSpec },
+  ): Promise<SandboxSession<TState> | null>;
 
   /** Tear down the session and its underlying sandbox (cascade). Idempotent. */
   delete(session: SandboxSession<TState>): Promise<void>;
@@ -103,6 +114,20 @@ interface SessionSpec {
    */
   homeVolume?: HomeVolumeSpec;
   askpass?: AskpassMaterial;
+  /**
+   * `[proposed]` A directory of files the session reads at `containerDir`
+   * (skills.md → The gates in verify). Local-Docker binds `hostDir` there
+   * `:ro` at create, so `hostDir` is a path the daemon sees on the host.
+   * Daytona uploads each file of `hostDir` during post-create provisioning,
+   * after `askpass` and before the clone, and records `digest` in its session
+   * state; a failed upload deletes the sandbox and fails `create`, as a
+   * failed askpass upload does. Unlike `askpass`, it is not provisioned per
+   * run and has no per-task cleanup: `hostDir` is the caller's and outlives
+   * every session, and the sandbox's deletion removes Daytona's copy. A
+   * resume rebinds nothing; only Daytona's uploads again, when the caller's
+   * digest differs (`resume`).
+   */
+  readOnlyDir?: ReadOnlyDirSpec; // { hostDir: string; containerDir: string; digest: string }
   /** Process env for the container (`CLAUDE_CODE_OAUTH_TOKEN`, …). Never host `process.env`. */
   env?: Record<string, string>;
   /**
@@ -283,6 +308,7 @@ Hard transport differences (how working-tree material moves into the sandbox) li
 | Buffered exec | dockerode | `executeCommand` |
 | Streaming exec | dockerode demux | session-logs WebSocket + `stdbuf` |
 | `resume(state)` | container-id inspect | sandbox-id rehydrate |
+| `readOnlyDir` `[proposed]` | `:ro` bind at create | upload at create, and at a resume whose digest differs |
 | Worktree-less sessions | yes (skills container-tier) | yes (skills container-tier) |
 
 ### Backend selection
@@ -1023,7 +1049,7 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 ### Crash recovery
 
-`SandboxSessionState` for the Daytona backend stores `{ type: "daytona", taskId, sandboxId }`. On orchestrator restart mid-task, `client.resume(state)` re-attaches to the existing sandbox via the Daytona API. If the sandbox was reaped (TTL exceeded, manual delete, provider-side eviction), `resume()` fails fast and the orchestrator marks the task failed.
+`SandboxSessionState` for the Daytona backend stores `{ type: "daytona", taskId, sandboxId }`, `[proposed]` and `readOnlyDirDigest`, the digest of the `readOnlyDir` it last uploaded, when the session has one. On orchestrator restart mid-task, `client.resume(state)` re-attaches to the existing sandbox via the Daytona API. If the sandbox was reaped (TTL exceeded, manual delete, provider-side eviction), `resume()` fails fast and the orchestrator marks the task failed.
 
 ### Deferred / Phase 3c
 
