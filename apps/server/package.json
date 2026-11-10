@@ -121,7 +121,7 @@
     "@types/semver": "^7.8.0",
     "@types/split2": "4.2.3",
     "@types/ws": "^8.18.2",
-    "@vitest/coverage-v8": "^5.0.5",
+    "@vitest/coverage-v8": "^5.1.0",
     "dotenv": "^18.0.9",
     "drizzle-kit": "^0.31.11",
     "esbuild": "^0.28.2",
@@ -131,7 +131,7 @@
     "tsx": "^4.23.15",
     "type-fest": "^5.10.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5",
+    "vitest": "^5.1.0",
     "vitest-mock-extended": "5.1.1",
     "ws": "^8.22.1"
   }
