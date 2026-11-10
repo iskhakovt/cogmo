@@ -1,6 +1,7 @@
 import * as R from "remeda";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Node } from "web-tree-sitter";
+import { useVendoredPythonGrammar } from "../test/skills-fixtures.js";
 import type { SkillTree } from "./python-ast.js";
 import { loadPythonParser } from "./python-parser.js";
 import { formatSkillFinding, runSkillGates, type SkillFinding } from "./skill-gates.js";
@@ -17,6 +18,8 @@ vi.mock("./python-parser.js", async (importOriginal) => {
       parser.nullTree ? Promise.resolve(read(null)) : actual.withPythonTree(source, read),
   };
 });
+
+beforeAll(useVendoredPythonGrammar);
 
 afterEach(() => {
   parser.nullTree = false;

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { useVendoredPythonGrammar } from "../test/skills-fixtures.js";
 import type { SkillsCapabilities } from "./capabilities.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
 import {
@@ -7,9 +8,11 @@ import {
   classifyManifestStub,
   STUB_CLASSIFIER_VERSION,
 } from "./classifier.js";
-import { __resetParserForTests, __setWasmPathForTests } from "./python-parser.js";
+import { configurePythonParser } from "./python-parser.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillEffect, SkillManifest } from "./types.js";
+
+beforeAll(useVendoredPythonGrammar);
 
 /** The reasons `BUILD_CAPABILITIES` adds when the table would return `auto`. */
 const CAP_REASONS: SkillRiskReason[] = ["no_review_panel"];
@@ -239,13 +242,11 @@ describe("classifyManifest — fallback when AST parser is unloadable", () => {
   afterEach(() => {
     // Restore the production WASM path so other tests in this file
     // (and elsewhere in the suite) get the live AST classifier.
-    __setWasmPathForTests(null);
-    __resetParserForTests();
+    useVendoredPythonGrammar();
   });
 
   it("falls back to the stub + stamps STUB_CLASSIFIER_VERSION when WASM path is missing", async () => {
-    __setWasmPathForTests("/tmp/cogmo-nonexistent-wasm-path-xxxxxxxxxxxx.wasm");
-    __resetParserForTests();
+    configurePythonParser("/tmp/cogmo-nonexistent-wasm-path-xxxxxxxxxxxx.wasm");
 
     // Manifest declares a destructive effect → stub returns approve.
     // (The AST path would also return approve, but with a different
@@ -263,8 +264,7 @@ describe("classifyManifest — fallback when AST parser is unloadable", () => {
   });
 
   it("fallback preserves the stub's harmless-skill behavior (notify, never auto)", async () => {
-    __setWasmPathForTests("/tmp/cogmo-nonexistent-wasm-path-yyyyyyyyyyyy.wasm");
-    __resetParserForTests();
+    configurePythonParser("/tmp/cogmo-nonexistent-wasm-path-yyyyyyyyyyyy.wasm");
 
     // No declared effects, harmless body — with both capabilities set
     // the AST path promotes this to auto. Under the stub fallback, auto

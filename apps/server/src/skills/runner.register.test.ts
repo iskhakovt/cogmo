@@ -19,14 +19,14 @@ import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
-import { offlineWasm } from "../test/skills-fixtures.js";
+import { offlineWasm, useVendoredPythonGrammar } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
 import type { CpythonChecks } from "./cpython-checks.js";
 import { hashLockfileContents } from "./deps.js";
 import { migrateSkillsLayout } from "./migrate-layout.js";
 import { ensureSkillsMirror } from "./mirror-reconcile.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
-import { __resetParserForTests, __setWasmPathForTests } from "./python-parser.js";
+import { configurePythonParser } from "./python-parser.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
@@ -45,6 +45,7 @@ let close: () => Promise<void>;
 let store: DrizzleSkillStore;
 
 beforeAll(async () => {
+  useVendoredPythonGrammar();
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleSkillStore();
 });
@@ -3516,24 +3517,33 @@ async def run(inputs, ctx):
 
     describe("when the grammar cannot load", () => {
       afterEach(() => {
-        __setWasmPathForTests(null);
-        __resetParserForTests();
+        useVendoredPythonGrammar();
       });
 
-      it("rejects with the pausing registrar_unavailable, and a repeat after the fix goes live", async () => {
-        __setWasmPathForTests(join(tmpdir(), "cogmo-no-such-grammar.wasm"));
-        __resetParserForTests();
+      it("rejects with the pausing registrar_unavailable, logged, and a repeat after the fix goes live", async () => {
+        const missing = join(tmpdir(), "cogmo-no-such-grammar.wasm");
+        configurePythonParser(missing);
+        const error = vi.spyOn(logger, "error");
+        try {
+          const { result, before } = await registerBody(ECHO_BODY, ECHO_MANIFEST);
 
-        const { result, before } = await registerBody(ECHO_BODY, ECHO_MANIFEST);
+          assertStatus(result, "rejected");
+          expect(result.errors).toEqual([
+            expect.stringMatching(/^registrar_unavailable: parser: .+; retry the register$/),
+          ]);
+          expect(await getMainSha(repo.bare)).toBe(before);
+          expect(error).toHaveBeenCalledWith(
+            {
+              skillName: "echo",
+              detail: expect.stringContaining(`the Python grammar at ${missing} did not load`),
+            },
+            "the register-time gates could not run; the register pauses",
+          );
+        } finally {
+          error.mockRestore();
+        }
 
-        assertStatus(result, "rejected");
-        expect(result.errors).toEqual([
-          expect.stringMatching(/^registrar_unavailable: parser: .+; retry the register$/),
-        ]);
-        expect(await getMainSha(repo.bare)).toBe(before);
-
-        __setWasmPathForTests(null);
-        __resetParserForTests();
+        useVendoredPythonGrammar();
         const runner = await makeRunner();
         assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
       });

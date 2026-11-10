@@ -668,7 +668,7 @@ async function bundleFromSource(): Promise<string> {
     const code = e instanceof Error && "code" in e ? e.code : undefined;
     if (code !== "EEXIST" && code !== "ENOTEMPTY") throw e;
     await rm(buildDir, { recursive: true, force: true });
-    await assertOwnPrivateDir(outDir);
+    await assertOwnPrivateDir(outDir, "the wasm child bundle");
   }
   return join(outDir, "wasm-child.mjs");
 }

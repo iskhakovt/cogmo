@@ -3,7 +3,9 @@ import { promisify } from "node:util";
 import { err, ok, type Result } from "neverthrow";
 import { describeError } from "../util/describe-error.js";
 
-const execFileP = promisify(execFile);
+// Pure, so a bundle that reaches this module without calling it (the gates
+// bundle, through skill-files.ts) drops it, and with it `child_process`.
+const execFileP = /* @__PURE__ */ promisify(execFile);
 
 /** A ref, branch or sha that does not resolve in the repo. */
 export interface RefNotFound {

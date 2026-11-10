@@ -2,19 +2,18 @@ import { err, ok, type Result } from "neverthrow";
 import { match, P } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
-import { classifyWithAst } from "../ast-classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
 import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
 import type { SkillsRepo } from "../skill-files.js";
-import { formatSkillFinding, runSkillGates } from "../skill-gates.js";
-import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
+import { formatSkillFinding } from "../skill-gates.js";
+import { readSkillTexts } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest, SkillSchemas } from "../types.js";
 import { describeWasmPackagesError, type SkillSchemaImportError } from "../worker-wasm/wasm.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
-import { checkRegisterBody, type RegisterBodyRejection } from "./check-register-body.js";
 import { checkRegisterCpython, type RegisterCpythonRejection } from "./check-register-cpython.js";
+import { checkSkillFiles, type SkillFilesRejection } from "./check-skill-files.js";
 import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { describeLocateSkillRejection, locateSkill } from "./locate-skill.js";
@@ -166,51 +165,19 @@ async function prepareRegister(
   }
   const name = located.value;
 
-  const source = await readSkillSource(repo, name, branchSha);
-  if (source.isErr()) {
-    return err(
-      match(source.error)
-        .with({ kind: "missing_file", file: SKILL_MANIFEST_FILE }, () =>
-          rejectedResult(
-            branchSha,
-            `missing_skill_md: skills/${name}/SKILL.md not found at branch tip`,
-          ),
-        )
-        .with({ kind: "missing_file", file: SKILL_BODY_FILE }, () =>
-          rejectedResult(
-            branchSha,
-            `missing_skill_py: skills/${name}/skill.py not found at branch tip`,
-          ),
-        )
-        .with({ kind: "commit_not_found" }, () =>
-          rejectedResult(branchSha, "missing_commit: branch tip not found"),
-        )
-        .with({ kind: "invalid_manifest" }, ({ issues }) => rejectedResult(branchSha, ...issues))
-        .exhaustive(),
-    );
+  const files = await readSkillTexts(repo, name, branchSha);
+  if (files.isErr()) {
+    return err(rejectedResult(branchSha, "missing_commit: branch tip not found"));
   }
-  const { manifest, body } = source.value;
-  if (manifest.name !== name) {
-    return err(
-      rejectedResult(
-        branchSha,
-        `skill_name_mismatch: skills/${name}/SKILL.md names the skill '${manifest.name}'; its directory must be skills/${manifest.name}/`,
-      ),
-    );
-  }
-
-  // The register-time gates, wasm-lint among them, then the classifier: no
-  // body reaches the lockfile compile's sandbox session, or deploys, unless
-  // the AST path read it (design/skills.md → Register-time gates).
-  const checked = await checkRegisterBody(
-    { runGates: runSkillGates, classify: classifyWithAst },
-    { name, manifest, body },
-    deps.capabilities,
-  );
+  // The manifest, the name check, the register-time gates (wasm-lint among
+  // them), then the classifier: no body reaches the lockfile compile's
+  // sandbox session, or deploys, unless the AST path read it (design/skills.md
+  // → Register-time gates).
+  const checked = await checkSkillFiles(name, files.value, deps.capabilities);
   if (checked.isErr()) {
-    return err(rejectedResult(branchSha, ...describeBodyRejection(checked.error)));
+    return err(rejectedResult(branchSha, ...reportFilesRejection(name, checked.error)));
   }
-  const classifierLog = checked.value;
+  const { manifest, body, classifierLog } = checked.value;
 
   const lockfileResult = await readManifestLockfile(
     deps.lockfileCompiler,
@@ -288,14 +255,20 @@ async function prepareRegister(
   });
 }
 
-/** A body-check rejection as `RegisterResult.errors`: one string per gate finding. */
-function describeBodyRejection(rejection: RegisterBodyRejection): readonly string[] {
+/**
+ * A step-4 rejection as `RegisterResult.errors`, logging a gate that could not
+ * run at error, since the checks themselves log nothing.
+ */
+function reportFilesRejection(name: string, rejection: SkillFilesRejection): readonly string[] {
   return match(rejection)
-    .with({ kind: "lint_failed" }, ({ findings }) => findings.map(formatSkillFinding))
-    .with({ kind: "classifier_rejected" }, ({ validationErrors }) => [validationErrors.join("; ")])
-    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) => [
-      `registrar_unavailable: ${cause}: ${detail}; retry the register`,
-    ])
+    .with({ kind: "refused" }, ({ errors }) => errors)
+    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) => {
+      log.error(
+        { skillName: name, detail },
+        "the register-time gates could not run; the register pauses",
+      );
+      return [`registrar_unavailable: ${cause}: ${detail}; retry the register`];
+    })
     .exhaustive();
 }
 

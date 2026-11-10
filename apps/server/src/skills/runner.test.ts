@@ -12,7 +12,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { offlineWasm } from "../test/skills-fixtures.js";
+import { offlineWasm, useVendoredPythonGrammar } from "../test/skills-fixtures.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl, type SkillRunnerOptions } from "./runner.js";
 import { DrizzleSkillStore, type SkillRunIdentity } from "./store/index.js";
@@ -32,6 +32,7 @@ let store: DrizzleSkillStore;
 let wasmRoot: string;
 
 beforeAll(async () => {
+  useVendoredPythonGrammar();
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleSkillStore();
   wasmRoot = await mkdtemp(join(tmpdir(), "runner-test-wasm-"));

@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { skillsRepoAt } from "../test/skills-repo.js";
 import type { SkillsRepo } from "./skill-files.js";
-import { readSkillSource } from "./skill-source.js";
+import { readSkillSource, readSkillTexts } from "./skill-source.js";
 
 const execFileP = promisify(execFile);
 
@@ -133,6 +133,32 @@ describe("readSkillSource", () => {
   it("errs with commit_not_found when the sha does not resolve", async () => {
     const { repo } = await commit({});
     expect((await readSkillSource(repo, "echo", "refs/heads/missing"))._unsafeUnwrapErr()).toEqual({
+      kind: "commit_not_found",
+    });
+  });
+});
+
+describe("readSkillTexts", () => {
+  it("reads both files unparsed, a manifest that does not parse included", async () => {
+    const { repo, sha } = await commit({ "SKILL.md": "no frontmatter", "skill.py": "body\n" });
+    expect((await readSkillTexts(repo, "echo", sha))._unsafeUnwrap()).toEqual({
+      manifest: "no frontmatter",
+      body: "body\n",
+    });
+  });
+
+  it.each([
+    ["SKILL.md", { "skill.py": "body\n" }, { manifest: null, body: "body\n" }],
+    ["skill.py", { "SKILL.md": MANIFEST }, { manifest: MANIFEST, body: null }],
+    ["both files", {}, { manifest: null, body: null }],
+  ])("reads an absent %s as null", async (_label, files, expected) => {
+    const { repo, sha } = await commit(files);
+    expect((await readSkillTexts(repo, "echo", sha))._unsafeUnwrap()).toEqual(expected);
+  });
+
+  it("errs with commit_not_found when the sha does not resolve", async () => {
+    const { repo } = await commit({});
+    expect((await readSkillTexts(repo, "echo", "refs/heads/missing"))._unsafeUnwrapErr()).toEqual({
       kind: "commit_not_found",
     });
   });

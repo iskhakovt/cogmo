@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { Node } from "web-tree-sitter";
 import { expectDefined } from "../test/assertions.js";
+import { useVendoredPythonGrammar } from "../test/skills-fixtures.js";
 import {
   callArgument,
   ctxRequest,
@@ -13,6 +14,8 @@ import {
   readSkillTree,
 } from "./python-ast.js";
 import { withPythonTree } from "./python-parser.js";
+
+beforeAll(useVendoredPythonGrammar);
 
 /** `read` over the first node of `type` in `source`. */
 function firstOf<T>(source: string, type: string, read: (node: Node) => T): Promise<T> {

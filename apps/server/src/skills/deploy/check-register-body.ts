@@ -1,12 +1,9 @@
 import { err, ok, type Result, ResultAsync } from "neverthrow";
-import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
 import type { SkillsCapabilities } from "../capabilities.js";
 import type { SkillTree } from "../python-ast.js";
 import type { SkillFinding } from "../skill-gates.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
-
-const log = logger.child({ component: "skills.register" });
 
 /** The skill register's body checks read: its name, parsed frontmatter and `skill.py`. */
 interface CheckedSkill {
@@ -46,8 +43,8 @@ export type RegisterBodyRejection =
  * Register's step-4 checks of `skill.py`, before its transaction and its
  * sandbox sessions: the register-time gates' three stages, then the AST
  * classifier on the tree the gates parsed, each rejecting with one kind. A
- * throw from either is the pausing `registrar_unavailable` (`parser`), logged
- * at error.
+ * throw from either is the pausing `registrar_unavailable` (`parser`), which
+ * the caller logs: this runs in the gates bundle too, which carries no logger.
  */
 export async function checkRegisterBody(
   checks: RegisterBodyChecks,
@@ -57,13 +54,7 @@ export async function checkRegisterBody(
   const judged = await ResultAsync.fromPromise(judge(checks, skill, capabilities), describeError);
   return judged.match(
     (verdict) => verdict,
-    (detail) => {
-      log.error(
-        { skillName: skill.name, detail },
-        "the register-time gates could not run; the register pauses",
-      );
-      return err({ kind: "registrar_unavailable", cause: "parser", detail });
-    },
+    (detail) => err({ kind: "registrar_unavailable", cause: "parser", detail }),
   );
 }
 

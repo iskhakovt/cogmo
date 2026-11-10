@@ -36,15 +36,15 @@ export async function buildWasmChild(opts: { sourceDir: string; outDir: string }
 }
 
 /**
- * Throw unless `dir`, a bundle directory another process published under the
- * shared temporary directory, is one this user can trust: a real directory,
- * not a link, owned by this uid and closed to everyone else (`0o700`, as
- * `mkdtemp` creates it). Anything else may hold a planted child. A fatal
- * setup check: it runs only when the server runs from source.
+ * Throw unless `dir`, a directory another process published under the shared
+ * temporary directory holding `bundle` (the wasm child bundle, the gates
+ * bundle), is one this user can trust: a real directory, not a link, owned by
+ * this uid and closed to everyone else (`0o700`, as `mkdtemp` creates it).
+ * Anything else may hold planted code. A fatal setup check: it runs only when
+ * the server runs from source.
  */
-export async function assertOwnPrivateDir(dir: string): Promise<void> {
-  const refuse = (reason: string) =>
-    new Error(`refusing the wasm child bundle at ${dir}: ${reason}`);
+export async function assertOwnPrivateDir(dir: string, bundle: string): Promise<void> {
+  const refuse = (reason: string) => new Error(`refusing ${bundle} at ${dir}: ${reason}`);
   const stats = await lstat(dir);
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
     throw refuse(`${dir} is not a directory of its own`);

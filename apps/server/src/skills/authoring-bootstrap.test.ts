@@ -36,7 +36,7 @@ import type { Database, Transactor } from "../db/index.js";
 import type { GitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { offlineWasm } from "../test/skills-fixtures.js";
+import { offlineWasm, useVendoredPythonGrammar } from "../test/skills-fixtures.js";
 import { migrateSkillsLayout } from "./migrate-layout.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, SKILLS_CODING_REPO_NAME } from "./repo.js";
 import { SkillRunnerImpl } from "./runner.js";
@@ -51,6 +51,7 @@ let codingStore: DrizzleCodingStore;
 let skillStore: DrizzleSkillStore;
 
 beforeAll(async () => {
+  useVendoredPythonGrammar();
   ({ db, tx, close } = await createTestDatabase());
   codingStore = new DrizzleCodingStore();
   skillStore = new DrizzleSkillStore();

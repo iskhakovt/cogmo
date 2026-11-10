@@ -21,7 +21,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
-import { offlineWasm } from "../test/skills-fixtures.js";
+import { offlineWasm, useVendoredPythonGrammar } from "../test/skills-fixtures.js";
 import { hashLockfileContents } from "./deps.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
@@ -81,6 +81,7 @@ let wasmRoot: string;
 
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
+  useVendoredPythonGrammar();
   wasmRoot = await mkdtemp(join(tmpdir(), "runner-sysbox-wasm-"));
   const testDb = await createTestDatabase();
   ({ tx, close } = testDb);

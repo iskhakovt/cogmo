@@ -1,7 +1,7 @@
 /**
  * `RegisterResult` builders for tests of what consumes a deploy outcome, the
- * offline wasm host side a test's `SkillRunnerImpl` runs with, and the
- * register-time gates as an oracle for authoring guidance.
+ * grammar and the offline wasm host side a test's `SkillRunnerImpl` runs
+ * with, and the register-time gates as an oracle for authoring guidance.
  */
 
 import { join } from "node:path";
@@ -9,9 +9,11 @@ import { ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { DeployFacts } from "../skills/deploy/deploy-facts.js";
+import { configurePythonParser } from "../skills/python-parser.js";
 import type { RegisterResult, SkillRunnerOptions } from "../skills/runner.js";
 import { formatSkillFinding, runSkillGates } from "../skills/skill-gates.js";
 import type { SkillManifest } from "../skills/types.js";
+import { vendoredGrammarPath } from "../skills/vendored-grammar.js";
 import type { WasmProbe, WasmSchemaImporter } from "../skills/worker-wasm/wasm.js";
 
 type LiveResult = Extract<RegisterResult, { status: "live" }>;
@@ -19,6 +21,15 @@ type PendingResult = Extract<RegisterResult, { status: "pending_approval" }>;
 
 export const FIXTURE_SKILL_ID = "019d0000-0000-7000-8000-0000000000ab";
 export const FIXTURE_DEPLOY_ID = "019d0000-0000-7000-8000-0000000000cd";
+
+/**
+ * Point the parser at the vendored grammar under the working directory, which
+ * Vitest sets to the server package, as `bootstrapSkillRunner` does: the
+ * first call of a test that parses a skill body outside the boot.
+ */
+export function useVendoredPythonGrammar(): void {
+  configurePythonParser(vendoredGrammarPath(process.cwd()));
+}
 
 /**
  * The register-time gates' findings, formatted, for a `skill.py` with pydantic
@@ -57,6 +68,7 @@ export async function gateGuidanceSignature(guidance: string): Promise<string[]>
     dependencies: [],
     cost_per_call_usd: 0,
   };
+  useVendoredPythonGrammar();
   const gated = await runSkillGates({ name: "echo", manifest, body }, () => undefined);
   return gated.match(
     () => [],

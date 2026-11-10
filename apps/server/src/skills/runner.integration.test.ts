@@ -29,7 +29,7 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectOk } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { fileDatabaseUrl } from "../test/integration-file.js";
-import { offlineWasm } from "../test/skills-fixtures.js";
+import { offlineWasm, useVendoredPythonGrammar } from "../test/skills-fixtures.js";
 import { resolveSkillRunAs, type SkillRunAs } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -47,6 +47,7 @@ let runAs: SkillRunAs;
 let wasmRoot: string;
 
 beforeAll(async () => {
+  useVendoredPythonGrammar();
   wasmRoot = await mkdtemp(join(tmpdir(), "runner-it-wasm-"));
   sql = postgres(fileDatabaseUrl(), { max: 4 });
   db = drizzle(sql, { schema });

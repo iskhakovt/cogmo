@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "tsup";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { tsupOptions } from "../../tsup.config.js";
+import { GATES_BUNDLE_DIR, GATES_BUNDLE_FILES, gatesBundleDigest } from "../skills/gates-bundle.js";
 
 /**
  * `tsup.config.ts` against the layout the bundled skills host depends on.
@@ -14,10 +15,11 @@ import { tsupOptions } from "../../tsup.config.js";
  * the host lands in, with its Pyodide worker beside it. The child runs under
  * `--permission` with read access to its own directory and the Pyodide
  * distribution only, so neither file may import anything but Node's
- * built-ins. Only the label-gated e2e tier runs the image build, so this runs
- * the build itself: in-process, through tsup's API, so no bundled copy of the
- * config lands beside it in the source tree. Entries resolve from the cwd,
- * which Vitest sets to the server package.
+ * built-ins. The gates bundle goes in a directory of its own beside them
+ * (`gates-bundle.ts`). Only the label-gated e2e tier runs the image build, so
+ * this runs the build itself: in-process, through tsup's API, so no bundled
+ * copy of the config lands beside it in the source tree. Entries resolve from
+ * the cwd, which Vitest sets to the server package.
  */
 
 /** The specifier `host.ts` resolves against its module URL in the build. */
@@ -99,5 +101,12 @@ describe("tsup build", () => {
     expect(sources[1]).toContain("async def call_run(");
     expect(sources[1]).toContain("class _CogmoBridge:");
     expect(sources[1]).toContain("async def _install_wheels(mount, files):");
+  });
+
+  it("writes the gates bundle's files into their own directory", async () => {
+    const dir = join(outDir, GATES_BUNDLE_DIR);
+
+    expect(readdirSync(dir).sort()).toEqual([...GATES_BUNDLE_FILES].sort());
+    await expect(gatesBundleDigest(dir)).resolves.toMatch(/^[0-9a-f]{64}$/);
   });
 });

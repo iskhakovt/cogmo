@@ -15,10 +15,11 @@ import {
   type SkillsMirrorReconcileDeps,
 } from "../skills/mirror-reconcile.js";
 import { loadBundledPackages } from "../skills/pyodide-compat.js";
-import { loadPythonParser } from "../skills/python-parser.js";
+import { configurePythonParser, loadPythonParser } from "../skills/python-parser.js";
 import { resolveSkillRunAs } from "../skills/run-as.js";
 import { SkillRunnerImpl } from "../skills/runner.js";
 import { createSkillRunsSweeper } from "../skills/runs-sweeper.js";
+import { vendoredGrammarPath } from "../skills/vendored-grammar.js";
 import {
   readBootId,
   readStartTime,
@@ -63,7 +64,11 @@ export async function bootstrapSkillRunner(
 ): Promise<SkillRunnerHandle> {
   // The grammar register's gates and classifier share: a broken image stops
   // here rather than pausing every register (design/skills.md →
-  // Register-time gates → A gate that cannot run).
+  // Register-time gates → A gate that cannot run). It resolves from the
+  // working directory, the server package's by bootstrap's convention
+  // (`loadHindsightCompat` in `checks.ts`): tsup flattens the build, so
+  // `import.meta.url` cannot locate `vendor/` from `dist/`.
+  configurePythonParser(vendoredGrammarPath(process.cwd()));
   await loadPythonParser();
   const wasmChildrenDir = `${env.COGMO_SKILLS_PATH}/.wasm-children`;
   if (ownership.reapWasmChildren) {

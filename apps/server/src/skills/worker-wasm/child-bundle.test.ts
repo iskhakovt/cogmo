@@ -17,14 +17,14 @@ describe("assertOwnPrivateDir", () => {
 
   it("trusts a directory this user owns with mode 700", async () => {
     const dir = await mkdtemp(join(root, "bundle-"));
-    await expect(assertOwnPrivateDir(dir)).resolves.toBeUndefined();
+    await expect(assertOwnPrivateDir(dir, "the wasm child bundle")).resolves.toBeUndefined();
   });
 
   it("refuses a directory others can read or write", async () => {
     const dir = join(root, "open");
     await mkdir(dir);
     await chmod(dir, 0o777);
-    await expect(assertOwnPrivateDir(dir)).rejects.toThrow(
+    await expect(assertOwnPrivateDir(dir, "the wasm child bundle")).rejects.toThrow(
       `refusing the wasm child bundle at ${dir}: ${dir} has mode 777, not 700`,
     );
   });
@@ -37,7 +37,7 @@ describe("assertOwnPrivateDir", () => {
       // The suite has no second user: this process claims another uid instead.
       const getuid = vi.spyOn(process, "getuid").mockReturnValue(ownUid + 1);
       try {
-        await expect(assertOwnPrivateDir(dir)).rejects.toThrow(
+        await expect(assertOwnPrivateDir(dir, "the wasm child bundle")).rejects.toThrow(
           `refusing the wasm child bundle at ${dir}: ${dir} is owned by uid ${ownUid}, not this process's`,
         );
       } finally {
@@ -50,12 +50,16 @@ describe("assertOwnPrivateDir", () => {
     const target = await mkdtemp(join(root, "bundle-"));
     const link = join(root, "link");
     await symlink(target, link);
-    await expect(assertOwnPrivateDir(link)).rejects.toThrow(/not a directory of its own/);
+    await expect(assertOwnPrivateDir(link, "the wasm child bundle")).rejects.toThrow(
+      /not a directory of its own/,
+    );
   });
 
   it("refuses a file", async () => {
     const file = join(root, "file");
     await writeFile(file, "");
-    await expect(assertOwnPrivateDir(file)).rejects.toThrow(/not a directory of its own/);
+    await expect(assertOwnPrivateDir(file, "the wasm child bundle")).rejects.toThrow(
+      /not a directory of its own/,
+    );
   });
 });
