@@ -923,7 +923,7 @@ An `unavailable` verdict judged nothing.
 - **Slice 2** adds `presubmit_refused` and `presubmit_stale_base` to `coding_task_failure_reason`, in one migration file, since no CHECK names them.
 - **Slice 3** adds two files. The first is `ADD VALUE 'pending_fix'`. The second holds the `presubmit_fix_passes` column, `chk_coding_tasks_fix_passes_bound`, `chk_coding_tasks_fix_owed`, the count in `chk_coding_tasks_queued_bare`, and `pending_fix` in the two gate CHECKs.
 
-That is 1.17k to 1.38k production lines. Tests run two to three times that: replay tests on both orchestrators, PGlite tests of the guards and CHECKs, a migration test, and a test that a tip the dry run passes registers. Slice 3 holds together, since a `pending_fix` with no claimant strands the task, but `cogmo coding cancel` (about 60 lines) can ship ahead of it on its own: it also frees a task stuck at `pending_verify`. Nothing here is new infrastructure.
+That is 1.17k to 1.38k production lines. Tests run two to three times that: replay tests on both orchestrators, PGlite tests of the guards and CHECKs, a migration test, and a test that a tip the dry run passes registers. The skill-authoring e2e runs with the pre-submit off (`BootstrapOptions.skipPresubmit`) until slice 2, since its replay cannot recreate the recorded sandbox commit the dry run judges; unit tests cover the stage. Slice 3 holds together, since a `pending_fix` with no claimant strands the task, but `cogmo coding cancel` (about 60 lines) can ship ahead of it on its own: it also frees a task stuck at `pending_verify`. Nothing here is new infrastructure.
 
 ## Autonomy Gates `[proposed]`
 

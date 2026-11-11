@@ -55,16 +55,20 @@ const FIX_PASS = 0;
 
 /**
  * The `presubmit` step, on the skills repo only; the repo's name does not
- * change under a run. Durable: it runs sandbox sessions against the network.
- * Its result is `{ verdict }`.
+ * change under a run. With `deps.presubmit` null the stage is off, and no
+ * step is planned (`BootstrapOptions.skipPresubmit`). Durable: it runs sandbox
+ * sessions against the network. Its result is `{ verdict }`.
  */
 export async function runPresubmit(
   run: CodingRun,
-  deps: TaskStoreDeps & { presubmit: PresubmitDeps },
+  deps: TaskStoreDeps & { presubmit: PresubmitDeps | null },
   args: PresubmitArgs,
 ): Promise<void> {
-  if (args.repo.name !== SKILLS_CODING_REPO_NAME) return;
-  await run.stepRun("presubmit", async () => ({ verdict: await presubmit(run, deps, args) }));
+  const stage = deps.presubmit;
+  if (stage === null || args.repo.name !== SKILLS_CODING_REPO_NAME) return;
+  await run.stepRun("presubmit", async () => ({
+    verdict: await presubmit(run, deps, stage, args),
+  }));
 }
 
 /**
@@ -75,7 +79,8 @@ export async function runPresubmit(
  */
 async function presubmit(
   run: CodingRun,
-  deps: TaskStoreDeps & { presubmit: PresubmitDeps },
+  deps: TaskStoreDeps,
+  stage: PresubmitDeps,
   args: PresubmitArgs,
 ): Promise<PresubmitVerdict> {
   const task = await deps.runInTx((tx) => deps.store.getTask(tx, run.taskId));
@@ -84,11 +89,11 @@ async function presubmit(
   if (stored !== null && stored.runId === run.runId && stored.fixPass === FIX_PASS) return stored;
 
   const verdict: PresubmitVerdict = {
-    ...(await judgeTip(run, deps.presubmit, args)),
+    ...(await judgeTip(run, stage, args)),
     runId: run.runId,
     fixPass: FIX_PASS,
     checkedAt: new Date().toISOString(),
-    releaseVersion: deps.presubmit.releaseVersion,
+    releaseVersion: stage.releaseVersion,
   };
   const written = await deps.runInTx((tx) =>
     deps.store.setTaskPresubmitVerdict(tx, run.taskId, verdict),
