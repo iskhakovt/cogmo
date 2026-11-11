@@ -4,35 +4,43 @@
       "match": {
         "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhat's bitcoin at? Use the btc-spot skill.",
         "model": "claude-sonnet-5",
-        "turnIndex": 4,
-        "hasToolResult": true
+        "turnIndex": 3,
+        "hasToolResult": false
       },
       "response": {
-        "content": "Bitcoin is currently at **$64,725 USD**.",
+        "toolCalls": [
+          {
+            "name": "btc-spot",
+            "arguments": "{}",
+            "id": "toolu_01EsmRUo89x4eLEUfD37qTW7"
+          }
+        ],
         "usage": {
           "input_tokens": 2,
-          "cache_creation_input_tokens": 168,
-          "cache_read_input_tokens": 12727,
+          "cache_creation_input_tokens": 12710,
+          "cache_read_input_tokens": 0,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 168
+            "ephemeral_1h_input_tokens": 12710
           },
-          "output_tokens": 22
+          "output_tokens": 141
         }
       },
       "recordedTimings": {
-        "ttftMs": 529,
+        "ttftMs": 1156,
         "interChunkDelaysMs": [
           0,
+          1125,
           0,
           0,
-          55,
-          36,
+          1,
           0,
           0,
+          50,
+          1,
           0
         ],
-        "totalDurationMs": 620
+        "totalDurationMs": 2333
       },
       "metadata": {
         "systemHash": "af3fb4b5",
