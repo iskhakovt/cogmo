@@ -1,4 +1,5 @@
 import { lstat, readFile } from "node:fs/promises";
+import { text } from "node:stream/consumers";
 import { fileURLToPath } from "node:url";
 import { err, ok, type Result, ResultAsync } from "neverthrow";
 import * as R from "remeda";
@@ -6,39 +7,45 @@ import { match } from "ts-pattern";
 import { describeError } from "../util/describe-error.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
 import { checkSkillFiles, declaredDependencyNames } from "./deploy/check-skill-files.js";
+import { describeLocateSkillRejection, skillOfChangedPaths } from "./deploy/locate-skill.js";
 import { configurePythonParser } from "./python-parser.js";
 import { SKILL_BODY_FILE, SKILL_MANIFEST_FILE, type SkillFileTexts } from "./skill-source.js";
 
 /**
  * The gates CLI, bundled as `gates.mjs` (design/skills.md → The gates in
- * verify): register's step 4 after `locateSkill`, run by the skills repo's
- * `.cogmo/verify` on a skill's working tree.
+ * verify): register's path rules and its step 4 after `locateSkill`, run by
+ * the skills repo's `.cogmo/verify` on the working tree.
  *
  *     node gates.mjs skills/<name>
  *     node gates.mjs --dependencies skills/<name>
+ *     node gates.mjs --paths < <NUL-separated paths>
  *
  * Run from the repo root. It reads `skills/<name>/SKILL.md` and
- * `skills/<name>/skill.py` and the two wasm files beside the bundle, and
- * nothing else: no network, environment, clock or git. It writes to stdout
- * once the verdict is complete, one line per string `RegisterResult.errors`
- * would carry for those files, and exits 0 when every check passes, 1 on a
- * refusal, and 2 when the checks cannot run, with `gates: <detail>` on
+ * `skills/<name>/skill.py` and the two wasm files beside the bundle, or for
+ * `--paths` its stdin, and nothing else: no network, environment, clock or
+ * git. It writes to stdout once the verdict is complete, one line per string
+ * `RegisterResult.errors` would carry, and exits 0 when every check passes, 1
+ * on a refusal, and 2 when the checks cannot run, with `gates: <detail>` on
  * stderr and nothing on stdout. `--dependencies` prints the manifest's
- * declared dependency names instead, one per line, exit 0. Every release
- * keeps these forms, exits and outputs; a release may add a form, a finding
- * id or a cause of exit 2.
+ * declared dependency names instead, one per line, exit 0. `--paths` applies
+ * register's path rules to the repo-relative paths a change touches. Every
+ * release keeps these forms, exits and outputs; a release may add a form, a
+ * finding id or a cause of exit 2.
  */
 
 const EXIT_PASSED = 0;
 const EXIT_REFUSED = 1;
 const EXIT_CANNOT_RUN = 2;
 
-const USAGE = "usage: gates.mjs [--dependencies] skills/<name>";
+const USAGE = "usage: gates.mjs [--dependencies] skills/<name> | gates.mjs --paths < paths";
 
 /** `skills/<name>`, with or without a trailing `/`; `<name>` is one path segment. */
 const SKILL_DIR_ARGUMENT = /^skills\/([^/]+)\/?$/;
 
-type Command = { kind: "gates"; name: string } | { kind: "dependencies"; name: string };
+type Command =
+  | { kind: "gates"; name: string }
+  | { kind: "dependencies"; name: string }
+  | { kind: "paths" };
 
 /** The run's result: lines for stdout and the exit they go with, or why the checks cannot run. */
 type Outcome =
@@ -61,18 +68,17 @@ void run(process.argv.slice(2))
 async function run(argv: readonly string[]): Promise<Outcome> {
   const command = parseCommand(argv);
   if (command.isErr()) return cannotRun(command.error);
-  const { name } = command.value;
-  const dir = await skillDirectory(name);
-  if (dir.isErr()) return cannotRun(dir.error);
   return match(command.value)
-    .with({ kind: "gates" }, () => gates(name))
-    .with({ kind: "dependencies" }, () => dependencies(name))
+    .with({ kind: "gates" }, ({ name }) => inSkillDirectory(name, gates))
+    .with({ kind: "dependencies" }, ({ name }) => inSkillDirectory(name, dependencies))
+    .with({ kind: "paths" }, () => pathRules())
     .exhaustive();
 }
 
 function parseCommand(argv: readonly string[]): Result<Command, string> {
   const [first, second, ...rest] = argv;
   if (rest.length > 0) return err(USAGE);
+  if (first === "--paths") return second === undefined ? ok({ kind: "paths" }) : err(USAGE);
   if (first === "--dependencies") {
     return second === undefined
       ? err(USAGE)
@@ -89,11 +95,33 @@ function skillName(argument: string): Result<string, string> {
     : ok(name);
 }
 
-/** `skills/<name>` as a directory of its own, by `lstat`, so a link to one does not count. */
-async function skillDirectory(name: string): Promise<Result<void, string>> {
+/**
+ * `check` of skill `name`, once `skills/<name>` is a directory of its own by
+ * `lstat`, so a link to one does not count.
+ */
+async function inSkillDirectory(
+  name: string,
+  check: (name: string) => Promise<Outcome>,
+): Promise<Outcome> {
   const path = `skills/${name}`;
   const stats = await ResultAsync.fromPromise(lstat(path), describeError);
-  return stats.andThen((s) => (s.isDirectory() ? ok() : err(`${path} is not a directory`)));
+  if (stats.isErr()) return cannotRun(stats.error);
+  return stats.value.isDirectory() ? check(name) : cannotRun(`${path} is not a directory`);
+}
+
+/**
+ * Register's path rules over the NUL-separated paths on stdin, decoded as
+ * UTF-8 as register's `git diff` read is: no line when they name one skill
+ * or none, else the rejection as register words it.
+ */
+async function pathRules(): Promise<Outcome> {
+  const input = await ResultAsync.fromPromise(text(process.stdin), describeError);
+  if (input.isErr()) return cannotRun(`cannot read the paths on stdin: ${input.error}`);
+  const paths = input.value.split("\0").filter((path) => path.length > 0);
+  return skillOfChangedPaths(paths).match(
+    (): Outcome => ({ kind: "passed", lines: [] }),
+    (rejection): Outcome => ({ kind: "refused", lines: [describeLocateSkillRejection(rejection)] }),
+  );
 }
 
 /**

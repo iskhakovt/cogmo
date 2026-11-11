@@ -1,10 +1,21 @@
-import { execFile } from "node:child_process";
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { expectDefined } from "../test/assertions.js";
-import { DEPENDENCIES_CASES, GATES_CASES } from "../test/gates-cases.js";
+import { DEPENDENCIES_CASES, GATES_CASES, PATHS_CASES } from "../test/gates-cases.js";
 import { buildGatesBundle } from "./gates-bundle.js";
 import { GATES_BUNDLE_FILES } from "./gates-files.js";
 
@@ -13,8 +24,9 @@ import { GATES_BUNDLE_FILES } from "./gates-files.js";
  * verify): the bundle the release's build function writes, under `node` from
  * the repo root, with Node's permission model granting reads of the bundle's
  * directory and the skill's alone (`--allow-fs-read=<repo>/skills/<name>`),
- * and with no environment, so no `NODE_OPTIONS`. It shares its case table
- * with `check-skill-files.test.ts`.
+ * and with no environment, so no `NODE_OPTIONS`; `--paths` has the bundle's
+ * grant alone. It shares its case tables with `check-skill-files.test.ts` and
+ * `locate-skill.test.ts`.
  */
 
 /** Building the bundle; generous so a loaded runner doesn't fail it on time. */
@@ -44,17 +56,25 @@ interface Run {
   stderr: string;
 }
 
+interface RunOptions {
+  bundle?: string;
+  /** The skill's grant; null for none, as verify runs `--paths`. */
+  grant?: string | null;
+  /** Written to stdin, which closes after it. */
+  input?: string;
+}
+
 /** `node <bundle>/gates.mjs ...args` from the repo root, under verify's grants. */
-function runGates(args: readonly string[], opts: { bundle?: string; grant?: string } = {}) {
+function runGates(args: readonly string[], opts: RunOptions = {}) {
   const bundle = opts.bundle ?? gatesDir;
-  const grant = opts.grant ?? grantFor(args);
+  const grant = opts.grant === undefined ? grantFor(args) : opts.grant;
   return new Promise<Run>((resolve) => {
-    execFile(
+    const child = execFile(
       process.execPath,
       [
         "--permission",
         `--allow-fs-read=${bundle}`,
-        `--allow-fs-read=${grant}`,
+        ...(grant === null ? [] : [`--allow-fs-read=${grant}`]),
         join(bundle, "gates.mjs"),
         ...args,
       ],
@@ -64,6 +84,7 @@ function runGates(args: readonly string[], opts: { bundle?: string; grant?: stri
         resolve({ exit, stdout, stderr });
       },
     );
+    if (opts.input !== undefined) child.stdin?.end(opts.input);
   });
 }
 
@@ -96,6 +117,8 @@ function linesOf(stdout: string): string[] {
   return stdout === "" ? [] : stdout.replace(/\n$/, "").split("\n");
 }
 
+const USAGE = "usage: gates.mjs [--dependencies] skills/<name> | gates.mjs --paths < paths";
+
 const PASSING = expectDefined(
   GATES_CASES.find((c) => c.exit === 0),
   "a passing case",
@@ -126,6 +149,78 @@ describe("gates.mjs --dependencies: the parity table", () => {
       lines,
       stderr: "",
     });
+  });
+});
+
+describe("gates.mjs --paths: the parity table", () => {
+  it.each(PATHS_CASES)("$label", async ({ paths, lines, exit }) => {
+    const run = await runGates(["--paths"], {
+      grant: null,
+      input: paths.map((path) => `${path}\0`).join(""),
+    });
+
+    expect({ exit: run.exit, lines: linesOf(run.stdout), stderr: run.stderr }).toEqual({
+      exit,
+      lines: lines.map(printed),
+      stderr: "",
+    });
+  });
+});
+
+describe("gates.mjs --paths", () => {
+  it("reads paths with no trailing NUL", async () => {
+    const run = await runGates(["--paths"], {
+      grant: null,
+      input: "skills/echo/skill.py\0skills/other/skill.py",
+    });
+
+    expect(run).toEqual({
+      exit: 1,
+      stdout: "owned_paths: the branch changes more than one skill: echo, other\n",
+      stderr: "",
+    });
+  });
+
+  it("reads an empty stdin as no paths", async () => {
+    expect(await runGates(["--paths"], { grant: null, input: "" })).toEqual({
+      exit: 0,
+      stdout: "",
+      stderr: "",
+    });
+  });
+
+  it("exits 2 for a stdin it cannot read", async () => {
+    // A file opened write-only as stdin: its reads fail with EBADF.
+    const stdin = await open(join(repo, "write-only"), "w");
+    try {
+      const child = spawn(
+        process.execPath,
+        ["--permission", `--allow-fs-read=${gatesDir}`, join(gatesDir, "gates.mjs"), "--paths"],
+        { cwd: repo, env: {}, stdio: [stdin.fd, "pipe", "pipe"] },
+      );
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      expectDefined(child.stdout, "stdout").on("data", (chunk: Buffer) => stdout.push(chunk));
+      expectDefined(child.stderr, "stderr").on("data", (chunk: Buffer) => stderr.push(chunk));
+      const [exit] = await once(child, "close");
+
+      expect(exit).toBe(2);
+      expect(Buffer.concat(stdout).toString()).toBe("");
+      expect(Buffer.concat(stderr).toString()).toMatch(
+        /^gates: cannot read the paths on stdin: EBADF: .+\n$/,
+      );
+    } finally {
+      await stdin.close();
+    }
+  });
+
+  it.each([
+    ["an argument after it", ["--paths", "skills/echo"]],
+    ["it after a path", ["skills/echo", "--paths"]],
+  ])("exits 2 for %s", async (_label, args) => {
+    const run = await runGates(args, { grant: null, input: "" });
+
+    expect(run).toEqual({ exit: 2, stdout: "", stderr: `gates: ${USAGE}\n` });
   });
 });
 
@@ -207,8 +302,6 @@ describe("gates.mjs", () => {
 });
 
 describe("gates.mjs exits 2, with nothing on stdout, when the checks cannot run", () => {
-  const USAGE = "usage: gates.mjs [--dependencies] skills/<name>";
-
   beforeEach(async () => {
     await writeSkill("echo", { manifest: PASSING.manifest, body: PASSING.body });
   });

@@ -51,18 +51,24 @@ def test_shout() -> None:
     assert shout("hi") == "hi"
 """
 
-# Logs its call and answers with the entry `STUB_NODE_ANSWERS` holds for it, keyed `gates:<skill>` or
-# `dependencies:<skill>`; a call without one prints nothing and exits 0.
+# Logs its call, with its stdin for `--paths`, and answers with the entry `STUB_NODE_ANSWERS` holds for it, keyed
+# `paths`, `gates:<skill>` or `dependencies:<skill>`; a call without one prints nothing and exits 0.
 _STUB_NODE = """\
 import json
 import os
 import sys
 
 argv = sys.argv[1:]
+call = {"argv": argv, "cwd": os.getcwd(), "NODE_OPTIONS": os.environ.get("NODE_OPTIONS")}
+if "--paths" in argv:
+    key = "paths"
+    call["stdin"] = sys.stdin.read()
+else:
+    key = f"{'dependencies' if '--dependencies' in argv else 'gates'}:{argv[-1]}"
 with open(os.environ["STUB_NODE_LOG"], "a") as log:
-    log.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "NODE_OPTIONS": os.environ.get("NODE_OPTIONS")}) + "\\n")
+    log.write(json.dumps(call) + "\\n")
 with open(os.environ["STUB_NODE_ANSWERS"]) as answers:
-    answer = json.load(answers).get(f"{'dependencies' if '--dependencies' in argv else 'gates'}:{argv[-1]}", {})
+    answer = json.load(answers).get(key, {})
 sys.stdout.write(answer.get("stdout", ""))
 sys.stderr.write(answer.get("stderr", ""))
 sys.stdout.flush()
@@ -82,8 +88,14 @@ class Gates:
     answers: Path
 
     def answer(self, mode: str, skill: str, *, stdout: str, stderr: str, exit: int) -> None:
+        self._set(f"{mode}:skills/{skill}", {"stdout": stdout, "stderr": stderr, "exit": exit})
+
+    def answer_paths(self, *, stdout: str, stderr: str, exit: int) -> None:
+        self._set("paths", {"stdout": stdout, "stderr": stderr, "exit": exit})
+
+    def _set(self, key: str, answer: dict[str, object]) -> None:
         answers = json.loads(self.answers.read_text())
-        answers[f"{mode}:skills/{skill}"] = {"stdout": stdout, "stderr": stderr, "exit": exit}
+        answers[key] = answer
         self.answers.write_text(json.dumps(answers))
 
     def kill(self, mode: str, skill: str, signal: int) -> None:
@@ -175,6 +187,15 @@ def _headers(result: subprocess.CompletedProcess[str], name: str) -> list[str]:
     return [line.removeprefix(prefix) for line in result.stdout.splitlines() if line.startswith(prefix)]
 
 
+def _paths_section(result: subprocess.CompletedProcess[str]) -> list[str]:
+    """The stdout lines the path rules printed, up to the first skill's header."""
+    lines = result.stdout.splitlines()
+    if "verify: paths" not in lines:
+        return []
+    rest = lines[lines.index("verify: paths") + 1 :]
+    return list(itertools.takewhile(lambda line: not line.startswith("verify: "), rest))
+
+
 def _section(result: subprocess.CompletedProcess[str], name: str, label: str) -> list[str]:
     """The stdout lines check `label` printed for skill `name`, up to the next check's header; none without its own."""
     lines = result.stdout.splitlines()
@@ -197,15 +218,116 @@ def test_it_fails_on_a_base_the_repo_does_not_have(repo: Path, gates: Gates) -> 
     assert f"COGMO_VERIFY_BASE={'f' * 40} names no commit" in result.stderr
 
 
-def test_it_passes_when_no_skill_changed_without_the_gates_or_node(repo: Path, gates: Gates, tmp_path: Path) -> None:
+def test_it_passes_when_nothing_changed_without_the_gates_or_node(repo: Path, gates: Gates, tmp_path: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
-    (repo / "README.md").write_text("notes\n")
-    # Ignored files under `skills/` are not a change.
+    # Ignored files are not a change.
     (repo / "skills" / "stray" / "__pycache__").mkdir(parents=True)
     (repo / "skills" / "stray" / "__pycache__" / "skill.cpython-314.pyc").write_bytes(b"\0")
+    (repo / ".pytest_cache").mkdir()
     result = _verify(repo, base, gates, {"COGMO_GATES_DIR": None, "PATH": _git_only(tmp_path)})
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "no skill changed" in result.stdout
+    assert result.stdout == "verify: nothing changed\n"
+
+
+@pytest.mark.parametrize("missing", ["gates", "node"])
+def test_a_change_outside_skills_needs_the_gates_and_node(
+    repo: Path, gates: Gates, tmp_path: Path, missing: str
+) -> None:
+    # Register's path rules judge it, and they run under `node`.
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "README.md").write_text("notes\n")
+    env = {"COGMO_GATES_DIR": None} if missing == "gates" else {"PATH": _git_only(tmp_path)}
+    result = _verify(repo, base, gates, env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    message = "COGMO_GATES_DIR is not set" if missing == "gates" else "node is not on PATH"
+    assert f"verify: {message}" in result.stderr
+    assert gates.calls() == []
+
+
+def test_it_runs_the_path_rules_on_every_changed_path(repo: Path, gates: Gates) -> None:
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
+    (repo / "notes.md").write_text("old\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "echo")
+    base = _git(repo, "rev-parse", "HEAD")
+    # Tracked: edited, deleted and staged; untracked and not ignored, inside and outside `skills/`; ignored: none.
+    (repo / "skills" / "echo" / "test_skill.py").write_text(_FAILING_TEST)
+    (repo / "notes.md").unlink()
+    (repo / ".cogmo" / "paths").write_text("edited\n")
+    _git(repo, "add", ".cogmo/paths")
+    (repo / "skills" / "echo" / "__init__.py").write_text("")
+    (repo / "scratch.txt").write_text("x\n")
+    (repo / "skills" / "echo" / "__pycache__").mkdir()
+    (repo / "skills" / "echo" / "__pycache__" / "skill.cpython-314.pyc").write_bytes(b"\0")
+    result = _verify(repo, base, gates)
+    calls = gates.calls()
+    assert calls[0] == {
+        "argv": ["--permission", f"--allow-fs-read={gates.dir}", str(gates.dir / "gates.mjs"), "--paths"],
+        "cwd": str(repo),
+        "NODE_OPTIONS": None,
+        "stdin": ".cogmo/paths\0notes.md\0scratch.txt\0skills/echo/__init__.py\0skills/echo/test_skill.py\0",
+    }, result.stdout + result.stderr
+    assert "stdin" not in calls[1]
+
+
+def test_a_path_rule_refusal_fails_verify_after_every_skills_checks(repo: Path, gates: Gates) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
+    (repo / "skills" / "echo" / "__init__.py").write_text("")
+    refusal = "owned_paths: skills/echo/__init__.py outside a skill's own files (skills/<name>/ with SKILL.md, ...)"
+    gates.answer_paths(stdout=f"{refusal}\n", stderr="", exit=1)
+    result = _verify(repo, base, gates)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert _paths_section(result) == [refusal]
+    assert result.stdout.splitlines().index("verify: paths") < result.stdout.splitlines().index("verify: echo: gates")
+    assert _headers(result, "echo") == ["gates", "suppressions", "ruff", "format", "pyrefly", "imports", "pytest"]
+    assert "verify: the change failed the path rules\n" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "exit", "detail"),
+    [
+        ("", "gates: usage: gates.mjs [--dependencies] skills/<name>\n", 2, "gates: usage: gates.mjs"),
+        # A bundle from before `--paths`, or Node's own failure before the bundle runs.
+        ("", "", 1, "node exited 1 with nothing on stdout"),
+    ],
+)
+def test_path_rules_that_could_not_run_exit_2_after_every_skills_checks(
+    repo: Path, gates: Gates, stdout: str, stderr: str, exit: int, detail: str
+) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(repo, "echo", SKILL, _FAILING_TEST)
+    gates.answer_paths(stdout=stdout, stderr=stderr, exit=exit)
+    result = _verify(repo, base, gates)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert f"verify: paths: the gates could not run: {detail}" in result.stderr
+    assert "verify: the change could not run the path rules\n" in result.stderr
+    assert "verify: echo failed pytest\n" in result.stderr
+
+
+def test_a_test_importing_the_skill_by_its_module_name_passes(repo: Path, gates: Gates) -> None:
+    # pytest's prepend import mode puts the test's own directory first on `sys.path`, and pyrefly runs with it on
+    # its search path, so `from skill import ...` resolves under both, as `CLAUDE.md` tells the author.
+    base = _git(repo, "rev-parse", "HEAD")
+    test = (
+        "from typing import cast\n\nfrom cogmo_ctx import Ctx\nfrom skill import Input, Output, run\n\n\n"
+        "async def test_run() -> None:\n"
+        '    assert await run(Input(text="hi"), cast(Ctx, None)) == Output(text="HI")\n'
+    )
+    _write_skill(repo, "echo", SKILL, test)
+    result = _verify(repo, base, gates)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "echo passed" in result.stdout
+
+
+def test_a_test_importing_the_skill_relatively_fails_pytest(repo: Path, gates: Gates) -> None:
+    # A skill directory is no package: register refuses an `__init__.py` in it.
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST.replace("from skill import", "from .skill import"))
+    result = _verify(repo, base, gates)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "attempted relative import with no known parent package" in result.stdout
+    assert "pytest" in next(line for line in result.stderr.splitlines() if line.startswith("verify: echo failed "))
 
 
 def test_it_passes_a_new_skill_and_writes_no_bytecode(repo: Path, gates: Gates) -> None:
@@ -222,6 +344,7 @@ def test_it_runs_the_checks_in_verifys_order(repo: Path, gates: Gates) -> None:
     _write_skill(repo, "echo", SKILL, _PASSING_TEST)
     result = _verify(repo, base, gates)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[0] == "verify: paths"
     assert _headers(result, "echo") == ["gates", "suppressions", "ruff", "format", "pyrefly", "imports", "pytest"]
 
 
@@ -232,7 +355,9 @@ def test_it_runs_the_gates_under_the_permission_model_with_node_options_cleared(
     assert result.returncode == 0, result.stdout + result.stderr
     grants = ["--permission", f"--allow-fs-read={gates.dir}", f"--allow-fs-read={repo / 'skills' / 'echo'}"]
     bundle = str(gates.dir / "gates.mjs")
+    paths = "skills/echo/skill.py\0skills/echo/test_skill.py\0"
     assert gates.calls() == [
+        {"argv": [*grants[:2], bundle, "--paths"], "cwd": str(repo), "NODE_OPTIONS": None, "stdin": paths},
         {"argv": [*grants, bundle, "skills/echo"], "cwd": str(repo), "NODE_OPTIONS": None},
         {"argv": [*grants, bundle, "--dependencies", "skills/echo"], "cwd": str(repo), "NODE_OPTIONS": None},
     ]

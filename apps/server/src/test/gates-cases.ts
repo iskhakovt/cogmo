@@ -1,8 +1,10 @@
 /**
- * The parity table of register's step 4 and the gates CLI (design/skills.md →
- * The gates in verify → Parity). `check-skill-files.test.ts` runs each case
- * through `checkSkillFiles`, as register calls it, and `gates-cli.test.ts`
- * through the bundle under `node`, so the two agree on every case here.
+ * The parity table of register's step 4 and path rules and the gates CLI
+ * (design/skills.md → The gates in verify → Parity). `check-skill-files.test.ts`
+ * runs each skill case through `checkSkillFiles`, as register calls it,
+ * `locate-skill.test.ts` each path case through `skillOfChangedPaths`, and
+ * `gates-cli.test.ts` both through the bundle under `node`, so the two agree on
+ * every case here.
  */
 
 /** A skill's two files and what register's step 4 and the CLI make of them. */
@@ -274,6 +276,64 @@ export const DEPENDENCIES_CASES: readonly DependenciesCase[] = [
     label: "no SKILL.md",
     manifest: null,
     lines: ["missing_skill_md: skills/echo/SKILL.md not found"],
+    exit: 1,
+  },
+];
+
+/** A change's paths and what `--paths` makes of them, or `skillOfChangedPaths`. */
+export interface PathsCase {
+  label: string;
+  /** Repo-relative, as `git diff --name-only` and `git ls-files --others` list them. */
+  paths: readonly string[];
+  /** `describeLocateSkillRejection`'s string for exit 1, none for exit 0. */
+  lines: readonly string[];
+  exit: 0 | 1;
+}
+
+const OWN_FILES = "(skills/<name>/ with SKILL.md, skill.py, requirements.lock, test_skill.py)";
+
+export const PATHS_CASES: readonly PathsCase[] = [
+  {
+    label: "one skill's own files",
+    paths: ["skills/echo/SKILL.md", "skills/echo/skill.py", "skills/echo/test_skill.py"],
+    lines: [],
+    exit: 0,
+  },
+  { label: "nothing changed", paths: [], lines: [], exit: 0 },
+  {
+    label: "an __init__.py beside the skill's own files",
+    paths: ["skills/echo/__init__.py", "skills/echo/skill.py"],
+    lines: [`owned_paths: skills/echo/__init__.py outside a skill's own files ${OWN_FILES}`],
+    exit: 1,
+  },
+  {
+    label: "a second skill",
+    paths: ["skills/echo/skill.py", "skills/other/skill.py"],
+    lines: ["owned_paths: the branch changes more than one skill: echo, other"],
+    exit: 1,
+  },
+  {
+    label: "a skill file at the repo root, which hides the other rules",
+    paths: ["skill.py", "notes.md"],
+    lines: ["layout_violation: skill.py at the repo root; a skill's files live in skills/<name>/"],
+    exit: 1,
+  },
+  {
+    label: "a path outside skills/",
+    paths: ["skills/echo/skill.py", "notes.md"],
+    lines: [`owned_paths: notes.md outside a skill's own files ${OWN_FILES}`],
+    exit: 1,
+  },
+  {
+    label: "a toolchain entry edited",
+    paths: [".cogmo/verify", "skills/echo/skill.py"],
+    lines: [`owned_paths: .cogmo/verify outside a skill's own files ${OWN_FILES}`],
+    exit: 1,
+  },
+  {
+    label: "a path holding a newline, one string",
+    paths: ["skills/echo/skill.py", "skills/echo/notes\nmore.md"],
+    lines: [`owned_paths: skills/echo/notes\nmore.md outside a skill's own files ${OWN_FILES}`],
     exit: 1,
   },
 ];

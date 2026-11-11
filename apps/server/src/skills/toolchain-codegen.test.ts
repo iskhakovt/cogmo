@@ -160,9 +160,15 @@ describe("renderToolchainClaudeMd", () => {
     expect(rendered.startsWith("<!-- Generated; do not edit. -->\n")).toBe(true);
   });
 
+  it("says a skill directory holds only its files and its test imports the skill by its module name", () => {
+    expect(rendered).toContain(
+      "Nothing else goes in it, so no `__init__.py`: a skill directory is no package. `test_skill.py` imports the skill by its module name, `from skill import run`, with `Input` and `Output` when it has them (`from skill import Input, Output, run`), never relatively.",
+    );
+  });
+
   it("names the check that must pass, the base it reads, and its checks in verify's order", () => {
     expect(rendered).toContain(
-      "## Checks\n\n`uv run --locked --group dev .cogmo/verify` checks each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, in this order: register's gates, whose findings are the refusals register would make; the suppression rule below; ruff; `ruff format --check`; pyrefly; its imports, each from the standard library, the runtime's pydantic and `cogmo_ctx`, or a declared dependency; and pytest. It must pass before the work is done.",
+      "## Checks\n\n`uv run --locked --group dev .cogmo/verify` first applies register's path rules to every path that differs from `COGMO_VERIFY_BASE`, the commit the branch was cut from: one skill's own files and nothing else. Then it checks each skill changed, in this order: register's gates, whose findings are the refusals register would make; the suppression rule below; ruff; `ruff format --check`; pyrefly; its imports, each from the standard library, the runtime's pydantic and `cogmo_ctx`, or a declared dependency; and pytest. It must pass before the work is done.",
     );
     expect(rendered).toContain("It reads the gates from `COGMO_GATES_DIR`");
   });

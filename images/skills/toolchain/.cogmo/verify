@@ -2,20 +2,22 @@
 """Check the skills this branch changes, with Cogmo's toolchain.
 
 Run from the skills repo as `uv run --locked --group dev .cogmo/verify`.
-`COGMO_VERIFY_BASE` names the commit the branch was cut from. A skill is
-checked when a path under `skills/<name>/` differs from that commit in the
-working tree: tracked, or untracked and not ignored. Each is checked, every
-check running whatever an earlier one found, with register's gates
-(`gates.mjs` in `COGMO_GATES_DIR`, under `node`), the suppression rule
-register applies (`.cogmo/suppressions.py`), ruff, `ruff format --check`,
-pyrefly with the skill's directory on its search path, the Imports rule
-register applies (`.cogmo/imports.py`) against the dependencies its
-`SKILL.md` declares, then pytest of its `test_skill.py`. pyrefly and pytest
-run with the skill's `requirements.lock` installed when it has one, and the
-Imports rule reads that lockfile's environment. Exits 0 when every check
-passes or no skill changed, 1 when a check fails, 2 when the base is
-missing or unknown, when a skill changed and `COGMO_GATES_DIR` or `node` is
-missing, or when the gates could not run.
+`COGMO_VERIFY_BASE` names the commit the branch was cut from. The change is
+every path that differs from that commit in the working tree: tracked, or
+untracked and not ignored. Register's path rules judge it first (`gates.mjs
+--paths` in `COGMO_GATES_DIR`, under `node`): one skill's own files in
+`skills/<name>/` and nothing else. Then each skill with a changed path is
+checked, every check running whatever an earlier one found, with register's
+gates, the suppression rule register applies (`.cogmo/suppressions.py`),
+ruff, `ruff format --check`, pyrefly with the skill's directory on its
+search path, the Imports rule register applies (`.cogmo/imports.py`) against
+the dependencies its `SKILL.md` declares, then pytest of its
+`test_skill.py`. pyrefly and pytest run with the skill's `requirements.lock`
+installed when it has one, and the Imports rule reads that lockfile's
+environment. Exits 0 when every check passes or nothing changed, 1 when a
+check fails, 2 when the base is missing or unknown, when something changed
+and `COGMO_GATES_DIR` or `node` is missing, or when the path rules or the
+gates could not run.
 
 Part of Cogmo's toolchain, which Cogmo replaces on each release.
 """
@@ -75,12 +77,17 @@ def listed(*args: str) -> list[str]:
     return [path for path in result.stdout.split("\0") if path]
 
 
-def changed_skills(base: str) -> list[str]:
-    """The skills with a path differing from `base` in the working tree, tracked or untracked and not ignored."""
-    paths = listed("diff", "--name-only", "--no-renames", "-z", base, "--", f"{SKILLS_DIR}/") + listed(
-        "ls-files", "--others", "--exclude-standard", "-z", "--", f"{SKILLS_DIR}/"
-    )
-    names = {parts[1] for parts in (path.split("/") for path in paths) if len(parts) >= 3}
+def changed_paths(base: str) -> list[str]:
+    """Every path differing from `base` in the working tree, tracked or untracked and not ignored, sorted as git
+    sorts register's `main..tip` diff."""
+    tracked = listed("diff", "--name-only", "--no-renames", "-z", base, "--")
+    untracked = listed("ls-files", "--others", "--exclude-standard", "-z")
+    return sorted(set(tracked + untracked))
+
+
+def changed_skills(paths: list[str]) -> list[str]:
+    """The skills with a path among `paths`, whose directories exist."""
+    names = {parts[1] for parts in (path.split("/") for path in paths) if len(parts) >= 3 and parts[0] == SKILLS_DIR}
     return sorted(name for name in names if (ROOT / SKILLS_DIR / name).is_dir())
 
 
@@ -92,12 +99,14 @@ def with_requirements(skill: Path, command: list[str]) -> list[str]:
     return command
 
 
-def run_gates(node: str, gates: Path, skill: Path, *options: str) -> tuple[int, list[str]] | None:
-    """`gates.mjs` on the skill, as its exit, 0 or 1, and its stdout's lines; None, after saying why, when it could
-    not run.
+def run_bundle(
+    node: str, gates: Path, args: list[str], *, reads: list[Path], stdin: str, label: str
+) -> tuple[int, list[str]] | None:
+    """`gates.mjs` with `args` and `stdin`, as its exit, 0 or 1, and its stdout's lines; None, after saying why under
+    `label`, when it could not run.
 
-    It runs with `NODE_OPTIONS` cleared and under Node's permission model, reading only its own directory and the
-    skill's. Node exits 1 with nothing on stdout when it fails before the bundle runs, so only an exit 1 with a line
+    It runs with `NODE_OPTIONS` cleared and under Node's permission model, reading only its own directory and
+    `reads`. Node exits 1 with nothing on stdout when it fails before the bundle runs, so only an exit 1 with a line
     is a refusal.
     """
     env = {key: value for key, value in os.environ.items() if key != "NODE_OPTIONS"}
@@ -105,18 +114,27 @@ def run_gates(node: str, gates: Path, skill: Path, *options: str) -> tuple[int, 
         node,
         "--permission",
         f"--allow-fs-read={gates}",
-        f"--allow-fs-read={ROOT / skill}",
+        *(f"--allow-fs-read={path}" for path in reads),
         str(gates / "gates.mjs"),
-        *options,
-        str(skill),
+        *args,
     ]
-    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, check=False)
+    result = subprocess.run(command, cwd=ROOT, env=env, input=stdin, capture_output=True, text=True, check=False)
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     if result.returncode == 0 or (result.returncode == 1 and lines):
         return result.returncode, lines
     detail = result.stderr.strip() or f"node exited {result.returncode}" + ("" if lines else " with nothing on stdout")
-    print(f"verify: {skill.name}: the gates could not run: {detail}", file=sys.stderr, flush=True)
+    print(f"verify: {label}: the gates could not run: {detail}", file=sys.stderr, flush=True)
     return None
+
+
+def run_gates(node: str, gates: Path, skill: Path, *options: str) -> tuple[int, list[str]] | None:
+    """`gates.mjs` on the skill, reading its directory alone (`run_bundle`)."""
+    return run_bundle(node, gates, [*options, str(skill)], reads=[ROOT / skill], stdin="", label=skill.name)
+
+
+def run_path_rules(node: str, gates: Path, paths: list[str]) -> tuple[int, list[str]] | None:
+    """`gates.mjs --paths` on the change, its paths NUL-separated on stdin, reading no file (`run_bundle`)."""
+    return run_bundle(node, gates, ["--paths"], reads=[], stdin="".join(f"{path}\0" for path in paths), label="paths")
 
 
 def refused_pragmas(skill: Path) -> list[str]:
@@ -243,33 +261,52 @@ def check(name: str, node: str, gates: Path) -> Checked:
     return checked
 
 
+def check_paths(node: str, gates: Path, paths: list[str]) -> Checked:
+    """Register's path rules over the change, printing the refusal register would make."""
+    checked = Checked()
+    print("verify: paths", flush=True)
+    ran = run_path_rules(node, gates, paths)
+    if ran is None:
+        checked.unrun.append("the path rules")
+        return checked
+    status, lines = ran
+    for line in lines:
+        print(line, flush=True)
+    if status == 1:
+        checked.failed.append("the path rules")
+    return checked
+
+
 def main() -> int:
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     base = resolve_base()
     if base is None:
         return 2
-    skills = changed_skills(base)
-    if not skills:
-        print("verify: no skill changed")
+    paths = changed_paths(base)
+    if not paths:
+        print("verify: nothing changed")
         return 0
     gates = resolve_gates()
     if gates is None:
         return 2
     node = shutil.which("node")
     if node is None:
-        print("verify: node is not on PATH; register's gates run under it, so no skill is checked", file=sys.stderr)
+        print("verify: node is not on PATH; register's gates run under it, so nothing is checked", file=sys.stderr)
         return 2
-    results = {name: check(name, node, gates) for name in skills}
-    for name, checked in results.items():
+    # The change first, then each skill whatever it found, so one round shows every finding.
+    change = check_paths(node, gates, paths)
+    skills = changed_skills(paths)
+    results = [("the change", change), *((name, check(name, node, gates)) for name in skills)]
+    for name, checked in results:
         if checked.unrun:
             print(f"verify: {name} could not run {', '.join(checked.unrun)}", file=sys.stderr)
         if checked.failed:
             print(f"verify: {name} failed {', '.join(checked.failed)}", file=sys.stderr)
-    if any(checked.unrun for checked in results.values()):
+    if any(checked.unrun for _, checked in results):
         return 2
-    if any(checked.failed for checked in results.values()):
+    if any(checked.failed for _, checked in results):
         return 1
-    print(f"verify: {', '.join(skills)} passed")
+    print(f"verify: {', '.join(skills)} passed" if skills else "verify: no skill changed")
     return 0
 
 

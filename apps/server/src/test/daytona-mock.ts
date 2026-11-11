@@ -26,9 +26,11 @@
  * with the same `(method, path)` (FIFO within a bucket); WS frames
  * replay verbatim per scenario. Body comparison is intentionally loose
  * — UUIDs, timestamps, and similar non-deterministic fields would
- * otherwise force re-records on every test run.
+ * otherwise force re-records on every test run — so a request body over
+ * 64 KiB is recorded as its size and digest alone.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -297,6 +299,18 @@ function redactStrings(value: unknown): unknown {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactStrings(v)]));
   }
   return value;
+}
+
+/**
+ * The largest request body a fixture records verbatim. Replay matches on
+ * `(method, path)` alone and never reads a request body, so a larger one (a
+ * file upload such as the gates bundle) is recorded as {@link elidedBody}:
+ * its size and digest, which still say what was sent.
+ */
+const MAX_RECORDED_REQUEST_BODY_BYTES = 64 * 1024;
+
+function elidedBody(body: Buffer): string {
+  return `<elided ${body.length} bytes sha256:${createHash("sha256").update(body).digest("hex")}>`;
 }
 
 /**
@@ -936,7 +950,9 @@ export class DaytonaMock {
     }
     let reqBodyJson: unknown;
     let reqBodyText: string | undefined;
-    if (body.length > 0) {
+    if (body.length > MAX_RECORDED_REQUEST_BODY_BYTES) {
+      reqBodyText = elidedBody(body);
+    } else if (body.length > 0) {
       const reqContentType = headers["content-type"];
       if (typeof reqContentType === "string" && reqContentType.includes("application/json")) {
         try {

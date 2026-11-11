@@ -29,14 +29,47 @@ export type LocateSkillRejection =
   | { kind: "several_skills"; names: readonly string[]; atTip: boolean }
   | { kind: "nothing_to_register" };
 
+/** The rejections the path rules make, from the changed paths alone. */
+export type PathRuleRejection = Extract<
+  LocateSkillRejection,
+  { kind: "root_files" | "outside_paths" | "several_skills" }
+>;
+
+/** The skill a set of changed paths names, when they pass the path rules. */
+export type ChangedSkill = { kind: "one"; name: string } | { kind: "none" };
+
+/**
+ * The path rules over a change's paths, repo-relative: no skill file at the
+ * repo root, nothing outside one skill's own files in `skills/<name>/`, and
+ * no more than one skill (design/skills.md → Per-skill structure). Register
+ * applies them to `main..tip`, and the gates CLI's `--paths` to the working
+ * tree's change, so verify refuses what register does.
+ */
+export function skillOfChangedPaths(
+  paths: readonly string[],
+): Result<ChangedSkill, PathRuleRejection> {
+  const atRoot = paths.filter((path) => SKILL_FILES.some((f) => f === path));
+  if (atRoot.length > 0) return err({ kind: "root_files", paths: atRoot });
+  const owned = paths.map((path) => ({ path, match: SKILL_PATH.exec(path) }));
+  const outside = owned
+    .filter(({ match }) => match === null || !SKILL_FILES.some((f) => f === match[2]))
+    .map(({ path }) => path);
+  if (outside.length > 0) return err({ kind: "outside_paths", paths: outside });
+  const names = R.unique(owned.flatMap(({ match }) => (match?.[1] ? [match[1]] : [])));
+  if (names.length > 1) return err({ kind: "several_skills", names, atTip: false });
+  const [name] = names;
+  return ok(name === undefined ? { kind: "none" } : { kind: "one", name });
+}
+
 /**
  * The skill a branch tip deploys (design/skills.md → Per-skill structure).
  * The tip descends from `main`, so `main..tip` is the branch's own change: it
- * must touch only one skill's own files in `skills/<name>/`, and that skill is
- * the one. A tip that changes nothing is `main` itself, as after a register
- * whose commit failed once `update-ref` landed: its skill is the one whose
- * files differ from its live version, or, when none does, the one live at the
- * tip. Its commits must not carry Cogmo's identity or trailers.
+ * must pass the path rules ({@link skillOfChangedPaths}), and the one skill
+ * it touches is the one. A tip that changes nothing is `main` itself, as
+ * after a register whose commit failed once `update-ref` landed: its skill is
+ * the one whose files differ from its live version, or, when none does, the
+ * one live at the tip. Its commits must not carry Cogmo's identity or
+ * trailers.
  */
 export async function locateSkill(
   deps: { runInTx: Transactor; store: SkillStore },
@@ -54,19 +87,13 @@ export async function locateSkill(
     return err({ kind: "cogmo_commits", shas: cogmoMade.map((c) => c.sha) });
   }
 
-  const changed = await changedPaths(repo.path, mainSha, tipSha);
-  const atRoot = changed.filter((path) => SKILL_FILES.some((f) => f === path));
-  if (atRoot.length > 0) return err({ kind: "root_files", paths: atRoot });
-  const owned = changed.map((path) => ({ path, match: SKILL_PATH.exec(path) }));
-  const outside = owned
-    .filter(({ match }) => match === null || !SKILL_FILES.some((f) => f === match[2]))
-    .map(({ path }) => path);
-  if (outside.length > 0) return err({ kind: "outside_paths", paths: outside });
-  const names = R.unique(owned.flatMap(({ match }) => (match?.[1] ? [match[1]] : [])));
-  if (names.length > 1) return err({ kind: "several_skills", names, atTip: false });
-  const [name] = names;
-  if (name !== undefined) return ok(name);
-  return skillAtUnchangedTip(deps, repo, tipSha);
+  const changed = skillOfChangedPaths(await changedPaths(repo.path, mainSha, tipSha));
+  if (changed.isErr()) return err(changed.error);
+  return match(changed.value)
+    .returnType<Promise<Result<string, LocateSkillRejection>>>()
+    .with({ kind: "one" }, async ({ name }) => ok(name))
+    .with({ kind: "none" }, () => skillAtUnchangedTip(deps, repo, tipSha))
+    .exhaustive();
 }
 
 /** A rejection as the register error it surfaces as. */

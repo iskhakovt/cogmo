@@ -5,6 +5,7 @@
  * stub proves the proxy + fixture-writing path.
  */
 
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -12,7 +13,13 @@ import { join } from "node:path";
 import { PtyHandle } from "@daytona/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import { z } from "zod";
 import { DaytonaMock } from "./daytona-mock.js";
+
+/** The recorded requests' text bodies, as a fixture file holds them. */
+const RecordedRequestsSchema = z.object({
+  calls: z.array(z.object({ request: z.object({ bodyText: z.string().optional() }) })),
+});
 
 let fixtureDir: string;
 
@@ -988,6 +995,53 @@ describe("DaytonaMock", () => {
       const text = readFileSync(fixturePath, "utf8");
       expect(text).not.toContain(githubToken);
       expect(text).toContain("gho_REDACTED");
+    });
+
+    it("stores a request body over 64 KiB as its size and digest, and replays its response", async () => {
+      // Replay matches on (method, path) alone, so the bytes of an upload as
+      // large as the gates bundle buy the cassette nothing.
+      const large = `--b\r\n${"x".repeat(70_000)}\r\n--b--\r\n`;
+      const atBound = "y".repeat(64 * 1024);
+      const upstream = await startStubUpstream((path) => ({ status: 200, bodyJson: { path } }));
+      const fixturePath = join(fixtureDir, "record-elides-large-body.json");
+      const recorder = await DaytonaMock.create({
+        mode: "record",
+        fixturePath,
+        upstreamUrl: upstream.url,
+        upstreamApiKey: "sk-real-secret",
+      });
+      try {
+        recorder.beginScenario("elides-large-body");
+        for (const [path, body] of [
+          ["/sandbox/large", large],
+          ["/sandbox/at-bound", atBound],
+        ] as const) {
+          await fetch(`${recorder.url}${path}`, {
+            method: "POST",
+            headers: { "content-type": "multipart/form-data; boundary=b" },
+            body,
+          });
+        }
+        await recorder.endScenario();
+      } finally {
+        await recorder.stop();
+        await upstream.stop();
+      }
+
+      const { calls } = RecordedRequestsSchema.parse(JSON.parse(readFileSync(fixturePath, "utf8")));
+      const digest = createHash("sha256").update(large).digest("hex");
+      expect(calls.map((c) => c.request.bodyText)).toEqual([
+        `<elided ${Buffer.byteLength(large)} bytes sha256:${digest}>`,
+        atBound,
+      ]);
+
+      const replay = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const res = await fetch(`${replay.url}/sandbox/large`, { method: "POST", body: "other" });
+        expect(await res.json()).toEqual({ path: "/sandbox/large" });
+      } finally {
+        await replay.stop();
+      }
     });
   });
 });
