@@ -382,6 +382,36 @@ describe("runPresubmit", () => {
     expect(await verdictOf(taskId)).toEqual(recorded);
   });
 
+  it("a dry run that honours its deadline and rejects with the signal's reason logs no failure", {
+    timeout: 5_000,
+  }, async () => {
+    const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+    const sha = await pushBranch();
+    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY };
+    const late = Promise.withResolvers<RegisterDryRun>();
+    const h = harness(taskId, "verify-run-1");
+    const warn = vi.spyOn(h.run.log, "warn");
+    const deadline = stageDeadline();
+    let given: AbortSignal | undefined;
+    h.skillRunner.checkRegister.mockImplementation(({ signal }) => {
+      deadline.expire();
+      given = signal;
+      return late.promise;
+    });
+
+    await runPresubmit(h.run, h.deps, args);
+    const signal = expectDefined(given, "the dry run's signal");
+    expect(signal.aborted).toBe(true);
+    late.reject(signal.reason);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "presubmit: the dry run left at its deadline failed",
+    );
+    expect(await verdictOf(taskId)).toMatchObject({ kind: "unavailable", cause: "deadline" });
+  });
+
   it("a scratch ref that will not delete is logged, and the verdict still recorded", async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();

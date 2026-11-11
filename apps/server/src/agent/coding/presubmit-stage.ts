@@ -164,7 +164,8 @@ async function judgeTip(run: CodingRun, deps: PresubmitDeps, args: PresubmitArgs
  * no signal, so the dry run can outlast it. Past the deadline it is left to
  * finish on its own, each check deleting the session it opened once its
  * create returns, and whatever it settles to is dropped, since only this
- * stage writes the verdict; a late failure is logged.
+ * stage writes the verdict; a late failure other than the deadline's own
+ * abort is logged.
  */
 async function dryRunWithin(
   run: CodingRun,
@@ -176,6 +177,9 @@ async function dryRunWithin(
   return abortable(dryRun, signal).catch((e: unknown): Judged => {
     if (!signal.aborted) throw e;
     dryRun.catch((err: unknown) => {
+      // A check that honours the signal rejects with its reason: that is the
+      // deadline doing its job, not a failure.
+      if (err === signal.reason) return;
       run.log.warn({ err }, "presubmit: the dry run left at its deadline failed");
     });
     return stageUnavailable(sha, "deadline", describeError(e));
