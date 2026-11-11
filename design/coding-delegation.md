@@ -69,6 +69,7 @@ Shared abstraction over both CLIs, lives in `src/agent/coding/`:
 interface CodingBackend {
   plan(ctx: BackendCallContext): AsyncIterable<CodingEvent>;
   execute(ctx: BackendCallContext, sessionId: string): AsyncIterable<CodingEvent>;
+  fix(ctx: BackendCallContext, findings: readonly string[]): AsyncIterable<CodingEvent>;  // [proposed]
 }
 
 type CodingEvent =
@@ -80,7 +81,7 @@ type CodingEvent =
   | { kind: "complete"; exitCode: number; usage?: BackendUsage; isError: boolean };
 ```
 
-Two concrete impls: `ClaudeCodeBackend` (slices 1+2), `CodexBackend` (later). Selection per-task via `coding_tasks.backend`. Both `plan(ctx)` and `execute(ctx, sessionId)` return `AsyncIterable<CodingEvent>` directly — there is no bidirectional control-channel handle. `execute` resumes a prior session via `claude --resume <sid>`; session id is captured during the plan phase. Neither runner passes `--permission-prompt-tool stdio`, so the CLI resolves every tool decision locally and emits no `control_request` frames. Both runners write the prompt as a single stream-json `user` frame and immediately close stdin — the CLI treats stdin EOF as the graceful-shutdown signal under `--input-format stream-json`. See [Sandbox isolation](#sandbox-isolation-confirmed) for the security-boundary rationale.
+Two concrete impls: `ClaudeCodeBackend` (slices 1+2), `CodexBackend` (later). Selection per-task via `coding_tasks.backend`. Both `plan(ctx)` and `execute(ctx, sessionId)` return `AsyncIterable<CodingEvent>` directly — there is no bidirectional control-channel handle. `execute` resumes a prior session via `claude --resume <sid>`; session id is captured during the plan phase. `[proposed]` `fix` starts a fresh execute-mode session with no `--resume`, for a skills-repo fix pass: the backend builds the `fix` prompt from the task's goal and approved plan and the findings ([Skills-repo pre-submit](#skills-repo-pre-submit-proposed) → The fix pass). Neither runner passes `--permission-prompt-tool stdio`, so the CLI resolves every tool decision locally and emits no `control_request` frames. Both runners write the prompt as a single stream-json `user` frame and immediately close stdin — the CLI treats stdin EOF as the graceful-shutdown signal under `--input-format stream-json`. See [Sandbox isolation](#sandbox-isolation-confirmed) for the security-boundary rationale.
 
 A repo with a `connector_id` runs its tasks on a connector instead of the sandbox: the stages that touch the execution environment dispatch jobs. The statuses and transitions are unchanged; `coding_task_failure_reason` gains four connector reasons. See [connectors.md](connectors.md) `[proposed]`.
 
@@ -337,7 +338,7 @@ The per-state data stays in columns rather than one JSONB blob per state: the re
 | `start_emit_failed` | `delegate`, `failQueuedTask` | the send error |
 | `unexpected_error` | every orchestrator's catch, `failTaskFromCatch`; migration 0080's backfill, for any other text on a `failed` row (the catch's free text) | `describeError(err)`: a thrown step (`StepError`), the CLI exec hitting its cap (`exec.wait()` throws the timed-out `ExecError` out of `plan-cli` / `execute-cli`), a `23514` from a write the CHECKs refuse |
 | `user_cancelled`, `user_requested_revisions` | the plan keyboard, `cancelTaskIfActive` | null |
-| `presubmit_refused` `[proposed]` | verify's `transition-presubmit-failed`, on a `refused` pre-submit verdict with no fix pass left, or on a tip no fix pass changed | the findings, at most 8 KiB |
+| `presubmit_refused` `[proposed]` | verify's `transition-presubmit-failed`, on a `refused` pre-submit verdict with no fix pass left, or a `repeated` one | the findings, at most 8 KiB |
 | `presubmit_stale_base` `[proposed]` | verify's `transition-presubmit-failed`, on a `stale_base` verdict | the tip's and `main`'s shas |
 | `unknown` | migration 0080's backfill, for any other text on a `cancelled` row, and for a `failed` / `cancelled` row with no or empty text | the stored text, or null |
 
@@ -710,7 +711,8 @@ Every `execStreaming()` call inside the orchestrator pair (plan + execute) and t
 | Callsite | `timeoutMs` | `idleTimeoutMs` | Rationale |
 |-|-|-|-|
 | `checkoutFeatureBranchInSandbox` (`git checkout -B`) | 60 s | 30 s | Fast op (~1 s in steady state). Both timeouts tight because there is no legitimate slow path. |
-| `runClaudePlan` / `runClaudeExecute` (plan + execute streams) | 30 min | 5 min | Total cap is the absolute upper bound for one CLI invocation against current models. Idle cap catches WS-wedged-mid-stream while still allowing legitimate gaps between tool calls and thinking blocks. |
+| `checkoutFeatureBranchInSandbox` on a git-remote fix pass (`git fetch origin cogmo/<idShort>`, then `git checkout -B` at the verdict's sha) `[proposed]` | 5 min for the fetch (network download); 60 s for the checkout | 30 s | The fetch reaches the remote under the askpass env, as `git push` does; the idle cap catches a hung TLS connection ([Skills-repo pre-submit](#skills-repo-pre-submit-proposed) → The fix pass). |
+| `runClaudePlan` / `runClaudeExecute` (plan + execute streams; `[proposed]` and a fix pass's fresh session) | 30 min | 5 min | Total cap is the absolute upper bound for one CLI invocation against current models. Idle cap catches WS-wedged-mid-stream while still allowing legitimate gaps between tool calls and thinking blocks. |
 | `runCommitAndPush` (`git add`, `git commit -S`, `git push`) | 60 s for local-mutating commands; 5 min for `git push` (network upload) | 30 s | Push can take longer on a large delta; idle cap protects against a hung TLS connection mid-upload. |
 | `run-verify` (`bash -lc <verify_command>`) | `coding_repos.verify_timeout_seconds` (default 600 s) | — | A timeout once the command runs is a verdict, not an error: `runVerifyStreaming` reads `exited` and maps `timed_out` to `exitCode = TIMEOUT_EXIT_CODE (124)` and `timedOut: true`, recorded as `failure_reason = 'verify_timed_out'` with the output as `failure_detail` `[proposed]`. A start that outlasts the cap leaves nothing to judge: `execStreaming()` throws a timed_out `ExecError`, which fails the `run-verify` step. No idle cap yet (tracked in `todo.md`). |
 
@@ -758,7 +760,7 @@ verify:  claim → credentials → sandbox → run-verify → commit-and-push �
 | 1. Lock | no: it is inside the deploy transaction |
 | 2. Base, and S10's spec comparison, for a draft's register | with S10, both read-only: spec drift is a finding, and a moved base is a `base_moved` verdict |
 | 3. Fast-forward | yes, read-only; `main` not an ancestor of the tip is `stale_base`, and the dry run stops there, as register does |
-| 4. Read and classify | yes: host-side, no session; a `blocked` tier is a verdict, not a finding |
+| 4. Read and classify | yes: host-side, no session. A `blocked` tier is a verdict, not a finding: the dry run goes on through step 5, and a refusal there wins over it, as register's would |
 | 5. Lockfile, Pyodide, CPython checks, schemas, ajv | yes: sandbox sessions, and nothing of the deploy written |
 | 6. No-op, 7. Pending | no: they are in the transaction, and a pending deploy is the owner's to resolve |
 | 8. Writes | no |
@@ -767,7 +769,7 @@ It writes nothing that register's transaction or its post-commit steps write: no
 
 ```typescript
 type RegisterDryRun =
-  | { kind: "passed"; sha: string; riskTier: SkillRiskTier; releaseVersion: string } // auto, notify, approve
+  | { kind: "passed"; sha: string; riskTier: SkillRiskTier }   // auto, notify, approve
   | { kind: "blocked"; sha: string; reasons: readonly SkillRiskReason[] }
   | { kind: "refused"; sha: string; findings: readonly string[] }  // register's terminal rejections, as RegisterResult.errors writes them
   | { kind: "stale_base"; sha: string; mainSha: string }
@@ -778,15 +780,7 @@ type DryRunUnavailable =
 // with S10, a draft's dry run adds | { kind: "base_moved"; sha: string; liveGitSha: string | null }
 ```
 
-`blocked` arrives with the blocked tier ([skills.md → Risk tiers without a human](skills.md#risk-tiers-without-a-human)); until then the dry run never returns it.
-
-| Verdict | The task | Why |
-|-|-|-|
-| `passed` | goes on to `transition-pushed` and the PR | — |
-| `blocked` | the same, its reasons recorded in the verdict | the tier is the owner's call: the author cannot fix a deployment that lacks enforcement. Register writes the `blocked` deploy row, and under S10 the draft parks at `risk_blocked` for the owner's Override |
-| `unavailable` | the same | skipped, neither paused nor failed. `coding_tasks` has no pausing state, and failing would end the task, and spend an S10 round, on an outage. Register runs the same checks again with its own pausing outcome, and a draft parks without spending a round |
-| `refused` | a fix pass while one is left and the tip has changed since the last refusal; otherwise `failed: presubmit_refused` | [The fix pass](#the-fix-pass) |
-| `stale_base` | `failed: presubmit_stale_base` | register refuses the tip whatever the author changes, since `main` only moves forward. The fix is a merge of `main`, which Cogmo makes at an attempt's start (S9), and the sandbox's `origin/main` can lag the bare repo's. Failing here spares register's sessions and a PR, and S10 reads it as a new attempt |
+`blocked` arrives with the blocked tier ([skills.md → Risk tiers without a human](skills.md#risk-tiers-without-a-human)); until then the dry run never returns it. Each verdict maps to one transition, with its reason, in the [State machine](#state-machine) table.
 
 **What register's code gains** (slice 1). `prepareRegister` takes the tip's sha, and `registerSkill` resolves the branch first. `readManifestLockfile` returns the compile's error kind rather than a string. The rejection splits into terminal and pausing at the checks that know which: the gates' and the CPython runner's `registrar_unavailable`, the compile's `transport_failed`, and the schema import's `unavailable` variants. `registerSkill` flattens the rejection into `RegisterResult.errors`; the typed `RegisterRejection` union is S10's. The step's signal is the auto-register's 300 s deadline. The step body maps the deadline's abort, a failed fetch and a moved branch to `unavailable`; any other throw is a bug, and fails the task `unexpected_error` through the catch, as in every step.
 
@@ -796,13 +790,13 @@ type DryRunUnavailable =
 
 A `refused` verdict with a fix pass left moves the task to `pending_fix` and emits `coding/task/presubmit-refused`. The execute orchestrator takes that event as a second trigger. It claims `pending_fix → executing`, creates a fresh sandbox, and starts a fresh execute session (`claude -p --permission-mode bypassPermissions`, no `--resume`) with the `fix` prompt ([Skeleton](#skeleton)), through `CodingBackend.fix`. The branch holds the work. Then the execute tail runs: on git-remote `commit-and-push-execute-changes`, then `transition-pending-verify` and `emit-cli-done`. The next verify run runs `run-verify`, pushes and dry-runs again. No plan gate applies, since the pass works inside the approved plan.
 
-**The bound.** Two fix passes per task (`PRESUBMIT_FIX_PASSES`), so a task runs at most three execute sessions, three verify suites and three dry runs, then the real register. A refusal with no pass left fails the task `presubmit_refused`. So does a refusal on a tip no fix pass changed: `presubmit` finds the tip equal to the row's refused verdict and returns that verdict without the dry run, since the same tip under the same release gets the same verdict. Failing beats opening the PR: register would reach the same verdict after paying for its sessions again, and the PR would only be closed.
+**The bound.** Two fix passes per task (`PRESUBMIT_FIX_PASSES`), so a task runs at most three execute sessions, three verify suites and three dry runs, then the real register. A refusal with no pass left fails the task `presubmit_refused`. So does a repeated refusal. `presubmit` returns `{ verdict, repeated }`, and when the tip sha and `releaseVersion` both match the row's `refused` verdict, it returns that verdict with `repeated` set and runs no dry run, since the same tip under the same release gets the same verdict. An unchanged tip under a new release gets a fresh dry run. A memo without the flag, from an older build, reads as a fresh verdict. Failing beats opening the PR: register would reach the same verdict after paying for its sessions again, and the PR would only be closed.
 
-**The sandbox.** The fix pass works the same on both backends. The verify run that hands back reaps its sandbox and releases its askpass dir in `teardown-before-fix`, ahead of the emit. After a hand-back its `finally` does neither, since the fix pass's sandbox carries the same task label and askpass path. The fix pass never calls `try-resume`. It creates its sandbox through execute's create path: `check-credentials` (the Claude token, and on git-remote the identity), `provision-askpass` on git-remote, then `create-container`. On bind-mount the container mounts the host tree, which holds the work, and no askpass dir, as execute's does. On git-remote, `checkout-feature-branch` fetches `cogmo/<idShort>` and checks out the verdict's sha, so a commit verify made is in its base.
+**The sandbox.** The fix pass works the same on both backends. The verify run that hands back reaps its sandbox and releases its askpass dir in `teardown-before-fix`, ahead of the emit. The fix pass's sandbox carries the same task label and askpass path, so once `teardown-before-fix` is memoized, the run's `finally` skips its sweep and its askpass release. Only that memo decides: a run whose `transition-pending-fix` is memoized but never reached `teardown-before-fix` sweeps and releases as on any other exit. The fix pass never calls `try-resume`. It creates its sandbox through execute's create path: `check-credentials` (the Claude token, and on git-remote the identity), `provision-askpass` on git-remote, then `create-container`. On bind-mount the container mounts the host tree, which holds the work, and no askpass dir, as execute's does. On git-remote, `checkout-feature-branch` fetches `cogmo/<idShort>` and checks out the verdict's sha, so a commit verify made is in its base. The fetch reaches the remote under the provisioned askpass env (`GIT_ASKPASS=/tmp/cogmo-askpass/helper`, `GIT_TERMINAL_PROMPT=0`), as `commit-and-push-execute-changes` does, and with a network cap ([Per-callsite exec timeouts](#per-callsite-exec-timeouts-confirmed)).
 
 **Budgets.** `task_token_budget` and `task_wall_time_seconds` are the task's. The fix prompt names the token budget left after the recorded usage. A fix pass adds its usage to the row's: its `persist-usage` writes through `addTaskResourceUsage`, which sums tokens and cost in one UPDATE, while every other execute run writes through `setTaskResourceUsage`. Both budgets are prompt guidance until the enforcement the [Self-verify clause](#self-verify-clause) specifies is built (todo.md).
 
-**Announcing.** After the first execute session, nothing renders a failure: verify publishes nothing, and the registry released the execute stream at the first `execute_complete`. So a subscriber on `coding/task/failed` posts a skills-repo task's failure into its conversation when the reason is `presubmit_refused` or `presubmit_stale_base`, or when the task had a fix pass (`presubmit_fix_passes ≥ 1`), which covers a fix session's `cli_exit_error` and a `verify_failed` after a fix. It posts the failure as a rejected `skills/deploy/outcome`, which the channel renders as it renders register's rejection, and takes the `taskId`-keyed idempotency every `coding/task/failed` subscriber takes ([Worker-death reconciliation](#worker-death-reconciliation-confirmed)).
+**Announcing.** After the first execute session, nothing renders a failure: verify publishes nothing, and the registry released the execute stream at the first `execute_complete`. So a subscriber on `coding/task/failed` posts a skills-repo task's failure into its conversation when the reason is `presubmit_refused` or `presubmit_stale_base`, or when the task had a fix pass (`presubmit_fix_passes ≥ 1`), which covers a fix session's `cli_exit_error` and a `verify_failed` after a fix. It emits `coding/task/failure-notice` (`{ conversationId, taskId, reason, detail, branch }`), which the channel renders as a coding-task failure with `describeTaskFailure`, so a `skills/deploy/outcome` stays a register result alone. For `presubmit_stale_base` on a task with no draft, the notice names the pushed `cogmo/<idShort>` branch, so the owner can merge `main` into it and register it by hand. The subscriber takes the `taskId`-keyed idempotency every `coding/task/failed` subscriber takes ([Worker-death reconciliation](#worker-death-reconciliation-confirmed)).
 
 **Sizes.** The verdict on the row keeps the CPython runner's bound: the first 100 findings, each cut at 400 code points, then a count of the rest per check. The fix prompt carries that list. `failure_detail`, and with it `coding/task/failed`, carries at most 8 KiB, as verify output does, cut at a finding boundary with a count of the rest. The chat post fits Telegram's 4096 characters the same way. `coding/task/presubmit-refused` carries no findings: the fix session reads them from the row.
 
@@ -814,20 +808,21 @@ A `refused` verdict with a fix pass left moves the task to `pending_fix` and emi
 
 ```text
 verifying ──passed, blocked, unavailable──▶ pushed → pr_open
-verifying ──refused, a pass left, the tip changed──▶ pending_fix ──claim-fix-pass──▶ executing → pending_verify → verifying
+verifying ──refused, not repeated, a pass left──▶ pending_fix ──claim-fix-pass──▶ executing → pending_verify → verifying
 verifying ──refused otherwise──▶ failed: presubmit_refused
 verifying ──stale_base──▶ failed: presubmit_stale_base
 ```
 
-Every non-terminal status, `pending_fix` included, keeps its `→ failed` and `→ cancelled` edges. This table is the home of the pre-submit's transitions; the [Task lifecycle](#task-lifecycle-confirmed) table points here.
+Every non-terminal status, `pending_fix` included, keeps its `→ failed` and `→ cancelled` edges. This table is the home of the pre-submit's transitions, and maps each verdict to one; the [Task lifecycle](#task-lifecycle-confirmed) table points here.
 
-| Transition | Writer (step) | Guard | Writes |
-|-|-|-|-|
-| `verifying`, no status change | verify, `presubmit` | conditional on `verifying` | `presubmit_verdict` |
-| `pending_verify → verifying` | verify, `set-status-verifying` | the verify claim, also matching `presubmit_fix_passes` to the trigger's `fixPass` | `claimed_by_run_id` |
-| `verifying → pending_fix` | verify, `transition-pending-fix` | conditional on `verifying`, a `refused` verdict on a changed tip, and `presubmit_fix_passes = $n`, where `$n` is the trigger's `fixPass` and `$n < 2` | `presubmit_fix_passes = $n + 1`; `coding/task/presubmit-refused` follows only when it fires |
-| `pending_fix → executing` | execute, `claim-fix-pass` | conditional on `pending_fix` and `presubmit_fix_passes` equal to the trigger's `fixPass` | `claimed_by_run_id` |
-| `verifying → failed` | verify, `transition-presubmit-failed` | conditional on `verifying`; a `refused` verdict not handed back, or `stale_base` | `presubmit_refused` with the findings, or `presubmit_stale_base` with both shas |
+| Transition | Writer (step) | Guard | Writes | Why |
+|-|-|-|-|-|
+| `verifying`, no status change | verify, `presubmit` | conditional on `verifying` | `presubmit_verdict` | — |
+| `pending_verify → verifying` | verify, `set-status-verifying` | the verify claim, also matching `presubmit_fix_passes` to the trigger's `fixPass` | `claimed_by_run_id` | a trigger from an earlier pass loses here |
+| `verifying → pushed` | verify, `transition-pushed` ([Task lifecycle](#task-lifecycle-confirmed)) | a `passed`, `blocked` or `unavailable` verdict | — | `blocked` is the owner's call: the author cannot fix a deployment that lacks enforcement, so register writes the `blocked` deploy row, and under S10 the draft parks at `risk_blocked` for the owner's Override. `unavailable` is skipped, neither paused nor failed: `coding_tasks` has no pausing state, failing would end the task (and spend an S10 round) on an outage, and register runs the same checks again with its own pausing outcome |
+| `verifying → pending_fix` | verify, `transition-pending-fix` | conditional on `verifying`, a `refused` verdict not `repeated`, and `presubmit_fix_passes = $n`, where `$n` is the trigger's `fixPass` and `$n < 2` | `presubmit_fix_passes = $n + 1`; `coding/task/presubmit-refused` follows only when it fires | [The fix pass](#the-fix-pass) |
+| `pending_fix → executing` | execute, `claim-fix-pass` | conditional on `pending_fix` and `presubmit_fix_passes` equal to the trigger's `fixPass` | `claimed_by_run_id` | — |
+| `verifying → failed` | verify, `transition-presubmit-failed` | conditional on `verifying`; a `refused` verdict that is `repeated` or has no pass left, or `stale_base` | `presubmit_refused` with the findings, or `presubmit_stale_base` with both shas | `refused`: [The bound](#the-fix-pass). `stale_base`: register refuses the tip whatever the author changes, since `main` only moves forward. The fix is a merge of `main`, which Cogmo makes at an attempt's start (S9), and the sandbox's `origin/main` can lag the bare repo's. Failing here spares register's sessions and a PR, and S10 reads it as a new attempt |
 
 Both claims match the pass, so a trigger from an earlier pass, redelivered past the bus's window or replayed, loses at its claim before any failure machinery. With the claim pinning the count, a count that differs at `transition-pending-fix` is an invariant violation, and the step throws. The refusal exits are conditional on `verifying`. `stale` at `pushed` or `pr_open`, statuses only the run's own memoized steps reach, reads as passed, and the run carries on to them. `stale` at `failed` with the verdict's reason is the run's own commit, and the run goes on to `emit-task-failed`.
 
@@ -836,7 +831,7 @@ Both claims match the pass, so a trigger from an earlier pass, redelivered past 
 | Column | Shape | Written |
 |-|-|-|
 | `presubmit_fix_passes` | `SMALLINT NOT NULL DEFAULT 0` | The default is the start of every task's count, the one value an insert can mean, and it backfills the existing rows. Moved only by `transition-pending-fix`. `chk_coding_tasks_fix_passes_bound` holds it between 0 and 2, the bound `PRESUBMIT_FIX_PASSES` also holds, and the two change together |
-| `presubmit_verdict` | `JSONB`, `PresubmitVerdictSchema`: the `RegisterDryRun` union with `checkedAt` on each variant, flat, so `->>'kind'` reads the variant | the latest dry run's verdict; null until the task's first, and on every other repo's task |
+| `presubmit_verdict` | `JSONB`, `PresubmitVerdictSchema`: the `RegisterDryRun` union with `checkedAt` and the server's `releaseVersion` on each variant, flat, so `->>'kind'` reads the variant | the latest dry run's verdict; null until the task's first, and on every other repo's task |
 
 - `chk_coding_tasks_fix_owed`: `status <> 'pending_fix' OR (presubmit_verdict->>'kind' = 'refused' AND presubmit_fix_passes >= 1)`.
 - `chk_coding_tasks_queued_bare` adds both columns at their start values. `chk_coding_tasks_plan_at_gate` and `chk_coding_tasks_approval_after_gate` add `pending_fix` to the statuses that hold `plan` and `plan_approved_at`. `chk_coding_tasks_pr_metadata_after_push` keeps `pr_metadata` null at `pending_fix` as written.
@@ -852,9 +847,9 @@ Both claims match the pass, so a trigger from an earlier pass, redelivered past 
 
 | Step | Run | Notes |
 |-|-|-|
-| `presubmit` | verify, skills repo | The fetch, the dry run and the verdict write run in one body, which returns the verdict; the sessions never run in the bare body. On a tip equal to the row's refused verdict, it returns that verdict without the fetch or the dry run. Durable because it runs sessions against the network, and its verdict selects disjoint step sets |
+| `presubmit` | verify, skills repo | The fetch, the dry run and the verdict write run in one body, which returns `{ verdict, repeated }`; the sessions never run in the bare body. When the tip sha and `releaseVersion` both match the row's `refused` verdict, it returns that verdict with `repeated` set and no fetch or dry run. Every invocation parses the memo, and one without the flag reads as `repeated: false`. Durable because it runs sessions against the network, and its result selects disjoint step sets |
 | `transition-pending-fix` | verify, a refusal handed back | Conditional. `stale` at `pending_fix` with the count at `$n + 1` is this step's own commit |
-| `teardown-before-fix` | verify, a hand-back | `deleteByTaskId`, then the askpass lease's release, ahead of the emit. Inside the step, so no replay repeats the release after the fix pass has provisioned the same path |
+| `teardown-before-fix` | verify, a hand-back | `deleteByTaskId`, then the askpass lease's release, ahead of the emit. Inside the step, so no replay repeats the release after the fix pass has provisioned the same path. Its memo, and only its memo, makes the run's `finally` skip the sweep and the release |
 | `emit-presubmit-refused` | verify, once the transition fires | `{ taskId, fixPass: $n + 1 }`, under id `presubmit-refused-<taskId>-f<n+1>` |
 | `transition-presubmit-failed` | verify, a refusal not handed back, or `stale_base` | Conditional `verifying → failed`; `emit-task-failed` and `teardown-worktree` follow, as on verify's other failure exits |
 | `claim-fix-pass` | execute, a fix-pass run | In place of `set-status-executing` on a fix-pass run: the body picks the claim from its trigger's payload, where a `fixPass` marks a fix pass. The other steps keep their ids, since a pass is its own run |
@@ -867,7 +862,7 @@ Both claims match the pass, so a trigger from an earlier pass, redelivered past 
 
 ### Failure modes
 
-Every run reaps its own sandbox: execute at its hand-off, verify in `teardown-before-fix` before a hand-back and in its `finally` otherwise, and a fix pass at its own hand-off. What the rows below leave is a reap that fails, and the sandboxes of a run that dies, which the reaper's TTL pass or Daytona's auto-stop takes as for any run.
+Every run reaps its own sandbox: execute at its hand-off, verify in `teardown-before-fix` before a hand-back and in its `finally` otherwise, and a fix pass at its own hand-off. Each reap is `deleteByTaskId`, which takes every sandbox with the task's label, so a reap that fails leaves its sandbox only until the next run's. The reaper's TTL pass or Daytona's auto-stop matters only for the sandboxes of a run that dies.
 
 | Crash point or condition | State left | Why safe, or the residual |
 |-|-|-|
@@ -878,10 +873,10 @@ Every run reaps its own sandbox: execute at its hand-off, verify in `teardown-be
 | `emit-presubmit-refused` fails after its retries | `failed: unexpected_error`, announced | the `StepError` reaches the catch, whose `record-catch-failure` fails the `pending_fix` row; no fix pass starts |
 | The verify run dies after the emit, before it returns | `executing` under the fix pass, then `failed: run_terminated` | reconcile reads no claimant, so it fails a task the fix pass now holds (todo.md). **Residual:** the window `emit-cli-done` has at the execute hand-off, once more per hand-back |
 | A trigger from an earlier pass, redelivered past the bus's window or replayed | unchanged | its claim matches the pass and loses, before any failure machinery |
-| `teardown-before-fix` fails to reap (its errors are swallowed) | the verify sandbox up beside the fix pass's | the fix pass never calls `try-resume`, so the CLI never runs in it. The reaper's TTL pass deletes it on Local-Docker; on Daytona it auto-stops and waits for the orphan sweep (todo.md) |
+| `teardown-before-fix` fails to reap (its errors are swallowed) | the verify sandbox up beside the fix pass's | the fix pass never calls `try-resume`, so the CLI never runs in it, and the fix pass's own `teardown` at its hand-off reaps it with every other sandbox labelled with the task. Only when the fix pass dies does it wait for the reaper's TTL pass on Local-Docker, or on Daytona for its auto-stop and the orphan sweep (todo.md) |
 | A fix pass breaks the suite | `failed: verify_failed`, announced | `run-verify` keeps the no-retry rule |
 | A fix pass leaves more or other findings, edits outside the skill (`owned_paths`), or deletes it (`nothing_to_register`) | `pending_fix` again, or `failed: presubmit_refused` with the last findings | each is a finding of the next dry run, and the cap ends the loop |
-| A fix pass changes nothing | `failed: presubmit_refused` | the tip equals the refused one, so `presubmit` returns the last verdict and no pass repeats it |
+| A fix pass changes nothing | `failed: presubmit_refused` | the tip and the release equal the refused verdict's, so `presubmit` returns it `repeated` and no pass repeats it. Under a new release the tip gets a fresh dry run |
 | A fix pass amends or rebases commits already pushed | `failed: branch_conflict`, announced | no push forces; the `fix` prompt says to commit on top |
 | A fix session ends in error, or a fix-pass step throws | `failed: cli_exit_error` or `unexpected_error`, announced | as for execute |
 | Cancel during the dry run or during a fix pass | `cancelled` | as a Cancel during the suite or during `execute-cli`: the next transition reads `left` and the run reclaims |
@@ -890,7 +885,7 @@ Every run reaps its own sandbox: execute at its hand-off, verify in `teardown-be
 | Two dry runs at once | — | a task has one verify run (concurrency 1, and the claim keyed on the pass), and the skills repo admits one task. The previous task's auto-register can register beside this task's dry run; they share only the venv populate, which `.ready` serializes, and the dry run takes no lock |
 | A verify run in flight across slice 1's deploy, past `commit-and-push` | the status it had reached | `presubmit` is a new step, so it runs wherever the run is, and slice 1 always proceeds. **Residual, one deploy:** a run already past `transition-pushed` spends the dry run's sessions for nothing |
 | A verify run that memoized a `refused` or `stale_base` verdict under slice 1, across slice 2's deploy | `pushed` or `pr_open` as it was, or `failed` | `transition-presubmit-failed` is conditional on `verifying`: past `transition-pushed` it reads `stale` at `pushed` or `pr_open` and the run carries on; still at `verifying`, it fails the task |
-| A verify run in flight across slice 3's deploy, its trigger from before it | the status it had reached | its claim is memoized, and its trigger's absent `fixPass` reads as 0. A refusal whose exit is still ahead takes slice 3's, a hand-back at pass 0. One that memoized `transition-presubmit-failed` meets `transition-pending-fix` instead, which reads `stale` at `failed` with `presubmit_refused`, takes it as the run's own failure and goes on to `emit-task-failed`, memoized or not |
+| A verify run in flight across slice 3's deploy, its trigger from before it | the status it had reached | its claim is memoized, its trigger's absent `fixPass` reads as 0, and its `presubmit` memo, which has no `repeated` flag, reads as a fresh verdict. A refusal whose exit is still ahead takes slice 3's, a hand-back at pass 0. One that memoized `transition-presubmit-failed` meets `transition-pending-fix` instead, which reads `stale` at `failed` with `presubmit_refused`, takes it as the run's own failure and goes on to `emit-task-failed`, memoized or not. That run never reaches `teardown-before-fix`, so its `finally` sweeps and releases as on any failure exit |
 | The migrations | migrated | the enum value commits in its own file before the CHECKs that name it. No row is at `pending_fix`, and every row backfills a count of 0 and a null verdict, which the CHECKs accept |
 
 ### With S10
@@ -917,10 +912,10 @@ An `unavailable` verdict judged nothing.
 | # | PR | Production lines |
 |-|-|-|
 | 1 | The dry run and an advisory stage: `checkRegisterDryRun` (`prepareRegister` on a sha, the terminal and pausing split, `readManifestLockfile`'s error kind, the verdict union and its bounds) and `SkillRunner.checkRegister`; the `presubmit_verdict` column; `presubmit-stage.ts` (the scratch-ref fetch, the deadline, the verdict write) between the push and `transition-pushed`. It always proceeds, so refusal rates can be measured before anything acts on them | 400–450 |
-| 2 | A refusal or a stale base fails the task: `transition-presubmit-failed` with its `stale` rules, `presubmit_refused` and `presubmit_stale_base`, the 8 KiB detail, and the announcing subscriber with its 4096-character fit | 230–280 |
+| 2 | A refusal or a stale base fails the task: `transition-presubmit-failed` with its `stale` rules, `presubmit_refused` and `presubmit_stale_base`, the 8 KiB detail; the announcing subscriber, its `coding/task/failure-notice` event and the channel's rendering of it, fitted to 4096 characters | 270–330 |
 | 3 | The fresh-session fix pass: `pending_fix` and the counter, in two migration files with the CHECKs; the pass-keyed claims; `transition-pending-fix`, `teardown-before-fix`, the `finally` change, the event, per-pass ids and the unchanged-tip check; the execute trigger, `claim-fix-pass`, the create path without `try-resume`, and the git-remote checkout at the verdict's sha; `CodingBackend.fix` and the `fix` prompt; additive usage; the announcer's fix-pass case; `cogmo coding cancel` | 500–600 |
 
-That is 1.13k to 1.33k production lines. Tests run two to three times that: replay tests on both orchestrators, PGlite tests of the guards and CHECKs, a migration test, and a test that a tip the dry run passes registers. Slice 3 holds together, since a `pending_fix` with no claimant strands the task, but `cogmo coding cancel` (about 60 lines) can ship ahead of it on its own: it also frees a task stuck at `pending_verify`. Nothing here is new infrastructure.
+That is 1.17k to 1.38k production lines. Tests run two to three times that: replay tests on both orchestrators, PGlite tests of the guards and CHECKs, a migration test, and a test that a tip the dry run passes registers. Slice 3 holds together, since a `pending_fix` with no claimant strands the task, but `cogmo coding cancel` (about 60 lines) can ship ahead of it on its own: it also frees a task stuck at `pending_verify`. Nothing here is new infrastructure.
 
 ## Autonomy Gates `[proposed]`
 
