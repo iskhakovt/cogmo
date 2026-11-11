@@ -21,11 +21,18 @@ import { logger } from "../logger.js";
 import { GATES_BUNDLE_FILES, gatesBundleDigest } from "./gates-files.js";
 import { publishGatesBundle, releaseGatesBundle } from "./publish-gates-bundle.js";
 
-// The filesystem as it is, with `rename` and `copyFile` spied on, so a test
-// can stand in a concurrent publish or a failing copy at one call.
+// The filesystem as it is, with `rename`, `copyFile`, `rm` and `stat` spied
+// on, so a test can stand in a concurrent publish, a failing copy, rename or
+// `stat` at one call, or see when the cleanup runs.
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, rename: vi.fn(actual.rename), copyFile: vi.fn(actual.copyFile) };
+  return {
+    ...actual,
+    rename: vi.fn(actual.rename),
+    copyFile: vi.fn(actual.copyFile),
+    rm: vi.fn(actual.rm),
+    stat: vi.fn(actual.stat),
+  };
 });
 
 let root: string;
@@ -243,15 +250,32 @@ describe("publishGatesBundle", () => {
     expect(await temporaries()).toEqual([]);
   });
 
-  it("removes its temporary directory and rethrows when a copy fails", async () => {
-    vi.mocked(copyFile).mockRejectedValueOnce(fsError("EIO"));
+  it("removes its temporary directory once every copy has settled, and rethrows the copy's error", async () => {
+    const realCopyFile = vi.mocked(copyFile).getMockImplementation();
+    if (realCopyFile === undefined) throw new Error("copyFile is not spied on");
+    let releaseSecond = (): void => {};
+    const secondHeld = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    vi.mocked(copyFile)
+      .mockRejectedValueOnce(fsError("EIO"))
+      .mockImplementationOnce(async (from, to, mode) => {
+        await secondHeld;
+        await realCopyFile(from, to, mode);
+      });
 
-    await expect(
-      publishGatesBundle(
-        { boundSources: bound(NOTHING_BOUND) },
-        { sourceDir: source, root: gatesRoot },
-      ),
-    ).rejects.toThrow("EIO: stood in");
+    const publishing = publishGatesBundle(
+      { boundSources: bound(NOTHING_BOUND) },
+      { sourceDir: source, root: gatesRoot },
+    );
+    publishing.catch(() => undefined);
+    // Every copy has started, the first has failed, and the second is still writing.
+    await vi.waitFor(() => expect(copyFile).toHaveBeenCalledTimes(GATES_BUNDLE_FILES.length));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(rm).not.toHaveBeenCalled();
+    releaseSecond();
+
+    await expect(publishing).rejects.toThrow("EIO: stood in");
     expect(await readdir(gatesRoot)).toEqual([]);
   });
 
@@ -372,6 +396,75 @@ describe("publishGatesBundle", () => {
     expect(await exists(boundDir)).toBe(true);
     expect(await exists(boundBelow)).toBe(true);
     expect(await exists(unbound)).toBe(false);
+  });
+
+  it("logs and keeps another release's directory it cannot rename away", async () => {
+    const warnSpy = vi.spyOn(logger, "warn");
+    try {
+      await publishGatesBundle(
+        { boundSources: bound(NOTHING_BOUND) },
+        { sourceDir: source, root: gatesRoot },
+      );
+      const other = await otherRelease("a");
+      await age(other, 2 * DAY_MS);
+      // This boot reuses its directory, so the removal's is the first rename.
+      vi.mocked(rename).mockRejectedValueOnce(fsError("EBUSY"));
+
+      await publishGatesBundle(
+        { boundSources: bound(NOTHING_BOUND) },
+        { sourceDir: source, root: gatesRoot },
+      );
+
+      expect(await exists(join(other, "gates.mjs"))).toBe(true);
+      expect(await temporaries()).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ err: "EBUSY: stood in", dir: other }),
+        "removing a stale gates bundle failed",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("keeps, without a word, another release's directory gone before its age is read", async () => {
+    const warnSpy = vi.spyOn(logger, "warn");
+    try {
+      const other = await otherRelease("a");
+      await age(other, 2 * DAY_MS);
+      // No temporary directory is there, so the other release's is the first `stat`.
+      vi.mocked(stat).mockRejectedValueOnce(fsError("ENOENT"));
+      const boundSources = bound(NOTHING_BOUND);
+
+      await publishGatesBundle({ boundSources }, { sourceDir: source, root: gatesRoot });
+
+      expect(await exists(join(other, "gates.mjs"))).toBe(true);
+      expect(boundSources).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("logs and keeps another release's directory whose age cannot be read", async () => {
+    const warnSpy = vi.spyOn(logger, "warn");
+    try {
+      const other = await otherRelease("a");
+      await age(other, 2 * DAY_MS);
+      vi.mocked(stat).mockRejectedValueOnce(fsError("EACCES"));
+
+      await publishGatesBundle(
+        { boundSources: bound(NOTHING_BOUND) },
+        { sourceDir: source, root: gatesRoot },
+      );
+
+      expect(await exists(join(other, "gates.mjs"))).toBe(true);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ err: "EACCES: stood in", dir: other }),
+        "reading a gates bundle's age failed",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("keeps every other release's directory when the bound ones cannot be listed", async () => {

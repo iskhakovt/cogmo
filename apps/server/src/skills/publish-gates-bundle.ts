@@ -128,10 +128,17 @@ async function publishInto(
   digest: string,
 ): Promise<void> {
   const temp = await mkdtemp(join(root, PUBLISHING_PREFIX));
+  // Every copy settles before the cleanup runs, so none writes into the
+  // directory while it is removed, and the first copy's error is the one thrown.
+  const copied = await Promise.allSettled(
+    GATES_BUNDLE_FILES.map((file) => copyFile(join(sourceDir, file), join(temp, file))),
+  );
+  const failed = copied.find((result) => result.status === "rejected");
+  if (failed !== undefined) {
+    await rm(temp, { recursive: true, force: true });
+    throw failed.reason;
+  }
   try {
-    await Promise.all(
-      GATES_BUNDLE_FILES.map((file) => copyFile(join(sourceDir, file), join(temp, file))),
-    );
     await rename(temp, hostDir);
   } catch (e) {
     await rm(temp, { recursive: true, force: true });
