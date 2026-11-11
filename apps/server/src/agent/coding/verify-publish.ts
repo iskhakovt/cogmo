@@ -1,6 +1,7 @@
 /**
  * The verify phase's publishing stages, run once the suite has passed: push
- * the feature branch, then open the PR and record it on the task.
+ * the feature branch, dry-run register on it on the skills repo, then open
+ * the PR and record it on the task.
  */
 
 import type { Octokit } from "@octokit/rest";
@@ -15,6 +16,7 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
 import { runOpenPr } from "./open-pr.js";
+import { type PresubmitDeps, runPresubmit } from "./presubmit-stage.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { advanceTask, type TaskLeft } from "./task-lifecycle.js";
 import { WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
@@ -49,8 +51,8 @@ export interface OpenTaskPrArgs {
 }
 
 /**
- * The `commit-and-push` stage, then `pushed`. Durable: it writes a commit
- * and pushes it. The PAT reaches the runner through the askpass env and the
+ * The `commit-and-push` stage, the skills repo's `presubmit`, then `pushed`.
+ * Durable: it writes a commit and pushes it. The PAT reaches the runner through the askpass env and the
  * closure, never as a step argument or return.
  *
  * `nothing_to_commit` is a valid outcome — the suite passed on a clean tree
@@ -59,10 +61,11 @@ export interface OpenTaskPrArgs {
  */
 export async function pushVerifiedBranch(
   run: CodingRun,
-  deps: TaskStoreDeps,
+  deps: TaskStoreDeps & { presubmit: PresubmitDeps | null },
   inngest: EventPublisher,
   args: {
     task: CodingTaskRow;
+    repo: CodingRepoRow;
     branch: string;
     identity: GitHubIdentity;
     askpass: AskpassMaterials;
@@ -101,6 +104,13 @@ export async function pushVerifiedBranch(
   const branchSha =
     landed.value ||
     (await run.stepRun("read-head-sha", async () => readHeadSha(await args.container())));
+
+  await runPresubmit(run, deps, {
+    repo: args.repo,
+    branch: args.branch,
+    branchSha,
+    identity: args.identity,
+  });
 
   // Conditional on `verifying`: the suite runs for minutes, and a Cancel
   // landing inside it must not be overwritten by the push that follows.

@@ -25,6 +25,12 @@
  *     the new skill onto it; `afterAll` closes the PR and deletes the test
  *     branches and `refs/cogmo-wip/` refs. Replay uses a local bare remote
  *     and a stub Octokit (`makeStubOctokitFactory`).
+ *   - The skills repo's pre-submit is off in both modes (`skipPresubmit`).
+ *     Its dry run judges the commit the sandbox pushed, and only when the
+ *     fetched branch is that commit. A replay cannot recreate it: the push
+ *     is recorded output, the branch the stub seeds is a fresh commit, and
+ *     the replay's `main` is minted anew, so the dry run would judge
+ *     nothing and the recording's sessions would not line up.
  *
  * See `design/testing.md` -> Skill-Authoring Integration for the
  * contract.
@@ -273,6 +279,9 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       // skill's own request, so a live CoinGecko would make the run depend
       // on its uptime and rate limits in replay and record alike.
       skillCtxHttpOverride: makeStubSkillNetwork(),
+      // See the header: the dry run judges the recorded sandbox commit,
+      // which a replay cannot recreate.
+      skipPresubmit: true,
       codingAuthOverride: async () =>
         // Pinned model + disabled thinking match `claude-cli.integration.test.ts`
         // and keep the recorded stream-json output stable across runs.
@@ -379,6 +388,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       );
     }
     expect(task.status).toBe("pr_open");
+    // The pre-submit is off, so the verify run planned no dry run.
+    expect(task.presubmitVerdict).toBeNull();
 
     // Track for cleanup. Branch name = `cogmo/run/<task-id>` (see `runBranchFor`).
     createdBranches.push(`cogmo/run/${task.id}`);

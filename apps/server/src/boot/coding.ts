@@ -85,7 +85,20 @@ export function createCodingRuntime(
     codingFunctions.push(createCodingOrchestrator(orchestratorDeps, inngest));
     codingFunctions.push(createCodingExecuteOrchestrator(orchestratorDeps, inngest));
     codingFunctions.push(
-      createCodingVerifyOrchestrator({ ...sandboxTaskDeps, ...octokit }, inngest),
+      createCodingVerifyOrchestrator(
+        {
+          ...sandboxTaskDeps,
+          ...octokit,
+          presubmit: opts.skipPresubmit
+            ? null
+            : {
+                skillRunner,
+                skillsRepoPath: env.COGMO_SKILLS_PATH,
+                releaseVersion: env.VERSION,
+              },
+        },
+        inngest,
+      ),
     );
 
     // Event-driven cleanup of `cogmo/run/*` branches once a task reaches

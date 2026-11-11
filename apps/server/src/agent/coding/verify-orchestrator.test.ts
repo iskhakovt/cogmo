@@ -28,7 +28,7 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectOk } from "../../test/assertions.js";
-import { fakeExecHandle, parkCodingTaskAt } from "../../test/coding-fixtures.js";
+import { fakeExecHandle, idlePresubmitDeps, parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent, recordingStepRun } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
@@ -216,6 +216,7 @@ function makeDeps(handle: SandboxSession<LocalDockerSessionState>): VerifyOrches
     devbaseImage: "alpine",
     defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
     taskTtlMs: 60_000,
+    presubmit: idlePresubmitDeps(),
   };
 }
 

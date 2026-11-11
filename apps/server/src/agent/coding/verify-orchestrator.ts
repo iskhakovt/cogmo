@@ -7,7 +7,7 @@
  *   pending_verify → verifying → (failed) | pushed → pr_open
  *
  *   claim → credentials → verify sandbox → run verify → push branch →
- *   open PR
+ *   (skills repo) pre-submit → open PR
  *
  * The execute run already reaped its container, so this one creates a
  * fresh container with the askpass mount bound, which only this run can
@@ -36,6 +36,7 @@ import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
 import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
 import { parseRemoteUrl } from "./open-pr.js";
+import type { PresubmitDeps } from "./presubmit-stage.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
 import {
@@ -71,6 +72,11 @@ export interface VerifyOrchestratorDeps {
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;
   taskTtlMs: number;
+  /**
+   * The skills repo's pre-submit: register's dry run on the pushed tip. Null
+   * turns the stage off (`BootstrapOptions.skipPresubmit`, a test seam).
+   */
+  presubmit: PresubmitDeps | null;
   /**
    * Optional Octokit factory. Tests inject a stub; production omits it
    * and `runOpenPr` constructs a real client from the resolved PAT.
@@ -182,6 +188,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 
     const pushed = await pushVerifiedBranch(run, deps, inngest, {
       task,
+      repo,
       branch: assignment.branch,
       identity,
       askpass,
