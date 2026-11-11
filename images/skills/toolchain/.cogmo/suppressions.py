@@ -5,8 +5,9 @@ A suppression names its rule and covers one line: ruff's `# noqa: <code>` and `#
 or without codes, `# ruff: file-ignore[...]` and `# ruff: disable[...]`, and pyrefly's `# pyrefly: ignore-errors`;
 so is pyrefly's bare `# pyrefly: ignore`, which names no error. ruff's own PGH004 refuses a bare `# noqa`, and the
 configuration has pyrefly honor only its own pragmas, so `# type: ignore` suppresses nothing. The formatter's pragmas
-(`# fmt: off`, `# fmt: on`, `# fmt: skip`, `# yapf: disable`, `# yapf: enable`) are refused and recorded as no
-suppression, since a skill's layout is `ruff format`'s. A file carries at most `MAX_SUPPRESSIONS`.
+(`# fmt: off`, `# fmt: on`, `# fmt: skip`, `# yapf: disable`, `# yapf: enable`) are refused wherever `ruff format`
+honours them, and recorded as no suppression, since a skill's layout is the formatter's; a comment the formatter
+ignores is no pragma. A file carries at most `MAX_SUPPRESSIONS`.
 
 Part of Cogmo's toolchain, which Cogmo replaces on each release.
 """
@@ -14,7 +15,7 @@ Part of Cogmo's toolchain, which Cogmo replaces on each release.
 import io
 import re
 import tokenize
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 MAX_SUPPRESSIONS = 100
 
@@ -27,7 +28,20 @@ _NOQA = re.compile(r"#\s*[Nn][Oo][Qq][Aa]")
 _NOQA_CODES = re.compile(r"\s*:(.*)", re.DOTALL)
 _PYREFLY_FILE = re.compile(r"#\s*pyrefly:\s*ignore-errors")
 _PYREFLY = re.compile(r"#\s*pyrefly:\s*ignore(.*)", re.DOTALL)
-_FORMATTER = re.compile(r"#\s*(fmt:\s*(?:off|on|skip)|yapf:\s*(?:disable|enable))(?![\w-])")
+
+# The formatter's pragmas as the pinned ruff's formatter reads a comment (`SuppressionKind::from_comment` in
+# `ruff_python_trivia`): past one `#`, and Python's whitespace at either end, the comment is `fmt:` or `yapf:` and,
+# after whitespace, exactly a command; or one of its `#`-separated parts, so trimmed, is `fmt:` and exactly `skip`.
+# Case counts, and Python's whitespace is space, tab and form feed alone. Each command's kind is `off`, `on` or `skip`.
+_PYTHON_WHITESPACE = " \t\x0c"
+type _FormatterKind = Literal["off", "on", "skip"]
+_FORMATTER_COMMANDS: dict[str, dict[str, _FormatterKind]] = {
+    "fmt:": {"off": "off", "on": "on", "skip": "skip"},
+    "yapf:": {"disable": "off", "enable": "on"},
+}
+# A comment between brackets belongs to an expression, where the formatter reads no pragma.
+_OPENING = frozenset("([{")
+_CLOSING = frozenset(")]}")
 
 # The codes a rule can have; another names no rule, so suppresses nothing and is not recorded.
 _RUFF_CODE = re.compile(r"[A-Z]+[0-9]+")
@@ -59,6 +73,14 @@ class Scan(NamedTuple):
     refusals: list[Refusal]
 
 
+class _FormatterPragma(NamedTuple):
+    """A formatter pragma in a comment: its `#`'s code point offset in the comment, its kind, and its directive."""
+
+    offset: int
+    kind: _FormatterKind
+    directive: str
+
+
 def scan(source: str) -> Scan:
     """Every suppression and refused pragma in `source`'s comments, in order.
 
@@ -66,10 +88,26 @@ def scan(source: str) -> Scan:
     """
     suppressions: list[tuple[Suppression, int]] = []
     refusals: list[Refusal] = []
+    lines = io.StringIO(source, newline=None).read().split("\n")
+    depth = 0
     for token in tokenize.generate_tokens(io.StringIO(source, newline=None).readline):
+        if token.type == tokenize.OP and token.string in _OPENING:
+            depth += 1
+        elif token.type == tokenize.OP and token.string in _CLOSING:
+            depth -= 1
         if token.type != tokenize.COMMENT:
             continue
         line, start = token.start
+        pragma = _formatter_pragma(token.string)
+        own_line = lines[line - 1][:start].strip(_PYTHON_WHITESPACE) == ""
+        if pragma is not None and depth == 0 and _formatter_honours(pragma.kind, own_line):
+            refusals.append(
+                Refusal(
+                    line,
+                    start + pragma.offset + 1,
+                    f"`# {pragma.directive}` exempts code from `ruff format`, whose layout every skill keeps",
+                )
+            )
         noqa_seen = False
         for offset, comment in _comments(token.string):
             column = start + offset + 1
@@ -114,9 +152,30 @@ def _refusal(comment: str) -> str | None:
         return f"`# pyrefly: ignore-errors` exempts the whole file; {_PYREFLY_PER_LINE}"
     if (matched := _PYREFLY.match(comment)) and _pyrefly_blanket(matched.group(1)):
         return f"`# pyrefly: ignore` names no error; {_PYREFLY_PER_LINE}"
-    if matched := _FORMATTER.match(comment):
-        return f"`# {matched.group(1)}` exempts code from `ruff format`, whose layout every skill keeps"
     return None
+
+
+def _formatter_pragma(comment: str) -> _FormatterPragma | None:
+    """The formatter pragma a comment token is or holds, as ruff's formatter reads it; None when it is none."""
+    whole = comment.removeprefix("#").strip(_PYTHON_WHITESPACE)
+    for prefix, commands in _FORMATTER_COMMANDS.items():
+        command = whole.removeprefix(prefix).lstrip(_PYTHON_WHITESPACE)
+        if whole.startswith(prefix) and command in commands:
+            return _FormatterPragma(0, commands[command], f"{prefix} {command}")
+    for offset, part in _comments(comment):
+        rest = part.removeprefix("#").strip(_PYTHON_WHITESPACE)
+        if rest.startswith("fmt:") and rest.removeprefix("fmt:").lstrip(_PYTHON_WHITESPACE) == "skip":
+            return _FormatterPragma(offset, "skip", "fmt: skip")
+    return None
+
+
+def _formatter_honours(kind: _FormatterKind, own_line: bool) -> bool:
+    """Whether the formatter acts on a pragma of `kind` outside brackets, where a comment belongs to a statement.
+
+    `off` and `on` bound a region from their own line; `skip`, and `off` too, keep the layout of the statement whose
+    line they end.
+    """
+    return kind == "off" or (kind == "on" and own_line) or (kind == "skip" and not own_line)
 
 
 def _noqa_codes(comment: str, start: int) -> list[str]:

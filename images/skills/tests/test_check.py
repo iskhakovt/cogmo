@@ -672,18 +672,37 @@ def test_a_formatter_pragma_is_refused_and_records_no_suppression(
 
     reply = _check(body, toolchain)
 
-    def refused(pragma: str) -> str:
-        return f"`# {pragma}` exempts code from `ruff format`, whose layout every skill keeps"
-
     protocol("check_reply", reply)
     assert _findings(reply) == [
-        ("suppression", 2, 12, refused("fmt:skip")),
-        ("suppression", 3, 1, refused("fmt: off")),
-        ("suppression", 5, 1, refused("fmt: on")),
-        ("suppression", 6, 1, refused("yapf: disable")),
-        ("suppression", 8, 1, refused("yapf: enable")),
+        ("suppression", 2, 12, _formatter_pragma("fmt: skip")),
+        ("suppression", 3, 1, _formatter_pragma("fmt: off")),
+        ("suppression", 5, 1, _formatter_pragma("fmt: on")),
+        ("suppression", 6, 1, _formatter_pragma("yapf: disable")),
+        ("suppression", 8, 1, _formatter_pragma("yapf: enable")),
     ]
     assert _suppressions(reply) == []
+
+
+def _formatter_pragma(directive: str) -> str:
+    return f"`# {directive}` exempts code from `ruff format`, whose layout every skill keeps"
+
+
+@pytest.mark.parametrize(
+    ("body", "finding"),
+    [
+        # `fmt: skip` as a later part of a comment is refused at its own `#`: the 30th code point, the 31st UTF-16 unit.
+        ('s = "é😀"  # keeps its layout # fmt: skip\n', ("suppression", 1, 31, _formatter_pragma("fmt: skip"))),
+        # `off` at the end of a statement's line keeps that statement's layout, as `skip` does.
+        ("x = 1  # fmt: off\n", ("suppression", 1, 8, _formatter_pragma("fmt: off"))),
+        ("x = 1  # yapf: disable\n", ("suppression", 1, 8, _formatter_pragma("yapf: disable"))),
+    ],
+)
+def test_a_formatter_pragma_is_refused_where_it_stands(
+    toolchain: Toolchain, body: str, finding: tuple[str, int, int, str]
+) -> None:
+    reply = _check(body, toolchain)
+
+    assert _findings(reply) == [finding]
 
 
 def test_it_refuses_the_pragmas_the_shared_table_refuses(toolchain: Toolchain) -> None:
