@@ -51,7 +51,7 @@ interface SandboxClient<TState> {
 
   create(spec: SessionSpec): Promise<SandboxSession<TState>>;
   /**
-   * `[proposed]` `opts.readOnlyDir` is the caller's current read-only
+   * `opts.readOnlyDir` is the caller's current read-only
    * directory (SessionSpec.readOnlyDir). Daytona uploads it again when its
    * digest differs from the one the state records, an absent record
    * counting as different, and returns a session whose state records the
@@ -65,7 +65,7 @@ interface SandboxClient<TState> {
    * Discover the live root session (depth-0 container created by the
    * orchestrator) for `taskId`, or null when none is currently alive.
    * Used in the orchestrator's get-or-create path after an idle TTL
-   * where a prior session may or may not still exist. `[proposed]` It cannot
+   * where a prior session may or may not still exist. It cannot
    * see the digest an earlier create uploaded, so Daytona, given
    * `opts.readOnlyDir`, always uploads it, as `resume` does on an absent
    * record, and records its digest.
@@ -89,7 +89,7 @@ interface SandboxClient<TState> {
   shutdown(): Promise<void>;
 }
 
-/** `[proposed]` What a re-attach (`resume`, `tryResumeByTaskId`) passes beside the state. */
+/** What a re-attach (`resume`, `tryResumeByTaskId`) passes beside the state. */
 interface ResumeOptions {
   readOnlyDir?: ReadOnlyDirSpec; // the session's current one (SessionSpec.readOnlyDir)
 }
@@ -121,7 +121,7 @@ interface SessionSpec {
   homeVolume?: HomeVolumeSpec;
   askpass?: AskpassMaterial;
   /**
-   * `[proposed]` A directory of files the session reads at `containerDir`;
+   * A directory of files the session reads at `containerDir`;
    * the caller's, outliving every session, so no backend provisions or
    * cleans it per task. Local-Docker binds `hostDir` (a path the daemon sees
    * on the host) there `:ro` at create. Daytona uploads its regular files
@@ -310,7 +310,7 @@ Hard transport differences (how working-tree material moves into the sandbox) li
 | Buffered exec | dockerode | `executeCommand` |
 | Streaming exec | dockerode demux | session-logs WebSocket + `stdbuf` |
 | `resume(state)` | container-id inspect | sandbox-id rehydrate |
-| `readOnlyDir` `[proposed]` | `:ro` bind at create | upload at create, at a resume whose digest differs, and at every `tryResumeByTaskId` |
+| `readOnlyDir` | `:ro` bind at create | upload at create, at a resume whose digest differs, and at every `tryResumeByTaskId` |
 | Worktree-less sessions | yes (skills container-tier) | yes (skills container-tier) |
 
 ### Backend selection
@@ -1051,7 +1051,7 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 ### Crash recovery
 
-`SandboxSessionState` for the Daytona backend stores `{ type: "daytona", taskId, sandboxId }`, `[proposed]` and `readOnlyDirDigest`, the digest of the `readOnlyDir` it last uploaded, when the session has one; a state without one, memoized before the field or for a session given no directory, counts as holding a different one. On orchestrator restart mid-task, `client.resume(state)` re-attaches to the existing sandbox via the Daytona API. If the sandbox was reaped (TTL exceeded, manual delete, provider-side eviction), `resume()` fails fast and the orchestrator marks the task failed.
+`SandboxSessionState` for the Daytona backend stores `{ type: "daytona", taskId, sandboxId }` and `readOnlyDirDigest`, the digest of the `readOnlyDir` it last uploaded, when the session has one; a state without one, memoized before the field or for a session given no directory, counts as holding a different one. On orchestrator restart mid-task, `client.resume(state)` re-attaches to the existing sandbox via the Daytona API. If the sandbox was reaped (TTL exceeded, manual delete, provider-side eviction), `resume()` fails fast and the orchestrator marks the task failed.
 
 ### Deferred / Phase 3c
 
