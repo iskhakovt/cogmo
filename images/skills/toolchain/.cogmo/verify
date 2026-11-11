@@ -12,7 +12,8 @@ gates, the suppression rule register applies (`.cogmo/suppressions.py`),
 ruff, `ruff format --check`, pyrefly with the skill's directory on its
 search path, the Imports rule register applies (`.cogmo/imports.py`) against
 the dependencies its `SKILL.md` declares, then pytest of its
-`test_skill.py`. pyrefly and pytest run with the skill's `requirements.lock`
+`test_skill.py`; a skill the change deletes meets the gates alone, which
+refuse it as register does. pyrefly and pytest run with the skill's `requirements.lock`
 installed when it has one, and the Imports rule reads that lockfile's
 environment. Exits 0 when every check passes or nothing changed, 1 when a
 check fails, 2 when the base is missing or unknown, when something changed
@@ -86,9 +87,9 @@ def changed_paths(base: str) -> list[str]:
 
 
 def changed_skills(paths: list[str]) -> list[str]:
-    """The skills with a path among `paths`, whose directories exist."""
+    """The skills with a path among `paths`, a skill the change deletes among them."""
     names = {parts[1] for parts in (path.split("/") for path in paths) if len(parts) >= 3 and parts[0] == SKILLS_DIR}
-    return sorted(name for name in names if (ROOT / SKILLS_DIR / name).is_dir())
+    return sorted(names)
 
 
 def with_requirements(skill: Path, command: list[str]) -> list[str]:
@@ -236,6 +237,10 @@ def check(name: str, node: str, gates: Path) -> Checked:
             print(line, flush=True)
         if status == 1:
             checked.failed.append("gates")
+    if not (ROOT / skill).is_dir():
+        # A skill the change deletes: the gates refuse it as register does, and the other checks have nothing to read.
+        print(f"verify: {name} has no directory, so only the gates check it", flush=True)
+        return checked
 
     print(f"verify: {name}: suppressions", flush=True)
     report("suppressions", refused_pragmas(skill))

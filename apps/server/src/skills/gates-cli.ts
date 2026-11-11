@@ -61,6 +61,9 @@ type WorkingFile =
 
 type SkillFileName = typeof SKILL_MANIFEST_FILE | typeof SKILL_BODY_FILE;
 
+/** Reads one of the skill's files from the working tree. */
+type ReadSkillFile = (file: SkillFileName) => Promise<Result<WorkingFile, string>>;
+
 void run(process.argv.slice(2))
   .catch((e: unknown): Outcome => ({ kind: "cannot_run", detail: describeError(e) }))
   .then(report);
@@ -96,17 +99,26 @@ function skillName(argument: string): Result<string, string> {
 }
 
 /**
- * `check` of skill `name`, once `skills/<name>` is a directory of its own by
- * `lstat`, so a link to one does not count.
+ * `check` of skill `name`, reading its files from `skills/<name>` once that is
+ * a directory of its own by `lstat`, so a link to one does not count. A
+ * directory that does not exist, as a branch that deletes the skill leaves,
+ * reads as both files absent, as register reads that tip; nothing beneath it
+ * is read, which a grant on a path that does not exist would refuse.
  */
 async function inSkillDirectory(
   name: string,
-  check: (name: string) => Promise<Outcome>,
+  check: (name: string, read: ReadSkillFile) => Promise<Outcome>,
 ): Promise<Outcome> {
   const path = `skills/${name}`;
-  const stats = await ResultAsync.fromPromise(lstat(path), describeError);
-  if (stats.isErr()) return cannotRun(stats.error);
-  return stats.value.isDirectory() ? check(name) : cannotRun(`${path} is not a directory`);
+  const stats = await ResultAsync.fromPromise(lstat(path), (e) => e);
+  if (stats.isErr()) {
+    return isMissing(stats.error)
+      ? check(name, async () => ok({ kind: "absent" }))
+      : cannotRun(describeError(stats.error));
+  }
+  return stats.value.isDirectory()
+    ? check(name, (file) => readWorkingFile(name, file))
+    : cannotRun(`${path} is not a directory`);
 }
 
 /**
@@ -129,15 +141,15 @@ async function pathRules(): Promise<Outcome> {
  * `skill.py`, then `checkSkillFiles`. A missing `SKILL.md` refuses before
  * `skill.py` is read, as register refuses it.
  */
-async function gates(name: string): Promise<Outcome> {
+async function gates(name: string, read: ReadSkillFile): Promise<Outcome> {
   configurePythonParser(fileURLToPath(new URL("./tree-sitter-python.wasm", import.meta.url)));
-  const manifest = await readWorkingFile(name, SKILL_MANIFEST_FILE);
+  const manifest = await read(SKILL_MANIFEST_FILE);
   if (manifest.isErr()) return cannotRun(manifest.error);
   return match(manifest.value)
     .with({ kind: "not_regular_file" }, async () => notRegular(name, SKILL_MANIFEST_FILE))
     .with({ kind: "absent" }, () => checkedFiles(name, { manifest: null, body: null }))
     .with({ kind: "text" }, async ({ text }) => {
-      const body = await readWorkingFile(name, SKILL_BODY_FILE);
+      const body = await read(SKILL_BODY_FILE);
       if (body.isErr()) return cannotRun(body.error);
       return match(body.value)
         .with({ kind: "not_regular_file" }, async () => notRegular(name, SKILL_BODY_FILE))
@@ -160,8 +172,8 @@ async function checkedFiles(name: string, files: SkillFileTexts): Promise<Outcom
   );
 }
 
-async function dependencies(name: string): Promise<Outcome> {
-  const manifest = await readWorkingFile(name, SKILL_MANIFEST_FILE);
+async function dependencies(name: string, read: ReadSkillFile): Promise<Outcome> {
+  const manifest = await read(SKILL_MANIFEST_FILE);
   if (manifest.isErr()) return cannotRun(manifest.error);
   return match(manifest.value)
     .with({ kind: "not_regular_file" }, () => notRegular(name, SKILL_MANIFEST_FILE))

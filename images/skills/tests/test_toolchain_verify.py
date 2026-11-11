@@ -623,6 +623,26 @@ def test_it_fails_an_unused_suppression_in_either_file(repo: Path, gates: Gates)
     assert "unused-ignore" in result.stdout
 
 
+def test_a_deleted_skill_runs_the_gates_alone(repo: Path, gates: Gates) -> None:
+    # Register reads the tip's files and refuses `missing_skill_md`; its other checks have no files to read.
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "echo")
+    base = _git(repo, "rev-parse", "HEAD")
+    shutil.rmtree(repo / "skills" / "echo")
+    refusal = "missing_skill_md: skills/echo/SKILL.md not found"
+    gates.answer("gates", "echo", stdout=f"{refusal}\n", stderr="", exit=1)
+    result = _verify(repo, base, gates)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert _headers(result, "echo") == ["gates"]
+    assert _section(result, "echo", "gates") == [refusal, "verify: echo has no directory, so only the gates check it"]
+    grants = ["--permission", f"--allow-fs-read={gates.dir}", f"--allow-fs-read={repo / 'skills' / 'echo'}"]
+    assert gates.calls()[1:] == [
+        {"argv": [*grants, str(gates.dir / "gates.mjs"), "skills/echo"], "cwd": str(repo), "NODE_OPTIONS": None}
+    ]
+    assert "verify: echo failed gates\n" in result.stderr
+
+
 def test_it_checks_a_tracked_change_and_skips_unchanged_skills(repo: Path, gates: Gates) -> None:
     _write_skill(repo, "stale", SKILL, _FAILING_TEST)
     _write_skill(repo, "echo", SKILL, _PASSING_TEST)

@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { match } from "ts-pattern";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { expectDefined } from "../test/assertions.js";
 import { DEPENDENCIES_CASES, GATES_CASES, PATHS_CASES } from "../test/gates-cases.js";
@@ -125,8 +126,11 @@ const PASSING = expectDefined(
 );
 
 describe("gates.mjs: the parity table, as verify runs it", () => {
-  it.each(GATES_CASES)("$label", async ({ name, manifest, body, lines, exit }) => {
-    await writeSkill(name, { manifest, body });
+  it.each(GATES_CASES)("$label", async ({ name, directory, manifest, body, lines, exit }) => {
+    await match(directory)
+      .with("present", () => writeSkill(name, { manifest, body }))
+      .with("deleted", async () => {})
+      .exhaustive();
 
     const run = await runGates([`skills/${name}`]);
 
@@ -294,6 +298,17 @@ describe("gates.mjs", () => {
     });
   });
 
+  it("refuses a deleted skill's SKILL.md as missing under --dependencies, as the gates run does", async () => {
+    // verify's grant names the directory that no longer exists.
+    const run = await runGates(["--dependencies", "skills/echo"]);
+
+    expect(run).toEqual({
+      exit: 1,
+      stdout: "missing_skill_md: skills/echo/SKILL.md not found\n",
+      stderr: "",
+    });
+  });
+
   it("accepts the path with a trailing slash", async () => {
     await writeSkill("echo", { manifest: PASSING.manifest, body: PASSING.body });
 
@@ -333,14 +348,15 @@ describe("gates.mjs exits 2, with nothing on stdout, when the checks cannot run"
     });
   });
 
-  it("for a skill directory that does not exist", async () => {
-    const run = await runGates(["skills/missing"], { grant: repo });
+  it("for a skills/ that is a file, which no skill directory can sit under", async () => {
+    await rm(join(repo, "skills"), { recursive: true });
+    await writeFile(join(repo, "skills"), "");
+
+    const run = await runGates(["skills/echo"], { grant: repo });
 
     expect(run.exit).toBe(2);
     expect(run.stdout).toBe("");
-    expect(run.stderr).toMatch(
-      /^gates: ENOENT: no such file or directory, lstat 'skills\/missing'\n$/,
-    );
+    expect(run.stderr).toMatch(/^gates: ENOTDIR: not a directory, lstat 'skills\/echo'\n$/);
   });
 
   it("for a skill directory that is a symlink", async () => {

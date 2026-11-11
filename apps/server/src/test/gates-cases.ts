@@ -12,6 +12,11 @@ export interface GatesCase {
   label: string;
   /** The skill's directory, `skills/<name>/`. */
   name: string;
+  /**
+   * Whether `skills/<name>/` exists in the working tree; a branch that deletes
+   * the skill leaves none, and its files read as absent.
+   */
+  directory: "present" | "deleted";
   /** `SKILL.md`'s text, or null where it is absent. */
   manifest: string | null;
   /** `skill.py`'s text, or null where it is absent. */
@@ -63,10 +68,19 @@ const SYNTAX_MESSAGE =
   "tree-sitter cannot parse this: a syntax error, or syntax newer than the vendored Python grammar";
 
 export const GATES_CASES: readonly GatesCase[] = [
-  { label: "a pass", name: "echo", manifest: WASM, body: RUN, lines: [], exit: 0 },
+  {
+    label: "a pass",
+    name: "echo",
+    directory: "present",
+    manifest: WASM,
+    body: RUN,
+    lines: [],
+    exit: 0,
+  },
   {
     label: "a container-tier pass reading memory it declares",
     name: "echo",
+    directory: "present",
     manifest: manifest("container", "effects:\n  - reads_memory\n"),
     body: 'async def run(inputs, ctx):\n    return await ctx.memory.recall("q")\n',
     lines: [],
@@ -75,6 +89,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "no SKILL.md, whatever skill.py is",
     name: "echo",
+    directory: "present",
     manifest: null,
     body: null,
     lines: ["missing_skill_md: skills/echo/SKILL.md not found"],
@@ -83,6 +98,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "no skill.py",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: null,
     lines: ["missing_skill_py: skills/echo/skill.py not found"],
@@ -91,6 +107,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "a manifest with no frontmatter",
     name: "echo",
+    directory: "present",
     manifest: "# echo\n",
     body: RUN,
     lines: ["SKILL.md must start with a YAML frontmatter block delimited by '---' lines"],
@@ -99,6 +116,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "a manifest whose YAML does not parse, its code frame one string",
     name: "echo",
+    directory: "present",
     manifest: "---\nname: [echo\n---\n",
     body: RUN,
     lines: [
@@ -109,6 +127,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "a manifest the schema refuses, one issue per string",
     name: "echo",
+    directory: "present",
     manifest: "---\nname: echo\ndescription: short\ntier: lambda\n---\n",
     body: RUN,
     lines: [
@@ -120,6 +139,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "a manifest naming another skill",
     name: "echo",
+    directory: "present",
     manifest: WASM.replace("name: echo", "name: other"),
     body: RUN,
     lines: [
@@ -130,6 +150,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "size: over the line bound, which hides the parse",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: `def run(:\n${RUN}${pad(999)}`,
     lines: [`size: ${PATH}: 1002 lines, over the limit of 1000`],
@@ -138,6 +159,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "size: over the character bound",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: `${RUN}# ${"x".repeat(120_000)}\n`,
     lines: [`size: ${PATH}: 120045 characters, over the limit of 120000`],
@@ -146,6 +168,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "syntax: an error, which hides the third stage",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: 'eval("1")\ndef run(:\n    pass\n',
     lines: [`syntax: ${PATH}:2:9: ${SYNTAX_MESSAGE}`],
@@ -154,6 +177,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "entrypoint: no run, which hides the classifier",
     name: "echo",
+    directory: "present",
     manifest: CONTAINER,
     body: "import smtplib\n",
     lines: [
@@ -164,6 +188,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "entrypoint: a synchronous run with one parameter",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: "def run(inputs):\n    return {}\n",
     lines: [
@@ -174,6 +199,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "dynamic_code: eval",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: 'async def run(inputs, ctx):\n    return eval("{}")\n',
     lines: [
@@ -184,6 +210,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "effects: a host outside network.allow and an undeclared secret",
     name: "echo",
+    directory: "present",
     manifest: NETWORK,
     body: 'async def run(inputs, ctx):\n    await ctx.secrets.get("other_key")\n    return await ctx.http.get("https://evil.example.org/")\n',
     lines: [
@@ -195,6 +222,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "wasm_lint: a line and no column",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: `import subprocess\n${RUN}`,
     lines: [
@@ -205,6 +233,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "the third stage's gates together, in gate order",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: 'import subprocess\nasync def run(inputs, ctx, extra):\n    return eval("{}")\n',
     lines: [
@@ -217,6 +246,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "a classifier refusal: its validation errors as one string",
     name: "echo",
+    directory: "present",
     manifest: CONTAINER,
     body: 'import smtplib\nasync def run(inputs, ctx):\n    await ctx.memory.recall("q")\n    return {}\n',
     lines: [
@@ -227,6 +257,7 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "a column after non-ASCII text, in UTF-16 code units",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: 'async def run(inputs, ctx):\n    note = "naïve 😀"; return eval(note)\n',
     lines: [
@@ -237,11 +268,21 @@ export const GATES_CASES: readonly GatesCase[] = [
   {
     label: "a \\r\\n body, each line ending once",
     name: "echo",
+    directory: "present",
     manifest: WASM,
     body: 'x = 1\r\ny = 2\r\nasync def run(inputs, ctx):\r\n    return eval("{}")\r\n',
     lines: [
       `dynamic_code: ${PATH}:4:12: \`eval\` runs code built at run time; keep the code static`,
     ],
+    exit: 1,
+  },
+  {
+    label: "a skill whose directory the branch deletes",
+    name: "echo",
+    directory: "deleted",
+    manifest: null,
+    body: null,
+    lines: ["missing_skill_md: skills/echo/SKILL.md not found"],
     exit: 1,
   },
 ];
