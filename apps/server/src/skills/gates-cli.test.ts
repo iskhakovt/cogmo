@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { expectDefined } from "../test/assertions.js";
+import { DEPENDENCIES_CASES, GATES_CASES } from "../test/gates-cases.js";
 import { buildGatesBundle } from "./gates-bundle.js";
-import { DEPENDENCIES_CASES, GATES_CASES } from "./gates-cases.js";
 import { GATES_BUNDLE_FILES } from "./gates-files.js";
 
 /**

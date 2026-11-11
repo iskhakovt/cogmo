@@ -25,6 +25,7 @@ import type { Database, Transactor } from "../../db/index.js";
 import type {
   ExecStreamingHandle,
   GitRemoteWorktreeSpec,
+  ReadOnlyDirSpec,
   SandboxClient,
   SandboxSession,
   SessionSpec,
@@ -97,6 +98,7 @@ import type { CodingOrchestratorDeps } from "./orchestrator.js";
 import { runCodingExecute, runCodingTask } from "./orchestrator.js";
 import { NULL_EXECUTE_STREAM, NULL_PLAN_STREAM } from "./progress-stream.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
+import type { RepoSessionDir } from "./task-sandbox.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
 
 // --- Test scaffolding -----------------------------------------------------
@@ -942,6 +944,7 @@ const verifyExecScript: ExecScript = (cmd) => {
 function makeVerifyDeps(overrides: {
   sandbox: SandboxClient;
   octokitFactory: (pat: string) => Octokit;
+  repoSessionDir?: RepoSessionDir;
 }): VerifyOrchestratorDeps {
   const secretsStore = mock<SecretsStore>();
   secretsStore.getSecret.mockImplementation(async (_tx, name) => {
@@ -1055,5 +1058,144 @@ describe("runCodingVerify — git-remote transport", () => {
     expect(transportMocks.fetchFeatureBranch).toHaveBeenCalledWith(
       expect.objectContaining({ branch, remoteUrl: "https://github.com/owner/cogmo.git" }),
     );
+  });
+});
+
+// --- The repo's read-only directory on every resume -------------------------
+
+/** The skills repo's gates bundle, as the composition root hands it over, here for `cogmo`. */
+const GATES_DIR: ReadOnlyDirSpec = {
+  hostDir: "/var/lib/cogmo/gates/d1",
+  containerDir: "/tmp/cogmo-gates",
+  digest: "d1",
+};
+const COGMO_GATES: RepoSessionDir = {
+  repoName: "cogmo",
+  readOnlyDir: GATES_DIR,
+  env: { COGMO_GATES_DIR: "/tmp/cogmo-gates" },
+};
+
+/** The options of each `resume` call, which the checkout's resume is among on git-remote. */
+function resumeOptions(sandbox: SandboxClient): unknown[] {
+  return vi.mocked(sandbox.resume).mock.calls.map((call) => call[1]);
+}
+
+describe("git-remote: the repo's read-only directory reaches every resume", () => {
+  it("in the plan run, the checkout's included", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createSpecs } = fakeGitRemoteSandbox();
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-1" },
+          { kind: "plan_ready", plan: "## Plan\n" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+        secretsStore,
+        repoSessionDir: COGMO_GATES,
+      }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("awaiting_approval");
+    expect(createSpecs.map((spec) => spec.readOnlyDir)).toEqual([GATES_DIR]);
+    // `checkout-feature-branch`, then `plan-cli`.
+    expect(resumeOptions(sandbox)).toEqual([
+      { readOnlyDir: GATES_DIR },
+      { readOnlyDir: GATES_DIR },
+    ]);
+  });
+
+  it("in the execute run, its try-resume and the checkout's included", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "git-remote",
+        branch: `cogmo/${idShort}`,
+      }),
+    );
+    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
+    const { sandbox } = fakeGitRemoteSandbox((cmd) =>
+      gitSubcommand(cmd) === "status" && cmd.includes("--porcelain")
+        ? { exitCode: 0, stdout: "M src/foo.ts\n" }
+        : undefined,
+    );
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-from-plan" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+        secretsStore,
+        repoSessionDir: COGMO_GATES,
+      }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("pending_verify");
+    expect(vi.mocked(sandbox.tryResumeByTaskId).mock.calls).toEqual([
+      [task.id, { readOnlyDir: GATES_DIR }],
+    ]);
+    // `checkout-feature-branch`, then the session's, which the push shares.
+    expect(resumeOptions(sandbox)).toEqual([
+      { readOnlyDir: GATES_DIR },
+      { readOnlyDir: GATES_DIR },
+    ]);
+  });
+
+  it("in the verify run, the checkout's included", async () => {
+    const { task } = await seedTaskReadyForVerify();
+    transportMocks.fetchFeatureBranch.mockResolvedValue(undefined);
+    const { sandbox, createSpecs } = fakeGitRemoteSandbox(verifyExecScript);
+    const create = vi.fn(async () => ({
+      data: { html_url: "https://github.com/owner/cogmo/pull/9", number: 9 },
+    }));
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) };
+
+    const result = await runCodingVerify({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeVerifyDeps({
+        sandbox,
+        octokitFactory: () => ({ pulls: { create } }) as unknown as Octokit,
+        repoSessionDir: COGMO_GATES,
+      }),
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result.status).toBe("pr_open");
+    expect(createSpecs.map((spec) => spec.readOnlyDir)).toEqual([GATES_DIR]);
+    // `checkout-feature-branch`, then the session's, which verify and the push share.
+    expect(resumeOptions(sandbox)).toEqual([
+      { readOnlyDir: GATES_DIR },
+      { readOnlyDir: GATES_DIR },
+    ]);
   });
 });

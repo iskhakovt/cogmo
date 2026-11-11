@@ -12,7 +12,6 @@ import {
 } from "@daytona/sdk";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
-import { describeError } from "../../util/describe-error.js";
 import { withRetry } from "../../util/with-retry.js";
 import {
   type DaytonaSessionState,
@@ -681,7 +680,13 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         });
       }
       if (spec.readOnlyDir) {
-        await uploadReadOnlyDir({ sandbox: sdkSandbox, dir: spec.readOnlyDir });
+        // `create` is the `SandboxClient` boundary, whose failure channel is a
+        // rejection: the upload's error is thrown here, once, so the block's
+        // cleanup deletes the sandbox.
+        const uploaded = await uploadReadOnlyDir({ sandbox: sdkSandbox, dir: spec.readOnlyDir });
+        if (uploaded.isErr()) {
+          throw new Error(`uploading the read-only directory failed: ${uploaded.error}`);
+        }
       }
       if (spec.worktree?.type === "git-remote") {
         const wt = spec.worktree;
@@ -948,21 +953,17 @@ async function refreshReadOnlyDir(
   dir: ReadOnlyDirSpec | undefined,
 ): Promise<string | undefined> {
   if (dir === undefined || dir.digest === recorded) return recorded;
-  try {
-    await uploadReadOnlyDir({ sandbox: sdkSandbox, dir });
-    return dir.digest;
-  } catch (err) {
-    log.warn(
-      {
-        err: describeError(err),
-        sandboxId: sdkSandbox.id,
-        digest: dir.digest,
-        recorded: recorded ?? null,
-      },
-      "uploading the read-only directory at resume failed; the session keeps the copy it has",
-    );
-    return recorded;
-  }
+  const uploaded = await uploadReadOnlyDir({ sandbox: sdkSandbox, dir });
+  return uploaded.match(
+    () => dir.digest,
+    (error) => {
+      log.warn(
+        { err: error, sandboxId: sdkSandbox.id, digest: dir.digest, recorded: recorded ?? null },
+        "uploading the read-only directory at resume failed; the session keeps the copy it has",
+      );
+      return recorded;
+    },
+  );
 }
 
 /**

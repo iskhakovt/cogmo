@@ -1,19 +1,49 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Docker from "dockerode";
+import { ok } from "neverthrow";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import type { Database, Transactor } from "../db/index.js";
+import type { Database, Transaction, Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { DAYTONA_API_KEY_SECRET } from "../sandbox/daytona/auth.js";
 import { DAYTONA_CAPABILITIES } from "../sandbox/daytona/client.js";
 import type { SandboxBackendOptions } from "../sandbox/factory.js";
 import type { SandboxClient, SandboxSession, SessionSpec } from "../sandbox/index.js";
+import { managedBindSources } from "../sandbox/managed-binds.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import { cogmoInstances } from "../sandbox/store/schema.js";
 import { LOCAL_DOCKER_CAPABILITIES } from "../sandbox/supervisor.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import {
+  type PublishGatesBundleDeps,
+  publishGatesBundle,
+  releaseGatesBundle,
+} from "../skills/publish-gates-bundle.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { bootstrapCliSandbox, scheduleReconcileCrashedInstances } from "./sandbox.js";
+import {
+  bootstrapCliSandbox,
+  bootstrapSandbox,
+  scheduleReconcileCrashedInstances,
+} from "./sandbox.js";
+import { type CoreDeps, NO_SANDBOX } from "./stages.js";
+
+// `bootstrapSandbox` reads `env`; each test of it sets the keys it needs on
+// this copy of the real one.
+const testEnv: Record<string, unknown> = vi.hoisted(() => ({}));
+vi.mock("../env.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../env.js")>();
+  Object.assign(testEnv, actual.env);
+  return { ...actual, env: testEnv };
+});
+vi.mock("../skills/publish-gates-bundle.js", () => ({
+  releaseGatesBundle: vi.fn(),
+  publishGatesBundle: vi.fn(),
+}));
+vi.mock("../sandbox/managed-binds.js", () => ({ managedBindSources: vi.fn() }));
 
 describe("scheduleReconcileCrashedInstances", () => {
   it("logs a warn with backendLabel + orphansReaped when reconcile returns a non-zero count", async () => {
@@ -358,5 +388,117 @@ describe("bootstrapCliSandbox", () => {
     });
     expect(await instances()).toEqual([]);
     expect(listeners.size).toBe(0);
+  });
+});
+
+describe("bootstrapSandbox's gates bundle", () => {
+  /** What the stand-in publish throws once it has recorded what it was given. */
+  const PUBLISH_STOPPED = new Error("the stand-in publish stops the boot here");
+  const FAKE_TX = { __mockTx: true } as never;
+  const fakeRunInTx: Transactor = <T>(cb: (trx: Transaction) => Promise<T>) => cb(FAKE_TX);
+  let dirs: string;
+  let baseline: Record<string, unknown>;
+
+  beforeAll(() => {
+    baseline = { ...testEnv };
+  });
+
+  beforeEach(async () => {
+    dirs = await mkdtemp(join(tmpdir(), "cogmo-boot-sandbox-"));
+    Object.assign(testEnv, {
+      SANDBOX_PROXY_SOCKET_DIR: join(dirs, "sockets"),
+      SANDBOX_ASKPASS_DIR: join(dirs, "askpass"),
+      SANDBOX_GATES_DIR: join(dirs, "gates"),
+    });
+    vi.mocked(releaseGatesBundle).mockResolvedValue("/release/skills-gates");
+    vi.mocked(publishGatesBundle).mockImplementation(async () => {
+      throw PUBLISH_STOPPED;
+    });
+  });
+
+  afterEach(async () => {
+    for (const key of Object.keys(testEnv)) delete testEnv[key];
+    Object.assign(testEnv, baseline);
+    vi.mocked(releaseGatesBundle).mockReset();
+    vi.mocked(publishGatesBundle).mockReset();
+    vi.mocked(managedBindSources).mockReset();
+    await rm(dirs, { recursive: true, force: true });
+  });
+
+  function core(daytonaKey: string | undefined): CoreDeps {
+    const secretsStore = mock<DrizzleSecretsStore>();
+    secretsStore.getSecret.mockResolvedValue(daytonaKey);
+    return mock<CoreDeps>({ runInTx: fakeRunInTx, secretsStore });
+  }
+
+  /** The `boundSources` the boot handed the publish. */
+  function publishedWith(): PublishGatesBundleDeps["boundSources"] {
+    return expectDefined(vi.mocked(publishGatesBundle).mock.calls[0], "the publish")[0]
+      .boundSources;
+  }
+
+  it("fails the boot without the release's bundle, before any backend is chosen", async () => {
+    Object.assign(testEnv, { SANDBOX_BACKEND: "local-docker", SANDBOX_RUNTIME: undefined });
+    vi.mocked(releaseGatesBundle).mockRejectedValue(
+      new Error("the release's gates bundle lacks x"),
+    );
+
+    await expect(bootstrapSandbox(core(undefined))).rejects.toThrow(
+      "the release's gates bundle lacks x",
+    );
+    const moduleUrl = expectDefined(vi.mocked(releaseGatesBundle).mock.calls[0], "the check")[0];
+    expect(moduleUrl).toMatch(/\/boot\/sandbox\.ts$/);
+  });
+
+  it("publishes nothing with no backend configured", async () => {
+    Object.assign(testEnv, { SANDBOX_BACKEND: "local-docker", SANDBOX_RUNTIME: undefined });
+
+    expect(await bootstrapSandbox(core(undefined))).toEqual(NO_SANDBOX);
+    expect(releaseGatesBundle).toHaveBeenCalledTimes(1);
+    expect(publishGatesBundle).not.toHaveBeenCalled();
+  });
+
+  it("checks SANDBOX_GATES_DIR is writable before it publishes", async () => {
+    const file = join(dirs, "a-file");
+    await writeFile(file, "");
+    testEnv.SANDBOX_GATES_DIR = join(file, "gates");
+
+    await expect(
+      bootstrapSandbox(core(undefined), { sandboxClientOverride: mock<SandboxClient>() }),
+    ).rejects.toThrow(`SANDBOX_GATES_DIR=${join(file, "gates")} is not writable`);
+    expect(publishGatesBundle).not.toHaveBeenCalled();
+  });
+
+  it("asks the daemon which directories Local-Docker's containers bind", async () => {
+    Object.assign(testEnv, { SANDBOX_BACKEND: "local-docker", SANDBOX_RUNTIME: "runc" });
+    const bound = ok<ReadonlySet<string>, string>(new Set(["/var/lib/cogmo/gates/d1"]));
+    vi.mocked(managedBindSources).mockResolvedValue(bound);
+
+    await expect(bootstrapSandbox(core(undefined))).rejects.toBe(PUBLISH_STOPPED);
+
+    expect(vi.mocked(publishGatesBundle).mock.calls[0]?.[1]).toEqual({
+      sourceDir: "/release/skills-gates",
+      root: join(dirs, "gates"),
+    });
+    expect(await publishedWith()()).toBe(bound);
+    expect(vi.mocked(managedBindSources).mock.calls).toEqual([[expect.any(Docker)]]);
+  });
+
+  it("publishes for Daytona, whose sessions bind nothing", async () => {
+    Object.assign(testEnv, { SANDBOX_BACKEND: "daytona" });
+
+    await expect(bootstrapSandbox(core("dtn-key"))).rejects.toBe(PUBLISH_STOPPED);
+
+    expect((await publishedWith()())._unsafeUnwrap()).toEqual(new Set());
+    expect(managedBindSources).not.toHaveBeenCalled();
+  });
+
+  it("publishes for the test override, binding nothing", async () => {
+    await expect(
+      bootstrapSandbox(core(undefined), { sandboxClientOverride: mock<SandboxClient>() }),
+    ).rejects.toBe(PUBLISH_STOPPED);
+
+    expect((await publishedWith()())._unsafeUnwrap()).toEqual(new Set());
+    expect(managedBindSources).not.toHaveBeenCalled();
   });
 });

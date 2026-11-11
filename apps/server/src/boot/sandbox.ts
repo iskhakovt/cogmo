@@ -147,15 +147,14 @@ export async function bootstrapSandbox(
     );
     return {
       sandbox,
-      codingSandbox: sandbox,
+      coding: { sandbox, gatesBundle },
       sandboxInstanceId,
       sandboxDocker: null,
-      gatesBundle,
     };
   }
   // Both backends are coding-capable: local-docker via host-bind-mount
   // worktrees, daytona via git-as-transport (`cogmo/run/<task-id>` push
-  // → sandbox-side clone). `codingSandbox` is the same handle as
+  // → sandbox-side clone). `coding.sandbox` is the same handle as
   // `sandbox` whenever a backend is configured; the orchestrator
   // branches on `capabilities.workingTreeTransport`, not backend
   // identity. The split exists because the reaper Inngest function
@@ -239,7 +238,6 @@ async function bootstrapLocalDocker(
     proxy,
     askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
   });
-  const codingSandbox = localDocker;
   scheduleReconcileCrashedInstances(localDocker, instance.id);
   logger.info(
     {
@@ -251,10 +249,9 @@ async function bootstrapLocalDocker(
   );
   return {
     sandbox: localDocker,
-    codingSandbox,
+    coding: { sandbox: localDocker, gatesBundle },
     sandboxInstanceId: instance.id,
     sandboxDocker: docker,
-    gatesBundle,
   };
 }
 
@@ -300,7 +297,12 @@ async function bootstrapDaytona(apiKey: string, gatesSource: string): Promise<Sa
     },
     "daytona sandbox initialized",
   );
-  return { sandbox, codingSandbox: sandbox, sandboxInstanceId, sandboxDocker: null, gatesBundle };
+  return {
+    sandbox,
+    coding: { sandbox, gatesBundle },
+    sandboxInstanceId,
+    sandboxDocker: null,
+  };
 }
 
 /** The process whose `SIGINT` or `SIGTERM` closes the CLI sandbox's instance row. */

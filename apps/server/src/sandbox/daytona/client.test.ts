@@ -16,7 +16,7 @@ import {
   SandboxState,
   SnapshotState,
 } from "@daytona/sdk";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import {
@@ -102,13 +102,16 @@ interface FakeSandboxOptions {
   refreshStates?: ReadonlyArray<SandboxState>;
 }
 
+/** What `fs.uploadFiles` receives: each file's bytes and its path in the sandbox. */
+type UploadFiles = (files: Array<{ source: Buffer; destination: string }>) => Promise<void>;
+
 interface FakeSandbox extends DaytonaSdkSandbox {
   // Expose the spies directly so tests can assert against them without
   // a `(sandbox.git.clone as Mock)` cast at every call site.
   __spies: {
     delete: ReturnType<typeof vi.fn>;
     gitClone: ReturnType<typeof vi.fn>;
-    fsUploadFiles: ReturnType<typeof vi.fn>;
+    fsUploadFiles: Mock<UploadFiles>;
     fsSetFilePermissions: ReturnType<typeof vi.fn>;
   };
 }
@@ -117,7 +120,7 @@ function fakeSandbox(opts: FakeSandboxOptions): FakeSandbox {
   const spies = {
     delete: vi.fn(async () => {}),
     gitClone: vi.fn(async () => {}),
-    fsUploadFiles: vi.fn(async () => {}),
+    fsUploadFiles: vi.fn<UploadFiles>(async () => {}),
     fsSetFilePermissions: vi.fn(async () => {}),
   };
   let refreshCount = 0;
@@ -937,8 +940,8 @@ describe("DaytonaSandboxClient", () => {
 
     /** The destinations of each `fs.uploadFiles` call, sorted within the call. */
     function uploadedDestinations(sb: FakeSandbox): string[][] {
-      return sb.__spies.fsUploadFiles.mock.calls.map((call) =>
-        (call[0] as Array<{ destination: string }>).map((u) => u.destination).sort(),
+      return sb.__spies.fsUploadFiles.mock.calls.map(([files]) =>
+        files.map((u) => u.destination).sort(),
       );
     }
 
@@ -987,10 +990,7 @@ describe("DaytonaSandboxClient", () => {
       const client = await makeClient();
       await client.create({ ...BASE_SPEC, readOnlyDir: readOnlyDir("d1") });
 
-      const uploads = sb.__spies.fsUploadFiles.mock.calls[0]?.[0] as Array<{
-        source: Buffer;
-        destination: string;
-      }>;
+      const uploads = expectDefined(sb.__spies.fsUploadFiles.mock.calls[0], "the upload")[0];
       expect(
         Object.fromEntries(uploads.map((u) => [u.destination, u.source.toString("utf8")])),
       ).toEqual({

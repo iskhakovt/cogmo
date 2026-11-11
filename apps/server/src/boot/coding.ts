@@ -64,7 +64,7 @@ export function createCodingRuntime(
         runInTx: core.runInTx,
         codingStore: core.codingStore,
         inngest,
-        sandboxAvailable: sandbox.codingSandbox !== null,
+        sandboxAvailable: sandbox.coding !== null,
       },
       conversationId,
     );
@@ -76,10 +76,7 @@ export function createCodingRuntime(
   // which sandbox provider is behind it.
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const codingFunctions: any[] = [];
-  if (sandbox.codingSandbox) {
-    if (sandbox.gatesBundle === null) {
-      throw new Error("a coding sandbox is configured but the boot published no gates bundle");
-    }
+  if (sandbox.coding) {
     // Every coding function reads tasks and repos, and authenticates to
     // GitHub through the stored identity: the plan/execute orchestrators use
     // it to push dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on
@@ -93,12 +90,12 @@ export function createCodingRuntime(
     // What every orchestrator that runs a task in a sandbox shares.
     const sandboxTaskDeps = {
       ...repoDeps,
-      sandbox: sandbox.codingSandbox,
+      sandbox: sandbox.coding.sandbox,
       devbaseImage: env.COGMO_DEVBASE_IMAGE,
       defaultResourceLimits: DEFAULT_CODING_RESOURCE_LIMITS,
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
-      repoSessionDir: skillsRepoGates(sandbox.gatesBundle),
+      repoSessionDir: skillsRepoGates(sandbox.coding.gatesBundle),
       ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
     };
     const orchestratorDeps = {

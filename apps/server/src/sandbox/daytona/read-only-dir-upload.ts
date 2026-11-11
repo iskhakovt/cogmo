@@ -6,19 +6,24 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Sandbox as DaytonaSdkSandbox } from "@daytona/sdk";
+import { ResultAsync } from "neverthrow";
+import { describeError } from "../../util/describe-error.js";
 import type { ReadOnlyDirSpec } from "../index.js";
 
 /**
  * Upload each regular file directly in `hostDir` to `containerDir`, in one
  * `fs.uploadFiles` call, over whatever an earlier upload left there. It sets
- * no mode: the session only reads them. Rejects when a file cannot be read or
- * the upload fails, which can leave some of the files written.
+ * no mode: the session only reads them. Errs, naming why, when a file cannot
+ * be read or the upload fails, which can leave some of the files written.
  */
-export async function uploadReadOnlyDir(args: {
+export function uploadReadOnlyDir(args: {
   sandbox: DaytonaSdkSandbox;
   dir: ReadOnlyDirSpec;
-}): Promise<void> {
-  const { sandbox, dir } = args;
+}): ResultAsync<void, string> {
+  return ResultAsync.fromPromise(upload(args.sandbox, args.dir), describeError);
+}
+
+async function upload(sandbox: DaytonaSdkSandbox, dir: ReadOnlyDirSpec): Promise<void> {
   const entries = await readdir(dir.hostDir, { withFileTypes: true });
   const uploads = await Promise.all(
     entries

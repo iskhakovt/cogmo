@@ -101,7 +101,7 @@ export interface BootstrapOptions {
    * `FakeDaytonaSandboxClient` so the daytona arm + cleanup-cron arm of
    * `bootstrapRuntime` exercise without paying for Daytona Cloud or
    * pulling a 10-service self-hosted compose. The override is treated
-   * as a coding-capable backend: `sandbox` AND `codingSandbox` both
+   * as a coding-capable backend: `sandbox` AND `coding.sandbox` both
    * resolve to it (the orchestrator branches on `capabilities`, not
    * backend identity).
    */
@@ -195,31 +195,33 @@ export interface CoreDeps {
 export interface SandboxDeps {
   sandbox: SandboxClient | null;
   /**
-   * Same handle as `sandbox` whenever a sandbox is configured. Coding
-   * orchestrators take the wide `SandboxClient` type and branch on
-   * `capabilities.workingTreeTransport` (`bind-mount` for local-docker,
-   * `git-remote` for daytona) rather than backend identity. The split
-   * exists because the registration gate is `codingSandbox !== null` —
-   * keeping it as a separate field leaves room for a future backend
-   * that's sandbox-capable but not coding-capable without widening the
-   * `SandboxClient` interface.
+   * What the coding orchestrators run on, null when they cannot run.
+   * `sandbox` is the same handle as the top-level one whenever a sandbox is
+   * configured. Coding orchestrators take the wide `SandboxClient` type and
+   * branch on `capabilities.workingTreeTransport` (`bind-mount` for
+   * local-docker, `git-remote` for daytona) rather than backend identity.
+   * The split exists because the registration gate is `coding !== null` —
+   * keeping it as a separate field leaves room for a future backend that's
+   * sandbox-capable but not coding-capable without widening the
+   * `SandboxClient` interface. `gatesBundle` is the release's gates bundle,
+   * published under `SANDBOX_GATES_DIR` for the skills repo's sessions.
    */
-  codingSandbox: SandboxClient | null;
+  coding: CodingSandbox | null;
   sandboxInstanceId: string | null;
   sandboxDocker: Docker | null;
-  /**
-   * The release's gates bundle, published under `SANDBOX_GATES_DIR` for the
-   * skills repo's coding sessions; non-null whenever `codingSandbox` is.
-   */
-  gatesBundle: PublishedGatesBundle | null;
+}
+
+/** A coding-capable sandbox and what the skills repo's sessions on it receive. */
+export interface CodingSandbox {
+  sandbox: SandboxClient;
+  gatesBundle: PublishedGatesBundle;
 }
 
 export const NO_SANDBOX: SandboxDeps = {
   sandbox: null,
-  codingSandbox: null,
+  coding: null,
   sandboxInstanceId: null,
   sandboxDocker: null,
-  gatesBundle: null,
 };
 
 /**

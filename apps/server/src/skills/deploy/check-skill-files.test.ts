@@ -2,9 +2,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { assertKind, expectDefined } from "../../test/assertions.js";
+import { DEPENDENCIES_CASES, GATES_CASES } from "../../test/gates-cases.js";
 import { useVendoredPythonGrammar } from "../../test/skills-fixtures.js";
 import { BUILD_CAPABILITIES } from "../capabilities.js";
-import { DEPENDENCIES_CASES, GATES_CASES } from "../gates-cases.js";
 import { configurePythonParser } from "../python-parser.js";
 import { checkSkillFiles, declaredDependencyNames } from "./check-skill-files.js";
 

@@ -7,11 +7,11 @@
  * validated only at typecheck time — no test ever ran `bootstrapSandbox`
  * with a daytona-shape backend. This test wires `FakeDaytonaSandboxClient`
  * via `BootstrapOptions.sandboxClientOverride` and verifies that:
- *   - the override flows through `bootstrapSandbox` (sandbox + codingSandbox
+ *   - the override flows through `bootstrapSandbox` (sandbox + coding.sandbox
  *     both resolve to the fake; daytona-shape capabilities surface),
  *   - `healthCheck` resolves on the wired client,
  *   - the coding orchestrator + cleanup-run-branch + orphan-sweep
- *     functions register in `bootstrapRuntime` (gated on `codingSandbox`),
+ *     functions register in `bootstrapRuntime` (gated on `coding`),
  *   - the sandbox-reaper Inngest function does NOT register (gated on
  *     `sandboxDocker`, which is null for the override path because the
  *     reaper is local-docker-specific).
@@ -79,9 +79,9 @@ function functionIds(fns: ReadonlyArray<InngestFunction.Any>): string[] {
 }
 
 describe("bootstrap with sandboxClientOverride (FakeDaytonaSandboxClient)", () => {
-  it("resolves sandbox + codingSandbox to the override with daytona-shape capabilities", () => {
+  it("resolves sandbox + coding.sandbox to the override with daytona-shape capabilities", () => {
     expect(bootstrapResult.sandbox).toBe(fakeSandbox);
-    expect(bootstrapResult.codingSandbox).toBe(fakeSandbox);
+    expect(bootstrapResult.coding?.sandbox).toBe(fakeSandbox);
     // `randomUUID()` mints a v4 — version nibble pinned to `4` so a
     // future swap to v7 here would fail the test instead of silently
     // changing the wire format consumers see.

@@ -1,22 +1,18 @@
-import { copyFile, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { gatesBundleDigest } from "./gates-files.js";
 import { vendoredGrammarPath } from "./vendored-grammar.js";
-import { assertOwnPrivateDir } from "./worker-wasm/child-bundle.js";
 
 /**
  * The gates bundle (design/skills.md → The gates in verify): `gates.mjs`, an
  * esbuild bundle of `gates-cli.ts`, and the two files it loads by path beside
  * it, web-tree-sitter's runtime and the vendored grammar. Two builds write it:
  * the server build into `dist/skills-gates/` (`tsup.config.ts`), and
- * {@link buildGatesBundleFromSource} into a temporary directory named by its
- * digest, for a server running from source. The server imports this module
- * only then, and dynamically: a deployed server has no esbuild. What it needs
- * of the bundle at runtime is `gates-files.ts`.
+ * `gates-bundle-source.ts` into a temporary directory named by its digest,
+ * for a server running from source. The server imports these only then, and
+ * dynamically: a deployed server has no esbuild. What it needs of the bundle
+ * at runtime is `gates-files.ts`.
  */
 
 /**
@@ -59,38 +55,4 @@ export async function buildGatesBundle(opts: {
     ),
     copyFile(vendoredGrammarPath(opts.serverRoot), join(opts.outDir, "tree-sitter-python.wasm")),
   ]);
-}
-
-/**
- * Build the bundle from this source tree into a temporary directory named by
- * its digest, so processes share one copy per version of the sources, and
- * return that directory. The first process to publish a digest wins; a later
- * one drops its own build and uses the winner's only if it is this user's
- * private directory, since anyone can create a name in the shared temporary
- * directory first. Throws when the build or the filesystem fails, or the
- * winner's directory is not one this user can trust.
- */
-export async function buildGatesBundleFromSource(): Promise<string> {
-  const root = await realpath(tmpdir());
-  const buildDir = await mkdtemp(join(root, "cogmo-gates-build-"));
-  try {
-    await buildGatesBundle({
-      serverRoot: fileURLToPath(new URL("../../", import.meta.url)),
-      outDir: buildDir,
-    });
-  } catch (e) {
-    await rm(buildDir, { recursive: true, force: true });
-    throw e;
-  }
-  const digest = await gatesBundleDigest(buildDir);
-  const outDir = join(root, `cogmo-gates-${digest.slice(0, 16)}`);
-  try {
-    await rename(buildDir, outDir);
-  } catch (e) {
-    const code = e instanceof Error && "code" in e ? e.code : undefined;
-    if (code !== "EEXIST" && code !== "ENOTEMPTY") throw e;
-    await rm(buildDir, { recursive: true, force: true });
-    await assertOwnPrivateDir(outDir, "the gates bundle");
-  }
-  return outDir;
 }

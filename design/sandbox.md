@@ -121,19 +121,13 @@ interface SessionSpec {
   homeVolume?: HomeVolumeSpec;
   askpass?: AskpassMaterial;
   /**
-   * `[proposed]` A directory of files the session reads at `containerDir`
-   * (skills.md → The gates in verify). Local-Docker binds `hostDir` there
-   * `:ro` at create, so `hostDir` is a path the daemon sees on the host.
-   * Daytona uploads each regular file directly in `hostDir` during
-   * post-create provisioning, after `askpass` and before the clone, in one
-   * `fs.uploadFiles` call that sets no mode, and records `digest` in its
-   * session state; a failed upload deletes the sandbox and fails `create`,
-   * as a failed askpass upload does. Unlike `askpass`, it is not provisioned
-   * per run and has no per-task cleanup: `hostDir` is the caller's and
-   * outlives every session, and the sandbox's deletion removes Daytona's
-   * copy. A resume rebinds nothing; only Daytona's uploads again, when the
-   * caller's digest differs from the recorded one or none is recorded
-   * (`resume`), and at every `tryResumeByTaskId`.
+   * `[proposed]` A directory of files the session reads at `containerDir`;
+   * the caller's, outliving every session, so no backend provisions or
+   * cleans it per task. Local-Docker binds `hostDir` (a path the daemon sees
+   * on the host) there `:ro` at create. Daytona uploads its regular files
+   * after `askpass` and before the clone, a failed upload failing `create`,
+   * and records `digest`, which `resume` and `tryResumeByTaskId` compare
+   * (above). The rest is skills.md → The gates in verify → Delivery.
    */
   readOnlyDir?: ReadOnlyDirSpec; // { hostDir: string; containerDir: string; digest: string }
   /** Process env for the container (`CLAUDE_CODE_OAUTH_TOKEN`, …). Never host `process.env`. */

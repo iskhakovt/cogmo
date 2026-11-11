@@ -25,6 +25,7 @@ describe("managedBindSources", () => {
     expect(listContainers).toHaveBeenCalledWith({
       all: true,
       filters: { label: ["cogmo.managed=true"] },
+      abortSignal: expect.any(AbortSignal),
     });
   });
 
@@ -43,6 +44,32 @@ describe("managedBindSources", () => {
     expect(sources._unsafeUnwrap()).toEqual(
       new Set(["/var/lib/cogmo/gates/d1", "/var/lib/cogmo/askpass/t2"]),
     );
+  });
+
+  it("errs once the daemon has not answered in 10 s, and aborts the request", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      const listContainers = vi.fn<DockerFacade["listContainers"]>(
+        (opts) =>
+          new Promise((_resolve, reject) => {
+            signal = opts?.abortSignal;
+            signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          }),
+      );
+
+      const pending = managedBindSources({ listContainers });
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect((await pending)._unsafeUnwrapErr()).toBe(
+        "the Docker daemon listed no containers within 10 s",
+      );
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("errs, naming why, when the daemon cannot list them", async () => {

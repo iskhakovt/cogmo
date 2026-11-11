@@ -30,8 +30,9 @@ const DIR = { containerDir: "/tmp/cogmo-gates", digest: "d1" };
 
 describe("uploadReadOnlyDir", () => {
   it("uploads each file's bytes to the container directory in one call", async () => {
-    await uploadReadOnlyDir({ sandbox: fakeSandbox(), dir: { ...DIR, hostDir } });
+    const uploaded = await uploadReadOnlyDir({ sandbox: fakeSandbox(), dir: { ...DIR, hostDir } });
 
+    expect(uploaded.isOk()).toBe(true);
     expect(uploadFiles).toHaveBeenCalledTimes(1);
     const uploads = uploadFiles.mock.calls[0]?.[0] ?? [];
     expect(
@@ -56,20 +57,23 @@ describe("uploadReadOnlyDir", () => {
     ]);
   });
 
-  it("rejects when the upload fails", async () => {
+  it("errs, naming why, when the upload fails", async () => {
     uploadFiles.mockRejectedValue(new Error("upload 503"));
 
-    await expect(
-      uploadReadOnlyDir({ sandbox: fakeSandbox(), dir: { ...DIR, hostDir } }),
-    ).rejects.toThrow(/upload 503/);
+    const uploaded = await uploadReadOnlyDir({ sandbox: fakeSandbox(), dir: { ...DIR, hostDir } });
+
+    expect(uploaded._unsafeUnwrapErr()).toContain("upload 503");
   });
 
-  it("rejects, uploading nothing, when the directory cannot be read", async () => {
+  it("errs, uploading nothing, when the directory cannot be read", async () => {
     const missing = join(hostDir, "missing");
 
-    await expect(
-      uploadReadOnlyDir({ sandbox: fakeSandbox(), dir: { ...DIR, hostDir: missing } }),
-    ).rejects.toThrow(missing);
+    const uploaded = await uploadReadOnlyDir({
+      sandbox: fakeSandbox(),
+      dir: { ...DIR, hostDir: missing },
+    });
+
+    expect(uploaded._unsafeUnwrapErr()).toContain(missing);
     expect(uploadFiles).not.toHaveBeenCalled();
   });
 });

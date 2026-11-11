@@ -154,6 +154,7 @@ async function main() {
     COGMO_WORKTREES_DIR: join(DEV_ROOT, "worktrees"),
     SANDBOX_PROXY_SOCKET_DIR: join(DEV_ROOT, "sockets"),
     SANDBOX_ASKPASS_DIR: join(DEV_ROOT, "askpass"),
+    SANDBOX_GATES_DIR: join(DEV_ROOT, "gates"),
     ...process.env,
     COGMO_MASTER_KEY: masterKey,
     DATABASE_URL: databaseUrl,

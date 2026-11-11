@@ -1,4 +1,17 @@
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,6 +20,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../logger.js";
 import { GATES_BUNDLE_FILES, gatesBundleDigest } from "./gates-files.js";
 import { publishGatesBundle, releaseGatesBundle } from "./publish-gates-bundle.js";
+
+// The filesystem as it is, with `rename` and `copyFile` spied on, so a test
+// can stand in a concurrent publish or a failing copy at one call.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, rename: vi.fn(actual.rename), copyFile: vi.fn(actual.copyFile) };
+});
 
 let root: string;
 /** A bundle's three files, as a release ships them. */
@@ -49,6 +69,25 @@ async function exists(path: string): Promise<boolean> {
     () => true,
     () => false,
   );
+}
+
+const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+
+/** Set `path`'s mtime `ms` in the past. */
+async function age(path: string, ms: number): Promise<void> {
+  const then = new Date(Date.now() - ms);
+  await utimes(path, then, then);
+}
+
+/** The entries of `$SANDBOX_GATES_DIR` a publish writes before its rename. */
+async function temporaries(): Promise<string[]> {
+  return (await readdir(gatesRoot)).filter((name) => name.startsWith(".publishing-"));
+}
+
+/** An error with `code`, as Node's filesystem raises it. */
+function fsError(code: string): Error {
+  return Object.assign(new Error(`${code}: stood in`), { code });
 }
 
 describe("releaseGatesBundle", () => {
@@ -134,6 +173,88 @@ describe("publishGatesBundle", () => {
     expect((await stat(join(again.hostDir, "gates.mjs"))).ino).toBe(marker);
   });
 
+  it("refreshes the mtime of the directory it reuses, which another release's boot reads as its age", async () => {
+    const first = await publishGatesBundle(
+      { boundSources: bound(NOTHING_BOUND) },
+      { sourceDir: source, root: gatesRoot },
+    );
+    await age(first.hostDir, 2 * DAY_MS);
+
+    await publishGatesBundle(
+      { boundSources: bound(NOTHING_BOUND) },
+      { sourceDir: source, root: gatesRoot },
+    );
+
+    expect(Date.now() - (await stat(first.hostDir)).mtimeMs).toBeLessThan(MINUTE_MS);
+  });
+
+  it("opens the directory it reuses to every user again", async () => {
+    const first = await publishGatesBundle(
+      { boundSources: bound(NOTHING_BOUND) },
+      { sourceDir: source, root: gatesRoot },
+    );
+    await Promise.all(GATES_BUNDLE_FILES.map((f) => chmod(join(first.hostDir, f), 0o600)));
+    await chmod(first.hostDir, 0o700);
+
+    await publishGatesBundle(
+      { boundSources: bound(NOTHING_BOUND) },
+      { sourceDir: source, root: gatesRoot },
+    );
+
+    expect((await stat(first.hostDir)).mode & 0o777).toBe(0o755);
+    const modes = await Promise.all(
+      GATES_BUNDLE_FILES.map(async (f) => (await stat(join(first.hostDir, f))).mode & 0o777),
+    );
+    expect(modes).toEqual(GATES_BUNDLE_FILES.map(() => 0o644));
+  });
+
+  it("takes a directory a concurrent publish renamed into place first, when its bytes are the bundle's", async () => {
+    const digest = await gatesBundleDigest(source);
+    const hostDir = join(gatesRoot, digest);
+    vi.mocked(rename).mockImplementationOnce(async () => {
+      await cp(source, hostDir, { recursive: true });
+      throw fsError("ENOTEMPTY");
+    });
+
+    const published = await publishGatesBundle(
+      { boundSources: bound(NOTHING_BOUND) },
+      { sourceDir: source, root: gatesRoot },
+    );
+
+    expect(published).toEqual({ hostDir, digest });
+    expect(await temporaries()).toEqual([]);
+  });
+
+  it("fails naming a directory a concurrent publish renamed into place first with other bytes", async () => {
+    const digest = await gatesBundleDigest(source);
+    const hostDir = join(gatesRoot, digest);
+    vi.mocked(rename).mockImplementationOnce(async () => {
+      await mkdir(hostDir);
+      await Promise.all(GATES_BUNDLE_FILES.map((f) => writeFile(join(hostDir, f), "planted")));
+      throw fsError("EEXIST");
+    });
+
+    await expect(
+      publishGatesBundle(
+        { boundSources: bound(NOTHING_BOUND) },
+        { sourceDir: source, root: gatesRoot },
+      ),
+    ).rejects.toThrow(`${hostDir} does not hold the gates bundle its name digests`);
+    expect(await temporaries()).toEqual([]);
+  });
+
+  it("removes its temporary directory and rethrows when a copy fails", async () => {
+    vi.mocked(copyFile).mockRejectedValueOnce(fsError("EIO"));
+
+    await expect(
+      publishGatesBundle(
+        { boundSources: bound(NOTHING_BOUND) },
+        { sourceDir: source, root: gatesRoot },
+      ),
+    ).rejects.toThrow("EIO: stood in");
+    expect(await readdir(gatesRoot)).toEqual([]);
+  });
+
   it("fails naming a digest's directory that holds other bytes", async () => {
     const digest = await gatesBundleDigest(source);
     const planted = join(gatesRoot, digest);
@@ -174,8 +295,9 @@ describe("publishGatesBundle", () => {
     ).rejects.toThrow(join(source, "web-tree-sitter.wasm"));
   });
 
-  it("removes another release's directory no container binds", async () => {
+  it("removes another release's directory no container binds once a day has passed since its boot", async () => {
     const other = await otherRelease("a");
+    await age(other, DAY_MS + MINUTE_MS);
 
     await publishGatesBundle(
       { boundSources: bound(NOTHING_BOUND) },
@@ -183,6 +305,19 @@ describe("publishGatesBundle", () => {
     );
 
     expect(await exists(other)).toBe(false);
+    expect(await temporaries()).toEqual([]);
+  });
+
+  it("keeps another release's unbound directory a boot published within the day", async () => {
+    const other = await otherRelease("a");
+    await age(other, DAY_MS - MINUTE_MS);
+
+    await publishGatesBundle(
+      { boundSources: bound(NOTHING_BOUND) },
+      { sourceDir: source, root: gatesRoot },
+    );
+
+    expect(await exists(other)).toBe(true);
   });
 
   it.skipIf(process.getuid?.() === 0)(
@@ -194,6 +329,7 @@ describe("publishGatesBundle", () => {
       await mkdir(locked);
       await writeFile(join(locked, "file"), "kept");
       await chmod(locked, 0o555);
+      await age(other, 2 * DAY_MS);
       try {
         const published = await publishGatesBundle(
           { boundSources: bound(NOTHING_BOUND) },
@@ -201,14 +337,21 @@ describe("publishGatesBundle", () => {
         );
 
         expect(await exists(published.hostDir)).toBe(true);
-        expect(await exists(join(locked, "file"))).toBe(true);
+        // Renamed away first, so what is left is a leftover a later boot
+        // removes, never a release's directory missing files.
+        expect(await exists(other)).toBe(false);
+        const [leftover, ...more] = await temporaries();
+        expect(more).toEqual([]);
+        expect(await exists(join(gatesRoot, `${leftover}`, "locked", "file"))).toBe(true);
         expect(warnSpy).toHaveBeenCalledWith(
-          expect.objectContaining({ dir: other }),
+          expect.objectContaining({ dir: join(gatesRoot, `${leftover}`) }),
           "removing a stale gates bundle failed",
         );
       } finally {
         warnSpy.mockRestore();
-        await chmod(locked, 0o755);
+        await Promise.all(
+          (await temporaries()).map((t) => chmod(join(gatesRoot, t, "locked"), 0o755)),
+        );
       }
     },
   );
@@ -217,6 +360,7 @@ describe("publishGatesBundle", () => {
     const boundDir = await otherRelease("a");
     const boundBelow = await otherRelease("b");
     const unbound = await otherRelease("c");
+    await Promise.all([boundDir, boundBelow, unbound].map((dir) => age(dir, 2 * DAY_MS)));
 
     await publishGatesBundle(
       {
@@ -234,6 +378,7 @@ describe("publishGatesBundle", () => {
     const warnSpy = vi.spyOn(logger, "warn");
     try {
       const other = await otherRelease("a");
+      await age(other, 2 * DAY_MS);
 
       await publishGatesBundle(
         { boundSources: bound(err("connect ECONNREFUSED")) },
@@ -250,10 +395,11 @@ describe("publishGatesBundle", () => {
     }
   });
 
-  it("removes a temporary directory a crashed publish left, whether or not listing works", async () => {
+  it("removes a temporary directory a crashed publish left over ten minutes ago, whether or not listing works", async () => {
     const leftover = join(gatesRoot, ".publishing-abc123");
     await mkdir(leftover);
     await writeFile(join(leftover, "gates.mjs"), "half a copy");
+    await age(leftover, 10 * MINUTE_MS + MINUTE_MS);
 
     await publishGatesBundle(
       { boundSources: bound(err("connect ECONNREFUSED")) },
@@ -261,6 +407,20 @@ describe("publishGatesBundle", () => {
     );
 
     expect(await exists(leftover)).toBe(false);
+  });
+
+  it("keeps a temporary directory written within ten minutes, which a live publish may still be filling", async () => {
+    const live = join(gatesRoot, ".publishing-live01");
+    await mkdir(live);
+    await writeFile(join(live, "gates.mjs"), "half a copy");
+    await age(live, 10 * MINUTE_MS - MINUTE_MS);
+
+    await publishGatesBundle(
+      { boundSources: bound(NOTHING_BOUND) },
+      { sourceDir: source, root: gatesRoot },
+    );
+
+    expect(await exists(join(live, "gates.mjs"))).toBe(true);
   });
 
   it("leaves alone what is neither a digest's directory nor its own temporary one", async () => {
@@ -278,8 +438,9 @@ describe("publishGatesBundle", () => {
     expect(await readFile(join(gatesRoot, "README"), "utf8")).toBe("the operator's");
   });
 
-  it("asks for the bound directories only when another release's is there to remove", async () => {
+  it("asks for the bound directories only when another release's is old enough to remove", async () => {
     const boundSources = bound(NOTHING_BOUND);
+    await otherRelease("a");
 
     await publishGatesBundle({ boundSources }, { sourceDir: source, root: gatesRoot });
 
