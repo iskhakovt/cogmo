@@ -13,6 +13,8 @@ Each skill is a directory `skills/<name>/` holding only:
 - `requirements.lock`: the lockfile, when the skill declares dependencies.
 - `test_skill.py`: a pytest test for each example, and one for a failure.
 
+Nothing else goes in it, so no `__init__.py`: a skill directory is no package. `test_skill.py` imports the skill by its module name, `from skill import run`, with `Input` and `Output` when it has them (`from skill import Input, Output, run`), never relatively.
+
 Cogmo owns `pyproject.toml`, `uv.lock`, `CLAUDE.md`, `.gitignore` and `.cogmo/`, and replaces them on each release. They are read-only: a branch that changes one is refused.
 
 ## skill.py
@@ -92,6 +94,8 @@ printf '%s\n' httpx==0.27.0 | uv pip compile - > skills/<name>/requirements.lock
 
 ## Checks
 
-`uv run --locked --group dev .cogmo/verify` runs ruff, pyrefly and pytest over each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, and refuses the suppressions register refuses. It must pass before the work is done.
+`uv run --locked --group dev .cogmo/verify` checks each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, in this order: the suppression rule below, ruff, `ruff format --check`, pyrefly and pytest. It must pass before the work is done.
 
-Fix a finding rather than suppress it. A suppression names its rule and covers one line: `# noqa: <code>` or `# ruff: ignore[<code>]` for ruff, `# pyrefly: ignore[<error>]` for pyrefly; pyrefly ignores `# type: ignore`. Register refuses a pragma that covers more (`# ruff: noqa`, `# ruff: file-ignore`, `# ruff: disable`, `# pyrefly: ignore-errors`), one that names no rule (`# noqa`, `# pyrefly: ignore`), and more than 100 in a file, and records each suppression on the deploy for review.
+The layout is the formatter's: `uv run ruff format skills/<name>` writes it.
+
+Fix a finding rather than suppress it. A suppression names its rule and covers one line: `# noqa: <code>` or `# ruff: ignore[<code>]` for ruff, `# pyrefly: ignore[<error>]` for pyrefly; pyrefly ignores `# type: ignore`. One that suppresses nothing, or names no rule the tool knows, is itself a finding. Register refuses a pragma that covers more (`# ruff: noqa`, `# ruff: file-ignore`, `# ruff: disable`, `# pyrefly: ignore-errors`), one that names no rule (`# noqa`, `# pyrefly: ignore`), the formatter's (`# fmt: off`, `# fmt: on`, `# fmt: skip`, `# yapf: disable`, `# yapf: enable`), and more than 100 in a file, and records each suppression on the deploy for review.

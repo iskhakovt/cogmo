@@ -135,7 +135,9 @@ describe("renderToolchainPyproject", () => {
     expect(rendered).toContain("[tool.uv.pip]\npython-version");
     expect(rendered).toContain("generate-hashes = true\nno-header = true");
     expect(rendered).toContain("package = false");
-    expect(rendered).toContain('select = ["E", "F", "B", "BLE", "S", "ASYNC", "PGH004"]');
+    expect(rendered).toContain(
+      'select = ["E", "F", "B", "BLE", "S", "ASYNC", "PGH004", "RUF100", "RUF102"]',
+    );
     expect(rendered).toContain('[tool.pyrefly]\nsearch-path = [".cogmo"]');
     expect(rendered).toContain('pythonpath = [".cogmo"]\nasyncio_mode = "auto"');
   });
@@ -143,6 +145,11 @@ describe("renderToolchainPyproject", () => {
   it("has ruff refuse a noqa that names no rule, and pyrefly honor only its own pragmas", () => {
     expect(rendered).toMatch(/^select = \[.*"PGH004".*\]$/m);
     expect(rendered).toContain('enabled-ignores = ["pyrefly"]');
+  });
+
+  it("makes a suppression that suppresses nothing a finding of ruff's and pyrefly's", () => {
+    expect(rendered).toMatch(/^select = \[.*"RUF100", "RUF102".*\]$/m);
+    expect(rendered).toContain("[tool.pyrefly.errors]\nunused-ignore = true\n");
   });
 });
 
@@ -153,9 +160,21 @@ describe("renderToolchainClaudeMd", () => {
     expect(rendered.startsWith("<!-- Generated; do not edit. -->\n")).toBe(true);
   });
 
-  it("names the check that must pass, and the base it reads", () => {
+  it("says a skill directory holds only its files and its test imports the skill by its module name", () => {
     expect(rendered).toContain(
-      "## Checks\n\n`uv run --locked --group dev .cogmo/verify` runs ruff, pyrefly and pytest over each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, and refuses the suppressions register refuses. It must pass before the work is done.\n",
+      "Nothing else goes in it, so no `__init__.py`: a skill directory is no package. `test_skill.py` imports the skill by its module name, `from skill import run`, with `Input` and `Output` when it has them (`from skill import Input, Output, run`), never relatively.",
+    );
+  });
+
+  it("names the check that must pass, the base it reads, and its checks in verify's order", () => {
+    expect(rendered).toContain(
+      "## Checks\n\n`uv run --locked --group dev .cogmo/verify` checks each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, in this order: the suppression rule below, ruff, `ruff format --check`, pyrefly and pytest. It must pass before the work is done.\n",
+    );
+  });
+
+  it("names the formatter's command, whose layout register accepts", () => {
+    expect(rendered).toContain(
+      "The layout is the formatter's: `uv run ruff format skills/<name>` writes it.",
     );
   });
 
@@ -169,6 +188,14 @@ describe("renderToolchainClaudeMd", () => {
     expect(rendered).toContain(`and more than ${cap} in a file`);
     expect(rendered).toContain("`# noqa: <code>` or `# ruff: ignore[<code>]` for ruff");
     expect(rendered).toContain("pyrefly ignores `# type: ignore`");
+    expect(rendered).toContain("One that suppresses nothing, or names no rule the tool knows");
+  });
+
+  it("states the formatter pragmas register refuses", () => {
+    const pragmas = ["# fmt: off", "# fmt: on", "# fmt: skip", "# yapf: disable", "# yapf: enable"];
+    expect(rendered).toContain(
+      `the formatter's (${pragmas.map((pragma) => `\`${pragma}\``).join(", ")})`,
+    );
   });
 
   it("names every frontmatter field and every effect", () => {
