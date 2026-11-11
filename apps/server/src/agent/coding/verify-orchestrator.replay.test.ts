@@ -17,6 +17,11 @@
  * See .agents/rules/inngest.md and design/crash-recovery.md.
  */
 
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { InngestTestEngine } from "@inngest/test";
 import type { Octokit } from "@octokit/rest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,16 +34,19 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import {
+  codingRepoRow,
   codingTaskRow,
   type FakeCodingSandbox,
   FIXTURE_TASK_ID,
   fakeCodingSandbox,
   fakeExecHandle,
+  idlePresubmitDeps,
   type StatefulCodingStore,
   statefulCodingStore,
 } from "../../test/coding-fixtures.js";
 import { emittedEventNames, fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
-import type { CodingTaskRow } from "./store/index.js";
+import type { PresubmitDeps } from "./presubmit-stage.js";
+import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import {
   createCodingVerifyOrchestrator,
   type VerifyOrchestratorDeps,
@@ -92,7 +100,7 @@ interface ExecLog {
 }
 
 /** Scripts the container's git + verify commands and counts each kind. */
-function countingExec(log: ExecLog) {
+function countingExec(log: ExecLog, headSha: string) {
   return async (cmd: ReadonlyArray<string>) => {
     if (cmd[0] === "bash") {
       log.verify++;
@@ -102,7 +110,7 @@ function countingExec(log: ExecLog) {
     if (sub === "push") log.push++;
     if (sub === "rev-parse") {
       log.revParse++;
-      return fakeExecHandle({ stdout: `${HEAD_SHA}\n`, exitCode: 0 });
+      return fakeExecHandle({ stdout: `${headSha}\n`, exitCode: 0 });
     }
     if (sub === "status") return fakeExecHandle({ stdout: "M src/foo.ts\n", exitCode: 0 });
     return fakeExecHandle({ exitCode: 0 });
@@ -127,15 +135,19 @@ interface Harness {
   create: ReturnType<typeof vi.fn>;
 }
 
-function setup(task: CodingTaskRow): Harness {
+function setup(
+  task: CodingTaskRow,
+  skills: { repo: CodingRepoRow; headSha: string; presubmit: PresubmitDeps } | null,
+): Harness {
+  const headSha = skills?.headSha ?? HEAD_SHA;
   const log: ExecLog = { verify: 0, push: 0, revParse: 0 };
-  const store = statefulCodingStore(task);
-  const sandbox = fakeCodingSandbox(countingExec(log));
+  const store = statefulCodingStore(task, skills?.repo);
+  const sandbox = fakeCodingSandbox(countingExec(log, headSha));
   const create = vi.fn(async () => ({
     data: {
       html_url: "https://github.com/user/cogmo/pull/7",
       number: 7,
-      head: { sha: HEAD_SHA },
+      head: { sha: headSha },
       created_at: "2026-08-20T00:02:00Z",
     },
   }));
@@ -153,6 +165,7 @@ function setup(task: CodingTaskRow): Harness {
       devbaseImage: "alpine",
       defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
       taskTtlMs: 60_000,
+      presubmit: skills?.presubmit ?? idlePresubmitDeps(),
       octokitFactory: () => ({ pulls: { create } }) as unknown as Octokit,
     },
   };
@@ -165,7 +178,7 @@ const cliDoneEvent = {
 
 describe("coding-task-verify — Inngest replay", () => {
   it("verifies, pushes, and opens the PR exactly once across the run's boundaries", async () => {
-    const h = setup(verifiableTask());
+    const h = setup(verifiableTask(), null);
     const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
     const engine = new InngestTestEngine({ function: fn, events: [cliDoneEvent] });
@@ -209,7 +222,7 @@ describe("coding-task-verify — Inngest replay", () => {
   });
 
   it("serves a cached verify verdict without re-running the suite", async () => {
-    const h = setup(verifiableTask());
+    const h = setup(verifiableTask(), null);
     const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
     const engine = new InngestTestEngine({
@@ -248,7 +261,7 @@ describe("coding-task-verify — Inngest replay", () => {
     // is new to this run, so it executes, finds the row `stale` at its own
     // target, and the run goes on to open the PR rather than re-pushing or
     // stopping.
-    const h = setup(verifiableTask({ status: "pushed" }));
+    const h = setup(verifiableTask({ status: "pushed" }), null);
     const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
     const engine = new InngestTestEngine({
@@ -290,7 +303,7 @@ describe("coding-task-verify — Inngest replay", () => {
     // at `pr_open` — settled by this run's own retired step — and carries
     // on; `transition-pr-open` reads `stale` at its own target; the run then
     // sends the `pr-opened` it owes, without a second `pulls.create`.
-    const h = setup(verifiableTask({ status: "pr_open" }));
+    const h = setup(verifiableTask({ status: "pr_open" }), null);
     const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
     const engine = new InngestTestEngine({
@@ -346,7 +359,7 @@ describe("coding-task-verify — Inngest replay", () => {
     // conditional UPDATE matches no row, so the run must return `skipped`
     // without running identity resolution — whose failure would otherwise
     // flip an already-terminal task to `failed`.
-    const h = setup(verifiableTask({ status: "pr_open" }));
+    const h = setup(verifiableTask({ status: "pr_open" }), null);
     const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
     const engine = new InngestTestEngine({ function: fn, events: [cliDoneEvent] });
@@ -361,5 +374,120 @@ describe("coding-task-verify — Inngest replay", () => {
     // Returning ahead of the try block means the loser doesn't sweep the
     // sandbox either — relevant the day per-task concurrency is relaxed.
     expect(h.sandbox.teardownCalls()).toBe(0);
+  });
+
+  describe("the skills repo's pre-submit", () => {
+    const git = async (...args: string[]) => (await promisify(execFile)("git", args)).stdout.trim();
+    const REMOTE = "https://github.com/user/skills.git";
+    let root: string;
+    let bare: string;
+    let tip: string;
+
+    beforeEach(async () => {
+      // The branch verify pushed, on a local "remote" the bare repo reaches
+      // under the GitHub URL the task's repo row names.
+      root = await mkdtemp(join(tmpdir(), "cogmo-presubmit-replay-"));
+      const upstream = join(root, "upstream");
+      bare = join(root, "skills.git");
+      await git("init", "-q", "-b", "cogmo/abc12345", upstream);
+      await git(
+        "-C",
+        upstream,
+        "-c",
+        "user.email=t@cogmo",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "skill",
+      );
+      tip = await git("-C", upstream, "rev-parse", "HEAD");
+      await git("init", "-q", "--bare", bare);
+      await git("-C", bare, "config", `url.${upstream}.insteadOf`, REMOTE);
+    });
+
+    afterEach(async () => {
+      await rm(root, { recursive: true, force: true });
+    });
+
+    function skillsSetup(task: CodingTaskRow) {
+      const skillRunner = mock<PresubmitDeps["skillRunner"]>();
+      skillRunner.checkRegister.mockResolvedValue({
+        kind: "refused",
+        sha: tip,
+        findings: ["ruff: skills/echo/skill.py:1:1: E501 Line too long"],
+      });
+      const repo = codingRepoRow({ name: "skills", remoteUrl: REMOTE });
+      const presubmit = { skillRunner, skillsRepoPath: bare, releaseVersion: "dev" };
+      return { ...setup(task, { repo, headSha: tip, presubmit }), skillRunner };
+    }
+
+    it("dry-runs the pushed tip once across the run's boundaries, records the verdict and opens the PR", async () => {
+      const h = skillsSetup(verifiableTask());
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+      }).execute();
+
+      expect(error).toBeUndefined();
+      // Advisory: a refusal changes nothing downstream.
+      expect(result).toMatchObject({ status: "pr_open", prNumber: 7 });
+      expect(h.skillRunner.checkRegister).toHaveBeenCalledTimes(1);
+      expect(h.skillRunner.checkRegister).toHaveBeenCalledWith({
+        sha: tip,
+        signal: expect.any(AbortSignal),
+      });
+      expect(h.store.current().presubmitVerdict).toMatchObject({
+        kind: "refused",
+        sha: tip,
+        runId: expect.any(String),
+        fixPass: 0,
+      });
+      expect(h.create).toHaveBeenCalledTimes(1);
+      expect(await git("-C", bare, "for-each-ref", "refs/cogmo-presubmit/")).toBe("");
+    });
+
+    it("a run in flight across the deploy that added the step, past `transition-pushed`, runs it and carries on", async () => {
+      // The step is new, so it runs where the run is: the dry run's sessions
+      // are spent, and the verdict is not written on a row past `verifying`.
+      const h = skillsSetup(verifiableTask({ status: "pushed" }));
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        steps: [
+          { id: "set-status-verifying", handler: () => ({ kind: "transitioned" }) },
+          {
+            id: "run-verify",
+            handler: () => ({
+              ok: true,
+              exitCode: 0,
+              output: "PASS",
+              durationMs: 1,
+              timedOut: false,
+            }),
+          },
+          { id: "emit-verify-complete", handler: () => null },
+          {
+            id: "commit-and-push",
+            handler: () => ({ kind: "pushed", commitSha: tip, output: "" }),
+          },
+          { id: "transition-pushed", handler: () => ({ kind: "transitioned" }) },
+          { id: "emit-pushed", handler: () => null },
+        ],
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toMatchObject({ status: "pr_open", prNumber: 7 });
+      expect(h.skillRunner.checkRegister).toHaveBeenCalledTimes(1);
+      expect(h.store.current().presubmitVerdict).toBeNull();
+      expect(h.log.push).toBe(0);
+      expect(h.create).toHaveBeenCalledTimes(1);
+    });
   });
 });

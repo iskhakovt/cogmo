@@ -15,14 +15,14 @@ import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import { GitHubIdentitySchema } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { assertStatus, expectDefined } from "../test/assertions.js";
+import { assertKind, assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
 import type { CpythonChecks } from "./cpython-checks.js";
-import { hashLockfileContents } from "./deps.js";
+import { hashLockfileContents, type LockfileCompiler } from "./deps.js";
 import { migrateSkillsLayout } from "./migrate-layout.js";
 import { ensureSkillsMirror } from "./mirror-reconcile.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
@@ -3867,6 +3867,188 @@ async def run(inputs, ctx):
       expect(deploy?.classifierLog.toolchain_version).toBeNull();
       expect(deploy?.classifierLog.suppressions).toEqual([]);
       expect(cpythonChecks.check).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("checkRegister: the register dry run", () => {
+    const live = () => new AbortController().signal;
+
+    /** Every row and ref a register's deploy writes, to show a dry run writes none. */
+    async function deployState() {
+      return {
+        main: await getMainSha(repo.bare),
+        branches: await git(repo.bare, "for-each-ref", "--format=%(refname) %(objectname)"),
+        skills: await tx((trx) => store.listAllSkills(trx)),
+        deploys: await db.select().from(skillDeploys),
+      };
+    }
+
+    async function pushEcho(): Promise<string> {
+      return pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+    }
+
+    it("passes a tip register deploys, writing nothing a deploy writes", async () => {
+      const runner = await makeRunner();
+      const sha = await pushEcho();
+      const before = await deployState();
+
+      const dryRun = await runner.checkRegister({ sha, signal: live() });
+
+      expect(dryRun).toEqual({ kind: "passed", sha, riskTier: "notify" });
+      expect(await deployState()).toEqual(before);
+      const registered = await runner.register({ branch: "skill/echo", origin: OWNER });
+      assertStatus(registered, "live");
+      expect([registered.gitSha, registered.riskTier]).toEqual([sha, "notify"]);
+    });
+
+    it("refuses with register's errors, bounded as the CPython runner bounds its own", async () => {
+      // 150 findings, each past 400 code points in characters UTF-16 counts twice.
+      const cpythonChecks = mock<CpythonChecks>();
+      cpythonChecks.check.mockResolvedValue(
+        ok({
+          findings: Array.from({ length: 150 }, (_, i) => ({
+            id: i < 120 ? ("ruff" as const) : ("pyrefly" as const),
+            line: i + 1,
+            column: 1,
+            message: "😀".repeat(450),
+          })),
+          suppressions: [],
+          toolchainVersion: "dev",
+        }),
+      );
+      const runner = await makeRunner({ cpythonChecks });
+      const sha = await pushEcho();
+
+      const dryRun = await runner.checkRegister({ sha, signal: live() });
+      const registered = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertKind(dryRun, "refused");
+      assertStatus(registered, "rejected");
+      expect(registered.errors).toHaveLength(150);
+      expect(dryRun.findings).toHaveLength(102);
+      const kept = dryRun.findings.slice(0, 100);
+      for (const [i, finding] of kept.entries()) {
+        expect(Array.from(finding)).toHaveLength(400);
+        expect(finding).toBe(
+          `${Array.from(registered.errors[i] ?? "")
+            .slice(0, 399)
+            .join("")}…`,
+        );
+      }
+      expect(dryRun.findings.slice(100)).toEqual([
+        "ruff: and 20 more ruff findings",
+        "pyrefly: and 30 more pyrefly findings",
+      ]);
+    });
+
+    it("judges a tip main is not an ancestor of stale, naming main", async () => {
+      const runner = await makeRunner();
+      const stale = await pushEcho();
+      await resetToMain(repo);
+      const mainSha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-later",
+        manifest: ECHO_MANIFEST,
+        body: `${ECHO_BODY}\n# a later deploy\n`,
+      });
+      assertStatus(await runner.register({ branch: "skill/echo-later", origin: OWNER }), "live");
+
+      expect(await runner.checkRegister({ sha: stale, signal: live() })).toEqual({
+        kind: "stale_base",
+        sha: stale,
+        mainSha,
+      });
+    });
+
+    it.each([
+      {
+        name: "the CPython checks",
+        cause: "registrar_unavailable",
+        overrides: (): Partial<Parameters<typeof SkillRunnerImpl.create>[0]> => {
+          const cpythonChecks = mock<CpythonChecks>();
+          cpythonChecks.check.mockResolvedValue(
+            err({ kind: "unavailable", detail: "check session did not start: daemon unreachable" }),
+          );
+          return { cpythonChecks };
+        },
+        detail:
+          "registrar_unavailable: sandbox: check session did not start: daemon unreachable; retry the register",
+      },
+      {
+        name: "the schema import",
+        cause: "schema_import_unavailable",
+        overrides: (): Partial<Parameters<typeof SkillRunnerImpl.create>[0]> => {
+          const offline = offlineWasm(repo.bare);
+          const schemaImporter = mock<WasmSchemaImporter>();
+          schemaImporter.importSchemas.mockResolvedValue(
+            err({ kind: "unavailable", message: "worker init failed: boom" }),
+          );
+          return { ...offline, wasm: { ...offline.wasm, schemaImporter } };
+        },
+        detail: "schema_import_unavailable: worker init failed: boom; retry the register",
+      },
+    ] as const)(
+      "judges a tip $name could not check unavailable, with register's pause",
+      async ({ cause, overrides, detail }) => {
+        const runner = await makeRunner(overrides());
+        const sha = await pushEcho();
+
+        expect(await runner.checkRegister({ sha, signal: live() })).toEqual({
+          kind: "unavailable",
+          sha,
+          cause,
+          detail,
+        });
+      },
+    );
+
+    it("judges a tip whose lockfile compile could not run unavailable, and one it refuses refused", async () => {
+      const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+      const compiler = {
+        compile: vi
+          .fn<LockfileCompiler["compile"]>()
+          .mockResolvedValueOnce(err({ kind: "transport_failed", message: "exec was disposed" }))
+          .mockResolvedValueOnce(err({ kind: "resolver_failed", message: "no httpx" })),
+      };
+      const runner = await makeRunner({ lockfileCompiler: compiler });
+      await writeFile(skillFile(repo.work, "SKILL.md", "echo"), ECHO_WITH_DEPS);
+      await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+      await writeFile(skillFile(repo.work, "requirements.lock", "echo"), lockfile);
+      await execFileP("git", ["-C", repo.work, "add", "."]);
+      await execFileP("git", ["-C", repo.work, "commit", "-m", "deps"]);
+      await execFileP("git", ["-C", repo.work, "push", "origin", "HEAD:refs/heads/skill/echo"]);
+      const sha = await git(repo.work, "rev-parse", "HEAD");
+
+      expect(await runner.checkRegister({ sha, signal: live() })).toEqual({
+        kind: "unavailable",
+        sha,
+        cause: "lockfile_transport",
+        detail: "requirements_lock_transport_failed: exec was disposed",
+      });
+      expect(await runner.checkRegister({ sha, signal: live() })).toEqual({
+        kind: "refused",
+        sha,
+        findings: ["requirements_lock_resolver_failed: no httpx"],
+      });
+    });
+
+    it("an abort during the checks throws its reason, not the pause it caused", async () => {
+      const controller = new AbortController();
+      const reason = new Error("dry-run deadline");
+      const cpythonChecks = mock<CpythonChecks>();
+      cpythonChecks.check.mockImplementation(async () => {
+        controller.abort(reason);
+        return err({ kind: "unavailable", detail: "the check runner was stopped" });
+      });
+      const runner = await makeRunner({ cpythonChecks });
+      const sha = await pushEcho();
+
+      await expect(runner.checkRegister({ sha, signal: controller.signal })).rejects.toBe(reason);
     });
   });
 

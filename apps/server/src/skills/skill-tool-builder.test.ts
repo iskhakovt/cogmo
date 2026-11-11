@@ -14,6 +14,7 @@ import {
 function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
   return {
     register: vi.fn(),
+    checkRegister: vi.fn(),
     approveDeploy: vi.fn(),
     denyDeploy: vi.fn(),
     rollback: vi.fn(),

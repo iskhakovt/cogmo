@@ -84,7 +84,7 @@ export async function approveDeploy(
     { verifyFresh: true },
   );
   if (lockfileResult.isErr()) {
-    return rejectedResult(deploy.gitSha, lockfileResult.error);
+    return rejectedResult(deploy.gitSha, lockfileResult.error.message);
   }
   const lockfile = lockfileResult.value;
 

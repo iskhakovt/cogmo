@@ -5,9 +5,14 @@ import { findPgErrorByCode } from "../../../db/pg-errors.js";
 import { DrizzleSandboxStore } from "../../../sandbox/store/index.js";
 import type { ContainerLabels, ResourceLimits } from "../../../sandbox/types.js";
 import { expectOk } from "../../../test/assertions.js";
-import { PARKED_PR_METADATA, parkCodingTaskAt } from "../../../test/coding-fixtures.js";
+import {
+  PARKED_PR_METADATA,
+  PASSED_PRESUBMIT_VERDICT,
+  parkCodingTaskAt,
+} from "../../../test/coding-fixtures.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
 import { DrizzleAgentStore } from "../../store/index.js";
+import type { PresubmitVerdict } from "../types.js";
 import { type CodingBackend, type CodingTaskStatus, DrizzleCodingStore } from "./index.js";
 
 let db: Database;
@@ -918,6 +923,62 @@ describe("DrizzleCodingStore", () => {
       await expect(tx((trx) => store.getTask(trx, t.id))).rejects.toThrow();
     });
 
+    it("records a pre-submit verdict on a verifying task only, and refuses a malformed one", async () => {
+      const repoId = await seedRepo();
+      const t = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      const { riskTier: _, ...key } = PASSED_PRESUBMIT_VERDICT;
+      const refused = {
+        ...key,
+        kind: "refused",
+        findings: ["ruff: skills/echo/skill.py:1:1: E501 Line too long"],
+      } as const;
+      await parkCodingTaskAt(tx, store, t.id, "pending_verify");
+      expect(await tx((trx) => store.setTaskPresubmitVerdict(trx, t.id, refused))).toBe(false);
+      expect((await tx((trx) => store.getTask(trx, t.id)))?.presubmitVerdict).toBeNull();
+
+      await parkCodingTaskAt(tx, store, t.id, "verifying");
+      expect(await tx((trx) => store.setTaskPresubmitVerdict(trx, t.id, refused))).toBe(true);
+      expect((await tx((trx) => store.getTask(trx, t.id)))?.presubmitVerdict).toEqual(refused);
+
+      const shaless = { ...PASSED_PRESUBMIT_VERDICT, sha: null };
+      await expect(
+        tx((trx) =>
+          store.setTaskPresubmitVerdict(trx, t.id, shaless as unknown as PresubmitVerdict),
+        ),
+      ).rejects.toThrow();
+      await parkCodingTaskAt(tx, store, t.id, "pushed");
+      expect(
+        await tx((trx) => store.setTaskPresubmitVerdict(trx, t.id, PASSED_PRESUBMIT_VERDICT)),
+      ).toBe(false);
+      expect((await tx((trx) => store.getTask(trx, t.id)))?.presubmitVerdict).toEqual(refused);
+    });
+
+    it("rejects malformed presubmit_verdict via raw SQL on read", async () => {
+      const repoId = await seedRepo();
+      const t = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      await parkCodingTaskAt(tx, store, t.id, "verifying");
+      await db.execute(
+        sql`UPDATE coding_tasks SET presubmit_verdict = '{"kind":"passed"}'::jsonb WHERE id = ${t.id}`,
+      );
+      await expect(tx((trx) => store.getTask(trx, t.id))).rejects.toThrow();
+    });
+
     it("rejects malformed resource_usage via raw SQL on read", async () => {
       const repoId = await seedRepo();
       const t = await tx((trx) =>
@@ -1498,6 +1559,14 @@ describe("DrizzleCodingStore", () => {
       expect(await violatedCheck(tx((trx) => store.setTaskSessionId(trx, id, "sess")))).toBe(
         "chk_coding_tasks_queued_bare",
       );
+      const verdict = JSON.stringify(PASSED_PRESUBMIT_VERDICT);
+      expect(
+        await violatedCheck(
+          db.execute(
+            sql`UPDATE coding_tasks SET presubmit_verdict = ${verdict}::jsonb WHERE id = ${id}`,
+          ),
+        ),
+      ).toBe("chk_coding_tasks_queued_bare");
     });
 
     it("refuses awaiting_approval without a plan", async () => {

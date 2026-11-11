@@ -1,8 +1,25 @@
 import { err, ok, type Result } from "neverthrow";
-import { type LockfileCompiler, type LockfileSnapshot, readLockfileAtSha } from "../deps.js";
+import {
+  type LockfileCompileError,
+  type LockfileCompiler,
+  type LockfileSnapshot,
+  readLockfileAtSha,
+} from "../deps.js";
 import { checkRuntimePins } from "../runtime-packages.js";
 import type { SkillsRepo } from "../skill-files.js";
 import type { SkillManifest } from "../types.js";
+
+/**
+ * Why the lockfile check refuses a sha: the compile's error kind when the
+ * compile failed, else `invalid`, for what the committed file shows.
+ * `transport_failed` is the compile not running, which pauses a register;
+ * every other kind is terminal for the sha. `message` is as register's
+ * `errors[]` carries it.
+ */
+export interface LockfileCheckError {
+  kind: LockfileCompileError["kind"] | "invalid";
+  message: string;
+}
 
 /**
  * Read the committed `requirements.lock` at a deploy sha and — when a
@@ -16,14 +33,14 @@ import type { SkillManifest } from "../types.js";
  *   - `ok(snapshot)` — manifest declares deps and a non-empty lockfile is
  *     present. When a compiler is configured, fresh resolver output
  *     byte-matches the committed file. `snapshot.hash` is `sha256(contents)`.
- *   - `err(message)` — manifest declares deps and one of: the
+ *   - `err(error)` — manifest declares deps and one of: the
  *     committed lockfile is missing/empty, the resolver couldn't run
  *     ('transport_failed'), the resolver itself failed
  *     ('resolver_failed'), the committed file is stale relative
  *     to a fresh resolve, or it pins pydantic or pydantic-core at
  *     another version than the runtime's, or one of pydantic's other
- *     requirements below its floor ('runtime_package_conflict'). The caller surfaces the message verbatim
- *     as the register `errors[]` payload.
+ *     requirements below its floor ('runtime_package_conflict'). See
+ *     {@link LockfileCheckError}.
  *
  * When `verifyFresh` is false, verification degrades to presence + hash
  * only — the committed file is trusted as-is. With `compiler` undefined,
@@ -40,20 +57,21 @@ export async function readManifestLockfile(
   gitSha: string,
   manifest: SkillManifest,
   opts: { verifyFresh: boolean; signal?: AbortSignal },
-): Promise<Result<LockfileSnapshot | null, string>> {
+): Promise<Result<LockfileSnapshot | null, LockfileCheckError>> {
   if (manifest.dependencies.length === 0) {
     return ok(null);
   }
   const snapshot = await readLockfileAtSha(repo, manifest.name, gitSha);
   if (snapshot.isErr()) {
-    return err(
-      `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes --no-header' and commit the result.`,
-    );
+    return err({
+      kind: "invalid",
+      message: `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes --no-header' and commit the result.`,
+    });
   }
 
   if (opts.verifyFresh) {
     const pins = checkRuntimePins(snapshot.value.contents);
-    if (pins.isErr()) return err(pins.error);
+    if (pins.isErr()) return err({ kind: "invalid", message: pins.error });
   }
 
   if (opts.verifyFresh && compiler) {
@@ -61,12 +79,15 @@ export async function readManifestLockfile(
       ...(opts.signal && { signal: opts.signal }),
     });
     if (compiled.isErr()) {
-      return err(`requirements_lock_${compiled.error.kind}: ${compiled.error.message}`);
+      const { kind, message } = compiled.error;
+      return err({ kind, message: `requirements_lock_${kind}: ${message}` });
     }
     if (compiled.value !== snapshot.value.contents) {
-      return err(
-        "requirements_lock_stale: committed requirements.lock differs from a fresh 'uv pip compile --generate-hashes --no-header'. Re-run the compile against your declared dependencies and recommit.",
-      );
+      return err({
+        kind: "invalid",
+        message:
+          "requirements_lock_stale: committed requirements.lock differs from a fresh 'uv pip compile --generate-hashes --no-header'. Re-run the compile against your declared dependencies and recommit.",
+      });
     }
   }
 

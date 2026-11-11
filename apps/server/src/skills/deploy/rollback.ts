@@ -113,7 +113,7 @@ export async function rollbackSkill(
     { verifyFresh: false },
   );
   if (lockfileResult.isErr()) {
-    return rejectedResult(targetSha, lockfileResult.error);
+    return rejectedResult(targetSha, lockfileResult.error.message);
   }
   const lockfile = lockfileResult.value;
 

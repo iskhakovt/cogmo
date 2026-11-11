@@ -36,7 +36,7 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
+import { idlePresubmitDeps, parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent, nullStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "./auth.js";
@@ -965,6 +965,7 @@ function makeVerifyDeps(overrides: {
     devbaseImage: "ghcr.io/iskhakovt/cogmo-devbase:test",
     defaultResourceLimits: RESOURCE_LIMITS,
     taskTtlMs: 60_000,
+    presubmit: idlePresubmitDeps(),
     ...overrides,
   };
 }

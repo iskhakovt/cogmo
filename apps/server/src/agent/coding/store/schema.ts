@@ -16,6 +16,7 @@ import { conversations } from "../../store/schema.js";
 import {
   CODING_TASK_FAILURE_REASONS,
   DevcontainerSpecSchema,
+  PresubmitVerdictSchema,
   PrMetadataSchema,
   ResourceUsageSchema,
   WorktreeAssignmentSchema,
@@ -157,6 +158,10 @@ export const codingTasks = pgTable(
     // versus don't mint a second sandbox and paid CLI session. Recording the
     // claimant makes them distinguishable.
     claimedByRunId: text("claimed_by_run_id"),
+    // The latest skills-repo pre-submit verdict, keyed by the verify run and
+    // fix pass that wrote it; null until the task's first, and on every other
+    // repo's task (design/coding-delegation.md → Skills-repo pre-submit).
+    presubmitVerdict: jsonbZod("presubmit_verdict", PresubmitVerdictSchema),
     createdAt: ts(),
   },
   (t) => [
@@ -174,7 +179,7 @@ export const codingTasks = pgTable(
     // Nothing is allocated, captured or claimed before the plan run's claim.
     check(
       "chk_coding_tasks_queued_bare",
-      sql`${t.status} <> 'queued' OR (${t.worktreeAssignment} IS NULL AND ${t.sessionId} IS NULL AND ${t.containerId} IS NULL AND ${t.plan} IS NULL AND ${t.planApprovedAt} IS NULL AND ${t.prMetadata} IS NULL AND ${t.resourceUsage} IS NULL AND ${t.claimedByRunId} IS NULL)`,
+      sql`${t.status} <> 'queued' OR (${t.worktreeAssignment} IS NULL AND ${t.sessionId} IS NULL AND ${t.containerId} IS NULL AND ${t.plan} IS NULL AND ${t.planApprovedAt} IS NULL AND ${t.prMetadata} IS NULL AND ${t.resourceUsage} IS NULL AND ${t.claimedByRunId} IS NULL AND ${t.presubmitVerdict} IS NULL)`,
     ),
     // `persist-plan` precedes `set-status-plan-ready`.
     check(
