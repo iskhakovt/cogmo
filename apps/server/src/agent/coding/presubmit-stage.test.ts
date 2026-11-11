@@ -10,7 +10,7 @@ import { logger } from "../../logger.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
 import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterDryRun } from "../../skills/runner.js";
-import { expectDefined, expectOk } from "../../test/assertions.js";
+import { assertKind, expectDefined, expectOk } from "../../test/assertions.js";
 import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { nullStepSendEvent, recordingStepRun } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -237,18 +237,23 @@ describe("runPresubmit", () => {
     });
 
     const fresh = harness(taskId, "verify-run-2");
+    // A name long enough that git's error passes the verdict's 400 code points.
+    const missing = `cogmo/missing-${"😀".repeat(300)}`;
     await runPresubmit(fresh.run, fresh.deps, {
       repo,
-      branch: "cogmo/missing",
+      branch: missing,
       branchSha: sha,
       identity: IDENTITY,
     });
-    expect(await verdictOf(taskId)).toMatchObject({
+    const failed = expectDefined(await verdictOf(taskId), "the verdict");
+    expect(failed).toMatchObject({
       kind: "unavailable",
       sha: null,
       cause: "fetch_failed",
-      detail: expect.stringContaining("cogmo/missing"),
+      detail: expect.stringMatching(/^git -C .* fetch .*cogmo\/missing-😀+…$/u),
     });
+    assertKind(failed, "unavailable");
+    expect(Array.from(failed.detail)).toHaveLength(400);
     expect(h.skillRunner.checkRegister).not.toHaveBeenCalled();
     expect(fresh.skillRunner.checkRegister).not.toHaveBeenCalled();
     expect(await scratchRefs()).toBe("");
@@ -292,6 +297,73 @@ describe("runPresubmit", () => {
       runId: "verify-run-3",
     });
     expect(late.skillRunner.checkRegister).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The stage's deadline, which `expire` lets pass once the dry run is under
+   * way, as a stalled sandbox create, which takes no signal, keeps it.
+   */
+  function stageDeadline(): { expire(): void } {
+    const deadline = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    return {
+      expire: () => {
+        setTimeout(() => deadline.abort(new DOMException("signal timed out", "TimeoutError")), 20);
+      },
+    };
+  }
+
+  it("a dry run whose create never resolves still yields unavailable at the deadline", {
+    timeout: 5_000,
+  }, async () => {
+    const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+    const sha = await pushBranch();
+    const h = harness(taskId, "verify-run-1");
+    const deadline = stageDeadline();
+    h.skillRunner.checkRegister.mockImplementation(() => {
+      deadline.expire();
+      return new Promise<never>(() => {});
+    });
+
+    await runPresubmit(h.run, h.deps, { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY });
+
+    expect(await verdictOf(taskId)).toMatchObject({
+      kind: "unavailable",
+      sha,
+      cause: "deadline",
+      detail: "signal timed out",
+      runId: "verify-run-1",
+    });
+    expect(await scratchRefs()).toBe("");
+  });
+
+  it("a dry run that settles past its deadline changes no verdict, and its late failure is logged", {
+    timeout: 5_000,
+  }, async () => {
+    const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+    const sha = await pushBranch();
+    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY };
+    const late = Promise.withResolvers<RegisterDryRun>();
+    const h = harness(taskId, "verify-run-1");
+    const warn = vi.spyOn(h.run.log, "warn");
+    const deadline = stageDeadline();
+    h.skillRunner.checkRegister.mockImplementation(() => {
+      deadline.expire();
+      return late.promise;
+    });
+
+    await runPresubmit(h.run, h.deps, args);
+    const recorded = await verdictOf(taskId);
+    late.reject(new Error("sandbox create gave up"));
+
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        { err: expect.objectContaining({ message: "sandbox create gave up" }) },
+        "presubmit: the dry run left at its deadline failed",
+      ),
+    );
+    expect(recorded).toMatchObject({ kind: "unavailable", cause: "deadline" });
+    expect(await verdictOf(taskId)).toEqual(recorded);
   });
 
   it("a scratch ref that will not delete is logged, and the verdict still recorded", async () => {

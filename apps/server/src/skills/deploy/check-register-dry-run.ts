@@ -2,11 +2,10 @@ import * as R from "remeda";
 import { match } from "ts-pattern";
 import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { prepareRegister } from "./register.js";
-import type { RegisterDryRun } from "./register-result.js";
+import { cutDryRunText, type RegisterDryRun } from "./register-result.js";
 
 /** The CPython runner's bound on what it reports (design/skills.md → Register-time CPython checks). */
 const MAX_FINDINGS = 100;
-const MAX_FINDING_CODE_POINTS = 400;
 
 /**
  * Register's steps 3 to 5 on `sha`, `prepareRegister`, without its deploy
@@ -39,7 +38,7 @@ export async function checkRegisterDryRun(
       kind: "unavailable",
       sha,
       cause,
-      detail: cut(error),
+      detail: cutDryRunText(error),
     }))
     .with({ kind: "stale_base" }, ({ mainSha }) => ({ kind: "stale_base", sha, mainSha }))
     .exhaustive();
@@ -53,14 +52,7 @@ export async function checkRegisterDryRun(
 function boundFindings(findings: readonly string[]): readonly string[] {
   const left = R.countBy(findings.slice(MAX_FINDINGS), (finding) => finding.split(":", 1)[0] ?? "");
   return [
-    ...findings.slice(0, MAX_FINDINGS).map(cut),
+    ...findings.slice(0, MAX_FINDINGS).map(cutDryRunText),
     ...Object.entries(left).map(([check, n]) => `${check}: and ${n} more ${check} findings`),
   ];
-}
-
-function cut(text: string): string {
-  const points = Array.from(text);
-  return points.length <= MAX_FINDING_CODE_POINTS
-    ? text
-    : `${points.slice(0, MAX_FINDING_CODE_POINTS - 1).join("")}…`;
 }

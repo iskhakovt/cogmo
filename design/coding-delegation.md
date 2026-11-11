@@ -313,7 +313,7 @@ The per-state data stays in columns rather than one JSONB blob per state: the re
 | `queued` | — | every lifecycle column (`chk_coding_tasks_queued_bare`) |
 | `planning` | `claimed_by_run_id`; then `worktree_assignment`, `container_id`, `session_id` as the run allocates, and `plan` once `persist-plan` runs | `plan_approved_at`, `pr_metadata`, `failure_reason` |
 | `awaiting_approval` | the above, `plan` (`chk_coding_tasks_plan_at_gate`); `plan_approved_at` once the gate clears | `pr_metadata`, `failure_reason` |
-| `executing`, `pending_verify`, `verifying` | `plan`, `plan_approved_at` (`chk_coding_tasks_approval_after_gate`); `resource_usage` as execute reports | `pr_metadata`, `failure_reason` |
+| `executing`, `pending_verify`, `verifying` | `plan`, `plan_approved_at` (`chk_coding_tasks_approval_after_gate`); `resource_usage` as execute reports; on the skills repo, `presubmit_verdict` once `presubmit` runs | `pr_metadata`, `failure_reason` |
 | `pending_fix` `[proposed]` | the above; a `refused` `presubmit_verdict` and `presubmit_fix_passes` of 1 or 2 (`chk_coding_tasks_fix_owed`) | `pr_metadata`, `failure_reason` |
 | `pushed` | the above; `pr_metadata` once `set-pr-metadata` runs | `failure_reason` |
 | `pr_open` | the above, `pr_metadata` (`chk_coding_tasks_pr_metadata_after_push`) | `failure_reason` |
@@ -770,7 +770,7 @@ It writes nothing that register's transaction or its post-commit steps write: no
 ```typescript
 type RegisterDryRun =
   | { kind: "passed"; sha: string; riskTier: SkillRiskTier }   // auto, notify, approve
-  | { kind: "blocked"; sha: string; reasons: readonly SkillRiskReason[] }
+  | { kind: "blocked"; sha: string; reasons: readonly SkillRiskReason[] }   // joins with the blocked tier
   | { kind: "refused"; sha: string; findings: readonly string[] }  // register's terminal rejections, as RegisterResult.errors writes them
   | { kind: "stale_base"; sha: string; mainSha: string }
   | { kind: "unavailable"; sha: string | null; cause: DryRunUnavailable; detail: string };
@@ -869,6 +869,7 @@ Every run reaps its own sandbox: execute at its hand-off, verify in `teardown-be
 | The worker dies inside `presubmit` (the fetch, a dry-run session), or after its verdict write, and the run fails | `verifying`, perhaps with the verdict written, a scratch ref in the bare repo and a session running | `inngest/function.failed` → reconcile fails the task `run_terminated`; the reaper deletes the session past its `expiresAt`. The scratch ref is inert: outside `refs/heads/`, and the mirror pushes only `main`. **Residual:** the ref stays in the bare repo until removed by hand |
 | `presubmit` writes its verdict, then Inngest loses the step result and runs the step again | `verifying`, the verdict keyed to this run and pass | the re-run finds its own key, returns the stored verdict with `repeated: false` and runs no second dry run, so a refusal still gets its fix pass |
 | A throw inside `presubmit` other than the mapped failures | `failed: unexpected_error` | a bug, recorded by the catch as in every step |
+| The dry run outlives the deadline: a sandbox create or delete, which takes no signal, stalls | `verifying`, the verdict `unavailable` (`deadline`) | `presubmit` races the dry run against the deadline and writes the deadline's verdict, so the PR waits no longer than the deadline. The abandoned checks run on: the abort stops what takes the signal, each session is deleted by the check that opened it once its create returns, and the reaper deletes one whose create never returns past its `expiresAt`. They read the tip by sha, so the scratch ref's delete does not cut them short. Whatever they settle to is dropped, a failure logged: only the step writes the verdict, once, under its key |
 | `transition-pending-fix` commits, then its result is lost | `pending_fix`, or `failed: run_terminated` | a re-run of the step reads `stale` at `pending_fix` with the count at `$n + 1`, takes it as its own commit and goes on to the emit. A worker that dies instead fails the run, and reconcile fails the row; S10 starts a new attempt |
 | `transition-presubmit-failed` commits, then its result is lost | `failed` with its reason | a re-run reads `stale` at `failed` with the verdict's reason as its own commit and goes on to `emit-task-failed`. A worker that dies instead fails the run, and reconcile reads `already_terminal` and emits nothing. **Residual:** as for every in-run failure exit, that task ends unannounced |
 | `emit-presubmit-refused` fails after its retries | `failed: unexpected_error`, announced | the `StepError` reaches the catch, whose `record-catch-failure` fails the `pending_fix` row; no fix pass starts |

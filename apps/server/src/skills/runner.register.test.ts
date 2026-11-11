@@ -3930,17 +3930,9 @@ async def run(inputs, ctx):
       assertKind(dryRun, "refused");
       assertStatus(registered, "rejected");
       expect(registered.errors).toHaveLength(150);
-      expect(dryRun.findings).toHaveLength(102);
-      const kept = dryRun.findings.slice(0, 100);
-      for (const [i, finding] of kept.entries()) {
-        expect(Array.from(finding)).toHaveLength(400);
-        expect(finding).toBe(
-          `${Array.from(registered.errors[i] ?? "")
-            .slice(0, 399)
-            .join("")}…`,
-        );
-      }
-      expect(dryRun.findings.slice(100)).toEqual([
+      // Each kept finding is register's error at 399 code points and an ellipsis.
+      expect(dryRun.findings).toEqual([
+        ...registered.errors.slice(0, 100).map((e) => `${Array.from(e).slice(0, 399).join("")}…`),
         "ruff: and 20 more ruff findings",
         "pyrefly: and 30 more pyrefly findings",
       ]);
@@ -3965,47 +3957,152 @@ async def run(inputs, ctx):
       });
     });
 
+    /**
+     * ECHO with a dependency Pyodide bundles as pure Python, so register asks
+     * neither PyPI nor the probe, and the schema import resolves its packages.
+     */
+    async function pushEchoWithBundledDep(): Promise<string> {
+      const spec = "httpx==0.28.1";
+      await writeFile(
+        skillFile(repo.work, "SKILL.md", "echo"),
+        ECHO_WITH_DEPS.replace("httpx==0.27.0", spec),
+      );
+      await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+      await writeFile(
+        skillFile(repo.work, "requirements.lock", "echo"),
+        `${spec} \\\n    --hash=sha256:${"0".repeat(64)}\n`,
+      );
+      await execFileP("git", ["-C", repo.work, "add", "."]);
+      await execFileP("git", ["-C", repo.work, "commit", "-m", "bundled dependency"]);
+      await execFileP("git", ["-C", repo.work, "push", "origin", "HEAD:refs/heads/skill/echo"]);
+      return git(repo.work, "rev-parse", "HEAD");
+    }
+
+    type RunnerOverrides = Partial<Parameters<typeof SkillRunnerImpl.create>[0]>;
+
+    function checksAnswering(answer: Awaited<ReturnType<CpythonChecks["check"]>>): RunnerOverrides {
+      const cpythonChecks = mock<CpythonChecks>();
+      cpythonChecks.check.mockResolvedValue(answer);
+      return { cpythonChecks };
+    }
+
+    function importAnswering(answer: SchemaImportError): RunnerOverrides {
+      const offline = offlineWasm(repo.bare);
+      const schemaImporter = mock<WasmSchemaImporter>();
+      schemaImporter.importSchemas.mockResolvedValue(err(answer));
+      return { ...offline, wasm: { ...offline.wasm, schemaImporter } };
+    }
+
+    function packagesFailing(error: WasmPackagesError): RunnerOverrides {
+      const offline = offlineWasm(repo.bare);
+      return { ...offline, wasm: { ...offline.wasm, resolvePackages: async () => err(error) } };
+    }
+
+    // Every check that knows a pause from a refusal, at both of its outcomes.
     it.each([
       {
-        name: "the CPython checks",
-        cause: "registrar_unavailable",
-        overrides: (): Partial<Parameters<typeof SkillRunnerImpl.create>[0]> => {
-          const cpythonChecks = mock<CpythonChecks>();
-          cpythonChecks.check.mockResolvedValue(
+        name: "the CPython checks could not run on",
+        tip: "plain",
+        arrange: () =>
+          checksAnswering(
             err({ kind: "unavailable", detail: "check session did not start: daemon unreachable" }),
-          );
-          return { cpythonChecks };
+          ),
+        judged: {
+          kind: "unavailable",
+          cause: "registrar_unavailable",
+          detail:
+            "registrar_unavailable: sandbox: check session did not start: daemon unreachable; retry the register",
         },
-        detail:
-          "registrar_unavailable: sandbox: check session did not start: daemon unreachable; retry the register",
       },
       {
-        name: "the schema import",
-        cause: "schema_import_unavailable",
-        overrides: (): Partial<Parameters<typeof SkillRunnerImpl.create>[0]> => {
-          const offline = offlineWasm(repo.bare);
-          const schemaImporter = mock<WasmSchemaImporter>();
-          schemaImporter.importSchemas.mockResolvedValue(
-            err({ kind: "unavailable", message: "worker init failed: boom" }),
-          );
-          return { ...offline, wasm: { ...offline.wasm, schemaImporter } };
+        name: "the gates' parser could not read",
+        tip: "plain",
+        arrange: (): RunnerOverrides => {
+          __setWasmPathForTests(join(tmpdir(), "cogmo-no-such-grammar.wasm"));
+          __resetParserForTests();
+          return {};
         },
-        detail: "schema_import_unavailable: worker init failed: boom; retry the register",
-      },
-    ] as const)(
-      "judges a tip $name could not check unavailable, with register's pause",
-      async ({ cause, overrides, detail }) => {
-        const runner = await makeRunner(overrides());
-        const sha = await pushEcho();
-
-        expect(await runner.checkRegister({ sha, signal: live() })).toEqual({
+        judged: {
           kind: "unavailable",
-          sha,
-          cause,
-          detail,
-        });
+          cause: "registrar_unavailable",
+          detail: expect.stringMatching(/^registrar_unavailable: parser: .+; retry the register$/),
+        },
       },
-    );
+      {
+        name: "the schema import's child could not import",
+        tip: "plain",
+        arrange: () =>
+          importAnswering({ kind: "unavailable", message: "worker init failed: boom" }),
+        judged: {
+          kind: "unavailable",
+          cause: "schema_import_unavailable",
+          detail: "schema_import_unavailable: worker init failed: boom; retry the register",
+        },
+      },
+      {
+        name: "the schema import could not fetch the packages of",
+        tip: "bundled",
+        arrange: () =>
+          packagesFailing({
+            kind: "network_failed",
+            spec: "httpx==0.28.1",
+            message: "pypi lookup: ECONNRESET",
+          }),
+        judged: {
+          kind: "unavailable",
+          cause: "schema_import_unavailable",
+          detail: expect.stringMatching(
+            /^schema_import_unavailable: the skill's packages were not fetched \(network_failed: .+\); retry the register$/,
+          ),
+        },
+      },
+      {
+        name: "the schema import found a wheel failing its hash in",
+        tip: "bundled",
+        arrange: () =>
+          packagesFailing({
+            kind: "hash_mismatch",
+            spec: "httpx==0.28.1",
+            message: "httpx-0.28.1-py3-none-any.whl hashes to sha256:aa",
+          }),
+        judged: {
+          kind: "refused",
+          findings: [expect.stringMatching(/^wasm_dependency_unavailable: hash_mismatch: /)],
+        },
+      },
+      {
+        name: "the schema import's child refused",
+        tip: "plain",
+        arrange: () =>
+          importAnswering({ kind: "refused", message: "skill.py did not load: ZeroDivisionError" }),
+        judged: {
+          kind: "refused",
+          findings: ["schema_import_failed: skill.py did not load: ZeroDivisionError"],
+        },
+      },
+    ] as const)("judges $judged.kind a tip $name", async ({ tip, arrange, judged }) => {
+      try {
+        const runner = await makeRunner(arrange());
+        const sha = tip === "plain" ? await pushEcho() : await pushEchoWithBundledDep();
+
+        expect(await runner.checkRegister({ sha, signal: live() })).toEqual({ ...judged, sha });
+      } finally {
+        __setWasmPathForTests(null);
+        __resetParserForTests();
+      }
+    });
+
+    it("cuts a pause's detail at 400 code points", async () => {
+      const detail = `check session did not start: ${"😀".repeat(450)}`;
+      const runner = await makeRunner(checksAnswering(err({ kind: "unavailable", detail })));
+      const sha = await pushEcho();
+
+      const dryRun = await runner.checkRegister({ sha, signal: live() });
+
+      assertKind(dryRun, "unavailable");
+      const paused = `registrar_unavailable: sandbox: ${detail}; retry the register`;
+      expect(dryRun.detail).toBe(`${Array.from(paused).slice(0, 399).join("")}…`);
+    });
 
     it("judges a tip whose lockfile compile could not run unavailable, and one it refuses refused", async () => {
       const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
@@ -4049,6 +4146,18 @@ async def run(inputs, ctx):
       const sha = await pushEcho();
 
       await expect(runner.checkRegister({ sha, signal: controller.signal })).rejects.toBe(reason);
+    });
+
+    it("an aborted signal runs no check", async () => {
+      const cpythonChecks = mock<CpythonChecks>();
+      const runner = await makeRunner({ cpythonChecks });
+      const sha = await pushEcho();
+      const reason = new Error("dry-run deadline");
+
+      await expect(runner.checkRegister({ sha, signal: AbortSignal.abort(reason) })).rejects.toBe(
+        reason,
+      );
+      expect(cpythonChecks.check).not.toHaveBeenCalled();
     });
   });
 

@@ -163,9 +163,9 @@ export function statefulCodingStore(
     task = { ...task, prMetadata: metadata };
   });
   store.setTaskPresubmitVerdict.mockImplementation(async (_tx, _id, verdict) => {
-    if (task.status !== "verifying") return false;
+    if (task.status !== "verifying") return { kind: "left", status: task.status };
     task = { ...task, presubmitVerdict: verdict };
-    return true;
+    return { kind: "recorded" };
   });
   store.setTaskContainerId.mockImplementation(async (_tx, _id, containerId) => {
     task = { ...task, containerId };

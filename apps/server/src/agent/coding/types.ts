@@ -110,6 +110,7 @@ const PRESUBMIT_UNAVAILABLE_CAUSES = [
   "branch_moved",
   "deadline",
 ] as const;
+export type PresubmitUnavailableCause = (typeof PRESUBMIT_UNAVAILABLE_CAUSES)[number];
 
 /**
  * The skills repo's pre-submit verdict on a task's pushed tip

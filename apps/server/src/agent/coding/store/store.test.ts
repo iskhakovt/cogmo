@@ -941,11 +941,16 @@ describe("DrizzleCodingStore", () => {
         findings: ["ruff: skills/echo/skill.py:1:1: E501 Line too long"],
       } as const;
       await parkCodingTaskAt(tx, store, t.id, "pending_verify");
-      expect(await tx((trx) => store.setTaskPresubmitVerdict(trx, t.id, refused))).toBe(false);
+      expect(await tx((trx) => store.setTaskPresubmitVerdict(trx, t.id, refused))).toEqual({
+        kind: "left",
+        status: "pending_verify",
+      });
       expect((await tx((trx) => store.getTask(trx, t.id)))?.presubmitVerdict).toBeNull();
 
       await parkCodingTaskAt(tx, store, t.id, "verifying");
-      expect(await tx((trx) => store.setTaskPresubmitVerdict(trx, t.id, refused))).toBe(true);
+      expect(await tx((trx) => store.setTaskPresubmitVerdict(trx, t.id, refused))).toEqual({
+        kind: "recorded",
+      });
       expect((await tx((trx) => store.getTask(trx, t.id)))?.presubmitVerdict).toEqual(refused);
 
       const shaless = { ...PASSED_PRESUBMIT_VERDICT, sha: null };
@@ -957,7 +962,7 @@ describe("DrizzleCodingStore", () => {
       await parkCodingTaskAt(tx, store, t.id, "pushed");
       expect(
         await tx((trx) => store.setTaskPresubmitVerdict(trx, t.id, PASSED_PRESUBMIT_VERDICT)),
-      ).toBe(false);
+      ).toEqual({ kind: "left", status: "pushed" });
       expect((await tx((trx) => store.getTask(trx, t.id)))?.presubmitVerdict).toEqual(refused);
     });
 

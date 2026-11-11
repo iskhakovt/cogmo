@@ -334,11 +334,15 @@ export interface CodingStore {
   setTaskPrMetadata(tx: Transaction, id: string, metadata: PrMetadata): Promise<void>;
 
   /**
-   * Records the pre-submit's verdict iff the task is `verifying`; whether it
-   * wrote. A task that left `verifying` during the dry run keeps the row its
+   * Records the pre-submit's verdict iff the task is `verifying`. `left`: the
+   * task moved out of `verifying` during the dry run, and keeps the row its
    * Cancel left.
    */
-  setTaskPresubmitVerdict(tx: Transaction, id: string, verdict: PresubmitVerdict): Promise<boolean>;
+  setTaskPresubmitVerdict(
+    tx: Transaction,
+    id: string,
+    verdict: PresubmitVerdict,
+  ): Promise<{ kind: "recorded" } | { kind: "left"; status: CodingTaskStatus }>;
 
   /**
    * **Shallow-merge** `patch` into the existing `resource_usage` JSONB
@@ -678,13 +682,21 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     id: string,
     verdict: PresubmitVerdict,
-  ): Promise<boolean> {
+  ): Promise<{ kind: "recorded" } | { kind: "left"; status: CodingTaskStatus }> {
     const updated = await tx
       .update(codingTasks)
       .set({ presubmitVerdict: verdict })
       .where(and(eq(codingTasks.id, id), eq(codingTasks.status, "verifying")))
       .returning({ id: codingTasks.id });
-    return updated.length > 0;
+    if (updated.length > 0) return { kind: "recorded" };
+    // The verify run that writes the verdict claimed this row.
+    const { status } = single(
+      await tx
+        .select({ status: codingTasks.status })
+        .from(codingTasks)
+        .where(eq(codingTasks.id, id)),
+    );
+    return { kind: "left", status };
   }
 
   async setTaskResourceUsage(
