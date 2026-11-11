@@ -2,16 +2,14 @@
 
 Reads one `check_request` on stdin: `skill.py`, the manifest's `dependencies` and the hash of the lockfile whose venv
 holds them. Writes the body to `skill.py` in a fresh temporary directory, checks it with CPython's `compile`, ruff,
-pyrefly, its imports and the toolchain's suppression rule, and writes one `check_reply` line to stdout: every finding,
-positioned in 1-based lines and UTF-16 columns as the register-time gates count them, and every suppression the body
-carries, with the release version the image baked beside its toolchain; or `fatal` when a check could not run. The
-tools run by absolute path from the tools venv, which no task's `PATH` or `sys.path` holds, and nothing here runs the
-skill's code or its dependencies' (design/skills.md → Register-time CPython checks).
+`ruff format`, pyrefly, and the toolchain's Imports and suppression rules, and writes one `check_reply` line to stdout:
+every finding, positioned in 1-based lines and UTF-16 columns as the register-time gates count them, and every
+suppression the body carries, with the release version the image baked beside its toolchain; or `fatal` when a check
+could not run. The tools run by absolute path from the tools venv, which no task's `PATH` or `sys.path` holds, and
+nothing here runs the skill's code or its dependencies' (design/skills.md → Register-time CPython checks).
 """
 
 import ast
-import importlib.machinery
-import importlib.metadata
 import importlib.util
 import json
 import os
@@ -21,9 +19,9 @@ import sys
 import tempfile
 import tokenize
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import ModuleType
 from typing import TextIO
 
@@ -32,9 +30,6 @@ from cogmo_skills_runtime.supervisor import _skill_venv_path
 TOOLS_VENV = "/opt/cogmo-skills/tools"
 TOOLCHAIN_DIR = "/opt/cogmo-skills/toolchain"
 VERSION_FILE = "/opt/cogmo-skills/VERSION"
-
-# What a skill imports besides the stdlib and its own dependencies: the runtime the image installs for every task.
-RUNTIME_ROOTS = frozenset({"pydantic", "pydantic_core", "cogmo_ctx"})
 
 # A tool's diagnostics a failure quotes from its stderr.
 _STDERR_TAIL = 2000
@@ -46,8 +41,8 @@ MAX_MESSAGE = 400
 # Lines end where CPython, ruff and pyrefly all end them.
 _NEWLINE = re.compile(r"\r\n|\r|\n")
 
-# A `name==version` dependency's name (`SkillDependencySchema`).
-_DEPENDENCY_NAME = re.compile(r"^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
+# What a `format` finding tells the author to run on the file its prefix names.
+_FORMAT_FIX = "`uv run ruff format` on it"
 
 
 @dataclass(frozen=True)
@@ -56,8 +51,8 @@ class Toolchain:
 
     ruff: str
     pyrefly: str
-    # The toolchain's `pyproject.toml`. Its `.cogmo/` holds `cogmo_ctx`, on pyrefly's search path, and
-    # `suppressions.py`, the suppression rule `.cogmo/verify` applies too.
+    # The toolchain's `pyproject.toml`. Its `.cogmo/` holds `cogmo_ctx`, on pyrefly's search path, `suppressions.py`,
+    # the suppression rule `.cogmo/verify` applies too, and `imports.py`, the Imports rule.
     config: str
     # The tools venv's site-packages, the last entry pyrefly resolves imports from (the runtime's pydantic).
     site_packages: str
@@ -124,8 +119,8 @@ def _utf16_length(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def compiled(body: str, lines: _Lines) -> ast.Module | Finding:
-    """The body's tree once CPython compiles it, writing no bytecode and running nothing; or its `syntax` finding.
+def syntax_finding(body: str, lines: _Lines) -> Finding | None:
+    """The body's `syntax` finding when CPython does not compile it, writing no bytecode and running nothing.
 
     The parse runs first, since its errors count their column in code points; the compile of its tree raises the
     compiler's and the symbol table's, which count it in UTF-8 bytes.
@@ -142,7 +137,7 @@ def compiled(body: str, lines: _Lines) -> ast.Module | Finding:
         return _syntax(e, lambda line, offset: lines.from_utf8(line, offset - 1))
     except (RecursionError, MemoryError) as e:
         return _uncompilable(e)
-    return tree
+    return None
 
 
 def _syntax(e: SyntaxError, column: Callable[[int, int], int]) -> Finding:
@@ -153,129 +148,6 @@ def _syntax(e: SyntaxError, column: Callable[[int, int], int]) -> Finding:
 
 def _uncompilable(e: RecursionError | MemoryError) -> Finding:
     return Finding("syntax", None, None, f"CPython could not compile it: {type(e).__name__}")
-
-
-def installed_modules(site_packages: str) -> dict[str, frozenset[str]]:
-    """Each distribution in `site_packages` with the modules its `RECORD` lists, by its PEP 503 name."""
-    return {
-        _normalized(name): record_modules(dist.files or [])
-        for dist in importlib.metadata.distributions(path=[site_packages])
-        if (name := dist.metadata.get("Name"))
-    }
-
-
-def record_modules(files: Iterable[PurePosixPath]) -> frozenset[str]:
-    """The modules a `RECORD`'s paths list.
-
-    Each path names the module its file is: a `.py` file, or one with an extension module's suffix, without the
-    suffix, and an `__init__` its directory. So a directory whose `__init__` no `RECORD` lists (PEP 420) is a namespace
-    and names no module. Other files (`py.typed`, a license, a `.pth`), `*.dist-info/`, `*.data/`, `__pycache__/`,
-    paths leaving site-packages, and names that are not identifiers name none.
-    """
-    return frozenset(module for path in files if (module := _record_module(PurePosixPath(path).parts)) is not None)
-
-
-def _record_module(parts: tuple[str, ...]) -> str | None:
-    if not parts or parts[0] in ("..", "/") or parts[0].endswith((".dist-info", ".data")) or "__pycache__" in parts:
-        return None
-    module = _module_name(parts[-1])
-    if module is None:
-        return None
-    segments = parts[:-1] if module == "__init__" else (*parts[:-1], module)
-    return ".".join(segments) if segments and all(segment.isidentifier() for segment in segments) else None
-
-
-def _module_name(file: str) -> str | None:
-    if file.endswith(".py"):
-        return file.removesuffix(".py")
-    suffix = next((s for s in importlib.machinery.EXTENSION_SUFFIXES if file.endswith(s)), None)
-    return None if suffix is None else file.removesuffix(suffix)
-
-
-def _normalized(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def _dependency_name(spec: str) -> str:
-    matched = _DEPENDENCY_NAME.match(spec)
-    return _normalized(matched.group(1) if matched else spec)
-
-
-def import_findings(
-    tree: ast.Module,
-    lines: _Lines,
-    dependencies: Sequence[str],
-    installed: Mapping[str, frozenset[str]],
-) -> list[Finding]:
-    """Every import the stdlib, the runtime and the modules a declared dependency installs do not cover.
-
-    `import a.b` imports `a.b`. `from a.b import c` reads `c` from `a.b`, so it passes when a declared distribution's
-    `RECORD` alone lists `a.b`'s file; from a namespace it imports `a.b.c`. The distributions that install a module are
-    those installing its deepest prefix that some distribution installs, or, for a namespace, every one installing a
-    module beneath it.
-    """
-    declared = frozenset(_dependency_name(spec) for spec in dependencies)
-    installers: dict[str, set[str]] = {}
-    for name, modules in installed.items():
-        for module in modules:
-            installers.setdefault(module, set()).add(name)
-    findings: list[Finding] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            if node.level > 0:
-                findings.append(_at(node, lines, "a relative import, which a skill's one module cannot resolve"))
-                continue
-            module = node.module or ""
-            if _sole_installer(module, installers) in declared:
-                continue
-            imported = [module if alias.name == "*" else f"{module}.{alias.name}" for alias in node.names]
-        else:
-            continue
-        refusals = (_import_refusal(name, declared, installers) for name in imported)
-        findings.extend(_at(node, lines, message) for message in dict.fromkeys(r for r in refusals if r is not None))
-    return sorted(findings, key=lambda f: (f.line or 0, f.column or 0))
-
-
-def _import_refusal(name: str, declared: frozenset[str], installers: Mapping[str, set[str]]) -> str | None:
-    root = name.split(".")[0]
-    if root in sys.stdlib_module_names or root in RUNTIME_ROOTS:
-        return None
-    installed = _installed_as(name, installers)
-    if installed is None:
-        return (
-            f"'{root}' is not the standard library, pydantic, pydantic_core, cogmo_ctx or a module a declared "
-            "dependency installs"
-        )
-    module, names = installed
-    if names & declared:
-        return None
-    return (
-        f"'{module}' is installed by {', '.join(f"'{n}'" for n in sorted(names))}, which no declared dependency "
-        "names; declare every package the skill imports"
-    )
-
-
-def _sole_installer(module: str, installers: Mapping[str, set[str]]) -> str | None:
-    """The one distribution whose `RECORD` lists `module`'s file, its `__init__` or module; None for none or several."""
-    names = installers.get(module, set())
-    return next(iter(names)) if len(names) == 1 else None
-
-
-def _installed_as(name: str, installers: Mapping[str, set[str]]) -> tuple[str, set[str]] | None:
-    """The module `name` imports as installed, with the distributions installing it; None when none installs it."""
-    parts = name.split(".")
-    for depth in range(len(parts), 0, -1):
-        prefix = ".".join(parts[:depth])
-        if prefix in installers:
-            return prefix, installers[prefix]
-    beneath = {n for module, names in installers.items() if module.startswith(f"{name}.") for n in names}
-    return (name, beneath) if beneath else None
-
-
-def _at(node: ast.stmt, lines: _Lines, message: str) -> Finding:
-    return Finding("imports", node.lineno, lines.from_utf8(node.lineno, node.col_offset), message)
 
 
 def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -313,6 +185,43 @@ def ruff_findings(toolchain: Toolchain, path: str, lines: _Lines) -> list[Findin
         ]
     except (ValueError, KeyError, TypeError) as e:
         raise _failure("ruff", result, f"exited 1 with output that is not its JSON ({e!r})") from e
+
+
+def format_findings(toolchain: Toolchain, path: str, lines: _Lines) -> list[Finding]:
+    """`ruff format --check` with the toolchain's configuration: one finding at the first difference from the
+    formatter's layout. 0, or 1 with its JSON diagnostic, is a result; anything else a failure."""
+    result = _run(
+        [
+            toolchain.ruff,
+            "format",
+            "--check",
+            "--output-format",
+            "json",
+            "--no-cache",
+            "--config",
+            toolchain.config,
+            path,
+        ]
+    )
+    if result.returncode == 0:
+        return []
+    if result.returncode != 1:
+        raise _failure("ruff format", result, f"exited {result.returncode}")
+    try:
+        findings = [
+            Finding(
+                "format",
+                d["location"]["row"],
+                lines.from_code_points(d["location"]["row"], d["location"]["column"]),
+                f"{d['code']} {d['message']}: run {_FORMAT_FIX}",
+            )
+            for d in json.loads(result.stdout)
+        ]
+    except (ValueError, KeyError, TypeError) as e:
+        raise _failure("ruff format", result, f"exited 1 with output that is not its JSON ({e!r})") from e
+    if not findings:
+        raise _failure("ruff format", result, "exited 1 with no diagnostic")
+    return findings
 
 
 def pyrefly_findings(toolchain: Toolchain, path: str, lines: _Lines, venv_site_packages: str | None) -> list[Finding]:
@@ -360,11 +269,8 @@ def pyrefly_findings(toolchain: Toolchain, path: str, lines: _Lines, venv_site_p
         raise _failure("pyrefly", result, f"exited 1 with output that is not its JSON ({e!r})") from e
 
 
-def suppression_findings(
-    toolchain: Toolchain, body: str, lines: _Lines
-) -> tuple[list[Finding], list[dict[str, object]]]:
-    """The toolchain's suppression rule over the body: a finding per pragma it refuses, and each suppression's frame."""
-    rule = _suppression_rule(Path(toolchain.config).parent / ".cogmo" / "suppressions.py")
+def suppression_findings(rule: ModuleType, body: str, lines: _Lines) -> tuple[list[Finding], list[dict[str, object]]]:
+    """The suppression rule over the body: a finding per pragma it refuses, and each suppression's frame."""
     try:
         scanned = rule.scan(body)
     except (SyntaxError, tokenize.TokenError) as e:
@@ -375,17 +281,31 @@ def suppression_findings(
     )
 
 
-def _suppression_rule(path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location("cogmo_toolchain_suppressions", path)
+def import_findings(
+    rule: ModuleType, body: str, lines: _Lines, dependencies: Sequence[str], venv_site_packages: str | None
+) -> list[Finding]:
+    """The Imports rule over the body, against the modules the skill venv's `RECORD`s list; none without a venv."""
+    installed = {} if venv_site_packages is None else rule.installed_modules(venv_site_packages)
+    try:
+        refusals = rule.scan(body, dependencies, installed)
+    except (SyntaxError, RecursionError, MemoryError) as e:
+        raise CheckFailed(f"the Imports rule could not read the body: {e!r}") from e
+    return [Finding("imports", r.line, lines.from_code_points(r.line, r.column), r.message) for r in refusals]
+
+
+def toolchain_rule(toolchain: Toolchain, name: str, label: str) -> ModuleType:
+    """The toolchain's rule `.cogmo/<name>.py`, loaded by path."""
+    path = Path(toolchain.config).parent / ".cogmo" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"cogmo_toolchain_{name}", path)
     if spec is None or spec.loader is None:
-        raise CheckFailed(f"the toolchain has no suppression rule at {path}")
+        raise CheckFailed(f"the toolchain has no {label} rule at {path}")
     rule = importlib.util.module_from_spec(spec)
     # `-I` ignores PYTHONDONTWRITEBYTECODE, and the toolchain's directory is the image's.
     sys.dont_write_bytecode = True
     try:
         spec.loader.exec_module(rule)
     except (OSError, SyntaxError) as e:
-        raise CheckFailed(f"the toolchain's suppression rule did not load: {e}") from e
+        raise CheckFailed(f"the toolchain's {label} rule did not load: {e}") from e
     return rule
 
 
@@ -423,25 +343,26 @@ class Checked:
 def check(request: Request, toolchain: Toolchain) -> Checked:
     """Every check's findings for `request`; a `syntax` finding stands alone, since the other checks cannot read it."""
     lines = _Lines(request.body)
-    tree = compiled(request.body, lines)
-    if isinstance(tree, Finding):
-        return Checked([tree], [])
+    syntax = syntax_finding(request.body, lines)
+    if syntax is not None:
+        return Checked([syntax], [])
     venv_site_packages = None
-    installed: dict[str, frozenset[str]] = {}
     if request.lockfile_hash is not None:
         venv_site_packages = _site_packages(_skill_venv_path(request.lockfile_hash))
         if not os.path.isdir(venv_site_packages):
             raise CheckFailed(f"the skill venv has no site-packages at {venv_site_packages}")
-        installed = installed_modules(venv_site_packages)
+    suppression_rule = toolchain_rule(toolchain, "suppressions", "suppression")
+    imports_rule = toolchain_rule(toolchain, "imports", "Imports")
     with tempfile.TemporaryDirectory(prefix="cogmo-check-") as directory:
         path = os.path.join(directory, "skill.py")
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(request.body)
-        refused, suppressions = suppression_findings(toolchain, request.body, lines)
+        refused, suppressions = suppression_findings(suppression_rule, request.body, lines)
         findings = [
             *ruff_findings(toolchain, path, lines),
+            *format_findings(toolchain, path, lines),
             *pyrefly_findings(toolchain, path, lines, venv_site_packages),
-            *import_findings(tree, lines, request.dependencies, installed),
+            *import_findings(imports_rule, request.body, lines, request.dependencies, venv_site_packages),
             *refused,
         ]
     return Checked(findings, suppressions)

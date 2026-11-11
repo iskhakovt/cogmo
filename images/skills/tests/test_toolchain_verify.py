@@ -80,6 +80,11 @@ def _verify(repo: Path, base: str | None) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _headers(result: subprocess.CompletedProcess[str], name: str) -> list[str]:
+    prefix = f"verify: {name}: "
+    return [line.removeprefix(prefix) for line in result.stdout.splitlines() if line.startswith(prefix)]
+
+
 def test_it_fails_without_a_base(repo: Path) -> None:
     result = _verify(repo, None)
     assert result.returncode == 2
@@ -103,6 +108,31 @@ def test_it_passes_when_no_skill_changed(repo: Path) -> None:
     assert "no skill changed" in result.stdout
 
 
+def test_a_test_importing_the_skill_by_its_module_name_passes(repo: Path) -> None:
+    # pytest's prepend import mode puts the test's own directory first on `sys.path`, and pyrefly runs with it on
+    # its search path, so `from skill import ...` resolves under both, as `CLAUDE.md` tells the author.
+    base = _git(repo, "rev-parse", "HEAD")
+    test = (
+        "from typing import cast\n\nfrom cogmo_ctx import Ctx\nfrom skill import Input, Output, run\n\n\n"
+        "async def test_run() -> None:\n"
+        '    assert await run(Input(text="hi"), cast(Ctx, None)) == Output(text="HI")\n'
+    )
+    _write_skill(repo, "echo", SKILL, test)
+    result = _verify(repo, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "echo passed" in result.stdout
+
+
+def test_a_test_importing_the_skill_relatively_fails_pytest(repo: Path) -> None:
+    # A skill directory is no package: register refuses an `__init__.py` in it.
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST.replace("from skill import", "from .skill import"))
+    result = _verify(repo, base)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "attempted relative import with no known parent package" in result.stdout
+    assert "pytest" in next(line for line in result.stderr.splitlines() if line.startswith("verify: echo failed "))
+
+
 def test_it_passes_a_new_skill_and_writes_no_bytecode(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
     _write_skill(repo, "echo", SKILL, _PASSING_TEST)
@@ -110,6 +140,14 @@ def test_it_passes_a_new_skill_and_writes_no_bytecode(repo: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "echo passed" in result.stdout
     assert not list((repo / "skills").rglob("__pycache__"))
+
+
+def test_it_runs_the_checks_in_verifys_order(repo: Path) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
+    result = _verify(repo, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _headers(result, "echo") == ["suppressions", "ruff", "format", "pyrefly", "pytest"]
 
 
 def test_it_checks_a_skill_against_the_repos_cogmo_ctx(
@@ -148,6 +186,43 @@ def test_it_fails_a_skill_with_a_ruff_finding(repo: Path) -> None:
     assert result.returncode == 1
     assert "echo failed ruff" in result.stderr
     assert "BLE001" in result.stdout
+
+
+@pytest.mark.parametrize("file", ["skill.py", "test_skill.py"])
+def test_it_fails_a_skill_file_the_formatter_would_change(repo: Path, file: str) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
+    path = repo / "skills" / "echo" / file
+    path.write_text(path.read_text().replace(" -> ", "->", 1))
+    result = _verify(repo, base)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "verify: echo failed format\n" in result.stderr
+    assert f"--> skills/echo/{file}:" in result.stdout
+
+
+def test_a_skill_without_its_python_files_skips_the_formatter(repo: Path) -> None:
+    # `ruff format --check` given no file would check the whole repo.
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "skills" / "echo").mkdir(parents=True)
+    (repo / "skills" / "echo" / "SKILL.md").write_text("---\nname: echo\n---\n")
+    result = _verify(repo, base)
+    assert _headers(result, "echo") == ["suppressions", "ruff", "pyrefly", "pytest"], result.stdout + result.stderr
+
+
+def test_it_fails_an_unused_suppression_in_either_file(repo: Path) -> None:
+    # ruff's RUF100 and pyrefly's `unused-ignore`; `S101` is not selected in `test_skill.py`, so its `noqa` is unused.
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(
+        repo,
+        "echo",
+        SKILL.replace("return text.upper()", "return text.upper()  # pyrefly: ignore[bad-return]"),
+        _PASSING_TEST.replace('== "HI"', '== "HI"  # noqa: S101'),
+    )
+    result = _verify(repo, base)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "verify: echo failed ruff, pyrefly\n" in result.stderr
+    assert "RUF100" in result.stdout
+    assert "unused-ignore" in result.stdout
 
 
 def test_it_checks_a_tracked_change_and_skips_unchanged_skills(repo: Path) -> None:

@@ -4,9 +4,7 @@ The tools run from this environment's `bin/`, at the toolchain's pins, against a
 `cogmo_ctx` as the image's does. A skill venv is a directory of distributions laid out as an installer leaves them.
 """
 
-import base64
 import builtins
-import hashlib
 import io
 import json
 import os
@@ -15,13 +13,14 @@ import subprocess
 import sys
 import sysconfig
 from collections.abc import Callable, Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 
 from cogmo_skills_runtime import check, supervisor
 from cogmo_skills_runtime.check import Toolchain
 
+from .distributions import install
 from .pragma_cases import PRAGMAS, REFUSED
 
 type ProtocolCheck = Callable[[str, object], None]
@@ -31,6 +30,7 @@ _UNTRACKED = shutil.ignore_patterns("__pycache__", "*.py[co]")
 _BIN = Path(sys.executable).parent
 _HASH = "c" * 64
 _MINOR = f"{sys.version_info.major}.{sys.version_info.minor}"
+_FORMAT_FIX = "`uv run ruff format` on it"
 
 
 @pytest.fixture
@@ -60,22 +60,6 @@ def venvs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _site_packages(venvs: Path, lockfile_hash: str) -> Path:
     return venvs / f"{lockfile_hash}-py{_MINOR}" / "lib" / f"python{_MINOR}" / "site-packages"
-
-
-def _install(site_packages: Path, name: str, files: Mapping[str, str]) -> None:
-    """Lay `name`'s `files` out in `site_packages` as an installer does, with a `RECORD` listing each."""
-    dist_info = f"{name.replace('-', '_')}-1.0.dist-info"
-    everything = {**files, f"{dist_info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n"}
-    records = []
-    for relative, content in everything.items():
-        path = site_packages / relative
-        if not relative.startswith(".."):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
-        digest = base64.urlsafe_b64encode(hashlib.sha256(content.encode()).digest()).rstrip(b"=").decode()
-        records.append(f"{relative},sha256={digest},{len(content)}")
-    records.append(f"{dist_info}/RECORD,,")
-    (site_packages / dist_info / "RECORD").write_text("\n".join(records) + "\n")
 
 
 def _check(
@@ -244,7 +228,7 @@ def test_ruff_reads_the_toolchains_line_length(toolchain: Toolchain) -> None:
 
 
 def test_tool_columns_on_a_non_ascii_line_are_utf16_units(toolchain: Toolchain) -> None:
-    # ruff and pyrefly count code points: `;` is the 13th and `undefined_name` starts at the 19th.
+    # ruff, `ruff format` and pyrefly count code points: `;` is the 13th and `undefined_name` starts at the 19th.
     body = 'async def run(inputs, ctx):\n    s = "é😀"; x = undefined_name\n    return s, x\n'
 
     reply = _check(body, toolchain)
@@ -252,6 +236,7 @@ def test_tool_columns_on_a_non_ascii_line_are_utf16_units(toolchain: Toolchain) 
     assert _findings(reply) == [
         ("ruff", 2, 14, "E702 Multiple statements on one line (semicolon)"),
         ("ruff", 2, 20, "F821 Undefined name `undefined_name`"),
+        ("format", 2, 14, f"unformatted File would be reformatted: run {_FORMAT_FIX}"),
         ("pyrefly", 2, 20, "unknown-name Could not find name `undefined_name`"),
     ]
 
@@ -283,6 +268,56 @@ def test_a_ruff_that_does_not_start_is_fatal(toolchain: Toolchain, tmp_path: Pat
 
     assert reply["type"] == "fatal"
     assert str(reply["error"]).startswith("absent did not start: ")
+
+
+# --- format
+
+
+def test_a_body_the_formatter_would_change_is_one_finding_at_its_first_difference(
+    toolchain: Toolchain, protocol: ProtocolCheck
+) -> None:
+    # The formatter would change lines 1 and 4; ruff reports the first difference alone, in code points.
+    body = 's = "é😀";  x = 1\n\n\ny = [1,2]\n'
+
+    reply = _check(body, toolchain)
+
+    protocol("check_reply", reply)
+    assert [f for f in _findings(reply) if f[0] == "format"] == [
+        ("format", 1, 10, f"unformatted File would be reformatted: run {_FORMAT_FIX}")
+    ]
+
+
+def test_the_formatter_reads_the_toolchains_line_length(toolchain: Toolchain) -> None:
+    # Past ruff format's default 88 columns, within the toolchain's 120.
+    body = f"X = [{', '.join(['1000000'] * 11)}, 1234]\n"
+    assert 88 < len(body.rstrip()) <= 120
+
+    reply = _check(body, toolchain)
+
+    assert _findings(reply) == []
+
+
+@pytest.mark.parametrize(
+    ("script", "error"),
+    [
+        ("echo 'ruff: config unreadable' >&2; exit 2", "ruff format exited 2: ruff: config unreadable"),
+        ("echo '{not json'; exit 1", "ruff format exited 1 with output that is not its JSON"),
+        ("echo '[]'; exit 1", "ruff format exited 1 with no diagnostic"),
+    ],
+)
+def test_a_ruff_format_failure_status_is_fatal(
+    toolchain: Toolchain, tmp_path: Path, protocol: ProtocolCheck, script: str, error: str
+) -> None:
+    # `ruff check` runs as itself; `ruff format` runs the script.
+    ruff = tmp_path / "ruff"
+    ruff.write_text(f'#!/bin/sh\nif [ "$1" = format ]; then {script}; fi\nexec {toolchain.ruff} "$@"\n')
+    ruff.chmod(0o755)
+
+    reply = _check(_CLEAN, Toolchain(**{**toolchain.__dict__, "ruff": str(ruff)}))
+
+    protocol("check_reply", reply)
+    assert reply["type"] == "fatal"
+    assert str(reply["error"]).startswith(error)
 
 
 # --- pyrefly
@@ -332,7 +367,7 @@ _GREETING = "def greet() -> str:\n    return 'hi'\n"
 
 def test_a_module_a_declared_dependency_installs_passes(toolchain: Toolchain, venvs: Path) -> None:
     site_packages = _site_packages(venvs, _HASH)
-    _install(site_packages, "Greeting-Kit", {"greeting/__init__.py": _GREETING, "greeting/py.typed": ""})
+    install(site_packages, "Greeting-Kit", {"greeting/__init__.py": _GREETING, "greeting/py.typed": ""})
     body = "from greeting import greet\n\n\nasync def run(inputs, ctx):\n    return greet()\n"
 
     reply = _check(body, toolchain, ["greeting-kit==1.0"], _HASH)
@@ -343,8 +378,8 @@ def test_a_module_a_declared_dependency_installs_passes(toolchain: Toolchain, ve
 
 def test_a_module_only_a_transitive_dependency_installs_is_refused(toolchain: Toolchain, venvs: Path) -> None:
     site_packages = _site_packages(venvs, _HASH)
-    _install(site_packages, "greeting-kit", {"greeting/__init__.py": _GREETING})
-    _install(site_packages, "idna", {"idna/__init__.py": _GREETING})
+    install(site_packages, "greeting-kit", {"greeting/__init__.py": _GREETING})
+    install(site_packages, "idna", {"idna/__init__.py": _GREETING})
     body = "import idna\nfrom greeting import greet\n\n\nasync def run(inputs, ctx):\n    return greet(), idna\n"
 
     reply = _check(body, toolchain, ["greeting-kit==1.0"], _HASH)
@@ -392,8 +427,8 @@ def test_a_namespace_package_lets_through_only_what_a_declared_dependency_instal
 ) -> None:
     # Neither installs `google/__init__.py`: `google` is a PEP 420 namespace both install beneath.
     site_packages = _site_packages(venvs, _HASH)
-    _install(site_packages, "protobuf", {"google/protobuf/__init__.py": "", "google/_upb/_message.abi3.so": ""})
-    _install(site_packages, "google-auth", {"google/auth/__init__.py": "", "google/oauth2/__init__.py": ""})
+    install(site_packages, "protobuf", {"google/protobuf/__init__.py": "", "google/_upb/_message.abi3.so": ""})
+    install(site_packages, "google-auth", {"google/auth/__init__.py": "", "google/oauth2/__init__.py": ""})
     body = (
         "import google\n"
         "import google.protobuf.message\n"
@@ -414,8 +449,8 @@ def test_a_namespace_package_lets_through_only_what_a_declared_dependency_instal
 def test_a_shared_init_is_a_namespace_a_from_import_reaches_through(toolchain: Toolchain, venvs: Path) -> None:
     # Both install `zope/__init__.py`: a pkgutil-style namespace, which neither answers for alone.
     site_packages = _site_packages(venvs, _HASH)
-    _install(site_packages, "zope-interface", {"zope/__init__.py": "", "zope/interface/__init__.py": ""})
-    _install(site_packages, "zope-event", {"zope/__init__.py": "", "zope/event/__init__.py": ""})
+    install(site_packages, "zope-interface", {"zope/__init__.py": "", "zope/interface/__init__.py": ""})
+    install(site_packages, "zope-event", {"zope/__init__.py": "", "zope/event/__init__.py": ""})
     body = "import zope\nimport zope.interface\nimport zope.event\nfrom zope import event, interface\n"
 
     reply = _check(body, toolchain, ["zope-interface==1.0"], _HASH)
@@ -431,8 +466,8 @@ def test_a_name_from_a_declared_regular_package_may_be_its_attribute(toolchain: 
     # `alpha`'s `__init__`s, `alpha`'s alone, define `b` and `c`, which `from` reads first; `alpha-extras` installs
     # modules of those names inside them, which only `import` reaches.
     site_packages = _site_packages(venvs, _HASH)
-    _install(site_packages, "alpha", {"alpha/__init__.py": "b = 42\n", "alpha/inner/__init__.py": "c = 1\n"})
-    _install(site_packages, "alpha-extras", {"alpha/b.py": "", "alpha/inner/c.py": ""})
+    install(site_packages, "alpha", {"alpha/__init__.py": "b = 42\n", "alpha/inner/__init__.py": "c = 1\n"})
+    install(site_packages, "alpha-extras", {"alpha/b.py": "", "alpha/inner/c.py": ""})
     body = "from alpha import b\nfrom alpha.inner import c\nimport alpha.b\nimport alpha.inner.c\n"
 
     reply = _check(body, toolchain, ["alpha==1.0"], _HASH)
@@ -447,8 +482,8 @@ def test_a_name_from_a_declared_regular_package_may_be_its_attribute(toolchain: 
 def test_an_init_several_distributions_list_is_none_of_theirs_alone(toolchain: Toolchain, venvs: Path) -> None:
     # Both list `a/ns/__init__.py`, so `a.ns` is neither's alone; `b` beneath it is `transitive`'s.
     site_packages = _site_packages(venvs, _HASH)
-    _install(site_packages, "direct", {"a/ns/__init__.py": "", "a/ns/direct.py": ""})
-    _install(site_packages, "transitive", {"a/__init__.py": "", "a/ns/__init__.py": "", "a/ns/b/__init__.py": ""})
+    install(site_packages, "direct", {"a/ns/__init__.py": "", "a/ns/direct.py": ""})
+    install(site_packages, "transitive", {"a/__init__.py": "", "a/ns/__init__.py": "", "a/ns/b/__init__.py": ""})
     body = "from a.ns import b\nimport a.ns.b\nfrom a.ns import direct\n"
 
     reply = _check(body, toolchain, ["direct==1.0"], _HASH)
@@ -467,61 +502,46 @@ def test_a_dependency_without_its_skill_venv_is_fatal(toolchain: Toolchain, venv
     assert str(reply["error"]).startswith("the skill venv has no site-packages at ")
 
 
-def test_record_paths_map_to_the_modules_they_install() -> None:
-    suffix = next(s for s in check.importlib.machinery.EXTENSION_SUFFIXES if s != ".so")
-    files = [
-        "pkg/__init__.py",
-        "pkg/sub/mod.py",
-        "pkg/inner/__init__.py",
-        "single.py",
-        f"_native{suffix}",
-        "_plain.so",
-        "namespace/part/__init__.py",
-        "namespace/nested/leaf.py",
-        "pkg.libs/libvendored-1a2b.so",
-        "py.typed",
-        "LICENSE",
-        "pkg-1.0.pth",
-        "pkg-1.0.dist-info/METADATA",
-        "pkg-1.0.data/scripts/tool.py",
-        "__pycache__/single.cpython-314.pyc",
-        "pkg/__pycache__/mod.cpython-314.pyc",
-        "../../../bin/tool",
-        "/etc/absolute",
-    ]
-
-    modules = check.record_modules(PurePosixPath(f) for f in files)
-
-    assert modules == frozenset(
-        {
-            "pkg",
-            "pkg.sub.mod",
-            "pkg.inner",
-            "single",
-            "_native",
-            "_plain",
-            "namespace.part",
-            "namespace.nested.leaf",
-        }
+def _replace_imports_rule(toolchain: Toolchain, scan: str) -> None:
+    """Replace the toolchain's Imports rule with one whose `scan` has the body `scan`."""
+    (Path(toolchain.config).parent / ".cogmo" / "imports.py").write_text(
+        "import collections\n"
+        "Refusal = collections.namedtuple('Refusal', 'line column message')\n"
+        "def installed_modules(site_packages):\n    return {}\n"
+        f"def scan(source, dependencies, installed):\n{scan}"
     )
 
 
-def test_installed_distributions_are_keyed_by_their_pep_503_name(tmp_path: Path) -> None:
-    site_packages = tmp_path / "site-packages"
-    _install(site_packages, "My.Pkg_Name", {"my_pkg/__init__.py": "", "../../../bin/my-pkg": ""})
-    no_record = site_packages / "bare-1.0.dist-info"
-    no_record.mkdir()
-    (no_record / "METADATA").write_text("Metadata-Version: 2.1\nName: Bare\nVersion: 1.0\n")
+def test_the_imports_rule_is_the_toolchains(toolchain: Toolchain) -> None:
+    _replace_imports_rule(toolchain, "    return [Refusal(2, 1, 'the toolchain refuses this')]\n")
 
-    installed = check.installed_modules(os.fspath(site_packages))
+    reply = _check(_CLEAN, toolchain)
 
-    assert installed == {"my-pkg-name": frozenset({"my_pkg"}), "bare": frozenset()}
+    assert _findings(reply) == [("imports", 2, 1, "the toolchain refuses this")]
+
+
+def test_a_toolchain_without_its_imports_rule_is_fatal(toolchain: Toolchain) -> None:
+    (Path(toolchain.config).parent / ".cogmo" / "imports.py").unlink(missing_ok=True)
+
+    reply = _check(_CLEAN, toolchain)
+
+    assert reply["type"] == "fatal"
+    assert str(reply["error"]).startswith("the toolchain's Imports rule did not load: ")
+
+
+def test_an_imports_rule_that_cannot_read_the_body_is_fatal(toolchain: Toolchain) -> None:
+    _replace_imports_rule(toolchain, "    raise RecursionError('maximum recursion depth exceeded')\n")
+
+    reply = _check(_CLEAN, toolchain)
+
+    assert reply["type"] == "fatal"
+    assert str(reply["error"]).startswith("the Imports rule could not read the body: RecursionError")
 
 
 # --- suppressions
 
 
-_BAD_RETURN = "def f() -> int:\n    return 'x'"
+_BAD_RETURN = 'def f() -> int:\n    return "x"'
 _NOT_INT = "bad-return Returned type `Literal['x']` is not assignable to declared return type `int`"
 _RUFF_PER_LINE = "suppress per line, naming the rule: `# noqa: <code>`"
 _PYREFLY_PER_LINE = "suppress per line, naming the error: `# pyrefly: ignore[<error>]`"
@@ -570,10 +590,10 @@ _PYREFLY_PER_LINE = "suppress per line, naming the error: `# pyrefly: ignore[<er
         ),
         # pyrefly honors its own pragmas alone.
         (f"{_BAD_RETURN}  # type: ignore\n", [("pyrefly", 2, 12, _NOT_INT)]),
-        (f"# type: ignore\n\n{_BAD_RETURN}\n", [("pyrefly", 4, 12, _NOT_INT)]),
+        (f"# type: ignore\n\n\n{_BAD_RETURN}\n", [("pyrefly", 5, 12, _NOT_INT)]),
         # A string is not a comment.
         (
-            "s = '# ruff: noqa'\nimport os\n",
+            's = "# ruff: noqa"\nimport os\n',
             [
                 ("ruff", 2, 1, "E402 Module level import not at top of file"),
                 ("ruff", 2, 8, "F401 `os` imported but unused"),
@@ -598,9 +618,11 @@ def test_a_pragma_wider_than_its_line_or_naming_no_rule_is_refused(
         ("# ruff: ignore[F401]\nimport os\n", [("ruff", "F401", 1)]),
         ("import os  # why # ruff: ignore[F401]\n", [("ruff", "F401", 1)]),
         (f"{_BAD_RETURN}  # pyrefly: ignore[bad-return]\n", [("pyrefly", "bad-return", 2)]),
-        ("def f() -> int:\n    # pyrefly: ignore[bad-return]\n    return 'x'\n", [("pyrefly", "bad-return", 2)]),
+        ('def f() -> int:\n    # pyrefly: ignore[bad-return]\n    return "x"\n', [("pyrefly", "bad-return", 2)]),
         # ruff reads a comment's first `noqa` alone.
         ("import os  # noqa: F401 # noqa: E501\n", [("ruff", "F401", 1)]),
+        # Only a `noqa` naming RUF100 silences it, and it is recorded as any suppression is.
+        ("x = 1  # noqa: E501, RUF100\n", [("ruff", "E501", 1), ("ruff", "RUF100", 1)]),
     ],
 )
 def test_a_suppression_naming_its_rule_on_its_line_passes_and_is_recorded(
@@ -613,6 +635,76 @@ def test_a_suppression_naming_its_rule_on_its_line_passes_and_is_recorded(
     assert _suppressions(reply) == suppressions
 
 
+@pytest.mark.parametrize(
+    ("body", "finding"),
+    [
+        ("x = 1  # noqa: E501\n", ("ruff", 1, 8, "RUF100 Unused `noqa` directive (unused: `E501`)")),
+        ("# ruff: ignore[E501]\nx = 1\n", ("ruff", 1, 1, "RUF100 Unused suppression (unused: `E501`)")),
+        ("x = 1  # noqa: XYZ123\n", ("ruff", 1, 8, "RUF102 Invalid rule code in `# noqa`: XYZ123")),
+        (
+            "x = 1  # pyrefly: ignore[bad-return]\n",
+            ("pyrefly", 1, 8, "unused-ignore Unused `# pyrefly: ignore` comment for code(s): bad-return"),
+        ),
+    ],
+)
+def test_a_suppression_that_suppresses_nothing_is_a_finding(
+    toolchain: Toolchain, body: str, finding: tuple[str, int, int, str]
+) -> None:
+    reply = _check(body, toolchain)
+
+    assert _findings(reply) == [finding]
+
+
+def test_a_formatter_pragma_is_refused_and_records_no_suppression(
+    toolchain: Toolchain, protocol: ProtocolCheck
+) -> None:
+    # Each as `ruff format` honours it, so the formatter finds nothing to change.
+    body = (
+        "# fmt: offline, a comment that names no pragma\n"
+        "y = [1,2]  # fmt:skip\n"
+        "# fmt: off\n"
+        "x = [1,2]\n"
+        "# fmt: on\n"
+        "# yapf: disable\n"
+        "z = [1,2]\n"
+        "# yapf: enable\n"
+    )
+
+    reply = _check(body, toolchain)
+
+    protocol("check_reply", reply)
+    assert _findings(reply) == [
+        ("suppression", 2, 12, _formatter_pragma("fmt: skip")),
+        ("suppression", 3, 1, _formatter_pragma("fmt: off")),
+        ("suppression", 5, 1, _formatter_pragma("fmt: on")),
+        ("suppression", 6, 1, _formatter_pragma("yapf: disable")),
+        ("suppression", 8, 1, _formatter_pragma("yapf: enable")),
+    ]
+    assert _suppressions(reply) == []
+
+
+def _formatter_pragma(directive: str) -> str:
+    return f"`# {directive}` exempts code from `ruff format`, whose layout every skill keeps"
+
+
+@pytest.mark.parametrize(
+    ("body", "finding"),
+    [
+        # `fmt: skip` as a later part of a comment is refused at its own `#`: the 30th code point, the 31st UTF-16 unit.
+        ('s = "é😀"  # keeps its layout # fmt: skip\n', ("suppression", 1, 31, _formatter_pragma("fmt: skip"))),
+        # `off` at the end of a statement's line keeps that statement's layout, as `skip` does.
+        ("x = 1  # fmt: off\n", ("suppression", 1, 8, _formatter_pragma("fmt: off"))),
+        ("x = 1  # yapf: disable\n", ("suppression", 1, 8, _formatter_pragma("yapf: disable"))),
+    ],
+)
+def test_a_formatter_pragma_is_refused_where_it_stands(
+    toolchain: Toolchain, body: str, finding: tuple[str, int, int, str]
+) -> None:
+    reply = _check(body, toolchain)
+
+    assert _findings(reply) == [finding]
+
+
 def test_it_refuses_the_pragmas_the_shared_table_refuses(toolchain: Toolchain) -> None:
     refused = {name for name, (body, _) in PRAGMAS.items() if _findings(_check(body, toolchain))}
 
@@ -620,12 +712,12 @@ def test_it_refuses_the_pragmas_the_shared_table_refuses(toolchain: Toolchain) -
 
 
 def test_more_suppressions_than_a_file_may_carry_are_refused(toolchain: Toolchain) -> None:
-    reply = _check("x = 1  # noqa: E501\n" * 101, toolchain)
+    reply = _check("assert True  # noqa: S101\n" * 101, toolchain)
 
     assert _findings(reply) == [
-        ("suppression", 101, 8, "more than 100 suppressions; fix what they suppress instead"),
+        ("suppression", 101, 14, "more than 100 suppressions; fix what they suppress instead"),
     ]
-    assert _suppressions(reply) == [("ruff", "E501", line) for line in range(1, 101)]
+    assert _suppressions(reply) == [("ruff", "S101", line) for line in range(1, 101)]
 
 
 def test_a_toolchain_without_its_suppression_rule_is_fatal(toolchain: Toolchain) -> None:
@@ -654,17 +746,18 @@ def test_a_suppression_rule_that_cannot_read_the_body_is_fatal(toolchain: Toolch
 
 def test_a_flood_of_findings_is_capped_so_the_reply_fits_what_the_host_reads(toolchain: Toolchain) -> None:
     # Each line names an undefined `a` 50 times and runs past 120 columns: per line, ruff's 50 F821 and one E501,
-    # pyrefly's 50 unknown-name; 30 300 findings in all.
+    # pyrefly's 50 unknown-name; with the formatter's one, 30 301 findings in all.
     body = ("x = (" + ", ".join(["a"] * 50) + ")\n") * 300
 
     reply = _check(body, toolchain)
 
     findings = _findings(reply)
     assert len(json.dumps(reply)) < 1024 * 1024
-    assert len(findings) == 102
+    assert len(findings) == 103
     assert {check_id for check_id, *_ in findings[:100]} == {"ruff"}
     assert findings[100:] == [
         ("ruff", None, None, "and 15200 more ruff findings"),
+        ("format", None, None, "and 1 more format findings"),
         ("pyrefly", None, None, "and 15000 more pyrefly findings"),
     ]
 
