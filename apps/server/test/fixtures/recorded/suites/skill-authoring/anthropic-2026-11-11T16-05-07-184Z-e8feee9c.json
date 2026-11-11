@@ -2,7 +2,7 @@
   "fixtures": [
     {
       "match": {
-        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhat's bitcoin at?",
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhat's bitcoin at? Use the btc-spot skill.",
         "model": "claude-sonnet-5",
         "turnIndex": 3,
         "hasToolResult": false
@@ -12,35 +12,35 @@
           {
             "name": "btc-spot",
             "arguments": "{}",
-            "id": "toolu_01B5MeWxnLEGwxk8N2bHxXKV"
+            "id": "toolu_01QzN7uk48HFg4fG9TKANsZF"
           }
         ],
         "usage": {
           "input_tokens": 2,
-          "cache_creation_input_tokens": 12762,
-          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 1306,
+          "cache_read_input_tokens": 11421,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 12762
+            "ephemeral_1h_input_tokens": 1306
           },
-          "output_tokens": 59
+          "output_tokens": 110
         }
       },
       "recordedTimings": {
-        "ttftMs": 1214,
+        "ttftMs": 762,
         "interChunkDelaysMs": [
           0,
-          436,
+          1036,
+          0,
+          0,
+          0,
           1,
           0,
-          0,
-          0,
-          0,
-          35,
+          59,
           0,
           0
         ],
-        "totalDurationMs": 1686
+        "totalDurationMs": 1858
       },
       "metadata": {
         "systemHash": "af3fb4b5",
