@@ -88,7 +88,7 @@
     "mime-types": "^3.0.2",
     "neverthrow": "^8.2.0",
     "openai": "^7.47.0",
-    "p-retry": "^8.0.1",
+    "p-retry": "^9.0.0",
     "picomatch": "^4.0.7",
     "pino": "^10.4.0",
     "postgres": "^4.0.0",
