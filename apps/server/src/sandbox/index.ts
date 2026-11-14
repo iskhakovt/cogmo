@@ -305,5 +305,14 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
   shutdown(): Promise<void>;
 }
 
+/**
+ * What a caller that mints short-lived sessions and deletes them needs of a
+ * client: register's lockfile compile, install, checks and schema import.
+ */
+export type SessionSandbox = Pick<
+  SandboxClient,
+  "backendId" | "capabilities" | "ensureImagePresent" | "create" | "delete"
+>;
+
 export { CogmoSocketProxy } from "./proxy/index.js";
 export { LocalDockerSandboxClient } from "./supervisor.js";

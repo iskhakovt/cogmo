@@ -58,7 +58,8 @@ select = ["F", "E", "W", "I", "B", "UP", "RUF"]
 
 [tool.pyrefly]
 project-includes = ["src", "tests"]
-search-path = ["src"]
+# `.` puts `tests` on it as a package, so a test's relative import of a helper beside it resolves.
+search-path = ["src", "."]
 
 [tool.mutmut]
 source_paths = ["src/"]

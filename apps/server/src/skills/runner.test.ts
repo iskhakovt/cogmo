@@ -107,6 +107,7 @@ async function makeRunner(
   opts: { secretsStore?: SecretsStore; ctxHttp?: SkillRunnerCtxHttp } = {},
 ) {
   return SkillRunnerImpl.create({
+    releaseVersion: "dev",
     store,
     runInTx: tx,
     secretsStore: opts.secretsStore ?? makeMockSecrets(),
@@ -590,6 +591,7 @@ inputs:
       .mockResolvedValue(err({ kind: "prefetch_failed", message: "cdn down" }));
     const offline = offlineWasm(wasmRoot);
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       store,
       runInTx: tx,
       secretsStore: makeMockSecrets(),
@@ -800,6 +802,8 @@ inputs:
           validation_errors: [],
           reasons: [],
           declared_network: null,
+          toolchain_version: null,
+          suppressions: [],
         },
         schemas: { inputs: { type: "object", properties: {} }, outputs: null },
         resolvedAt: new Date(),
@@ -1249,6 +1253,7 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
 
   async function makeContainerRunner() {
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       store,
       runInTx: tx,
       secretsStore: makeMockSecrets(),
@@ -1461,6 +1466,7 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
     });
 
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       store,
       runInTx: tx,
       secretsStore: makeMockSecrets(),
@@ -1502,6 +1508,7 @@ describe("SkillRunnerImpl container pool lifecycle", () => {
     });
 
     const runner = await SkillRunnerImpl.create({
+      releaseVersion: "dev",
       store,
       runInTx: tx,
       secretsStore: makeMockSecrets(),

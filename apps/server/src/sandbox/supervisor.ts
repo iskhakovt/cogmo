@@ -83,7 +83,8 @@ interface CreateOptions {
   askpassBaseDir?: string;
 }
 
-const CAPABILITIES: SandboxCapabilities = {
+/** What the backend advertises, known before a client is built. */
+export const LOCAL_DOCKER_CAPABILITIES: Readonly<SandboxCapabilities> = Object.freeze({
   siblingContainers: "host-proxy",
   hostBindMount: true,
   customImage: true,
@@ -91,7 +92,7 @@ const CAPABILITIES: SandboxCapabilities = {
   workingTreeTransport: "bind-mount",
   depsCacheSharing: "shared-volume",
   noNetworkSessions: true,
-};
+});
 
 const HOME_VOLUME_TARGET = "/home/vscode";
 
@@ -103,7 +104,7 @@ const HOME_VOLUME_TARGET = "/home/vscode";
  */
 export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessionState> {
   readonly backendId = "local-docker";
-  readonly capabilities = CAPABILITIES;
+  readonly capabilities = LOCAL_DOCKER_CAPABILITIES;
 
   #docker: DockerFacade;
   #store: SandboxStore;

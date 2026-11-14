@@ -8,18 +8,20 @@
 # cogmo app version. See `design/skills.md` → "Container tier — sysbox"
 # for the contract.
 #
-# Two-stage build with uv: builder syncs the locked deps + builds the
+# Built with uv: builder syncs the locked deps + builds the
 # `cogmo_skills_runtime` package into a venv; runtime stage copies the
 # venv AND the uv binary itself — register-time lockfile compile and
 # first-invoke venv populate (see `design/skills.md` → Dependencies)
 # both shell out to `uv` inside this image, so the runtime resolver
-# matches the builder resolver byte-for-byte.
+# matches the builder resolver byte-for-byte. The `tools` and `toolchain`
+# stages build what register's CPython checks run: the skills repo
+# toolchain's tools venv and its configuration.
 #
 # `cogmo_skills_runtime` itself has zero third-party python deps; only
 # the per-skill venvs populated by `uv venv` + `uv pip sync` against a
 # manifest's `requirements.lock` introduce wheels into the runtime.
 #
-# The `mutation` stage between them is a local test image for
+# The `mutation` stage is a local test image for
 # `pnpm test:mutation:skills`; the release build never reaches it.
 
 # uv toolchain as a stage — version + digest from docker-bake.hcl, shared
@@ -68,6 +70,30 @@ COPY tests /app/tests/
 COPY contract /app/contract/
 ENV PATH="/app/.venv/bin:${PATH}" HOME=/tmp PYTHONDONTWRITEBYTECODE=1
 USER 1000:1000
+
+# The tools register's CPython checks run (design/skills.md → Register-time
+# CPython checks): the skills repo toolchain's whole dev group, from the lock
+# the repo commits, so it cannot drift from what `.cogmo/verify` runs. The
+# builder's UV_NO_DEV=1 would drop the group; `--locked` fails a stale lock.
+FROM builder AS tools
+ENV UV_NO_DEV=0 UV_PROJECT_ENVIRONMENT=/opt/cogmo-skills/tools
+WORKDIR /toolchain
+COPY toolchain/pyproject.toml toolchain/uv.lock /toolchain/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --only-group dev --no-install-project
+
+# The toolchain's entries as the boot commits them to the skills repo: those
+# `.cogmo/paths` lists, with `cogmo_ctx` joined into `.cogmo/`. The checks
+# read their configuration here, the files the author's `.cogmo/verify` reads.
+FROM builder AS toolchain
+COPY toolchain /src/toolchain/
+COPY src/cogmo_ctx /src/cogmo_ctx/
+RUN install -d /opt/cogmo-skills/toolchain \
+ && while read -r entry; do \
+      [ -z "${entry}" ] || cp -a "/src/toolchain/${entry}" /opt/cogmo-skills/toolchain/; \
+    done < /src/toolchain/.cogmo/paths \
+ && cp -a /src/cogmo_ctx /opt/cogmo-skills/toolchain/.cogmo/cogmo_ctx \
+ && find /opt/cogmo-skills/toolchain \( -name __pycache__ -o -name '*.py[co]' \) -prune -exec rm -rf {} +
 
 FROM mirror.gcr.io/library/python:3.14.10-slim@sha256:af8a5aa14780025dbfbcfbc81bd8a91ebd87711dd5b0f48ed71090949dd7cb1d
 
@@ -118,6 +144,18 @@ ENV UV_PYTHON_DOWNLOADS=0
 # inherits this ownership on first mount, so the non-root supervisor
 # can write into it without a CAP_CHOWN dance at runtime.
 RUN mkdir -p /skill-venvs && chown cogmo:cogmo /skill-venvs
+
+# The tools venv and the toolchain register's CPython checks read, root-owned
+# like the runtime venv, with the bytecode UV_COMPILE_BYTECODE compiled. No
+# PATH or sys.path names the tools venv: `cogmo_skills_runtime.check` runs
+# each tool by its absolute path, and no task sees them.
+COPY --from=tools /opt/cogmo-skills/tools /opt/cogmo-skills/tools
+COPY --from=toolchain /opt/cogmo-skills/toolchain /opt/cogmo-skills/toolchain
+
+# The release this toolchain belongs to, which a check reply carries. Last, so
+# a version bump rebuilds this layer alone.
+ARG VERSION
+RUN printf '%s\n' "${VERSION}" > /opt/cogmo-skills/VERSION
 
 # Cogmo's host (`src/skills/worker-sysbox/worker.ts`) overrides the
 # Entrypoint/Cmd at create-container time; the default below is for

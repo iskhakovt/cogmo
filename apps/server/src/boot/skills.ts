@@ -30,6 +30,7 @@ import type {
   CoreDeps,
   SandboxDeps,
   SkillRunnerHandle,
+  SkillRunnerSandboxes,
   WasmReapHost,
 } from "./stages.js";
 
@@ -50,13 +51,13 @@ interface SkillRunnerOwnership {
  * Used by both `cogmo serve` (where the runner is shared between
  * handle-message's `register_skill` tool and the channel adapters' `/skill`
  * admin commands) and `cogmo skills` (where the CLI drives it directly).
- * Container (sysbox/Daytona) skill execution requires a non-null `sandbox`;
- * CLIs pass `NO_SANDBOX` and accept that container invocations throw at call
- * time.
+ * Container (sysbox/Daytona) skill execution requires a non-null `invoke`
+ * sandbox; the CLI passes none and accepts that container invocations throw
+ * at call time, while its register still runs its sessions.
  */
 export async function bootstrapSkillRunner(
   core: CoreDeps,
-  sandbox: SandboxDeps,
+  sandboxes: SkillRunnerSandboxes,
   ownership: SkillRunnerOwnership,
   opts: BootstrapOptions = {},
 ): Promise<SkillRunnerHandle> {
@@ -75,7 +76,9 @@ export async function bootstrapSkillRunner(
     store: core.skillStore,
     runInTx: core.runInTx,
     secretsStore: core.secretsStore,
-    ...(sandbox.sandbox && { sandbox: sandbox.sandbox }),
+    ...(sandboxes.invoke && { sandbox: sandboxes.invoke }),
+    ...(sandboxes.register && { registerSandbox: sandboxes.register }),
+    releaseVersion: env.VERSION,
     containerImage: env.COGMO_SKILLS_IMAGE,
     depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
     userTimezone: env.USER_TIMEZONE,

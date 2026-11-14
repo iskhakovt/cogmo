@@ -92,4 +92,6 @@ printf '%s\n' httpx==0.27.0 | uv pip compile - > skills/<name>/requirements.lock
 
 ## Checks
 
-`uv run --locked --group dev .cogmo/verify` runs ruff, pyrefly and pytest over each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from. It must pass before the work is done.
+`uv run --locked --group dev .cogmo/verify` runs ruff, pyrefly and pytest over each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, and refuses the suppressions register refuses. It must pass before the work is done.
+
+Fix a finding rather than suppress it. A suppression names its rule and covers one line: `# noqa: <code>` or `# ruff: ignore[<code>]` for ruff, `# pyrefly: ignore[<error>]` for pyrefly; pyrefly ignores `# type: ignore`. Register refuses a pragma that covers more (`# ruff: noqa`, `# ruff: file-ignore`, `# ruff: disable`, `# pyrefly: ignore-errors`), one that names no rule (`# noqa`, `# pyrefly: ignore`), and more than 100 in a file, and records each suppression on the deploy for review.

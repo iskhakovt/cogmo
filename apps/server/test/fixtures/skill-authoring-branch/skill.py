@@ -1,21 +1,34 @@
 import json
+from pydantic import BaseModel
+from cogmo_ctx import Ctx, SkillError
 
 
-async def run(inputs, ctx) -> dict:
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-    resp = await ctx.http.get(url)
+class Input(BaseModel):
+    pass
 
-    if resp["status"] != 200:
-        raise RuntimeError(f"CoinGecko API returned status {resp['status']}")
+
+class Output(BaseModel):
+    price: float
+
+
+async def run(inputs: Input, ctx: Ctx) -> Output:
+    response = await ctx.http.get(
+        "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+    )
+
+    if response["status"] != 200:
+        raise SkillError(
+            "api_error",
+            f"CoinGecko API returned status {response['status']}",
+            retryable=response["status"] >= 500,
+        )
 
     try:
-        data = json.loads(resp["body"])
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Failed to parse CoinGecko response: {e}")
-
-    try:
+        data = json.loads(response["body"])
         price = data["bitcoin"]["usd"]
-    except (KeyError, TypeError) as e:
-        raise RuntimeError(f"Unexpected response structure from CoinGecko: {e}")
+    except (json.JSONDecodeError, KeyError) as e:
+        raise SkillError(
+            "parse_error", f"Failed to parse CoinGecko response: {e}"
+        ) from e
 
-    return {"price": price}
+    return Output(price=price)

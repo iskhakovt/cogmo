@@ -6,8 +6,8 @@ import {
   type ExecOptions,
   type ExecStreamingHandle,
   type ResourceLimits,
-  type SandboxClient,
   type SandboxSession,
+  type SessionSandbox,
 } from "../sandbox/index.js";
 import { abortable } from "../util/abortable.js";
 import { readSkillFile, type SkillsRepo } from "./skill-files.js";
@@ -161,7 +161,7 @@ const DEFAULT_COMPILE_TIMEOUT_MS = 180_000;
 const MAX_LOCKFILE_BYTES = 1024 * 1024;
 
 export interface SandboxLockfileCompilerOptions {
-  sandbox: SandboxClient;
+  sandbox: SessionSandbox;
   image: string;
   /** Override per-test or per-resource-constrained host. */
   resourceLimits?: Partial<ResourceLimits>;
@@ -313,6 +313,33 @@ export function makeSandboxLockfileCompiler(
   };
 }
 
+/** Register's install budget: the populate's, a cold sync of a large tree included. */
+export const INSTALL_TIMEOUT_MS = 180_000;
+
+/**
+ * What the image's uv (`UV_VERSION`) writes when it refuses a `uv pip sync
+ * --require-hashes --only-binary=:all:` for the lockfile's own content: a pin
+ * with no wheel this interpreter and platform can install, or a hash the
+ * lockfile does not carry or that does not match. Pinned against the image's
+ * uv by `deps.sysbox.integration.test.ts`.
+ */
+const UV_LOCKFILE_REFUSALS: readonly RegExp[] = [
+  /has no usable wheels/,
+  /has no wheels with a matching/,
+  /Hash mismatch for /,
+  /In `--require-hashes` mode, all requirements must have a hash/,
+];
+
+/**
+ * Whether a `populate_failed` message is uv refusing the lockfile's content,
+ * a verdict on the lockfile, rather than a failure a retry may clear (an
+ * unreachable index, a full disk) (design/skills.md → Register-time CPython
+ * checks).
+ */
+export function isLockfileContentRefusal(message: string): boolean {
+  return UV_LOCKFILE_REFUSALS.some((refusal) => refusal.test(message));
+}
+
 /**
  * Per-task wall-clock cap for the populate exec. Default uv pip sync
  * over a typical skill's lockfile (HTTP-only deps) finishes in
@@ -323,6 +350,13 @@ export function makeSandboxLockfileCompiler(
 const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
 
 /**
+ * The skills image's runtime interpreter, named by path: a backend's exec need
+ * not keep the image's `PATH`, and on Daytona a bare `python3` is the base
+ * image's interpreter, which has no `cogmo_skills_runtime`.
+ */
+export const RUNTIME_PYTHON = "/opt/cogmo-skills/.venv/bin/python3";
+
+/**
  * Prints the image's `py<major>.<minor>` tag, which names skill venvs. The
  * populate script and the reaper's both run it, so the two always agree on
  * which venvs are live. `-I` keeps the cwd off `sys.path` and ignores
@@ -330,7 +364,7 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
  * the script runs in; without it, a `cogmo_skills_runtime` in the cwd would
  * run instead.
  */
-export const PYTHON_ABI_TAG_COMMAND = "python3 -I -m cogmo_skills_runtime.abi";
+export const PYTHON_ABI_TAG_COMMAND = `${RUNTIME_PYTHON} -I -m cogmo_skills_runtime.abi`;
 
 /**
  * Shell program that the populator invokes inside the worker

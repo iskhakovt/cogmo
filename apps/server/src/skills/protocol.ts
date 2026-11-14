@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CtxErrorKindSchema } from "./ctx-contract.js";
 import type { SkillRunErrorKind } from "./store/index.js";
+import { SkillSuppressionSchema } from "./types.js";
 
 /**
  * Worker JSON-RPC protocol — transport-agnostic message shapes used by the
@@ -294,6 +295,55 @@ export const SchemaImportReplySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("fatal"), error: z.string() }),
 ]);
 export type SchemaImportReply = z.infer<typeof SchemaImportReplySchema>;
+
+/**
+ * Register's CPython checks' request, which `cogmo_skills_runtime.check`
+ * reads on stdin: `skill.py`, the manifest's `dependencies` and the hash of
+ * the lockfile whose venv holds them, null without dependencies
+ * (design/skills.md → Register-time CPython checks).
+ */
+export const CheckRequestSchema = z.object({
+  body: z.string(),
+  dependencies: z.array(z.string().min(1)),
+  lockfileHash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/, "lockfileHash must be sha256 hex")
+    .nullable(),
+});
+export type CheckRequest = z.infer<typeof CheckRequestSchema>;
+
+/** The CPython checks, in the order a reply reports them. */
+const CPYTHON_CHECK_IDS = ["syntax", "ruff", "pyrefly", "imports", "suppression"] as const;
+
+/**
+ * One CPython check's finding in `skill.py`. Lines are 1-based; columns are
+ * 1-based UTF-16 code units, as the register-time gates count them. Both are
+ * null for a finding about the file, and the column alone where the tool
+ * names no column.
+ */
+const CheckFindingSchema = z.object({
+  id: z.enum(CPYTHON_CHECK_IDS),
+  line: z.number().int().positive().nullable(),
+  column: z.number().int().positive().nullable(),
+  message: z.string().min(1),
+});
+export type CheckFinding = z.infer<typeof CheckFindingSchema>;
+
+/**
+ * The one reply of register's CPython checks: every check's findings, empty
+ * for a body that passes, the suppressions the body carries, and the release
+ * version the image baked beside its toolchain; `fatal` when a check could
+ * not run (a tool's failure status, a skill venv that is missing).
+ */
+export const CheckReplySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("check_findings"),
+    findings: z.array(CheckFindingSchema),
+    suppressions: z.array(SkillSuppressionSchema),
+    toolchainVersion: z.string().min(1),
+  }),
+  z.object({ type: z.literal("fatal"), error: z.string() }),
+]);
 
 /** Every frame a worker sends the host. A worker's first frame is its handshake. */
 export const WorkerMessageSchema = z.union([

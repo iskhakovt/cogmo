@@ -11,22 +11,34 @@
         "toolCalls": [
           {
             "name": "memory_recall",
-            "arguments": "{\"query\": \"user profile name job timezone communication preference\"}",
-            "id": "toolu_018xhnBASXvVsTFViJF2xvBm"
+            "arguments": "{\"query\": \"user name, role, timezone, communication preferences\"}",
+            "id": "toolu_01VMgfgGsWCbXDtj94n4cwb3"
           }
-        ]
+        ],
+        "usage": {
+          "input_tokens": 2,
+          "cache_creation_input_tokens": 312,
+          "cache_read_input_tokens": 11317,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 312
+          },
+          "output_tokens": 170
+        }
       },
       "recordedTimings": {
-        "ttftMs": 990,
+        "ttftMs": 810,
         "interChunkDelaysMs": [
           0,
-          2460,
+          1071,
           0,
           0,
           0,
           0,
           0,
-          412,
+          353,
+          0,
+          0,
           0,
           0,
           0,
@@ -36,15 +48,13 @@
           0,
           0,
           1,
-          0,
-          0,
           0
         ],
-        "totalDurationMs": 3863
+        "totalDurationMs": 2235
       },
       "metadata": {
-        "systemHash": "22d5c167",
-        "toolsHash": "8ae2ba59"
+        "systemHash": "f48b4a3b",
+        "toolsHash": "228fdbfa"
       }
     }
   ]

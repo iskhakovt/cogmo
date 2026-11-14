@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mock } from "vitest-mock-extended";
 import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
+import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import { GitHubIdentitySchema } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -20,6 +21,7 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
+import type { CpythonChecks } from "./cpython-checks.js";
 import { hashLockfileContents } from "./deps.js";
 import { migrateSkillsLayout } from "./migrate-layout.js";
 import { ensureSkillsMirror } from "./mirror-reconcile.js";
@@ -278,6 +280,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
 
   async function makeRunner(overrides: Partial<Parameters<typeof SkillRunnerImpl.create>[0]> = {}) {
     return SkillRunnerImpl.create({
+      releaseVersion: "dev",
       store,
       runInTx: tx,
       secretsStore: makeMockSecrets(),
@@ -3537,6 +3540,336 @@ async def run(inputs, ctx):
     });
   });
 
+  describe("register-time CPython checks", () => {
+    const VERSION = "dev";
+    /** The checks' answer: their findings and the toolchain release that ran them. */
+    function passing(toolchainVersion: string) {
+      return ok({ findings: [], suppressions: [], toolchainVersion });
+    }
+
+    function checksAnswering(answer: Awaited<ReturnType<CpythonChecks["check"]>>) {
+      const cpythonChecks = mock<CpythonChecks>();
+      cpythonChecks.check.mockResolvedValue(answer);
+      return cpythonChecks;
+    }
+
+    async function registerEcho(
+      overrides: Partial<Parameters<typeof SkillRunnerImpl.create>[0]>,
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      const runner = await makeRunner(overrides);
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const before = await getMainSha(repo.bare);
+      const result = await runner.register({
+        branch: "skill/echo",
+        origin: OWNER,
+        ...(opts.signal && { signal: opts.signal }),
+      });
+      return { result, before };
+    }
+
+    it("rejects with every finding in the gates' format, writing nothing", async () => {
+      const cpythonChecks = checksAnswering(
+        ok({
+          findings: [
+            {
+              id: "ruff",
+              line: 3,
+              column: 5,
+              message: "F841 Local variable `s` is assigned to but never used",
+            },
+            {
+              id: "pyrefly",
+              line: 3,
+              column: 9,
+              message: "bad-return Returned type `int` is not assignable",
+            },
+            {
+              id: "imports",
+              line: 1,
+              column: 1,
+              message: "'requests' is not the standard library",
+            },
+            {
+              id: "syntax",
+              line: null,
+              column: null,
+              message: "source code string cannot contain null bytes",
+            },
+          ],
+          suppressions: [],
+          toolchainVersion: VERSION,
+        }),
+      );
+
+      const { result, before } = await registerEcho({ cpythonChecks });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "ruff: skills/echo/skill.py:3:5: F841 Local variable `s` is assigned to but never used",
+        "pyrefly: skills/echo/skill.py:3:9: bad-return Returned type `int` is not assignable",
+        "imports: skills/echo/skill.py:1:1: 'requests' is not the standard library",
+        "syntax: skills/echo/skill.py: source code string cannot contain null bytes",
+      ]);
+      expect(await getMainSha(repo.bare)).toBe(before);
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    });
+
+    it("records the toolchain version the checks ran on the deploy's classifier log", async () => {
+      const cpythonChecks = checksAnswering(passing("2.17.0"));
+
+      const { result } = await registerEcho({ cpythonChecks });
+
+      assertStatus(result, "live");
+      const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+      expect(deploy?.classifierLog.toolchain_version).toBe("2.17.0");
+    });
+
+    it("records every suppression the checks accepted on the deploy's classifier log", async () => {
+      const suppressions = [
+        { tool: "ruff" as const, code: "S603", line: 4 },
+        { tool: "pyrefly" as const, code: "bad-return", line: 6 },
+      ];
+      const cpythonChecks = checksAnswering(
+        ok({ findings: [], suppressions, toolchainVersion: VERSION }),
+      );
+
+      const { result } = await registerEcho({ cpythonChecks });
+
+      assertStatus(result, "live");
+      const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+      expect(deploy?.classifierLog.suppressions).toEqual(suppressions);
+    });
+
+    it("hands the checks the body, the declared dependencies, the lockfile and the register's signal", async () => {
+      const cpythonChecks = checksAnswering(passing(VERSION));
+      const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+      const controller = new AbortController();
+      const runner = await makeRunner({ cpythonChecks });
+      await writeFile(skillFile(repo.work, "SKILL.md", "echo"), ECHO_WITH_DEPS);
+      await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+      await writeFile(skillFile(repo.work, "requirements.lock", "echo"), lockfile);
+      await execFileP("git", ["-C", repo.work, "add", "."]);
+      await execFileP("git", ["-C", repo.work, "commit", "-m", "deps"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "push",
+        "-f",
+        "origin",
+        "HEAD:refs/heads/skill/echo",
+      ]);
+
+      const result = await runner.register({
+        branch: "skill/echo",
+        origin: OWNER,
+        signal: controller.signal,
+      });
+
+      assertStatus(result, "live");
+      expect(cpythonChecks.check).toHaveBeenCalledWith({
+        body: ECHO_BODY,
+        dependencies: ["httpx==0.27.0"],
+        lockfile: { hash: hashLockfileContents(lockfile), contents: lockfile },
+        signal: controller.signal,
+      });
+    });
+
+    it("reads uv refusing the lockfile's content as a rejection of the lockfile", async () => {
+      const detail = "Because sdistonly==1.0 has no usable wheels and you require sdistonly==1.0";
+      const cpythonChecks = checksAnswering(err({ kind: "lockfile_invalid", detail }));
+
+      const { result, before } = await registerEcho({ cpythonChecks });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([`requirements_lock_uninstallable: ${detail}`]);
+      expect(await getMainSha(repo.bare)).toBe(before);
+    });
+
+    it("pauses on a check that could not run, and a repeat that runs goes live", async () => {
+      const cpythonChecks = checksAnswering(
+        err({ kind: "unavailable", detail: "check session did not start: daemon unreachable" }),
+      );
+
+      const { result, before } = await registerEcho({ cpythonChecks });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "registrar_unavailable: sandbox: check session did not start: daemon unreachable; retry the register",
+      ]);
+      expect(await getMainSha(repo.bare)).toBe(before);
+      cpythonChecks.check.mockResolvedValue(passing(VERSION));
+      const runner = await makeRunner({ cpythonChecks });
+      assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+    });
+
+    it("runs the check session over the register's sandbox, pausing when it does not start", async () => {
+      const sandbox = mock<SandboxClient>({
+        capabilities: {
+          siblingContainers: "host-proxy",
+          hostBindMount: true,
+          customImage: true,
+          volumes: "docker",
+          workingTreeTransport: "bind-mount",
+          depsCacheSharing: "shared-volume",
+          noNetworkSessions: true,
+        },
+      });
+      sandbox.ensureImagePresent.mockResolvedValue();
+      sandbox.create.mockRejectedValue(new Error("no daemon in this test"));
+
+      const { result } = await registerEcho({ registerSandbox: sandbox });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "registrar_unavailable: sandbox: check session did not start: no daemon in this test; retry the register",
+      ]);
+      expect(sandbox.create).toHaveBeenCalledTimes(1);
+      expect(sandbox.create).toHaveBeenCalledWith(expect.objectContaining({ network: "none" }));
+    });
+
+    it("skips the checks with no sandbox backend configured, recording no toolchain version", async () => {
+      const warn = vi.spyOn(logger, "warn");
+      try {
+        const { result } = await registerEcho({});
+
+        assertStatus(result, "live");
+        const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+        expect(deploy?.classifierLog.toolchain_version).toBeNull();
+        expect(deploy?.classifierLog.suppressions).toEqual([]);
+        expect(warn).toHaveBeenCalledWith(
+          { skillName: "echo" },
+          "no sandbox backend is configured: register skips the lockfile compile and the CPython checks",
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("an abort during the checks rejects with its reason and commits nothing", async () => {
+      const controller = new AbortController();
+      const reason = new Error("register deadline");
+      const cpythonChecks = mock<CpythonChecks>();
+      cpythonChecks.check.mockImplementation(async () => {
+        controller.abort(reason);
+        return err({ kind: "unavailable", detail: "the check runner was stopped" });
+      });
+
+      await expect(registerEcho({ cpythonChecks }, { signal: controller.signal })).rejects.toBe(
+        reason,
+      );
+
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    });
+
+    it("imports no schemas from a body the checks refuse", async () => {
+      const cpythonChecks = checksAnswering(
+        ok({
+          findings: [{ id: "ruff", line: 1, column: 1, message: "E501 Line too long" }],
+          suppressions: [],
+          toolchainVersion: VERSION,
+        }),
+      );
+      const offline = offlineWasm(repo.bare);
+      const schemaImporter = mock<WasmSchemaImporter>();
+      schemaImporter.importSchemas.mockResolvedValue(ok({ inputs: null, outputs: null }));
+
+      const { result } = await registerEcho({
+        ...offline,
+        wasm: { ...offline.wasm, schemaImporter },
+        cpythonChecks,
+      });
+
+      assertStatus(result, "rejected");
+      expect(schemaImporter.importSchemas).not.toHaveBeenCalled();
+    });
+
+    it("runs no check on a lockfile the compile refuses, and one on a lockfile it accepts", async () => {
+      const cpythonChecks = checksAnswering(passing(VERSION));
+      const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+      const compiler = {
+        compile: vi.fn().mockResolvedValue(err({ kind: "resolver_failed", message: "no httpx" })),
+      };
+      const runner = await makeRunner({ cpythonChecks, lockfileCompiler: compiler });
+      await writeFile(skillFile(repo.work, "SKILL.md", "echo"), ECHO_WITH_DEPS);
+      await writeFile(skillFile(repo.work, "skill.py", "echo"), ECHO_BODY);
+      await writeFile(skillFile(repo.work, "requirements.lock", "echo"), lockfile);
+      await execFileP("git", ["-C", repo.work, "add", "."]);
+      await execFileP("git", ["-C", repo.work, "commit", "-m", "deps"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "push",
+        "-f",
+        "origin",
+        "HEAD:refs/heads/skill/echo",
+      ]);
+
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual(["requirements_lock_resolver_failed: no httpx"]);
+      expect(cpythonChecks.check).not.toHaveBeenCalled();
+
+      // The same tip once the compile reproduces its lockfile.
+      compiler.compile.mockResolvedValue(ok(lockfile));
+      const accepted = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(accepted, "live");
+      expect(cpythonChecks.check).toHaveBeenCalledTimes(1);
+    });
+
+    it("warns when the image's toolchain belongs to another release than the server's", async () => {
+      const warn = vi.spyOn(logger, "warn");
+      try {
+        const cpythonChecks = checksAnswering(passing("2.16.0"));
+
+        const { result } = await registerEcho({ cpythonChecks });
+
+        assertStatus(result, "live");
+        expect(warn).toHaveBeenCalledWith(
+          { skillName: "echo", toolchainVersion: "2.16.0", releaseVersion: VERSION },
+          "the skills image's toolchain belongs to another release than the server's",
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("leaves a rollback's classifier log without a toolchain version, running no check", async () => {
+      const cpythonChecks = checksAnswering(passing("2.17.0"));
+      const runner = await makeRunner({ cpythonChecks });
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY.replace("+ 1", "+ 2"),
+      });
+      assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+      cpythonChecks.check.mockClear();
+
+      const rolled = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+      assertStatus(rolled, "live");
+      const deploy = await tx((trx) => store.getDeployById(trx, rolled.deployId));
+      expect(deploy?.classifierLog.toolchain_version).toBeNull();
+      expect(deploy?.classifierLog.suppressions).toEqual([]);
+      expect(cpythonChecks.check).not.toHaveBeenCalled();
+    });
+  });
+
   describe("safety: rollback verifies target sha belongs to this skill", () => {
     it("rolls skill A back to another skill's sha from A's own directory there", async () => {
       const runner = await makeRunner();
@@ -3997,7 +4330,12 @@ tier: wasm
         });
         sandbox.ensureImagePresent.mockResolvedValue();
         sandbox.create.mockRejectedValue(new Error("no daemon in this test"));
-        const runner = await makeRunner({ sandbox });
+        // Checks that start no session, so the import is the first to reach the sandbox.
+        const cpythonChecks = mock<CpythonChecks>();
+        cpythonChecks.check.mockResolvedValue(
+          ok({ findings: [], suppressions: [], toolchainVersion: "dev" }),
+        );
+        const runner = await makeRunner({ registerSandbox: sandbox, cpythonChecks });
         await pushWeather("skill/weather", CONTAINER_MANIFEST);
 
         const result = await runner.register({ branch: "skill/weather", origin: OWNER });
@@ -4290,6 +4628,8 @@ effects:
               validation_errors: [],
               reasons: [],
               declared_network: null,
+              toolchain_version: null,
+              suppressions: [],
             },
             applyFilesystem: async () => {
               throw new Error("simulated git update-ref failure");
@@ -4337,6 +4677,7 @@ effects:
       const repoWithRemote = await setupRepoWithRemote();
       try {
         const runner = await SkillRunnerImpl.create({
+          releaseVersion: "dev",
           store,
           runInTx: tx,
           secretsStore: makeMockSecrets(),
@@ -4474,6 +4815,7 @@ effects:
       const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(pushDeadline.signal);
       try {
         const runner = await SkillRunnerImpl.create({
+          releaseVersion: "dev",
           store,
           runInTx: tx,
           secretsStore,
@@ -4791,6 +5133,7 @@ effects:
      * memory / files / secrets setup. */
     async function makeRunnerForRepo(skillsRepoPath: string): Promise<SkillRunnerImpl> {
       return SkillRunnerImpl.create({
+        releaseVersion: "dev",
         store,
         runInTx: tx,
         secretsStore: makeMockSecrets(),

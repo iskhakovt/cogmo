@@ -19,7 +19,11 @@ const OWNER_RUN_AS: SkillRunAs = {
 };
 
 function depsFor(runner: SkillRunner) {
-  return { runner, ownerRunAs: vi.fn().mockResolvedValue(OWNER_RUN_AS) };
+  return {
+    runner,
+    ownerRunAs: vi.fn().mockResolvedValue(OWNER_RUN_AS),
+    close: vi.fn<SkillsCliDeps["close"]>().mockResolvedValue(),
+  };
 }
 
 function run(argv: readonly string[], deps: SkillsCliDeps, io: CliIo): Promise<number> {
@@ -224,6 +228,56 @@ describe("skillsCli", () => {
     const code = await run(["run", "echo", "{}"], depsFor(runner), io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/invoke failed: not found/);
+  });
+
+  describe("what the dependencies hold open", () => {
+    it.each([
+      ["list"],
+      ["run", "echo", "{}"],
+      ["register", "skill/echo"],
+      ["approve", "01960000-0000-7000-8000-000000000001"],
+      ["deny", "01960000-0000-7000-8000-000000000001"],
+      ["rollback", "echo", "abc1234"],
+      ["deregister", "echo"],
+    ])("is closed once `%s` returns", async (...argv) => {
+      const { io } = captureIo();
+      const deps = depsFor(
+        makeRunner({
+          invoke: vi.fn().mockResolvedValue(err({ kind: "not_found", name: "echo" })),
+          register: vi.fn().mockResolvedValue({ name: "echo", status: "rejected", errors: [] }),
+          approveDeploy: vi
+            .fn()
+            .mockResolvedValue({ name: "echo", status: "rejected", errors: [] }),
+          denyDeploy: vi.fn().mockResolvedValue(ok(undefined)),
+          rollback: vi.fn().mockResolvedValue({ name: "echo", status: "rejected", errors: [] }),
+          deregister: vi.fn().mockResolvedValue({ kind: "deregistered", name: "echo" }),
+        }),
+      );
+
+      await run(argv, deps, io);
+
+      expect(deps.close).toHaveBeenCalledTimes(1);
+    });
+
+    it("is closed when the command throws after the client was built, and the throw reaches the caller", async () => {
+      const { io } = captureIo();
+      const order: string[] = [];
+      const deps = depsFor(
+        makeRunner({
+          register: vi.fn(async () => {
+            order.push("register built the client, then threw");
+            throw new Error("git failed");
+          }),
+        }),
+      );
+      deps.close.mockImplementation(async () => {
+        order.push("closed");
+      });
+
+      await expect(run(["register", "skill/echo"], deps, io)).rejects.toThrow("git failed");
+
+      expect(order).toEqual(["register built the client, then threw", "closed"]);
+    });
   });
 
   describe("register / approve / deny / rollback / deregister subcommands", () => {
