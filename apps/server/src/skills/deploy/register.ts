@@ -14,6 +14,7 @@ import type { ClassifierLog, SkillManifest, SkillSchemas } from "../types.js";
 import { describeWasmPackagesError, type SkillSchemaImportError } from "../worker-wasm/wasm.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { checkRegisterBody, type RegisterBodyRejection } from "./check-register-body.js";
+import { checkRegisterCpython, type RegisterCpythonRejection } from "./check-register-cpython.js";
 import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { describeLocateSkillRejection, locateSkill } from "./locate-skill.js";
@@ -122,8 +123,8 @@ async function deleteFeatureBranch(repoPath: string, branch: string): Promise<vo
 /**
  * Every check `register` makes before its transaction: the branch, its
  * manifest and body, the register-time gates and the classifier, the
- * lockfile and its runtime pins, Pyodide compatibility, and the schemas it
- * puts live.
+ * lockfile and its runtime pins, Pyodide compatibility, the CPython checks,
+ * and the schemas it puts live.
  * Errs with the rejection `register` returns.
  */
 async function prepareRegister(
@@ -238,6 +239,17 @@ async function prepareRegister(
     }
   }
 
+  // Before the schema import, which mounts the venv the checks' install
+  // session populated (design/skills.md → Register-time CPython checks).
+  const cpython = await checkRegisterCpython(
+    deps.cpythonChecks,
+    { name, manifest, body, lockfile },
+    { releaseVersion: deps.releaseVersion, signal },
+  );
+  if (cpython.isErr()) {
+    return err(rejectedResult(branchSha, ...describeCpythonRejection(cpython.error)));
+  }
+
   const schemas = await resolveSchemas(deps, { manifest, body, lockfile, signal });
   if (schemas.isErr()) {
     return err({
@@ -266,7 +278,14 @@ async function prepareRegister(
     });
   }
 
-  return ok({ branchSha, manifest, body, classifierLog, lockfile, schemas: schemas.value });
+  return ok({
+    branchSha,
+    manifest,
+    body,
+    classifierLog: { ...classifierLog, ...cpython.value },
+    lockfile,
+    schemas: schemas.value,
+  });
 }
 
 /** A body-check rejection as `RegisterResult.errors`: one string per gate finding. */
@@ -280,13 +299,26 @@ function describeBodyRejection(rejection: RegisterBodyRejection): readonly strin
     .exhaustive();
 }
 
+/** A CPython-check rejection as `RegisterResult.errors`: one string per finding. */
+function describeCpythonRejection(rejection: RegisterCpythonRejection): readonly string[] {
+  return match(rejection)
+    .with({ kind: "lint_failed" }, ({ findings }) => findings.map(formatSkillFinding))
+    .with({ kind: "lockfile_invalid" }, ({ detail }) => [
+      `requirements_lock_uninstallable: ${detail}`,
+    ])
+    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) => [
+      `registrar_unavailable: ${cause}: ${detail}; retry the register`,
+    ])
+    .exhaustive();
+}
+
 /**
  * The schemas register puts live. A wasm skill is imported in a child, which
  * fetches and publishes its packages on the way, so the first run pays no
  * download. A container skill is imported in a session created with no
- * network, after an install session for its dependencies, or takes the
- * legacy schema path, its frontmatter, where the deployment cannot import it
- * (design/skills.md → Contracts).
+ * network, mounting the venv register's install session populated, or takes
+ * the legacy schema path, its frontmatter, where the deployment cannot
+ * import it (design/skills.md → Contracts).
  */
 async function resolveSchemas(
   deps: DeployDeps,

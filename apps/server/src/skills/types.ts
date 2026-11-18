@@ -277,6 +277,18 @@ function readLegacyCapabilities(value: unknown): unknown {
 }
 
 /**
+ * A suppression a passing `skill.py` carries, as register's CPython checks
+ * read it (design/skills.md → Register-time CPython checks → Suppressions):
+ * the tool, one rule the comment names, and the comment's 1-based line.
+ */
+export const SkillSuppressionSchema = z.object({
+  tool: z.enum(["ruff", "pyrefly"]),
+  code: z.string().min(1),
+  line: z.number().int().positive(),
+});
+export type SkillSuppression = z.infer<typeof SkillSuppressionSchema>;
+
+/**
  * What the classifier records on every deploy. Stored as JSONB on
  * `skill_deploys.classifier_log`; replayed in the audit UI and used by the
  * deploy-pipeline graduation logic. P3.1 stub-`register` writes a constant
@@ -308,6 +320,18 @@ export const ClassifierLogSchema = z.object({
    * through `LEGACY_CAPABILITY_KEYS`.
    */
   capabilities: z.preprocess(readLegacyCapabilities, ClassifierLogCapabilitiesSchema).optional(),
+  /**
+   * The release version of the toolchain register's CPython checks ran, as
+   * the skills image baked it (design/skills.md → Register-time CPython
+   * checks); null where none ran: no sandbox backend configured, a rollback,
+   * and rows written before the checks.
+   */
+  toolchain_version: z.string().min(1).nullable().default(null),
+  /**
+   * Every suppression the checks accepted in `skill.py`. Empty where none ran,
+   * on rollback rows, and on rows written before the checks recorded them.
+   */
+  suppressions: z.array(SkillSuppressionSchema).default([]),
 });
 export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
 

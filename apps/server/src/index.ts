@@ -23,8 +23,9 @@ import { inngest } from "./inngest/index.js";
 
 export { bootstrapCore } from "./boot/core.js";
 export { verifyHindsight } from "./boot/memory.js";
+export { bootstrapCliSandbox } from "./boot/sandbox.js";
 export { bootstrapSkillRunner } from "./boot/skills.js";
-export { type BootstrapOptions, NO_SANDBOX } from "./boot/stages.js";
+export type { BootstrapOptions } from "./boot/stages.js";
 
 /**
  * Probe the dependencies `cogmo serve` needs before it takes traffic. Runs in
@@ -56,7 +57,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const sandbox = await bootstrapSandbox(core, opts);
   const { skillRunner } = await bootstrapSkillRunner(
     core,
-    sandbox,
+    { invoke: sandbox.sandbox, register: sandbox.sandbox },
     { reapWasmChildren: true },
     opts,
   );

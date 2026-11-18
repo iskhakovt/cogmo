@@ -29,13 +29,14 @@ line-length = 120
 extend-exclude = [".cogmo"]
 
 [tool.ruff.lint]
-select = ["E", "F", "B", "BLE", "S", "ASYNC"]
+select = ["E", "F", "B", "BLE", "S", "ASYNC", "PGH004"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/test_skill.py" = ["S101"]
 
 [tool.pyrefly]
 search-path = [".cogmo"]
+enabled-ignores = ["pyrefly"]
 
 [tool.pytest.ini_options]
 pythonpath = [".cogmo"]

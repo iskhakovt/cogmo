@@ -11,7 +11,10 @@ import {
   readBootId,
 } from "../skills/worker-wasm/process-groups.js";
 import { bootstrapSkillRunner } from "./skills.js";
-import { type CoreDeps, NO_SANDBOX } from "./stages.js";
+import type { CoreDeps, SkillRunnerSandboxes } from "./stages.js";
+
+/** What a process with no sandbox backend configured passes. */
+const NO_SANDBOXES: SkillRunnerSandboxes = { invoke: null, register: null };
 
 /** `env` reads `COGMO_SKILLS_PATH` when the module loads, so it is set first. */
 const skillsPath = vi.hoisted(() => {
@@ -57,7 +60,7 @@ describe("bootstrapSkillRunner", () => {
   });
 
   it("leaves wasm children and their records alone for a CLI process", async () => {
-    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapWasmChildren: false });
+    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOXES, { reapWasmChildren: false });
 
     expect(orphan.exitCode).toBeNull();
     expect(orphan.signalCode).toBeNull();
@@ -67,7 +70,7 @@ describe("bootstrapSkillRunner", () => {
   it("kills a dead owner's wasm children before the serve's runner exists", async () => {
     const exited = once(orphan, "exit");
 
-    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapWasmChildren: true });
+    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOXES, { reapWasmChildren: true });
 
     expect(await exited).toEqual([null, "SIGKILL"]);
     expect(await readdir(childrenDir)).toEqual([]);
@@ -78,7 +81,7 @@ describe("bootstrapSkillRunner", () => {
 
     await bootstrapSkillRunner(
       mock<CoreDeps>(),
-      NO_SANDBOX,
+      NO_SANDBOXES,
       { reapWasmChildren: true },
       { wasmReapHostOverride: { platform: "darwin", readBootId: bootId } },
     );
@@ -96,7 +99,7 @@ describe("bootstrapSkillRunner", () => {
 
     await bootstrapSkillRunner(
       mock<CoreDeps>(),
-      NO_SANDBOX,
+      NO_SANDBOXES,
       { reapWasmChildren: true },
       {
         wasmReapHostOverride: {
@@ -123,7 +126,7 @@ describe("bootstrapSkillRunner's grammar check", () => {
     __resetParserForTests();
 
     await expect(
-      bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapWasmChildren: false }),
+      bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOXES, { reapWasmChildren: false }),
     ).rejects.toThrow(/no-such-grammar\.wasm/);
   });
 });

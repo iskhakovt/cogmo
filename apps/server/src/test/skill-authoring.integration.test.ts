@@ -35,14 +35,19 @@
  *      optionally `DAYTONA_ORGANIZATION_ID`, and
  *      `COGMO_TEST_SKILLS_REMOTE=https://github.com/<owner>/<throwaway>.git`.
  *      A throwaway is strongly recommended over a production skills
- *      repo even though branches stay in the orphan namespace.
+ *      repo even though branches stay in the orphan namespace. Set
+ *      `COGMO_DEVBASE_IMAGE` and `COGMO_SKILLS_IMAGE` to tags naming the
+ *      tree (`…:rec-<sha>`): `beforeAll` builds both snapshots from this
+ *      tree's Dockerfiles under those names, and reuses an active snapshot
+ *      a name already has.
  *   2. `gh auth status` — the PAT comes from gh CLI's keyring. Scope
  *      requirements: `repo` (push branches, open + close PRs).
  *   3. `RECORD=1 pnpm test:integration src/test/skill-authoring.integration.test.ts`
- *   4. Copy `SKILL.md` and `skill.py` from the recorded PR's head commit
- *      into `test/fixtures/skill-authoring-branch/`. `afterAll` deletes
- *      the branch, so fetch `pull/<n>/head`; `<n>` is in the `closed PR`
- *      log line.
+ *   4. Copy every file under the recorded PR's `skills/<name>/` (`SKILL.md`,
+ *      `skill.py`, `test_skill.py`) into
+ *      `test/fixtures/skill-authoring-branch/`. `afterAll` deletes the
+ *      branch, so fetch `pull/<n>/head`; `<n>` is in the `closed PR` log
+ *      line.
  *   5. Re-run without `RECORD=1` to confirm replay is byte-stable.
  *   6. Commit the refreshed fixtures + any llmock recordings under
  *      `test/fixtures/recorded/` that bear today's date.
@@ -69,7 +74,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
@@ -807,23 +812,21 @@ async function prebuildDaytonaPrereqs(): Promise<void> {
   const devbase = await bakedDevbaseImage();
   await ensureSnapshot(realSdk, "devbase", snapshotName, () => devbase);
 
-  // 1b. cogmo-skills snapshot — register's lockfile-compile sandbox uses
-  // this image. The default `:latest` tag is a ghcr.io pull, not a local
-  // build; Daytona stages it on first use.
+  // 1b. cogmo-skills snapshot, built from this tree's skills image as
+  // devbase's is: register's check session runs this commit's
+  // `cogmo_skills_runtime.check` and tools venv, which no published image
+  // carries yet. A tag naming the tree keeps an older active snapshot of the
+  // same name from standing in for it.
   const skillsImageRef = expectDefined(
-    process.env.COGMO_SKILLS_IMAGE ?? "ghcr.io/iskhakovt/cogmo-skills:latest",
+    process.env.COGMO_SKILLS_IMAGE,
+    "COGMO_SKILLS_IMAGE must be set in record mode (snapshot name + cogmo override key — registry doesn't need to exist)",
   );
-  // The default tag is `latest` which `snapshotNameFor` refuses. Fall back
-  // to passing the image directly to Daytona so it stages under its own
-  // generated name; cogmo's `ensureImagePresent` no-ops on `:latest`.
-  const skillsSnapshotName = snapshotNameFor(skillsImageRef);
-  if (skillsSnapshotName) {
-    await ensureSnapshot(realSdk, "cogmo-skills", skillsSnapshotName, () => skillsImageRef);
-  } else {
-    console.log(
-      `[skill-authoring e2e] cogmo-skills image ${skillsImageRef} is :latest — lazy-pull on first use`,
-    );
-  }
+  const skillsSnapshotName = expectDefined(
+    snapshotNameFor(skillsImageRef),
+    `snapshotNameFor(${skillsImageRef}) returned null — COGMO_SKILLS_IMAGE must include a non-latest tag`,
+  );
+  const skills = await bakedSkillsImage();
+  await ensureSnapshot(realSdk, "cogmo-skills", skillsSnapshotName, () => skills);
 
   // 2. Deps-cache volume — get-or-create then poll until ready. Register's
   // lockfile-compile sandbox attaches this volume; if it's still in
@@ -862,6 +865,27 @@ async function bakedDevbaseImage(): Promise<Image> {
     return Image.fromDockerfile(dockerfile);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The skills image as Daytona should build it, with bake's args written in as
+ * ARG defaults like devbase's. Its Dockerfile COPYs from `images/skills/`, and
+ * `fromDockerfile` takes the context from the Dockerfile's own directory, so
+ * the rendered file sits there until `fromDockerfile` has read it and listed
+ * the context it uploads at `snapshot.create`.
+ */
+async function bakedSkillsImage(): Promise<Image> {
+  const skills = await printBakeTarget("skills");
+  const rendered = join(dirname(skills.dockerfilePath), `.Dockerfile.daytona-${process.pid}`);
+  await writeFile(
+    rendered,
+    withArgDefaults(await readFile(skills.dockerfilePath, "utf8"), skills.args),
+  );
+  try {
+    return Image.fromDockerfile(rendered);
+  } finally {
+    await rm(rendered, { force: true });
   }
 }
 

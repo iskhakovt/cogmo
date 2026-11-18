@@ -22,6 +22,8 @@ function classifierLog(overrides: Partial<ClassifierLog> = {}): ClassifierLog {
     validation_errors: [],
     reasons: [],
     declared_network: null,
+    toolchain_version: null,
+    suppressions: [],
     ...overrides,
   };
 }

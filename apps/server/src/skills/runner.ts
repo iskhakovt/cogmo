@@ -4,11 +4,12 @@ import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
-import type { SandboxClient } from "../sandbox/index.js";
+import type { SandboxClient, SessionSandbox } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { describeError } from "../util/describe-error.js";
 import { importRoots } from "./ast-classifier.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
+import type { CpythonChecks } from "./cpython-checks.js";
 import type { DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   type DeregisterResult,
@@ -57,6 +58,7 @@ import type {
   SkillsMirrorStatus,
 } from "./store/index.js";
 import { wallClockSOf } from "./wall-clock.js";
+import { makeSandboxCpythonChecks } from "./worker-sysbox/check-session.js";
 import {
   type ContainerSchemaImporter,
   makeSandboxSchemaImporter,
@@ -118,7 +120,8 @@ export interface SkillRunner {
    * `origin` decides who a schedule the request puts live runs as.
    *
    * `signal` is checked at the start and just before the deploy transaction,
-   * and the lockfile compile honours it throughout. An abort seen by then
+   * and register's sandbox sessions (the lockfile compile, the install, the
+   * CPython checks, the schema import) honour it throughout. An abort seen by then
    * stops the deploy: `register` rejects with the signal's reason, leaving
    * main and the branch as they were. It is not a wall-clock cap: work that
    * takes no signal (local git, the classifier, PyPI lookups) runs to its end
@@ -252,10 +255,17 @@ export interface SkillRunnerOptions {
   };
   /**
    * Tests inject a container-tier schema importer that starts no session.
-   * Otherwise register imports container skills over `sandbox` when its
-   * backend creates sessions with no network.
+   * Otherwise register imports container skills over `registerSandbox` when
+   * its backend creates sessions with no network.
    */
   containerSchemaImporter?: ContainerSchemaImporter;
+  /** Tests inject CPython checks that start no session; otherwise they run over `registerSandbox`. */
+  cpythonChecks?: CpythonChecks;
+  /**
+   * The server's release version (`ReleaseToolchain.version`), which register
+   * compares the CPython checks' toolchain version against.
+   */
+  releaseVersion: string;
   /**
    * Sandbox handle for running container-tier (sysbox) skills. Optional —
    * deployments without `SANDBOX_RUNTIME` set leave it undefined; container
@@ -263,6 +273,15 @@ export interface SkillRunnerOptions {
    * Wasm-tier (Pyodide) skills work either way.
    */
   sandbox?: SandboxClient;
+  /**
+   * Where register's and approve's sessions run: the lockfile compile, the
+   * install, the CPython checks and the container schema import. `cogmo serve`
+   * passes its `sandbox`; `cogmo skills` passes its own client and no
+   * `sandbox`, so a container-tier run stays off it. Undefined when no
+   * backend is configured: register then skips the compile and the checks
+   * (design/skills.md → Register-time CPython checks → The CLI's sandbox).
+   */
+  registerSandbox?: SessionSandbox;
   /**
    * Image for container-tier skills. Defaults to the cogmo-skills image,
    * `COGMO_SKILLS_IMAGE`'s own default (`defaultSkillsImage()`).
@@ -298,10 +317,10 @@ export interface SkillRunnerOptions {
    * `requirements.lock`. Mismatch fails the deploy with a clear stale-
    * lockfile error.
    *
-   * Defaults to a {@link makeSandboxLockfileCompiler} backed by `sandbox`
-   * + `containerImage` when both are configured. When the deployment has no
-   * container sandbox (wasm-only deployments, or test paths that omit
-   * `sandbox`), the field is undefined and the runner downgrades to
+   * Defaults to a {@link makeSandboxLockfileCompiler} backed by
+   * `registerSandbox` + `containerImage`. When the deployment has no
+   * sandbox (wasm-only deployments, or test paths that omit
+   * `registerSandbox`), the field is undefined and the runner downgrades to
    * "presence + hash only" — lockfile must exist and parse, but the
    * resolver isn't re-run. Set explicitly in tests to swap a stub.
    */
@@ -332,17 +351,20 @@ export class SkillRunnerImpl implements SkillRunner {
 
   private constructor(opts: SkillRunnerOptions) {
     const containerImage = opts.containerImage ?? DEFAULT_CONTAINER_IMAGE;
+    // Both are the same backend's: `cogmo serve` passes one client as both,
+    // and `cogmo skills` only the register's.
+    const backend = opts.sandbox ?? opts.registerSandbox;
     // A shared deps-cache volume only makes sense when the sandbox
     // backend can honour uv's POSIX assumptions (hardlinks, atomic
     // rename, O_RDWR). Backends that advertise `per-sandbox` use
     // container-local /skill-venvs and pay a cold populate per worker;
     // omit the volume name regardless of what wiring passed in.
-    const sandboxIncompatible = opts.sandbox?.capabilities.depsCacheSharing === "per-sandbox";
+    const sandboxIncompatible = backend?.capabilities.depsCacheSharing === "per-sandbox";
     const depsCacheVolumeName = sandboxIncompatible ? undefined : opts.depsCacheVolumeName;
     if (sandboxIncompatible && opts.depsCacheVolumeName !== undefined) {
       log.warn(
         {
-          backend: opts.sandbox?.backendId,
+          backend: backend?.backendId,
           depsCacheVolumeName: opts.depsCacheVolumeName,
         },
         "ignoring depsCacheVolumeName — backend advertises depsCacheSharing: 'per-sandbox' (each sandbox uses ephemeral /skill-venvs)",
@@ -417,11 +439,21 @@ export class SkillRunnerImpl implements SkillRunner {
         ...(signal && { signal }),
       });
     };
+    const registerSandbox = opts.registerSandbox;
     const containerImporter =
       opts.containerSchemaImporter ??
-      (opts.sandbox?.capabilities.noNetworkSessions
+      (registerSandbox?.capabilities.noNetworkSessions
         ? makeSandboxSchemaImporter({
-            sandbox: opts.sandbox,
+            sandbox: registerSandbox,
+            image: containerImage,
+            depsCacheVolumeName,
+          })
+        : undefined);
+    const cpythonChecks =
+      opts.cpythonChecks ??
+      (registerSandbox
+        ? makeSandboxCpythonChecks({
+            sandbox: registerSandbox,
             image: containerImage,
             depsCacheVolumeName,
           })
@@ -451,18 +483,20 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
+      cpythonChecks,
+      releaseVersion: opts.releaseVersion,
       containerSchemas,
       wasm: { fetchImpl, probe, fillBuiltins, packageCacheDir, importSchemas },
       skillsRepo,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed
-      // compiler when the runtime has both a sandbox and a container image
-      // (the cogmo-skills image carries `uv`). Wasm-only deployments
-      // fall through to undefined → presence + hash check only.
+      // compiler when register has a sandbox (the cogmo-skills image carries
+      // `uv`). Wasm-only deployments fall through to undefined → presence +
+      // hash check only.
       lockfileCompiler:
         opts.lockfileCompiler ??
-        (opts.sandbox
-          ? makeSandboxLockfileCompiler({ sandbox: opts.sandbox, image: containerImage })
+        (registerSandbox
+          ? makeSandboxLockfileCompiler({ sandbox: registerSandbox, image: containerImage })
           : undefined),
       // The first occurrence of the manifest's `schedule` after the current
       // clock tick, in `userTimezone`.

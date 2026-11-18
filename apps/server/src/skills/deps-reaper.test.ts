@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
 import { expectDefined } from "../test/assertions.js";
+import { PYTHON_ABI_TAG_COMMAND } from "./deps.js";
 import { reapSkillVenvs } from "./deps-reaper.js";
 
 interface FakeExec {
@@ -273,7 +274,7 @@ describe("reapSkillVenvs", () => {
 
     const [argv] = expectDefined(vi.mocked(h.session.execStreaming).mock.calls[0], "reap exec");
     const script = expectDefined(argv[2], "reap script");
-    expect(/^PY_ABI=\$\((.*)\)$/m.exec(script)?.[1]).toBe("python3 -I -m cogmo_skills_runtime.abi");
+    expect(/^PY_ABI=\$\((.*)\)$/m.exec(script)?.[1]).toBe(PYTHON_ABI_TAG_COMMAND);
   });
 
   it("runs from / with uv's config discovery off, as the populate script does", async () => {

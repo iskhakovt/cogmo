@@ -135,9 +135,14 @@ describe("renderToolchainPyproject", () => {
     expect(rendered).toContain("[tool.uv.pip]\npython-version");
     expect(rendered).toContain("generate-hashes = true\nno-header = true");
     expect(rendered).toContain("package = false");
-    expect(rendered).toContain('select = ["E", "F", "B", "BLE", "S", "ASYNC"]');
+    expect(rendered).toContain('select = ["E", "F", "B", "BLE", "S", "ASYNC", "PGH004"]');
     expect(rendered).toContain('[tool.pyrefly]\nsearch-path = [".cogmo"]');
     expect(rendered).toContain('pythonpath = [".cogmo"]\nasyncio_mode = "auto"');
+  });
+
+  it("has ruff refuse a noqa that names no rule, and pyrefly honor only its own pragmas", () => {
+    expect(rendered).toMatch(/^select = \[.*"PGH004".*\]$/m);
+    expect(rendered).toContain('enabled-ignores = ["pyrefly"]');
   });
 });
 
@@ -150,8 +155,20 @@ describe("renderToolchainClaudeMd", () => {
 
   it("names the check that must pass, and the base it reads", () => {
     expect(rendered).toContain(
-      "## Checks\n\n`uv run --locked --group dev .cogmo/verify` runs ruff, pyrefly and pytest over each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from. It must pass before the work is done.\n",
+      "## Checks\n\n`uv run --locked --group dev .cogmo/verify` runs ruff, pyrefly and pytest over each skill changed since `COGMO_VERIFY_BASE`, the commit the branch was cut from, and refuses the suppressions register refuses. It must pass before the work is done.\n",
     );
+  });
+
+  it("states the suppression rule, with the cap the toolchain's rule applies", () => {
+    const rule = readFileSync(
+      join(repoRoot(), "images/skills/toolchain/.cogmo/suppressions.py"),
+      "utf8",
+    );
+    const cap = /^MAX_SUPPRESSIONS = (\d+)$/m.exec(rule)?.[1];
+    expect(cap).toBeDefined();
+    expect(rendered).toContain(`and more than ${cap} in a file`);
+    expect(rendered).toContain("`# noqa: <code>` or `# ruff: ignore[<code>]` for ruff");
+    expect(rendered).toContain("pyrefly ignores `# type: ignore`");
   });
 
   it("names every frontmatter field and every effect", () => {

@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from .pragma_cases import PRAGMAS, REFUSED, SKILL
+
 _IMAGE = Path(__file__).parent.parent
 _UNTRACKED = shutil.ignore_patterns("__pycache__", "*.py[co]", ".venv", ".ruff_cache", ".pytest_cache")
 
@@ -21,28 +23,6 @@ pytestmark = pytest.mark.skipif(
     shutil.which("git") is None or not (_IMAGE / "toolchain").is_dir(),
     reason="needs git and images/skills/toolchain/",
 )
-
-_SKILL = """\
-from pydantic import BaseModel
-
-from cogmo_ctx import Ctx
-
-
-class Input(BaseModel):
-    text: str
-
-
-class Output(BaseModel):
-    text: str
-
-
-def shout(text: str) -> str:
-    return text.upper()
-
-
-async def run(inputs: Input, ctx: Ctx) -> Output:
-    return Output(text=shout(inputs.text))
-"""
 
 _PASSING_TEST = """\
 from skill import Input, shout
@@ -125,7 +105,7 @@ def test_it_passes_when_no_skill_changed(repo: Path) -> None:
 
 def test_it_passes_a_new_skill_and_writes_no_bytecode(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
-    _write_skill(repo, "echo", _SKILL, _PASSING_TEST)
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
     result = _verify(repo, base)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "echo passed" in result.stdout
@@ -142,7 +122,7 @@ def test_it_checks_a_skill_against_the_repos_cogmo_ctx(
     (decoy / "__init__.py").write_text('raise ImportError("a cogmo_ctx outside the repo\'s .cogmo/")\n')
     monkeypatch.setenv("PYTHONPATH", str(decoy.parent))
     base = _git(repo, "rev-parse", "HEAD")
-    _write_skill(repo, "echo", _SKILL, _PASSING_TEST)
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
     result = _verify(repo, base)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "echo passed" in result.stdout
@@ -150,7 +130,7 @@ def test_it_checks_a_skill_against_the_repos_cogmo_ctx(
 
 def test_it_fails_a_skill_whose_test_fails(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
-    _write_skill(repo, "echo", _SKILL, _FAILING_TEST)
+    _write_skill(repo, "echo", SKILL, _FAILING_TEST)
     result = _verify(repo, base)
     assert result.returncode == 1
     assert "echo failed pytest" in result.stderr
@@ -159,7 +139,7 @@ def test_it_fails_a_skill_whose_test_fails(repo: Path) -> None:
 def test_it_fails_a_skill_with_a_ruff_finding(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
     # BLE001 and S110: an exception swallowed into success.
-    swallowing = _SKILL.replace(
+    swallowing = SKILL.replace(
         "    return text.upper()",
         "    try:\n        return text.upper()\n    except Exception:\n        pass\n    return text",
     )
@@ -171,8 +151,8 @@ def test_it_fails_a_skill_with_a_ruff_finding(repo: Path) -> None:
 
 
 def test_it_checks_a_tracked_change_and_skips_unchanged_skills(repo: Path) -> None:
-    _write_skill(repo, "stale", _SKILL, _FAILING_TEST)
-    _write_skill(repo, "echo", _SKILL, _PASSING_TEST)
+    _write_skill(repo, "stale", SKILL, _FAILING_TEST)
+    _write_skill(repo, "echo", SKILL, _PASSING_TEST)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "skills")
     base = _git(repo, "rev-parse", "HEAD")
@@ -181,3 +161,23 @@ def test_it_checks_a_tracked_change_and_skips_unchanged_skills(repo: Path) -> No
     assert result.returncode == 1
     assert "echo failed pytest" in result.stderr
     assert "stale" not in result.stdout + result.stderr
+
+
+def test_it_fails_a_skill_file_the_suppression_rule_cannot_read(repo: Path) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_skill(repo, "echo", SKILL, 'x = """unterminated\n')
+    result = _verify(repo, base)
+    assert result.returncode == 1
+    assert "echo failed suppressions" in result.stderr
+    assert "skills/echo/test_skill.py: the suppression rule cannot read it: " in result.stdout
+
+
+def test_it_refuses_the_pragmas_the_shared_table_refuses(repo: Path) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    for name, (body, _) in PRAGMAS.items():
+        _write_skill(repo, name, body, _PASSING_TEST)
+
+    result = _verify(repo, base)
+
+    failed = {line.split()[1] for line in result.stderr.splitlines() if " failed " in line}
+    assert failed == REFUSED, result.stdout + result.stderr

@@ -536,6 +536,8 @@ function classify(
     reasons,
     declared_network: manifest.network?.allow ?? null,
     capabilities: { ...capabilities },
+    toolchain_version: null,
+    suppressions: [],
   };
 }
 
@@ -571,5 +573,7 @@ function classifyFromDeclarationsOnly(
     reasons,
     declared_network: manifest.network?.allow ?? null,
     capabilities: { ...capabilities },
+    toolchain_version: null,
+    suppressions: [],
   };
 }

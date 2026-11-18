@@ -5,8 +5,9 @@ Run from the skills repo as `uv run --locked --group dev .cogmo/verify`.
 `COGMO_VERIFY_BASE` names the commit the branch was cut from. A skill is
 checked when a path under `skills/<name>/` differs from that commit in the
 working tree: tracked, or untracked and not ignored. Each is checked with
-ruff, then pyrefly with the skill's directory on its search path, then
-pytest of its `test_skill.py`; pyrefly and pytest run with the skill's
+the suppression rule register applies (`.cogmo/suppressions.py`), ruff,
+then pyrefly with the skill's directory on its search path, then pytest
+of its `test_skill.py`; pyrefly and pytest run with the skill's
 `requirements.lock` installed when it has one. Exits 0 when every check
 passes or no skill changed, 1 when a check fails, 2 when the base is
 missing or unknown.
@@ -17,6 +18,7 @@ Part of Cogmo's toolchain, which Cogmo replaces on each release.
 import os
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -65,9 +67,34 @@ def with_requirements(skill: Path, command: list[str]) -> list[str]:
     return command
 
 
+def refused_pragmas(skill: Path) -> list[str]:
+    """Each pragma the suppression rule refuses in the skill's Python files, as `path:line:column: message`."""
+    # The rule register applies, beside this script; importing it writes no bytecode into the repo.
+    sys.dont_write_bytecode = True
+    from suppressions import scan
+
+    refused = []
+    for path in sorted((ROOT / skill).glob("*.py")):
+        relative = path.relative_to(ROOT)
+        try:
+            scanned = scan(path.read_text(encoding="utf-8"))
+        except (SyntaxError, tokenize.TokenError, UnicodeDecodeError) as e:
+            refused.append(f"{relative}: the suppression rule cannot read it: {e}")
+            continue
+        refused.extend(f"{relative}:{r.line}:{r.column}: {r.message}" for r in scanned.refusals)
+    return refused
+
+
 def check(name: str) -> list[str]:
     """Run each check on skill `name`, returning the ones that failed."""
     skill = Path(SKILLS_DIR) / name
+    failed = []
+    print(f"verify: {name}: suppressions", flush=True)
+    refused = refused_pragmas(skill)
+    for line in refused:
+        print(line, flush=True)
+    if refused:
+        failed.append("suppressions")
     checks = [
         ("ruff", ["ruff", "check", str(skill)]),
         (
@@ -78,7 +105,6 @@ def check(name: str) -> list[str]:
         # dependencies; the `pytest` script runs the project's alone.
         ("pytest", with_requirements(skill, ["python", "-m", "pytest", "-q", str(skill / "test_skill.py")])),
     ]
-    failed = []
     for label, command in checks:
         print(f"verify: {name}: {label}", flush=True)
         if subprocess.run(command, cwd=ROOT, check=False).returncode != 0:

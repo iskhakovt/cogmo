@@ -169,6 +169,9 @@ target "_skills-build" {
   args = {
     UV_VERSION = "${UV_VERSION}"
     UV_DIGEST  = "${UV_DIGEST}"
+    // The release the image's toolchain belongs to, which register's CPython
+    // checks report (design/skills.md → Register-time CPython checks).
+    VERSION = "${VERSION}"
   }
 }
 

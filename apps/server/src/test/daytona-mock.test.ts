@@ -959,6 +959,36 @@ describe("DaytonaMock", () => {
       expect(text).toContain("gho_REDACTED");
       expect(text).toContain("sk-REDACTED");
     });
+
+    it("redacts a token on its own line of a text body, as a multipart upload carries it", async () => {
+      // Serialized, the newline before the token is the escape `\n`, so a
+      // word boundary ahead of the token's prefix never matches there.
+      const githubToken = "gho_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+      const upstream = await startStubUpstream(() => ({ status: 200, bodyJson: { ok: true } }));
+      const fixturePath = join(fixtureDir, "record-redacts-multipart-token.json");
+      const mock = await DaytonaMock.create({
+        mode: "record",
+        fixturePath,
+        upstreamUrl: upstream.url,
+        upstreamApiKey: "sk-real-secret",
+      });
+      try {
+        mock.beginScenario("redacts-multipart-token");
+        await fetch(`${mock.url}/sandbox/x`, {
+          method: "POST",
+          headers: { "content-type": "multipart/form-data; boundary=b" },
+          body: `--b\r\nContent-Disposition: form-data; name="files[1].file"; filename="pat"\r\n\r\n${githubToken}\r\n--b--\r\n`,
+        });
+        await mock.endScenario();
+      } finally {
+        await mock.stop();
+        await upstream.stop();
+      }
+
+      const text = readFileSync(fixturePath, "utf8");
+      expect(text).not.toContain(githubToken);
+      expect(text).toContain("gho_REDACTED");
+    });
   });
 });
 

@@ -18,7 +18,8 @@ Owns the supervisor + runner for container-tier skills — see `design/skills.md
   spawns this via `python3 -I -u -m cogmo_skills_runtime`.
 - `src/cogmo_skills_runtime/abi.py` — the `py<major>.<minor>` tag that
   names skill venvs. The supervisor calls it; the host's populate and
-  reap scripts run `python3 -I -m cogmo_skills_runtime.abi`.
+  reap scripts run it with the runtime interpreter,
+  `/opt/cogmo-skills/.venv/bin/python3 -I -m cogmo_skills_runtime.abi`.
 - `src/cogmo_ctx/` — the `ctx` a skill receives, with `CtxError`,
   `SkillError` and the `Bridge` protocol. Pure Python: the runner's relay
   pipe is its container-tier bridge, and Cogmo's wasm child embeds the

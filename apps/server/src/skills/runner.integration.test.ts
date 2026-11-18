@@ -90,6 +90,7 @@ afterAll(async () => {
 
 async function makeRunner() {
   return SkillRunnerImpl.create({
+    releaseVersion: "dev",
     store,
     runInTx: tx,
     secretsStore,

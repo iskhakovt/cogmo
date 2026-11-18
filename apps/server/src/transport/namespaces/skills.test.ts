@@ -406,6 +406,8 @@ function makeDeployRow(overrides: Partial<SkillDeployRow> = {}): SkillDeployRow 
       validation_errors: [],
       reasons: [],
       declared_network: null,
+      toolchain_version: null,
+      suppressions: [],
     },
     schemas: { inputs: { type: "object", properties: {} }, outputs: null },
     createdAt: new Date("2026-05-01T00:00:00Z"),

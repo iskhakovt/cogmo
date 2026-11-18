@@ -50,6 +50,8 @@ function pendingDeploy(overrides: Partial<SkillDeployRow> = {}): SkillDeployRow 
       validation_errors: [],
       reasons: ["approve_gating_effect"],
       declared_network: null,
+      toolchain_version: null,
+      suppressions: [],
     },
     schemas: { inputs: { type: "object", properties: {} }, outputs: null },
     createdAt: new Date("2026-11-02T00:00:00Z"),

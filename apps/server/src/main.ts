@@ -123,17 +123,28 @@ async function loadModelDeps(): Promise<ModelCliDeps> {
 
 async function loadSkillsDeps(): Promise<SkillsCliDeps> {
   const { resolveSkillRunAs } = await import("./skills/run-as.js");
-  const { bootstrapCore, bootstrapSkillRunner, NO_SANDBOX } = await import("./index.js");
-  // Without the sandbox, container skill execution throws at call time; wasm
-  // skills and every admin subcommand run.
+  const { bootstrapCliSandbox, bootstrapCore, bootstrapSkillRunner } = await import("./index.js");
+  const { createSandboxBackend } = await import("./sandbox/factory.js");
+  const { env } = await import("./env.js");
   const core = await bootstrapCore();
-  // A CLI process leaves wasm children alone: they may be the serve's.
-  const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX, {
-    reapWasmChildren: false,
+  // Register's and approve's sessions run in the CLI's own client; container
+  // skill execution stays off it and throws at call time, while wasm skills
+  // and every admin subcommand run.
+  const cliSandbox = await bootstrapCliSandbox(core, {
+    config: env,
+    createBackend: createSandboxBackend,
+    signals: process,
   });
+  // A CLI process leaves wasm children alone: they may be the serve's.
+  const { skillRunner } = await bootstrapSkillRunner(
+    core,
+    { invoke: null, register: cliSandbox.sandbox },
+    { reapWasmChildren: false },
+  );
   return {
     runner: skillRunner,
     ownerRunAs: () => resolveSkillRunAs(core, { userId: core.user.id, profileId: core.profile.id }),
+    close: cliSandbox.close,
   };
 }
 
