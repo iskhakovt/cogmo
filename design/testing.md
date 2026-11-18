@@ -118,7 +118,7 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 2. The agent calls `delegate_coding` against the auto-registered `skills` repo. The profile's `codingAutoapproveMode` is `on`, so the plan gate clears without a human tap.
 3. The task runs in a Daytona sandbox on `cogmo-devbase:<v>` through `DaytonaMock`: plan and execute drive the in-sandbox `claude` CLI over the production PTY path, then verify, push and PR open. The task ends `pr_open`.
 4. `coding/task/pr-opened` triggers `coding-auto-register-skill`, which fetches the PR head branch into the bare skills repo and registers it. The skill is stdlib-only `tier: wasm`, so register compiles no lockfile.
-5. Turn 2 ("What's bitcoin at?") lists the `btc-spot` tool and calls it; the skill runs in the wasm-tier Pyodide worker.
+5. Turn 2 ("What's bitcoin at? Use the btc-spot skill.") lists the `btc-spot` tool and calls it, named so the turn tests that the new tool runs, not which of it and `web_answer` the model prefers; the skill runs in the wasm-tier Pyodide worker.
 6. The reply goes out as `adapter/direct/outbound`.
 
 **What's asserted vs what's input noise.** The LLM is input noise; assertions pin the deterministic contract.
