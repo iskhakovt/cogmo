@@ -781,7 +781,14 @@ describe("coding-task-execute — a skills-repo fix pass", () => {
         tokens_input: 31_000,
         tokens_output: 5_200,
         cost_usd: 0.75,
+        counted_fix_pass: fixPass,
       });
+      expect(store.addTaskResourceUsage).toHaveBeenCalledWith(
+        expect.anything(),
+        FIXTURE_TASK_ID,
+        { tokens_input: 1_000, tokens_output: 200, cost_usd: 0.25 },
+        fixPass,
+      );
       expect(backend.executeCalls()).toBe(0);
       expect(backend.fixCalls()).toEqual([{ findings: FINDINGS, tokenBudgetLeft: 65_000 }]);
       // A live sandbox is never resumed: the fix pass creates its own.

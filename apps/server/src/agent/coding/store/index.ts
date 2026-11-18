@@ -7,6 +7,7 @@ import {
   getTableColumns,
   inArray,
   isNull,
+  lt,
   ne,
   notInArray,
   or,
@@ -360,8 +361,18 @@ export interface CodingStore {
    */
   setTaskResourceUsage(tx: Transaction, id: string, patch: Partial<ResourceUsage>): Promise<void>;
 
-  /** Adds `usage` to the row's `resource_usage` counters in one UPDATE, a missing counter read as 0. */
-  addTaskResourceUsage(tx: Transaction, id: string, usage: SessionUsage): Promise<void>;
+  /**
+   * Adds fix pass `fixPass`'s session `usage` to the row's `resource_usage`
+   * counters in one UPDATE, a missing counter read as 0, and records the
+   * pass in `counted_fix_pass`. `already_counted`: the counters include this
+   * pass or a later one, and nothing is written.
+   */
+  addTaskResourceUsage(
+    tx: Transaction,
+    id: string,
+    usage: SessionUsage,
+    fixPass: number,
+  ): Promise<{ kind: "added" } | { kind: "already_counted" }>;
 
   /**
    * Stamp `resource_usage.sandbox.deleted_at` to `deletedAt` via
@@ -774,18 +785,38 @@ export class DrizzleCodingStore implements CodingStore {
       .where(eq(codingTasks.id, id));
   }
 
-  async addTaskResourceUsage(tx: Transaction, id: string, usage: SessionUsage): Promise<void> {
+  async addTaskResourceUsage(
+    tx: Transaction,
+    id: string,
+    usage: SessionUsage,
+    fixPass: number,
+  ): Promise<{ kind: "added" } | { kind: "already_counted" }> {
+    // Validated here: the raw-SQL merge below bypasses the `jsonbZod`
+    // toDriver path that would otherwise run validation.
     const added = JSON.stringify(SessionUsageSchema.parse(usage));
-    // Each key of `added` summed with the row's; the aggregate is null for an empty patch.
-    await tx
+    const marker = JSON.stringify(
+      ResourceUsageSchema.pick({ counted_fix_pass: true }).parse({ counted_fix_pass: fixPass }),
+    );
+    const usageJson = codingTasks.resourceUsage;
+    const updated = await tx
       .update(codingTasks)
       .set({
-        resourceUsage: sql`COALESCE(${codingTasks.resourceUsage}, '{}'::jsonb) || COALESCE((
-          SELECT jsonb_object_agg(key, COALESCE((${codingTasks.resourceUsage}->key)::numeric, 0) + value::numeric)
+        // Each key of `added` summed with the row's (the aggregate is null
+        // for an empty patch), then the pass recorded.
+        resourceUsage: sql`COALESCE(${usageJson}, '{}'::jsonb) || COALESCE((
+          SELECT jsonb_object_agg(key, COALESCE((${usageJson}->key)::numeric, 0) + value::numeric)
           FROM jsonb_each(${added}::jsonb)
-        ), '{}'::jsonb)`,
+        ), '{}'::jsonb) || ${marker}::jsonb`,
       })
-      .where(eq(codingTasks.id, id));
+      .where(
+        and(
+          eq(codingTasks.id, id),
+          // A JSONB path, which the typed API does not reach.
+          lt(sql`COALESCE((${usageJson}->>'counted_fix_pass')::int, 0)`, fixPass),
+        ),
+      )
+      .returning({ id: codingTasks.id });
+    return updated.length > 0 ? { kind: "added" } : { kind: "already_counted" };
   }
 
   async setTaskSandboxDeletedAt(tx: Transaction, id: string, deletedAt: string): Promise<void> {

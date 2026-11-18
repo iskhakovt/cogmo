@@ -196,6 +196,11 @@ export const ResourceUsageSchema = z
      */
     cost_usd: z.number().nonnegative().optional(),
     /**
+     * The latest skills-repo fix pass whose session the three counters above
+     * include, so `addTaskResourceUsage` counts each pass once.
+     */
+    counted_fix_pass: z.number().int().positive().optional(),
+    /**
      * Execute-phase sandbox lifecycle. Captured Cogmo-side, so it works
      * uniformly across backends without depending on per-sandbox usage
      * APIs we don't have. `backend` mirrors `SandboxClient.backendId`
@@ -227,7 +232,10 @@ export const SessionUsageSchema = ResourceUsageSchema.pick({
   tokens_output: true,
   cost_usd: true,
 });
-export type SessionUsage = z.infer<typeof SessionUsageSchema>;
+
+/** `T`, which compiles only while every key is a number: `addTaskResourceUsage` sums them as `numeric`. */
+type NumericCounters<T extends Partial<Record<keyof T, number | undefined>>> = T;
+export type SessionUsage = NumericCounters<z.infer<typeof SessionUsageSchema>>;
 
 /**
  * Why a task ended at `failed` or `cancelled`, as `coding_tasks.failure_reason`

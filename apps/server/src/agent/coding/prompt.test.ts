@@ -111,6 +111,15 @@ describe("buildFixPrompt", () => {
     expect(out).toContain(ENTRYPOINT_RULE);
   });
 
+  it("fences the findings one backtick longer than the longest run inside them", () => {
+    const fenced = { ...fix, findings: ["skill.py:3: ````python is not closed", "a `x` b ```"] };
+    const out = buildFixPrompt(planned(), repo(), fenced);
+    expect(out).toContain(`\`\`\`\`\`\n${fenced.findings.join("\n")}\n\`\`\`\`\`\n`);
+    expect(buildFixPrompt(planned(), repo(), { ...fix, findings: ["a `x` b"] })).toContain(
+      "```\na `x` b\n```\n",
+    );
+  });
+
   it("names the token budget left", () => {
     expect(buildFixPrompt(planned(), repo(), fix)).toContain("About 42000 tokens");
   });

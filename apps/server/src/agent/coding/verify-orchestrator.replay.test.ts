@@ -579,6 +579,29 @@ describe("coding-task-verify — Inngest replay", () => {
       },
     );
 
+    it("a reap that fails inside `teardown-before-fix` is swallowed, and the hand-back still emits", async () => {
+      const h = skillsSetup(atPass(0));
+      vi.mocked(h.sandbox.sandbox.deleteByTaskId).mockRejectedValue(new Error("daytona 503"));
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        transformCtx: pinRunId,
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "pending_fix" });
+      expect(h.store.current()).toMatchObject({ status: "pending_fix", presubmitFixPasses: 1 });
+      expect(emittedEventNames(sendSpy)).toEqual([
+        "coding/task/verify-complete",
+        "coding/task/presubmit-refused",
+      ]);
+      // The step's reap alone: the `finally` does not sweep again.
+      expect(h.sandbox.sandbox.deleteByTaskId).toHaveBeenCalledTimes(1);
+      expect(existsSync(h.askpassDir)).toBe(false);
+    });
+
     it("a refusal with no pass left fails the task presubmit_refused with its findings", async () => {
       const h = skillsSetup(atPass(2));
       const fn = createCodingVerifyOrchestrator(h.deps, inngest);
@@ -867,9 +890,9 @@ describe("coding-task-verify — Inngest replay", () => {
 
     it("a run that memoized a refusal past `transition-pushed` reads `stale` at `pushed` as passed and opens the PR", async () => {
       // A slice-1 run across the deploy: its pre-submit proceeded on a
-      // refusal. `transition-presubmit-failed` is new to it, finds the row at
-      // `pushed`, which only the run's own `transition-pushed` writes, and the
-      // run carries on through its memoized steps.
+      // refusal at pass 0. `transition-pending-fix` is new to it, finds the
+      // row at `pushed`, which only the run's own `transition-pushed` writes,
+      // and the run carries on through its memoized steps.
       const h = skillsSetup(verifiableTask({ status: "pushed" }));
       const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 

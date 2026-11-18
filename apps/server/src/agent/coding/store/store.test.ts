@@ -1870,7 +1870,12 @@ describe("DrizzleCodingStore", () => {
       );
 
       await tx((trx) =>
-        store.addTaskResourceUsage(trx, id, { tokens_input: 40, tokens_output: 7, cost_usd: 0.1 }),
+        store.addTaskResourceUsage(
+          trx,
+          id,
+          { tokens_input: 40, tokens_output: 7, cost_usd: 0.1 },
+          1,
+        ),
       );
 
       expect(await usageOf(id)).toEqual({
@@ -1878,30 +1883,60 @@ describe("DrizzleCodingStore", () => {
         tokens_output: 27,
         cost_usd: 0.15,
         memory_bytes: { managed: 1, user: 2, project: 3 },
+        counted_fix_pass: 1,
       });
     });
 
     it("reads a null column, or a missing counter, as 0", async () => {
       const id = await seedPlanning();
-      await tx((trx) => store.addTaskResourceUsage(trx, id, { tokens_output: 5 }));
-      await tx((trx) => store.addTaskResourceUsage(trx, id, { tokens_input: 3, tokens_output: 5 }));
+      await tx((trx) => store.addTaskResourceUsage(trx, id, { tokens_output: 5 }, 1));
+      await tx((trx) =>
+        store.addTaskResourceUsage(trx, id, { tokens_input: 3, tokens_output: 5 }, 2),
+      );
 
-      expect(await usageOf(id)).toEqual({ tokens_input: 3, tokens_output: 10 });
+      expect(await usageOf(id)).toEqual({
+        tokens_input: 3,
+        tokens_output: 10,
+        counted_fix_pass: 2,
+      });
     });
 
     it("leaves the counters as they are for an empty patch", async () => {
       const id = await seedPlanning();
       await tx((trx) => store.setTaskResourceUsage(trx, id, { tokens_input: 3 }));
-      await tx((trx) => store.addTaskResourceUsage(trx, id, {}));
+      await tx((trx) => store.addTaskResourceUsage(trx, id, {}, 1));
 
-      expect(await usageOf(id)).toEqual({ tokens_input: 3 });
+      expect(await usageOf(id)).toEqual({ tokens_input: 3, counted_fix_pass: 1 });
+    });
+
+    it("adds a pass's usage once: a second add for the same pass changes nothing, a later pass adds", async () => {
+      const id = await seedPlanning();
+      await tx((trx) => store.setTaskResourceUsage(trx, id, { tokens_input: 100, cost_usd: 0.5 }));
+      const pass1 = { tokens_input: 40, cost_usd: 0.25 };
+
+      await tx((trx) => store.addTaskResourceUsage(trx, id, pass1, 1));
+      expect(await tx((trx) => store.addTaskResourceUsage(trx, id, pass1, 1))).toEqual({
+        kind: "already_counted",
+      });
+      expect(await usageOf(id)).toMatchObject({ tokens_input: 140, cost_usd: 0.75 });
+
+      expect(
+        await tx((trx) => store.addTaskResourceUsage(trx, id, { tokens_input: 2 }, 2)),
+      ).toEqual({
+        kind: "added",
+      });
+      expect(await usageOf(id)).toMatchObject({
+        tokens_input: 142,
+        cost_usd: 0.75,
+        counted_fix_pass: 2,
+      });
     });
 
     it("rejects a counter outside the session's", async () => {
       const id = await seedPlanning();
       await expect(
         // @ts-expect-error: intentionally invalid input — verifies runtime Zod rejection
-        tx((trx) => store.addTaskResourceUsage(trx, id, { cpu_seconds: 1 })),
+        tx((trx) => store.addTaskResourceUsage(trx, id, { cpu_seconds: 1 }, 1)),
       ).rejects.toThrow();
     });
   });

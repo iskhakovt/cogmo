@@ -209,8 +209,9 @@ export function statefulCodingStore(
     // The real store merges into the existing blob rather than replacing it.
     task = { ...task, resourceUsage: { ...(task.resourceUsage ?? {}), ...usage } };
   });
-  store.addTaskResourceUsage.mockImplementation(async (_tx, _id, usage) => {
+  store.addTaskResourceUsage.mockImplementation(async (_tx, _id, usage, fixPass) => {
     const prior = task.resourceUsage ?? {};
+    if ((prior.counted_fix_pass ?? 0) >= fixPass) return { kind: "already_counted" };
     const sum = (key: keyof typeof usage) => {
       const added = usage[key];
       return added === undefined ? {} : { [key]: (prior[key] ?? 0) + added };
@@ -222,8 +223,10 @@ export function statefulCodingStore(
         ...sum("tokens_input"),
         ...sum("tokens_output"),
         ...sum("cost_usd"),
+        counted_fix_pass: fixPass,
       },
     };
+    return { kind: "added" };
   });
   store.setTaskSandboxDeletedAt.mockImplementation(async (_tx, _id, deletedAt) => {
     // Real store gates on a sandbox block existing AND `deleted_at` being

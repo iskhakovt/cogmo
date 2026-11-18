@@ -106,6 +106,12 @@ const SKILLS_REPO_CONVENTION = [
   "```",
 ].join("\n");
 
+/** A code fence no finding can close: one backtick longer than the longest run in them, at least 3. */
+function findingsFence(findings: readonly string[]): string {
+  const runs = findings.flatMap((f) => Array.from(f.matchAll(/`+/g), ([run]) => run.length));
+  return "`".repeat(Math.max(3, ...runs.map((length) => length + 1)));
+}
+
 function repoConvention(repo: CodingRepoRow): string {
   if (repo.name === SKILLS_CODING_REPO_NAME) return `\n${SKILLS_REPO_CONVENTION}\n`;
   return "";
@@ -193,9 +199,9 @@ export function buildFixPrompt(task: CodingTaskRow, repo: CodingRepoRow, fix: Fi
     "# Register refused the branch",
     `The branch ${task.worktreeAssignment.branch} already holds the work for this plan, and is`,
     "checked out in /workspace. Registration's checks refused its tip with these findings:",
-    "```",
+    findingsFence(fix.findings),
     ...fix.findings,
-    "```",
+    findingsFence(fix.findings),
     "",
     "# What to do",
     "- Change only what the findings name, inside the skill's directory.",
