@@ -205,11 +205,11 @@ CREATE TYPE coding_task_status AS ENUM (
 CREATE TYPE coding_task_failure_reason AS ENUM (
   'cli_exit_error', 'no_plan_produced', 'claude_auth_failed',
   'push_failed', 'branch_conflict', 'auth_failed',
-  'verify_failed', 'verify_timed_out',
+  'verify_failed', 'verify_timed_out', 'presubmit_refused', 'presubmit_stale_base',
   'pr_auth_failed', 'pr_validation_failed', 'pr_open_failed',
   'credentials_unavailable', 'run_terminated', 'start_emit_failed', 'unexpected_error',
   'user_cancelled', 'user_requested_revisions', 'unknown'
-);  -- [proposed] + 'presubmit_refused', 'presubmit_stale_base' (Skills-repo pre-submit)
+);
 
 coding_tasks (
   id                      UUID v7 PK,
@@ -338,8 +338,8 @@ The per-state data stays in columns rather than one JSONB blob per state: the re
 | `start_emit_failed` | `delegate`, `failQueuedTask` | the send error |
 | `unexpected_error` | every orchestrator's catch, `failTaskFromCatch`; migration 0080's backfill, for any other text on a `failed` row (the catch's free text) | `describeError(err)`: a thrown step (`StepError`), the CLI exec hitting its cap (`exec.wait()` throws the timed-out `ExecError` out of `plan-cli` / `execute-cli`), a `23514` from a write the CHECKs refuse |
 | `user_cancelled`, `user_requested_revisions` | the plan keyboard, `cancelTaskIfActive` | null |
-| `presubmit_refused` `[proposed]` | verify's `transition-presubmit-failed`, on a `refused` pre-submit verdict with no fix pass left, or a repeated one, keyed to an earlier pass | the findings, at most 8 KiB |
-| `presubmit_stale_base` `[proposed]` | verify's `transition-presubmit-failed`, on a `stale_base` verdict | the tip's and `main`'s shas |
+| `presubmit_refused` `[confirmed]` | verify's `transition-presubmit-failed`, on a `refused` pre-submit verdict with no fix pass left, or a repeated one, keyed to an earlier pass | the findings, at most 8 KiB |
+| `presubmit_stale_base` `[confirmed]` | verify's `transition-presubmit-failed`, on a `stale_base` verdict | the tip's and `main`'s shas, and that the owner merges `main` into the branch and registers it by hand |
 | `unknown` | migration 0080's backfill, for any other text on a `cancelled` row, and for a `failed` / `cancelled` row with no or empty text | the stored text, or null |
 
 Every reason ends the task and the user re-delegates once the cause is fixed; a pausing state for the credential reasons is a follow-up, not a state this machine has.
@@ -850,7 +850,7 @@ Both claims match the pass, so a trigger from an earlier pass, redelivered past 
 | `presubmit` | verify, skills repo | The fetch, the dry run and the verdict write run in one body, which returns `{ verdict }`, the keyed verdict, in every slice; the sessions never run in the bare body. The body reads the row's verdict first, with three outcomes. (1) A verdict keyed to this run and pass is the step's own earlier commit, whose result Inngest lost: it is returned with no second dry run, as a claim takes `stale` at its own target with its own run id for its own (`claimTask`). (2) A `refused` verdict an earlier pass stored for the same tip sha and `releaseVersion` is returned under that pass's key, and nothing is written. (3) Anything else runs the fetch and the dry run, deletes the scratch ref, then writes the verdict under this run's key and returns it. The bare body reads a returned verdict keyed to another run or pass as a repeated refusal; the result carries no flag. Durable because it runs sessions against the network, and its result selects disjoint step sets |
 | `transition-pending-fix` | verify, a refusal handed back | Conditional. `stale` at `pending_fix` with the count at `$n + 1` is this step's own commit |
 | `teardown-before-fix` | verify, a hand-back | `deleteByTaskId`, then the askpass lease's release, ahead of the emit. Inside the step, so no replay repeats the release after the fix pass has provisioned the same path. Its returned result, and only that, makes the run's `finally` skip the sweep and the release |
-| `emit-failure-notice` `[proposed]` | the announcing subscriber, on `coding/task/failed` | `coding/task/failure-notice` under id `failure-notice-<taskId>` ([Announcing](#the-fix-pass)) |
+| `emit-failure-notice` `[confirmed]` | the announcing subscriber, on `coding/task/failed` | `coding/task/failure-notice` under id `failure-notice-<taskId>` ([Announcing](#the-fix-pass)) |
 | `emit-presubmit-refused` | verify, once the transition fires | `{ taskId, fixPass: $n + 1 }`, under id `presubmit-refused-<taskId>-f<n+1>` |
 | `transition-presubmit-failed` | verify, a refusal not handed back, or `stale_base` | Conditional `verifying → failed`; `emit-task-failed` and `teardown-worktree` follow, as on verify's other failure exits |
 | `claim-fix-pass` | execute, a fix-pass run | In place of `set-status-executing` on a fix-pass run: the body picks the claim from its trigger's payload, where a `fixPass` marks a fix pass. The other steps keep their ids, since a pass is its own run |
@@ -916,7 +916,7 @@ An `unavailable` verdict judged nothing.
 | # | PR | Production lines |
 |-|-|-|
 | 1 `[confirmed]` | The dry run and an advisory stage: `checkRegisterDryRun` (`prepareRegister` on a sha, the terminal and pausing split, `readManifestLockfile`'s error kind, the verdict union and its bounds) and `SkillRunner.checkRegister`; the keyed `presubmit_verdict` column; `presubmit-stage.ts` (the scratch-ref fetch, the deadline, the keyed verdict write and its recovery) between the push and `transition-pushed`. It always proceeds, so refusal rates can be measured before anything acts on them | 400–450 |
-| 2 | A refusal or a stale base fails the task: `transition-presubmit-failed` with its `stale` rules, `presubmit_refused` and `presubmit_stale_base`, the 8 KiB detail; the announcing subscriber, its `coding/task/failure-notice` event and the channel's rendering of it, fitted to 4096 characters | 270–330 |
+| 2 `[confirmed]` | A refusal or a stale base fails the task: `transition-presubmit-failed` with its `stale` rules, `presubmit_refused` and `presubmit_stale_base`, the 8 KiB detail; the announcing subscriber, its `coding/task/failure-notice` event and the channel's rendering of it, fitted to 4096 characters | 270–330 |
 | 3 | The fresh-session fix pass: `pending_fix` and the counter, in two migration files with the CHECKs; the pass-keyed claims; `transition-pending-fix`, `teardown-before-fix`, the `finally` change, the event, per-pass ids and the repeated-refusal check; the execute trigger, `claim-fix-pass`, the create path without `try-resume`, and the git-remote checkout at the verdict's sha; `CodingBackend.fix` and the `fix` prompt; additive usage; the announcer's fix-pass case; `cogmo coding cancel` | 500–600 |
 
 **What each slice stores.**
@@ -925,7 +925,7 @@ An `unavailable` verdict judged nothing.
 - **Slice 2** adds `presubmit_refused` and `presubmit_stale_base` to `coding_task_failure_reason`, in one migration file, since no CHECK names them.
 - **Slice 3** adds two files. The first is `ADD VALUE 'pending_fix'`. The second holds the `presubmit_fix_passes` column, `chk_coding_tasks_fix_passes_bound`, `chk_coding_tasks_fix_owed`, the count in `chk_coding_tasks_queued_bare`, and `pending_fix` in the two gate CHECKs.
 
-That is 1.17k to 1.38k production lines. Tests run two to three times that: replay tests on both orchestrators, PGlite tests of the guards and CHECKs, a migration test, and a test that a tip the dry run passes registers. The skill-authoring e2e runs with the pre-submit off (`BootstrapOptions.skipPresubmit`) until slice 2, since its replay cannot recreate the recorded sandbox commit the dry run judges; unit tests cover the stage. Slice 3 holds together, since a `pending_fix` with no claimant strands the task, but `cogmo coding cancel` (about 60 lines) can ship ahead of it on its own: it also frees a task stuck at `pending_verify`. Nothing here is new infrastructure.
+That is 1.17k to 1.38k production lines. Tests run two to three times that: replay tests on both orchestrators, PGlite tests of the guards and CHECKs, a migration test, and a test that a tip the dry run passes registers. The skill-authoring e2e runs with the pre-submit off (`BootstrapOptions.skipPresubmit`) until it replays recorded git history (todo.md), since its replay cannot recreate the recorded sandbox commit the dry run judges; unit tests cover the stage. Slice 3 holds together, since a `pending_fix` with no claimant strands the task, but `cogmo coding cancel` (about 60 lines) can ship ahead of it on its own: it also frees a task stuck at `pending_verify`. Nothing here is new infrastructure.
 
 ## Autonomy Gates `[proposed]`
 

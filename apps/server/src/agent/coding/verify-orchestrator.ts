@@ -197,6 +197,9 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     if (pushed.isErr()) return await failVerify(run, deps, failure, pushed.error);
     return await match(pushed.value)
       .with({ kind: "left" }, (left) => leaveVerify(run, deps, failure, left, "the push"))
+      .with({ kind: "failed" }, (recorded) =>
+        teardownFailedVerify(run, deps, failure, recorded.failure),
+      )
       .with({ kind: "pushed" }, ({ branchSha }) =>
         openPr(run, deps, inngest, failure, {
           task,
@@ -351,19 +354,32 @@ async function failVerify(
       });
       return { status: "skipped" };
     })
-    .with({ kind: "recorded" }, async (recordedFailure): Promise<VerifyOrchestratorResult> => {
-      await run
-        .stepRun("teardown-worktree", () =>
-          safeTeardownWorktree(deps, {
-            repo: failure.repo,
-            taskId: run.taskId,
-            worktreeAssignment: failure.assignment,
-          }),
-        )
-        .catch(() => undefined);
-      return { status: "failed", failure: recordedFailure.failure };
-    })
+    .with({ kind: "recorded" }, (recordedFailure) =>
+      teardownFailedVerify(run, deps, failure, recordedFailure.failure),
+    )
     .exhaustive();
+}
+
+/**
+ * A failure recorded and announced: the worktree goes in `teardown-worktree`,
+ * the sandbox and askpass in the caller's `finally`.
+ */
+async function teardownFailedVerify(
+  run: CodingRun,
+  deps: VerifyOrchestratorDeps,
+  failure: VerifyFailureContext,
+  taskFailure: TaskFailure,
+): Promise<VerifyOrchestratorResult> {
+  await run
+    .stepRun("teardown-worktree", () =>
+      safeTeardownWorktree(deps, {
+        repo: failure.repo,
+        taskId: run.taskId,
+        worktreeAssignment: failure.assignment,
+      }),
+    )
+    .catch(() => undefined);
+  return { status: "failed", failure: taskFailure };
 }
 
 /** A fresh container with the askpass dir mounted read-only. */

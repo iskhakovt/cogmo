@@ -18,17 +18,23 @@ import { fetchFeatureBranch } from "./git-as-transport.js";
 import { runOpenPr } from "./open-pr.js";
 import { type PresubmitDeps, runPresubmit } from "./presubmit-stage.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
+import { recordTaskFailedFrom } from "./task-failure.js";
 import { advanceTask, type TaskLeft } from "./task-lifecycle.js";
 import { WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import type { PrMetadata, TaskFailure, WorktreeAssignment } from "./types.js";
 
 /**
  * `pushed`: the branch is upstream, the task reads `pushed` and
- * `coding/task/pushed` is out. `left`: the task moved out of `verifying`
- * under the run (a Cancel during the suite or the push), so neither the
- * event nor the PR follows; the branch stays upstream for a re-delegate.
+ * `coding/task/pushed` is out. `failed`: the pre-submit failed the task,
+ * which reads `failed` with `coding/task/failed` out. `left`: the task moved
+ * out of `verifying` under the run (a Cancel during the suite, the push or
+ * the dry run), so neither the event nor the PR follows. Past the push the
+ * branch stays upstream for a re-delegate.
  */
-export type PushOutcome = { kind: "pushed"; branchSha: string } | TaskLeft;
+export type PushOutcome =
+  | { kind: "pushed"; branchSha: string }
+  | { kind: "failed"; failure: TaskFailure }
+  | TaskLeft;
 
 /**
  * `opened`: the PR is open, recorded on the task, and announced. `left`: the
@@ -51,9 +57,10 @@ export interface OpenTaskPrArgs {
 }
 
 /**
- * The `commit-and-push` stage, the skills repo's `presubmit`, then `pushed`.
- * Durable: it writes a commit and pushes it. The PAT reaches the runner through the askpass env and the
- * closure, never as a step argument or return.
+ * The `commit-and-push` stage, the skills repo's `presubmit`, then `pushed`,
+ * or the pre-submit's failure. Durable: it writes a commit and pushes it. The
+ * PAT reaches the runner through the askpass env and the closure, never as a
+ * step argument or return.
  *
  * `nothing_to_commit` is a valid outcome — the suite passed on a clean tree
  * (re-running an already-pushed task) — and the PR is still attempted; one
@@ -105,13 +112,55 @@ export async function pushVerifiedBranch(
     landed.value ||
     (await run.stepRun("read-head-sha", async () => readHeadSha(await args.container())));
 
-  await runPresubmit(run, deps, {
+  const presubmit = await runPresubmit(run, deps, {
     repo: args.repo,
     branch: args.branch,
     branchSha,
     identity: args.identity,
   });
+  return await match(presubmit)
+    .with({ kind: "proceed" }, () => transitionPushed(run, deps, inngest, branchSha))
+    .with({ kind: "fail" }, ({ failure }) => failPresubmit(run, deps, inngest, failure, branchSha))
+    .exhaustive();
+}
 
+/**
+ * `transition-presubmit-failed`, conditional on `verifying`. `stale` at
+ * `pushed` or `pr_open`, statuses only this run's own memoized steps reach,
+ * reads as passed, and the run carries on to the PR: a run in flight across
+ * the deploy that introduced this step, its refusal memoized past
+ * `transition-pushed`.
+ */
+async function failPresubmit(
+  run: CodingRun,
+  deps: TaskStoreDeps,
+  inngest: EventPublisher,
+  failure: TaskFailure,
+  branchSha: string,
+): Promise<Result<PushOutcome, TaskFailure>> {
+  const failed = await recordTaskFailedFrom(run, deps, failure, {
+    stepId: "transition-presubmit-failed",
+    from: "verifying",
+    settledAt: ["pushed", "pr_open"],
+  });
+  return await match(failed)
+    .with(
+      { kind: "recorded" },
+      (recorded): Result<PushOutcome, TaskFailure> =>
+        ok({ kind: "failed", failure: recorded.failure }),
+    )
+    .with({ kind: "left" }, (left): Result<PushOutcome, TaskFailure> => ok(left))
+    .with({ kind: "settled" }, () => transitionPushed(run, deps, inngest, branchSha))
+    .exhaustive();
+}
+
+/** `transition-pushed`, then `coding/task/pushed`. */
+async function transitionPushed(
+  run: CodingRun,
+  deps: TaskStoreDeps,
+  inngest: EventPublisher,
+  branchSha: string,
+): Promise<Result<PushOutcome, TaskFailure>> {
   // Conditional on `verifying`: the suite runs for minutes, and a Cancel
   // landing inside it must not be overwritten by the push that follows.
   // `stale` at `pushed` is this step re-executing after a lost result.

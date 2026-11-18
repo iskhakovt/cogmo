@@ -25,10 +25,11 @@ export interface CodingProgressDeps {
 
 /**
  * Skill deploy-outcome wiring — adapters that render deploy outcomes
- * (today: Telegram) use this to register an Inngest function listening on
+ * (today: Telegram) use this to register Inngest functions listening on
  * `skills/deploy/outcome`, which posts the outcome and its buttons into the
- * originating conversation's active session. Adapters without skills UX
- * leave it undefined.
+ * originating conversation's active session, and on
+ * `coding/task/failure-notice`, a skills-repo coding task's failure that no
+ * run renders. Adapters without skills UX leave it undefined.
  */
 export interface SkillsDeployDeps {
   runInTx: Transactor;

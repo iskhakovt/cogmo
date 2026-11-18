@@ -150,6 +150,18 @@ export function statefulCodingStore(
     };
     return { kind: "failed" };
   });
+  store.failTaskFromStatus.mockImplementation(async (_tx, _id, from, failure) => {
+    if (task.status !== from) {
+      return { kind: "stale", status: task.status, failureReason: task.failureReason };
+    }
+    task = {
+      ...task,
+      status: "failed",
+      failureReason: failure.reason,
+      failureDetail: failure.detail === "" ? null : failure.detail,
+    };
+    return { kind: "failed" };
+  });
   store.setTaskWorktreeAssignment.mockImplementation(async (_tx, _id, assignment) => {
     task = { ...task, worktreeAssignment: assignment };
   });

@@ -1389,6 +1389,80 @@ describe("DrizzleCodingStore", () => {
       },
     );
 
+    // The pre-submit's failure exit: `verifying → failed` and no other edge,
+    // so a task past `transition-pushed` or under a Cancel keeps its row.
+    it("failTaskFromStatus: fails a task at `from` with the reason and detail", async () => {
+      const repoId = await seedRepo();
+      const task = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      await parkCodingTaskAt(tx, store, task.id, "verifying");
+
+      const result = await tx((trx) =>
+        store.failTaskFromStatus(trx, task.id, "verifying", {
+          reason: "presubmit_refused",
+          detail: "ruff: E501",
+        }),
+      );
+
+      expect(result).toEqual({ kind: "failed" });
+      expect(await tx((trx) => store.getTask(trx, task.id))).toMatchObject({
+        status: "failed",
+        failureReason: "presubmit_refused",
+        failureDetail: "ruff: E501",
+      });
+    });
+
+    it.each<{ at: CodingTaskStatus; failureReason: string | null }>([
+      { at: "pushed", failureReason: null },
+      { at: "pr_open", failureReason: null },
+      { at: "pending_verify", failureReason: null },
+      { at: "failed", failureReason: "unexpected_error" },
+      { at: "cancelled", failureReason: "user_cancelled" },
+    ])(
+      "failTaskFromStatus: leaves a task at $at as it is, reading back its status and reason",
+      async ({ at, failureReason }) => {
+        const repoId = await seedRepo(`fail-from-${at}`);
+        const task = await tx((trx) =>
+          store.insertTask(trx, {
+            repoId,
+            goal: "g",
+            triggerSource: "user",
+            backend: "claude",
+            allowPrivilegedRunc: false,
+          }),
+        );
+        await parkCodingTaskAt(tx, store, task.id, at);
+        const before = await tx((trx) => store.getTask(trx, task.id));
+
+        const result = await tx((trx) =>
+          store.failTaskFromStatus(trx, task.id, "verifying", {
+            reason: "presubmit_stale_base",
+            detail: "main moved",
+          }),
+        );
+
+        expect(result).toEqual({ kind: "stale", status: at, failureReason });
+        expect(await tx((trx) => store.getTask(trx, task.id))).toEqual(before);
+      },
+    );
+
+    it("failTaskFromStatus: not_found for unknown id", async () => {
+      const result = await tx((trx) =>
+        store.failTaskFromStatus(trx, "019d0000-0000-7000-8000-000000000099", "verifying", {
+          reason: "presubmit_refused",
+          detail: "x",
+        }),
+      );
+      expect(result).toEqual({ kind: "not_found" });
+    });
+
     it("failTaskIfNonTerminal: not_found for unknown id", async () => {
       const result = await tx((trx) =>
         store.failTaskIfNonTerminal(trx, "019d0000-0000-7000-8000-000000000099", {

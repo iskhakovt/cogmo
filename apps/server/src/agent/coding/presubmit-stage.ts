@@ -1,8 +1,9 @@
 /**
  * The skills repo's pre-submit: register's dry run on the task's pushed tip,
  * between `commit-and-push` and `transition-pushed`
- * (design/coding-delegation.md → Skills-repo pre-submit). Advisory: the run
- * records the verdict on the task and carries on whatever it is.
+ * (design/coding-delegation.md → Skills-repo pre-submit). The run records the
+ * verdict on the task; a refusal or a stale base fails the task, and every
+ * other verdict proceeds to the PR.
  */
 
 import { ResultAsync } from "neverthrow";
@@ -15,10 +16,13 @@ import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterDryRun, SkillRunner } from "../../skills/runner.js";
 import { abortable } from "../../util/abortable.js";
 import { describeError } from "../../util/describe-error.js";
+import { redactSecretsInText } from "../../util/redact-secrets.js";
 import { REGISTER_TIMEOUT_MS } from "./auto-register-skill.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
+import { fitFindings } from "./presubmit-findings.js";
 import type { CodingRepoRow } from "./store/index.js";
-import type { PresubmitUnavailableCause, PresubmitVerdict } from "./types.js";
+import type { PresubmitUnavailableCause, PresubmitVerdict, TaskFailure } from "./types.js";
+import { OUTPUT_CAP_BYTES } from "./verify.js";
 
 export interface PresubmitDeps {
   /** Register's dry run. */
@@ -54,21 +58,64 @@ function stageUnavailable(sha: string | null, cause: StageCause, detail: string)
 const FIX_PASS = 0;
 
 /**
+ * Where the run goes from the pre-submit: on to `transition-pushed`, or to
+ * `transition-presubmit-failed` with the failure the verdict stands for.
+ */
+export type PresubmitExit = { kind: "proceed" } | { kind: "fail"; failure: TaskFailure };
+
+/**
  * The `presubmit` step, on the skills repo only; the repo's name does not
  * change under a run. With `deps.presubmit` null the stage is off, and no
  * step is planned (`BootstrapOptions.skipPresubmit`). Durable: it runs sandbox
- * sessions against the network. Its result is `{ verdict }`.
+ * sessions against the network, and its result, `{ verdict }`, selects the
+ * steps that follow.
  */
 export async function runPresubmit(
   run: CodingRun,
   deps: TaskStoreDeps & { presubmit: PresubmitDeps | null },
   args: PresubmitArgs,
-): Promise<void> {
+): Promise<PresubmitExit> {
   const stage = deps.presubmit;
-  if (stage === null || args.repo.name !== SKILLS_CODING_REPO_NAME) return;
-  await run.stepRun("presubmit", async () => ({
+  if (stage === null || args.repo.name !== SKILLS_CODING_REPO_NAME) return { kind: "proceed" };
+  const { verdict } = await run.stepRun("presubmit", async () => ({
     verdict: await presubmit(run, deps, stage, args),
   }));
+  return presubmitExit(verdict);
+}
+
+/**
+ * Each verdict's transition (design/coding-delegation.md → Skills-repo
+ * pre-submit → State machine). A refusal has no fix pass to take, so it fails
+ * the task. `unavailable` judged nothing, and register runs the same checks
+ * again with its own pausing outcome.
+ */
+function presubmitExit(verdict: PresubmitVerdict): PresubmitExit {
+  return match(verdict)
+    .returnType<PresubmitExit>()
+    .with({ kind: "passed" }, { kind: "unavailable" }, () => ({ kind: "proceed" }))
+    .with({ kind: "refused" }, ({ findings }) => ({
+      kind: "fail",
+      failure: { reason: "presubmit_refused", detail: refusedDetail(findings) },
+    }))
+    .with({ kind: "stale_base" }, ({ sha, mainSha }) => ({
+      kind: "fail",
+      failure: {
+        reason: "presubmit_stale_base",
+        detail: `main is at ${mainSha}, and the pushed tip ${sha} does not contain it. Merge main into the branch and register it by hand.`,
+      },
+    }))
+    .exhaustive();
+}
+
+/**
+ * The findings as `failure_detail` and `coding/task/failed` carry them: at
+ * most 8 KiB once masked, as verify output is, cut at a finding boundary.
+ */
+function refusedDetail(findings: readonly string[]): string {
+  return fitFindings(
+    findings,
+    (text) => Buffer.byteLength(redactSecretsInText(text)) <= OUTPUT_CAP_BYTES,
+  );
 }
 
 /**
