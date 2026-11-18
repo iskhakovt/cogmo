@@ -16,8 +16,11 @@ const FINDING_BREAK = /\n(?! {2})/;
 /** The last line of a cut: how many findings it left out. */
 const MORE_FINDINGS = /^\[(\d+) more findings\]$/;
 
-/** The dry run's per-check tail: `<check>: and <n> more <check> findings`. */
-const MORE_OF_CHECK = /^(\S+): and (\d+) more \1 findings$/;
+/**
+ * A per-check tail: the dry run's `<check>: and <n> more <check> findings`,
+ * or the skills image's, which names the file after the check.
+ */
+const MORE_OF_CHECK = /^(\S+): (?:\S+: )?and (\d+) more \1 findings$/;
 
 function moreFindings(count: number): string {
   return `[${count} more findings]`;

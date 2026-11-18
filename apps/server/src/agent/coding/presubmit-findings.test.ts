@@ -41,6 +41,17 @@ describe("fitFindings", () => {
     expect(splitFindings(cut)).toEqual([resolver, "[1 more findings]"]);
   });
 
+  it("counts the skills image's per-check tail, which names the file, as its findings", () => {
+    const findings = [
+      "ruff: skills/echo/skill.py:1:1: E501",
+      "ruff: skills/echo/skill.py: and 20 more ruff findings",
+    ];
+
+    expect(fitFindings(findings, within(`${findings[0]}\n[20 more findings]`.length))).toBe(
+      `${findings[0]}\n[20 more findings]`,
+    );
+  });
+
   it("counts a per-check tail it leaves out as the findings it stands for", () => {
     const findings = [
       "ruff: a.py:1:1: E501",
