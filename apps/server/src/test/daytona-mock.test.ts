@@ -479,6 +479,43 @@ describe("DaytonaMock", () => {
       }
     });
 
+    it("keeps the cursor where it is when a call matches behind it", async () => {
+      // A teardown deletes two sandboxes at once, recorded as [a, b] and
+      // arriving as [b, a]. `a` matches behind the cursor, at the earlier
+      // delete of `a`; the create after the pair must still get the later
+      // recorded create, not the one between the two deletes of `a`.
+      const fixturePath = join(fixtureDir, "replay-wrap-no-rewind.json");
+      const call = (method: string, path: string, id?: string) => ({
+        kind: "http",
+        method,
+        path,
+        request: {},
+        response: { status: 200, bodyJson: { id: id ?? path } },
+      });
+      await writeFixture(fixturePath, {
+        scenario: "wrap-no-rewind",
+        calls: [
+          call("DELETE", "/sandbox/a"),
+          call("POST", "/sandbox", "verify"),
+          call("DELETE", "/sandbox/a"),
+          call("DELETE", "/sandbox/b"),
+          call("POST", "/sandbox", "register"),
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const send = async (method: string, path: string): Promise<unknown> =>
+          (await fetch(`${mock.url}${path}`, { method })).json();
+        await send("DELETE", "/sandbox/a");
+        expect(await send("POST", "/sandbox")).toEqual({ id: "verify" });
+        await send("DELETE", "/sandbox/b");
+        await send("DELETE", "/sandbox/a");
+        expect(await send("POST", "/sandbox")).toEqual({ id: "register" });
+      } finally {
+        await mock.stop();
+      }
+    });
+
     it("re-matches an already-played entry after wrap (trade-off vs strict FIFO)", async () => {
       // Pinning the documented trade-off in findWrappedCall: there's
       // no consumed-set, so a fixture with a single call can satisfy

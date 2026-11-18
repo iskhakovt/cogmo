@@ -428,8 +428,20 @@ interface ReplayState {
    * sole scenario interleaves deterministically, so this is fine —
    * promote to per-kind cursors when a second scenario needs a
    * different order.
+   *
+   * It never moves back ({@link advanceCursor}).
    */
   cursor: number;
+}
+
+/**
+ * Move the cursor past a match, never back. A match behind it is a call
+ * arriving after one recorded later, as concurrent calls can; moving the
+ * cursor back to it would match the calls after it against an earlier
+ * stretch of the recording.
+ */
+function advanceCursor(replay: ReplayState, matchIndex: number): void {
+  replay.cursor = Math.max(replay.cursor, matchIndex + 1);
 }
 
 export class DaytonaMock {
@@ -728,7 +740,7 @@ export class DaytonaMock {
       ws.close(1011, "no fixture match");
       return;
     }
-    replay.cursor = match.i + 1;
+    advanceCursor(replay, match.i);
     this.#emitFrames(ws, match.call.frames);
   }
 
@@ -1037,7 +1049,7 @@ export class DaytonaMock {
       );
       return;
     }
-    replay.cursor = match.i + 1;
+    advanceCursor(replay, match.i);
     res.statusCode = match.call.response.status;
     for (const [k, v] of Object.entries(match.call.response.headers ?? {})) {
       // Skip headers Node computes from the actual body; recorded values
