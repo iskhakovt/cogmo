@@ -1,4 +1,4 @@
-import { fitFindings } from "../../../agent/coding/presubmit-findings.js";
+import { fitFindings, splitFindings } from "../../../agent/coding/presubmit-findings.js";
 import { describeTaskFailure } from "../../../agent/coding/task-failure.js";
 import type { Transactor } from "../../../db/index.js";
 import type { CodingTaskFailureNoticeData } from "../../../inngest/events.js";
@@ -20,7 +20,7 @@ function failureNoticeText(notice: CodingTaskFailureNoticeData): string {
       `Branch: ${notice.branch}`,
     ].join("\n");
   const detail = fitFindings(
-    notice.detail.split("\n"),
+    splitFindings(notice.detail),
     (fitted) => text(fitted).length <= TELEGRAM_MAX_MESSAGE_LENGTH,
   );
   return fitTelegramMessage(text(detail));

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { fitFindings } from "../../../agent/coding/presubmit-findings.js";
 import type { CodingTaskFailureNoticeData } from "../../../inngest/events.js";
 import { expectDefined } from "../../../test/assertions.js";
 import { fakeRunInTx, mockTransportStore } from "../../../test/factories.js";
@@ -75,6 +76,20 @@ describe("postCodingFailureNotice", () => {
     expect(kept[0]).toBe(`❌ The pre-submit refused the skill: ${findings[0]}`);
     expect(kept.slice(1)).toEqual(findings.slice(1, kept.length));
     expect(lines.at(-2)).toBe(`[${findings.length - kept.length + 7} more findings]`);
+  });
+
+  it("keeps a finding with line breaks whole, or leaves all of it out", async () => {
+    const short = "ruff: skills/echo/skill.py:1:1: E501 Line too long";
+    const traceback = [
+      "schema_import: Traceback (most recent call last):",
+      ...Array.from({ length: 3 }, (_, i) => `  frame ${i} ${"y".repeat(1500)}`),
+    ].join("\n");
+    // The detail as the verify run stores it.
+    const detail = fitFindings([short, traceback], () => true);
+
+    expect(await postedText(notice({ detail }))).toBe(
+      `❌ The pre-submit refused the skill: ${short}\n[1 more findings]\nBranch: cogmo/abc12345`,
+    );
   });
 
   it("posts nothing without a session on this channel", async () => {
