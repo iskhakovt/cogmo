@@ -90,7 +90,13 @@ export async function persistSessionUsage(
         .with({ kind: "resume" }, () => deps.store.setTaskResourceUsage(tx, run.taskId, row))
         .with({ kind: "fix" }, async ({ fixPass }) => {
           // A re-run after a lost result finds the pass counted and adds nothing.
-          await deps.store.addTaskResourceUsage(tx, run.taskId, row, fixPass);
+          const added = await deps.store.addTaskResourceUsage(tx, run.taskId, row, fixPass);
+          match(added)
+            .with({ kind: "added" }, () => undefined)
+            .with({ kind: "already_counted" }, () =>
+              run.log.info({ fixPass }, "persist-usage: the fix pass's usage is already counted"),
+            )
+            .exhaustive();
         })
         .exhaustive(),
     ),
