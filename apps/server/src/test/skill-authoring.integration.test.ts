@@ -389,6 +389,10 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // reach terminal status in <1m or it's silently stuck.
     const taskTimeoutMs = RECORDABLE ? 30 * 60_000 : 60_000;
     const task = await waitForCodingTask(db, conversationId, taskTimeoutMs);
+    // Track for cleanup before any assertion, so a failed record run still
+    // closes its PR. Branch name = `cogmo/run/<task-id>` (see `runBranchFor`).
+    createdBranches.push(`cogmo/run/${task.id}`);
+    if (task.prMetadata) createdPrNumbers.push(task.prMetadata.number);
     if (task.status !== "pr_open") {
       console.error(
         `[skill-authoring e2e] task ended in ${task.status} — failureReason="${task.failureReason}"`,
@@ -407,10 +411,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     } else {
       expect(judged).toBe(expectDefined(recorded).tip);
     }
-
-    // Track for cleanup. Branch name = `cogmo/run/<task-id>` (see `runBranchFor`).
-    createdBranches.push(`cogmo/run/${task.id}`);
-    if (task.prMetadata) createdPrNumbers.push(task.prMetadata.number);
 
     // Skill registered. It is stdlib-only, so `lockfileHash` is null;
     // `runner.sysbox.integration.test.ts` covers a skill with a lockfile.
@@ -587,14 +587,18 @@ async function createBareRemoteFromHistory(): Promise<{
  * cassette swallows: a replayed `git push origin <branch>` lands the recorded
  * tip on `<branch>` in the bare remote, as the record run's push did, before
  * the dry run fetches it. The execute run's push of the run branch
- * (`HEAD:refs/heads/…`) is left alone: no host-side step reads it back.
+ * (`HEAD:refs/heads/cogmo/run/…`) is left alone: no host-side step reads it
+ * back. Any other push throws, naming the command, rather than landing nothing.
  */
 function landRecordedPush(remotePath: string, tip: string): (command: string) => Promise<void> {
   return async (command) => {
-    const branch = /'push' 'origin' '([^':]+)'$/.exec(command)?.[1];
-    if (branch !== undefined) {
-      await runGitIn(remotePath, ["update-ref", `refs/heads/${branch}`, tip]);
+    if (!command.includes("'push'")) return;
+    const refspec = /'push' 'origin' '([^']+)'$/.exec(command)?.[1];
+    if (refspec?.startsWith("HEAD:refs/heads/cogmo/run/")) return;
+    if (refspec === undefined || refspec.includes(":")) {
+      throw new Error(`landRecordedPush: a push it does not replay: ${command}`);
     }
+    await runGitIn(remotePath, ["update-ref", `refs/heads/${refspec}`, tip]);
   };
 }
 

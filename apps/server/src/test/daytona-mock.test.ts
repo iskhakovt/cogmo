@@ -354,6 +354,29 @@ describe("DaytonaMock", () => {
       }
     });
 
+    it("answers an exec the cassette lacks with 503, without calling onExec", async () => {
+      const fixturePath = join(fixtureDir, "replay-on-exec-unrecorded.json");
+      await writeFixture(fixturePath, { scenario: "on-exec-unrecorded", calls: [] });
+      const seen: string[] = [];
+      const mock = await DaytonaMock.create({
+        mode: "replay",
+        fixturePath,
+        onExec: async (command) => {
+          seen.push(command);
+        },
+      });
+      try {
+        const resp = await fetch(`${mock.url}/toolbox/sb-1/process/session/s-9/exec`, {
+          method: "POST",
+          body: JSON.stringify({ command: "git push origin cogmo/x" }),
+        });
+        expect(resp.status).toBe(503);
+        expect(seen).toEqual([]);
+      } finally {
+        await mock.stop();
+      }
+    });
+
     it("answers 500 with the error when onExec rejects, in place of the recorded response", async () => {
       const fixturePath = join(fixtureDir, "replay-on-exec-rejects.json");
       const execPath = "/toolbox/sb-1/process/session/s-1/exec";
@@ -511,6 +534,49 @@ describe("DaytonaMock", () => {
         await send("DELETE", "/sandbox/b");
         await send("DELETE", "/sandbox/a");
         expect(await send("POST", "/sandbox")).toEqual({ id: "register" });
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("serves each recorded poll once after a later call ran early, then repeats the last", async () => {
+      // Recorded: the command pending, then complete, then a unique
+      // delete. Replay sends the delete first, which moves the cursor past
+      // both polls; they still reach `complete`, and an extra poll stays there.
+      const fixturePath = join(fixtureDir, "replay-poll-after-skip.json");
+      const poll = (state: string) => ({
+        kind: "http",
+        method: "GET",
+        path: "/command/1",
+        request: {},
+        response: { status: 200, bodyJson: { state } },
+      });
+      await writeFixture(fixturePath, {
+        scenario: "poll-after-skip",
+        calls: [
+          poll("pending"),
+          poll("complete"),
+          {
+            kind: "http",
+            method: "DELETE",
+            path: "/session/1",
+            request: {},
+            response: { status: 204 },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        expect((await fetch(`${mock.url}/session/1`, { method: "DELETE" })).status).toBe(204);
+        const states = [];
+        for (let n = 0; n < 3; n++) {
+          states.push(await (await fetch(`${mock.url}/command/1`)).json());
+        }
+        expect(states).toEqual([
+          { state: "pending" },
+          { state: "complete" },
+          { state: "complete" },
+        ]);
       } finally {
         await mock.stop();
       }

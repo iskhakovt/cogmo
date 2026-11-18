@@ -145,13 +145,13 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 
 | Fixture | What | Re-record trigger |
 |-|-|-|
-| `test/fixtures/daytona/skill-authoring.json` | Daytona HTTP + WS: snapshot lookup, sandbox create and delete, file upload, git clone, exec sessions, and the PTY frames carrying the in-sandbox CLI's stream-json (`claude-haiku-4-5-20251001`, thinking off) | New `cogmo-devbase:<v>`, `@daytona/sdk` bump, coding prompt or CLI flag change |
+| `test/fixtures/daytona/skill-authoring.json` | Daytona HTTP + WS: snapshot lookup, sandbox create and delete, file upload, git clone, exec sessions, and the PTY frames carrying the in-sandbox CLI's stream-json (`claude-haiku-4-5-20251001`, thinking off) | New `cogmo-devbase:<v>`, `@daytona/sdk` bump, coding prompt or CLI flag change, any change under `images/skills/toolchain/` or `images/skills/src/cogmo_ctx/` |
 | `test/fixtures/recorded/suites/skill-authoring/` | Anthropic `/v1/messages` for the host agent loop's two turns | Agent prompt change, model swap, tool registry change, any Daytona cassette refresh (turn 2 offers the recorded skill) |
 | `test/fixtures/skill-authoring-history.bundle` | The pushed branch the dry run judged, with its ancestry | Any Daytona cassette refresh; a change to the skills repo toolchain (`images/skills/toolchain/`, `images/skills/src/cogmo_ctx/`) |
 
 The suite skips unless the Daytona cassette exists or `RECORD=1` runs with `DAYTONA_API_KEY`, `ANTHROPIC_API_KEY` and `COGMO_TEST_SKILLS_REMOTE` set. A record run also needs a `COGMO_DEVBASE_IMAGE` with a non-`latest` tag and an authenticated `gh`; without them it fails in setup. It builds the devbase snapshot from the bake target and waits for the deps-cache volume before the run; the test file's header has the steps.
 
-**Cost and cadence.** Replay costs nothing and runs in the integration tier on every PR that changes code. A record run costs ~$1-2 of Daytona compute and Anthropic tokens; it runs locally and the operator commits the refreshed fixtures.
+**Cost and cadence.** Replay costs nothing and runs in the integration tier on every PR that changes code. A record run costs ~$1-2 of Daytona compute and Anthropic tokens; it runs locally and the operator commits the refreshed fixtures. Any change under `images/skills/toolchain/` or `images/skills/src/cogmo_ctx/` needs a paid live re-record: only a record run refreshes the history bundle, and replay refuses a toolchain that differs from the recorded `main`'s.
 
 **Non-goals.**
 

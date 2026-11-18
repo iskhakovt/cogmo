@@ -85,7 +85,7 @@ export async function runPresubmit(
 ): Promise<PresubmitExit> {
   if (args.repo.name !== SKILLS_CODING_REPO_NAME) return { kind: "proceed" };
   const { verdict } = await run.stepRun("presubmit", async () => ({
-    verdict: await presubmit(run, deps, deps.presubmit, args),
+    verdict: await presubmit(run, deps, args),
   }));
   return presubmitExit(verdict, { runId: run.runId, fixPass: args.fixPass });
 }
@@ -145,8 +145,7 @@ function refusedDetail(findings: readonly string[]): string {
  */
 async function presubmit(
   run: CodingRun,
-  deps: TaskStoreDeps,
-  stage: PresubmitDeps,
+  deps: TaskStoreDeps & { presubmit: PresubmitDeps },
   args: PresubmitArgs,
 ): Promise<PresubmitVerdict> {
   const task = await deps.runInTx((tx) => deps.store.getTask(tx, run.taskId));
@@ -159,16 +158,16 @@ async function presubmit(
     kind: "refused",
     fixPass: P.number.lt(args.fixPass),
     sha: args.branchSha,
-    releaseVersion: stage.releaseVersion,
+    releaseVersion: deps.presubmit.releaseVersion,
   } as const;
   if (isMatching(repeated, stored)) return stored;
 
   const verdict: PresubmitVerdict = {
-    ...(await judgeTip(run, stage, args)),
+    ...(await judgeTip(run, deps.presubmit, args)),
     runId: run.runId,
     fixPass: args.fixPass,
     checkedAt: new Date().toISOString(),
-    releaseVersion: stage.releaseVersion,
+    releaseVersion: deps.presubmit.releaseVersion,
   };
   const written = await deps.runInTx((tx) =>
     deps.store.setTaskPresubmitVerdict(tx, run.taskId, verdict),
