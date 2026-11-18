@@ -313,7 +313,14 @@ export const CheckRequestSchema = z.object({
 export type CheckRequest = z.infer<typeof CheckRequestSchema>;
 
 /** The CPython checks, in the order a reply reports them. */
-const CPYTHON_CHECK_IDS = ["syntax", "ruff", "pyrefly", "imports", "suppression"] as const;
+const CPYTHON_CHECK_IDS = [
+  "syntax",
+  "ruff",
+  "format",
+  "pyrefly",
+  "imports",
+  "suppression",
+] as const;
 
 /**
  * One CPython check's finding in `skill.py`. Lines are 1-based; columns are

@@ -390,7 +390,9 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     expect(skillRow.name).toBe("btc-spot");
 
     // --- Turn 2: invoke the new skill -------------------------------
-    await sendInbound(db, sessionId, conversationId, "What's bitcoin at?");
+    // Names the skill: the turn tests that the new tool is offered and runs,
+    // not which of it and `web_answer` the model prefers for a price.
+    await sendInbound(db, sessionId, conversationId, "What's bitcoin at? Use the btc-spot skill.");
     await sendEvent(inngestBaseUrl, "inbound/arrived", {
       conversationId,
       inboundMessageId: await latestInboundId(db, conversationId),
