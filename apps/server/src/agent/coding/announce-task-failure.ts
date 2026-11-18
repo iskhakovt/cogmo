@@ -29,14 +29,32 @@ export type FailureAnnouncement =
   | { kind: "announced" }
   | {
       kind: "skipped";
-      reason: "reason_not_announced" | "task_not_found" | "not_skills_repo" | "no_conversation";
+      reason: "reason_not_announced" | "not_skills_repo" | "no_conversation";
     };
 
-/** The failures of a skills-repo task that no run renders: the pre-submit's own. */
-const ANNOUNCED_REASONS: ReadonlyArray<CodingTaskFailureReason> = [
-  "presubmit_refused",
-  "presubmit_stale_base",
-];
+/** Whether a skills-repo task's failure gets a notice: the pre-submit's own, which no run renders. */
+const ANNOUNCED: Readonly<Record<CodingTaskFailureReason, boolean>> = {
+  cli_exit_error: false,
+  no_plan_produced: false,
+  claude_auth_failed: false,
+  push_failed: false,
+  branch_conflict: false,
+  auth_failed: false,
+  verify_failed: false,
+  verify_timed_out: false,
+  presubmit_refused: true,
+  presubmit_stale_base: true,
+  pr_auth_failed: false,
+  pr_validation_failed: false,
+  pr_open_failed: false,
+  credentials_unavailable: false,
+  run_terminated: false,
+  start_emit_failed: false,
+  unexpected_error: false,
+  user_cancelled: false,
+  user_requested_revisions: false,
+  unknown: false,
+};
 
 /**
  * Emits the notice under `failure-notice-<taskId>`, so a re-run after a lost
@@ -48,16 +66,18 @@ export async function announceTaskFailure(
   failed: TaskFailure & { taskId: string },
 ): Promise<FailureAnnouncement> {
   const { taskId } = failed;
-  if (!ANNOUNCED_REASONS.includes(failed.reason)) {
+  if (!ANNOUNCED[failed.reason]) {
     return { kind: "skipped", reason: "reason_not_announced" };
   }
-  const loaded = await deps.runInTx(async (tx) => {
+  // A failed task's row and its repo's stay: rows are never deleted, and the
+  // foreign key holds the repo.
+  const { task, repo } = await deps.runInTx(async (tx) => {
     const task = await deps.store.getTask(tx, taskId);
-    const repo = task && (await deps.store.getRepoById(tx, task.repoId));
-    return task && repo ? { task, repo } : null;
+    if (!task) throw new Error(`coding task ${taskId} is missing after it failed`);
+    const repo = await deps.store.getRepoById(tx, task.repoId);
+    if (!repo) throw new Error(`coding repo ${task.repoId} of task ${taskId} is missing`);
+    return { task, repo };
   });
-  if (loaded === null) return { kind: "skipped", reason: "task_not_found" };
-  const { task, repo } = loaded;
   if (repo.name !== SKILLS_CODING_REPO_NAME) return { kind: "skipped", reason: "not_skills_repo" };
   if (task.conversationId === null) return { kind: "skipped", reason: "no_conversation" };
   // The pre-submit judges a branch the verify run pushed.

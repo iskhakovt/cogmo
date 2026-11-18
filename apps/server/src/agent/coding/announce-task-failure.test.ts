@@ -105,13 +105,22 @@ describe("announceTaskFailure", () => {
     expect(h.publisher.send).not.toHaveBeenCalled();
   });
 
-  it("announces nothing for a task row that is gone", async () => {
+  it("throws on a task row that is gone, which no writer deletes", async () => {
     const h = harness({ task: null });
 
-    expect(await announceTaskFailure(h.deps, failed("presubmit_refused", "ruff: E501"))).toEqual({
-      kind: "skipped",
-      reason: "task_not_found",
-    });
+    await expect(
+      announceTaskFailure(h.deps, failed("presubmit_refused", "ruff: E501")),
+    ).rejects.toThrow(/is missing after it failed/);
+    expect(h.publisher.send).not.toHaveBeenCalled();
+  });
+
+  it("throws on a task whose repo is gone, which the foreign key holds", async () => {
+    const h = harness({});
+    h.store.getRepoById.mockResolvedValue(undefined);
+
+    await expect(
+      announceTaskFailure(h.deps, failed("presubmit_refused", "ruff: E501")),
+    ).rejects.toThrow(/coding repo .* is missing/);
     expect(h.publisher.send).not.toHaveBeenCalled();
   });
 
