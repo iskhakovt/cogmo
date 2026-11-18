@@ -73,6 +73,7 @@ const GROUPS: ReadonlyArray<readonly [string, readonly string[], string]> = [
   ["image-provider", ["add", "--help"], "--cfg-scale"],
   ["image-model", ["add", "--help"], "--model-string"],
   ["skills", ["run", "--help"], "<jsonInputs>"],
+  ["coding", ["cancel", "--help"], "<task-id>"],
   ["migrate-memories", ["--help"], "[bankId]"],
   ["backfill", ["profile-class", "--help"], "--tag"],
   ["migrate-skills-remote", ["--help"], "skills repo"],
