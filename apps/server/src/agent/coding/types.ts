@@ -156,6 +156,9 @@ export const PresubmitVerdictSchema = z.discriminatedUnion("kind", [
 ]);
 export type PresubmitVerdict = z.infer<typeof PresubmitVerdictSchema>;
 
+/** Fix passes a task is granted after pre-submit refusals; `chk_coding_tasks_fix_passes_bound` holds the same bound. */
+export const PRESUBMIT_FIX_PASSES = 2;
+
 /**
  * Aggregated stats per coding task. All fields optional — populated
  * incrementally as the task runs (memory_bytes at task start from CLAUDE.md
@@ -188,7 +191,8 @@ export const ResourceUsageSchema = z
      * USD spend reported by the CLI's `result` event, when available. It is
      * the session's running total, and the execute run resumes the plan
      * session, so it covers both phases; `tokens_input`/`tokens_output` are
-     * the execute run's alone.
+     * the execute run's alone. Each skills-repo fix pass adds its fresh
+     * session's to all three.
      */
     cost_usd: z.number().nonnegative().optional(),
     /**
@@ -216,6 +220,14 @@ export const ResourceUsageSchema = z
   })
   .strict();
 export type ResourceUsage = z.infer<typeof ResourceUsageSchema>;
+
+/** The counters a CLI session reports, which a fix pass adds to the task's. */
+export const SessionUsageSchema = ResourceUsageSchema.pick({
+  tokens_input: true,
+  tokens_output: true,
+  cost_usd: true,
+});
+export type SessionUsage = z.infer<typeof SessionUsageSchema>;
 
 /**
  * Why a task ended at `failed` or `cancelled`, as `coding_tasks.failure_reason`

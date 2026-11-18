@@ -16,7 +16,7 @@ import {
 } from "../../sandbox/index.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
-import { runCommitAndPush, runWipCommit, runWipPush } from "./commit-push.js";
+import { runCheckoutFixBase, runCommitAndPush, runWipCommit, runWipPush } from "./commit-push.js";
 
 interface FakeExecResult {
   stdout?: string;
@@ -526,6 +526,66 @@ function hostSession(root: string): Pick<SandboxSession, "execStreaming"> {
     },
   };
 }
+
+describe("runCheckoutFixBase", () => {
+  const SHA = "c".repeat(40);
+  const args = { worktreeDir: "/workspace", branch: "cogmo/abc12345", sha: SHA, askpassEnv };
+
+  /** A container scripted per git subcommand, recording each exec's argv and options. */
+  function scripted(results: Partial<Record<"fetch" | "checkout", FakeExecResult>>) {
+    const calls: { cmd: ReadonlyArray<string>; opts: ExecOptions | undefined }[] = [];
+    const execStreaming = vi.fn(async (cmd: ReadonlyArray<string>, opts?: ExecOptions) => {
+      calls.push({ cmd, opts });
+      const sub = cmd.includes("fetch") ? "fetch" : "checkout";
+      return fakeExec(expectDefined(results[sub], `a scripted ${sub}`));
+    });
+    return { container: { execStreaming }, calls };
+  }
+
+  it("fetches the branch from origin under the askpass env, then checks out the refused tip", async () => {
+    const { container, calls } = scripted({ fetch: {}, checkout: {} });
+
+    expect(await runCheckoutFixBase({ container, ...args })).toEqual({ kind: "checked_out" });
+
+    expect(calls.map(({ cmd }) => cmd.slice(-4))).toEqual([
+      [expect.any(String), "fetch", "origin", "cogmo/abc12345"],
+      ["checkout", "-B", "cogmo/abc12345", SHA],
+    ]);
+    expect(calls.map(({ opts }) => opts)).toEqual([
+      { workingDir: "/workspace", env: askpassEnv, timeoutMs: 5 * 60_000, idleTimeoutMs: 30_000 },
+      { workingDir: "/workspace", env: askpassEnv, timeoutMs: 60_000, idleTimeoutMs: 30_000 },
+    ]);
+  });
+
+  it("reads a fetch the remote refuses on auth as auth_failed, and checks nothing out", async () => {
+    const refusal =
+      "remote: Invalid username or token.\nfatal: Authentication failed for 'https://github.com/u/skills.git/'";
+    const { container, calls } = scripted({ fetch: { stderr: refusal, exitCode: 128 } });
+
+    expect(await runCheckoutFixBase({ container, ...args })).toEqual({
+      kind: "auth_failed",
+      output: refusal,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("throws on any other fetch failure, and on a failed checkout", async () => {
+    const missing = scripted({
+      fetch: { stderr: "fatal: couldn't find remote ref cogmo/abc12345", exitCode: 128 },
+    });
+    await expect(runCheckoutFixBase({ container: missing.container, ...args })).rejects.toThrow(
+      /git fetch origin cogmo\/abc12345 failed \(exit 128\): fatal: couldn't find remote ref/,
+    );
+
+    const unknownSha = scripted({
+      fetch: {},
+      checkout: { stderr: `fatal: reference is not a tree: ${SHA}`, exitCode: 128 },
+    });
+    await expect(runCheckoutFixBase({ container: unknownSha.container, ...args })).rejects.toThrow(
+      /git checkout -B cogmo\/abc12345 c{40} failed \(exit 128\)/,
+    );
+  });
+});
 
 describe("the WIP salvage against a real clone", () => {
   const execFileP = promisify(execFile);

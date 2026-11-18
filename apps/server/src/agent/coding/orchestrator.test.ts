@@ -243,6 +243,7 @@ function salvageReaps(taskId: string): string[] {
 
 function backendYielding(events: CodingEvent[]): CodingBackend {
   return {
+    fix: () => throwingPlan("fix not exercised by this test"),
     plan: async function* () {
       for (const ev of events) yield ev;
     },
@@ -252,6 +253,7 @@ function backendYielding(events: CodingEvent[]): CodingBackend {
 
 function executeBackendYielding(events: CodingEvent[]): CodingBackend {
   return {
+    fix: () => throwingPlan("fix not exercised by this test"),
     plan: () => throwingPlan("plan not exercised by this test — use backendYielding"),
     execute: async function* () {
       for (const ev of events) yield ev;
@@ -1061,6 +1063,7 @@ describe("runCodingTask", () => {
     const { sandbox, stopCalls } = fakeSandbox();
     const planStream = recordingPlanStream();
     const backend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: async function* () {
         yield { kind: "session_started", sessionId: "sess-A" };
         await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
@@ -1285,6 +1288,7 @@ describe("runCodingTask", () => {
     const { sandbox } = fakeSandbox();
     // Backend that throws — drives the function into the catch.
     const throwingBackend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => {
         throw new Error("backend exploded");
       },
@@ -1323,6 +1327,7 @@ describe("runCodingTask", () => {
 
     const { sandbox } = fakeSandbox();
     const throwingBackend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => {
         throw new Error("backend exploded");
       },
@@ -1396,6 +1401,7 @@ describe("runCodingTask", () => {
 
     const { sandbox } = fakeSandbox();
     const throwingBackend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => {
         throw new Error("backend exploded");
       },
@@ -1623,6 +1629,7 @@ describe("runCodingExecute", () => {
     ]);
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
@@ -1660,6 +1667,7 @@ describe("runCodingExecute", () => {
     const { task } = await seedExecutableTask(repo);
     const { sandbox } = fakeSandbox();
     const backend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => throwingPlan("plan not exercised by this test"),
       execute: () => ({
         [Symbol.asyncIterator]: () => ({
@@ -1669,6 +1677,7 @@ describe("runCodingExecute", () => {
     };
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
@@ -1693,6 +1702,7 @@ describe("runCodingExecute", () => {
     const stream = recordingExecuteStream();
     const thrown = new Error("exec failed", { cause: new Error("socket hang up") });
     const backend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => throwingPlan("plan not exercised by this test"),
       execute: () => ({
         [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(thrown) }),
@@ -1700,6 +1710,7 @@ describe("runCodingExecute", () => {
     };
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
@@ -1725,6 +1736,7 @@ describe("runCodingExecute", () => {
       `sandbox env dump: CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-${"z".repeat(40)}`,
     );
     const backend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => throwingPlan("plan not exercised by this test"),
       execute: () => ({
         [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(thrown) }),
@@ -1732,6 +1744,7 @@ describe("runCodingExecute", () => {
     };
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
@@ -1759,6 +1772,7 @@ describe("runCodingExecute", () => {
     fakeInngest.send.mockClear();
     // A Cancel tap landing while `execute-cli` streams.
     const backend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => throwingPlan("plan not exercised by this test"),
       execute: async function* () {
         yield { kind: "text_delta", text: "Editing\n" };
@@ -1768,6 +1782,7 @@ describe("runCodingExecute", () => {
     };
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
@@ -1803,6 +1818,7 @@ describe("runCodingExecute", () => {
     // A Cancel tap lands while `execute-cli` streams, and the session then
     // exits with an error.
     const backend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => throwingPlan("plan not exercised by this test"),
       execute: async function* () {
         yield { kind: "text_delta", text: "Editing\n" };
@@ -1812,6 +1828,7 @@ describe("runCodingExecute", () => {
     };
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
@@ -1848,6 +1865,7 @@ describe("runCodingExecute", () => {
     ]);
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
@@ -1896,6 +1914,7 @@ describe("runCodingExecute", () => {
     const { sandbox, createCalls } = fakeSandbox();
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
@@ -1927,6 +1946,7 @@ describe("runCodingExecute", () => {
     ]);
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
@@ -1963,6 +1983,7 @@ describe("runCodingExecute", () => {
     }) as never;
 
     await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
@@ -1996,6 +2017,7 @@ describe("runCodingExecute", () => {
 
     const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
     const adopted = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-first",
       deps: makeDeps({ sandbox: fakeSandbox().sandbox, backend }),
@@ -2012,6 +2034,7 @@ describe("runCodingExecute", () => {
 
     const second = fakeSandbox();
     const skipped = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-second",
       deps: makeDeps({ sandbox: second.sandbox, backend }),
@@ -2038,6 +2061,7 @@ describe("runCodingExecute", () => {
     );
     const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
     const resumed = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: mine.task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox: fakeSandbox().sandbox, backend }),
@@ -2060,6 +2084,7 @@ describe("runCodingExecute", () => {
     );
     const other = fakeSandbox();
     const skipped = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: theirs.task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox: other.sandbox, backend }),
@@ -2083,6 +2108,7 @@ describe("runCodingExecute", () => {
     const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
     const backend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: async function* () {
         yield { kind: "session_started", sessionId: "sess-A" };
         // Execute claims the task while the plan session is still streaming.
@@ -2115,6 +2141,7 @@ describe("runCodingExecute", () => {
     const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
     const backend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: async function* () {
         yield { kind: "session_started", sessionId: "sess-A" };
         // Cancel lands while the plan session is streaming.
@@ -2162,6 +2189,7 @@ describe("runCodingExecute", () => {
     const { sandbox, createCalls } = fakeSandbox();
     await expect(
       runCodingExecute({
+        trigger: { kind: "approved" },
         taskId: task.id,
         runId: "run-test",
         deps: makeDeps({
@@ -2197,6 +2225,7 @@ describe("runCodingExecute", () => {
     const stream = recordingExecuteStream();
     await expect(
       runCodingExecute({
+        trigger: { kind: "approved" },
         taskId: task.id,
         runId: "run-test",
         deps: makeDeps({
@@ -2217,6 +2246,7 @@ describe("runCodingExecute", () => {
     const { sandbox } = fakeSandbox();
     await expect(
       runCodingExecute({
+        trigger: { kind: "approved" },
         taskId: "019d0000-0000-7000-8000-000000000099",
         runId: "run-test",
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
@@ -2253,6 +2283,7 @@ describe("runCodingExecute", () => {
     fakeSecrets.getSecret.mockResolvedValue(undefined);
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
@@ -2287,6 +2318,7 @@ describe("runCodingExecute", () => {
     fakeSecrets.getSecret.mockResolvedValue(undefined);
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
@@ -2319,6 +2351,7 @@ describe("runCodingExecute", () => {
     const stream = recordingExecuteStream();
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
@@ -2350,6 +2383,7 @@ describe("runCodingExecute", () => {
       [Symbol.asyncIterator]: async function* () {},
     };
     const throwingBackend: CodingBackend = {
+      fix: () => throwingPlan("fix not exercised by this test"),
       plan: () => emptyPlan,
       execute: () => throwingPlan("backend exploded"),
     };
@@ -2365,6 +2399,7 @@ describe("runCodingExecute", () => {
 
     await expect(
       runCodingExecute({
+        trigger: { kind: "approved" },
         taskId: task.id,
         runId: "run-test",
         deps: makeDeps({ sandbox, backend: throwingBackend }),

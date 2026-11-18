@@ -39,6 +39,14 @@ export interface BackendCallContext {
   container: SandboxSession;
 }
 
+/** What a skills-repo fix pass's session is told beyond the task's goal and plan. */
+export interface FixContext {
+  /** Register's findings on the refused tip, as the task's verdict carries them. */
+  findings: readonly string[];
+  /** The task's token budget less the tokens recorded so far, at least 0. */
+  tokenBudgetLeft: number;
+}
+
 /**
  * Common surface for both Claude Code and Codex CLIs. The sandbox is the
  * security boundary — there's no runtime permission protocol; both
@@ -53,4 +61,10 @@ export interface CodingBackend {
    * session id is captured during the plan phase and stored on the task.
    */
   execute(ctx: BackendCallContext, sessionId: string): AsyncIterable<CodingEvent>;
+  /**
+   * A fresh execute-mode session, no `--resume`, for a skills-repo fix pass
+   * after a pre-submit refusal: the `fix` prompt carries the goal, the
+   * approved plan and the findings.
+   */
+  fix(ctx: BackendCallContext, fix: FixContext): AsyncIterable<CodingEvent>;
 }

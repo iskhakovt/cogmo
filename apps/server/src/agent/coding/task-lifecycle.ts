@@ -29,6 +29,7 @@ export const CLAIMS = {
   plan: { stepId: "claim-task-planning", from: "queued", to: "planning" },
   execute: { stepId: "set-status-executing", from: "awaiting_approval", to: "executing" },
   verify: { stepId: "set-status-verifying", from: "pending_verify", to: "verifying" },
+  fix: { stepId: "claim-fix-pass", from: "pending_fix", to: "executing" },
 } as const satisfies Record<string, Claim>;
 
 type TransitionResult = Awaited<ReturnType<CodingStore["transitionTaskStatus"]>>;
@@ -51,15 +52,19 @@ type ClaimOutcome = { kind: "owned" } | { kind: "lost"; transition: TransitionRe
  * `claimedByRunId` separates them: a fresh delivery is a fresh Inngest run.
  * A row at the target with no claimant (every row predating migration 0054)
  * is adopted by the transition itself and comes back `transitioned`.
+ *
+ * `fixPass`, the trigger's pass, also matches the row's
+ * `presubmit_fix_passes`, so a trigger from an earlier pass loses here.
  */
 export async function claimTask(
   run: CodingRun,
   deps: TaskStoreDeps,
   claim: Claim,
+  fixPass?: number,
 ): Promise<ClaimOutcome> {
   const transition = await run.stepRun(claim.stepId, () =>
     deps.runInTx((tx) =>
-      deps.store.transitionTaskStatus(tx, run.taskId, claim.from, claim.to, run.runId),
+      deps.store.transitionTaskStatus(tx, run.taskId, claim.from, claim.to, run.runId, fixPass),
     ),
   );
   const owned =

@@ -4,9 +4,15 @@ import { z } from "zod";
 import { logger } from "../../logger.js";
 import type { ExecStreamingHandle, SandboxSession } from "../../sandbox/index.js";
 import { describeError } from "../../util/describe-error.js";
-import type { BackendCallContext, BackendUsage, CodingBackend, CodingEvent } from "./backend.js";
+import type {
+  BackendCallContext,
+  BackendUsage,
+  CodingBackend,
+  CodingEvent,
+  FixContext,
+} from "./backend.js";
 import { readJsonl } from "./jsonl.js";
-import { buildExecutePrompt, buildPlanPrompt } from "./prompt.js";
+import { buildExecutePrompt, buildFixPrompt, buildPlanPrompt } from "./prompt.js";
 
 const log = logger.child({ component: "coding.claude" });
 
@@ -167,6 +173,11 @@ export class ClaudeCodeBackend implements CodingBackend {
     const prompt = buildExecutePrompt(ctx.repo);
     const flags = [...EXECUTE_FLAGS, "--resume", sessionId];
     return runClaudeSession(this.#binary, ctx.container, flags, prompt, "execute");
+  }
+
+  fix(ctx: BackendCallContext, fix: FixContext): AsyncIterable<CodingEvent> {
+    const prompt = buildFixPrompt(ctx.task, ctx.repo, fix);
+    return runClaudeSession(this.#binary, ctx.container, EXECUTE_FLAGS, prompt, "execute");
   }
 }
 

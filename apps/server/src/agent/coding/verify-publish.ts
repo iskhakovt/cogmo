@@ -1,7 +1,7 @@
 /**
  * The verify phase's publishing stages, run once the suite has passed: push
- * the feature branch, dry-run register on it on the skills repo, then open
- * the PR and record it on the task.
+ * the feature branch, dry-run register on it on the skills repo (handing a
+ * refusal back to a fix pass), then open the PR and record it on the task.
  */
 
 import type { Octokit } from "@octokit/rest";
@@ -16,6 +16,11 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
 import { runOpenPr } from "./open-pr.js";
+import {
+  emitPresubmitRefused,
+  transitionPendingFix,
+  type VerifySandboxLease,
+} from "./presubmit-hand-back.js";
 import { type PresubmitDeps, runPresubmit } from "./presubmit-stage.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { recordTaskFailedFrom } from "./task-failure.js";
@@ -26,14 +31,17 @@ import type { PrMetadata, TaskFailure, WorktreeAssignment } from "./types.js";
 /**
  * `pushed`: the branch is upstream, the task reads `pushed` and
  * `coding/task/pushed` is out. `failed`: the pre-submit failed the task,
- * which reads `failed` with `coding/task/failed` out. `left`: the task moved
- * out of `verifying` under the run (a Cancel during the suite, the push or
- * the dry run), so neither the event nor the PR follows. Past the push the
- * branch stays upstream for a re-delegate.
+ * which reads `failed` with `coding/task/failed` out. `handed_back`: the task
+ * reads `pending_fix`, the run's sandbox and askpass dir are reaped, and
+ * `coding/task/presubmit-refused` is out. `left`: the task moved out of
+ * `verifying` under the run (a Cancel during the suite, the push or the dry
+ * run), so neither the event nor the PR follows. Past the push the branch
+ * stays upstream for a re-delegate.
  */
 export type PushOutcome =
   | { kind: "pushed"; branchSha: string }
   | { kind: "failed"; failure: TaskFailure }
+  | { kind: "handed_back" }
   | TaskLeft;
 
 /**
@@ -77,6 +85,9 @@ export async function pushVerifiedBranch(
     identity: GitHubIdentity;
     askpass: AskpassMaterials;
     container: () => Promise<SandboxSession>;
+    /** The run's pass, from its trigger. */
+    fixPass: number;
+    lease: VerifySandboxLease;
   },
 ): Promise<Result<PushOutcome, TaskFailure>> {
   const commit = await run.stepRun("commit-and-push", async () =>
@@ -117,10 +128,46 @@ export async function pushVerifiedBranch(
     branch: args.branch,
     branchSha,
     identity: args.identity,
+    fixPass: args.fixPass,
   });
   return await match(presubmit)
     .with({ kind: "proceed" }, () => transitionPushed(run, deps, inngest, branchSha))
     .with({ kind: "fail" }, ({ failure }) => failPresubmit(run, deps, inngest, failure, branchSha))
+    .with({ kind: "hand_back" }, ({ failure }) =>
+      handBack(run, deps, inngest, {
+        failure,
+        branchSha,
+        fixPass: args.fixPass,
+        lease: args.lease,
+      }),
+    )
+    .exhaustive();
+}
+
+/**
+ * A refusal with a pass left: `transition-pending-fix`, then
+ * `teardown-before-fix` and `emit-presubmit-refused`, granting pass
+ * `fixPass + 1`. A run whose earlier build already failed the task on this
+ * refusal, or carried on past it, goes on as that build would.
+ */
+async function handBack(
+  run: CodingRun,
+  deps: TaskStoreDeps,
+  inngest: EventPublisher,
+  args: { failure: TaskFailure; branchSha: string; fixPass: number; lease: VerifySandboxLease },
+): Promise<Result<PushOutcome, TaskFailure>> {
+  const pending = await transitionPendingFix(run, deps, args.fixPass);
+  return await match(pending)
+    .with({ kind: "advanced" }, async (): Promise<Result<PushOutcome, TaskFailure>> => {
+      await args.lease.tearDownBeforeFix(run);
+      await emitPresubmitRefused(run, args.fixPass + 1);
+      return ok({ kind: "handed_back" });
+    })
+    .with({ kind: "failed_by_run" }, () =>
+      failPresubmit(run, deps, inngest, args.failure, args.branchSha),
+    )
+    .with({ kind: "settled" }, () => transitionPushed(run, deps, inngest, args.branchSha))
+    .with({ kind: "left" }, (left): Result<PushOutcome, TaskFailure> => ok(left))
     .exhaustive();
 }
 

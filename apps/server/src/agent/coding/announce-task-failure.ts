@@ -2,7 +2,8 @@
  * Posts a skills-repo task's failure into its conversation when no run
  * renders it (design/coding-delegation.md → Skills-repo pre-submit →
  * Announcing): after the first execute session verify publishes nothing, and
- * the registry has released the execute stream. Subscribes to
+ * the registry has released the execute stream, so a task that had a fix
+ * pass announces any failure. Subscribes to
  * `coding/task/failed` and emits `coding/task/failure-notice`, which the
  * channel renders as a coding-task failure.
  */
@@ -32,7 +33,7 @@ export type FailureAnnouncement =
       reason: "reason_not_announced" | "task_not_found" | "not_skills_repo" | "no_conversation";
     };
 
-/** The failures of a skills-repo task that no run renders: the pre-submit's own. */
+/** The failures no run renders on a skills-repo task that had no fix pass: the pre-submit's own. */
 const ANNOUNCED_REASONS: ReadonlyArray<CodingTaskFailureReason> = [
   "presubmit_refused",
   "presubmit_stale_base",
@@ -48,9 +49,6 @@ export async function announceTaskFailure(
   failed: TaskFailure & { taskId: string },
 ): Promise<FailureAnnouncement> {
   const { taskId } = failed;
-  if (!ANNOUNCED_REASONS.includes(failed.reason)) {
-    return { kind: "skipped", reason: "reason_not_announced" };
-  }
   const loaded = await deps.runInTx(async (tx) => {
     const task = await deps.store.getTask(tx, taskId);
     const repo = task && (await deps.store.getRepoById(tx, task.repoId));
@@ -59,8 +57,11 @@ export async function announceTaskFailure(
   if (loaded === null) return { kind: "skipped", reason: "task_not_found" };
   const { task, repo } = loaded;
   if (repo.name !== SKILLS_CODING_REPO_NAME) return { kind: "skipped", reason: "not_skills_repo" };
+  if (!ANNOUNCED_REASONS.includes(failed.reason) && task.presubmitFixPasses === 0) {
+    return { kind: "skipped", reason: "reason_not_announced" };
+  }
   if (task.conversationId === null) return { kind: "skipped", reason: "no_conversation" };
-  // The pre-submit judges a branch the verify run pushed.
+  // The pre-submit, and so a fix pass, judges a branch the verify run pushed.
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} failed ${failed.reason} with no worktree_assignment`);
   }

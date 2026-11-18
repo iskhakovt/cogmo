@@ -1,5 +1,6 @@
 import { ENTRYPOINT_RULE, ENTRYPOINT_SIGNATURE } from "../../skills/ast-rules.js";
 import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
+import type { FixContext } from "./backend.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
 /**
@@ -169,5 +170,44 @@ export function buildExecutePrompt(repo: CodingRepoRow): string {
     repoConvention(repo),
     "# Verify command",
     repo.verifyCommand,
+  ].join("\n");
+}
+
+/**
+ * A skills-repo fix pass's prompt, for a fresh execute session after
+ * register's dry run refused the pushed tip (design/coding-delegation.md →
+ * Skills-repo pre-submit → The fix pass). The session has no scrollback, so
+ * it carries the goal, the approved plan and the findings verbatim.
+ */
+export function buildFixPrompt(task: CodingTaskRow, repo: CodingRepoRow, fix: FixContext): string {
+  if (!task.worktreeAssignment || task.plan === null) {
+    throw new Error(`buildFixPrompt called for task ${task.id} without a worktree and a plan`);
+  }
+  return [
+    "# Task",
+    task.goal,
+    "",
+    "# Approved plan",
+    task.plan,
+    "",
+    "# Register refused the branch",
+    `The branch ${task.worktreeAssignment.branch} already holds the work for this plan, and is`,
+    "checked out in /workspace. Registration's checks refused its tip with these findings:",
+    "```",
+    ...fix.findings,
+    "```",
+    "",
+    "# What to do",
+    "- Change only what the findings name, inside the skill's directory.",
+    "- Commit on top of the branch. Do not amend, rebase or reset the commits already on it.",
+    "- Git credentials are NOT available — do not `git push` or `gh pr create`.",
+    "- Run the verify command and iterate until it passes.",
+    repoConvention(repo),
+    "# Verify command",
+    repo.verifyCommand,
+    "",
+    "# Budget",
+    `About ${fix.tokenBudgetLeft} tokens of the task's budget are left. ` +
+      "Narrow scope rather than run over.",
   ].join("\n");
 }

@@ -193,6 +193,47 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   return { kind: "pushed", commitSha, output: pushOutput };
 }
 
+export type FixBaseCheckout = { kind: "checked_out" } | { kind: "auth_failed"; output: string };
+
+/**
+ * A git-remote fix pass's base: `git fetch origin <branch>` under the askpass
+ * env, then `git checkout -B <branch> <sha>` at the refused tip, so a commit
+ * verify made is in the base. An auth refusal on the fetch is a result, as
+ * the push's is; any other failure throws.
+ */
+export async function runCheckoutFixBase(params: {
+  container: Pick<SandboxSession, "execStreaming">;
+  worktreeDir: string;
+  branch: string;
+  sha: string;
+  askpassEnv: Readonly<Record<string, string>>;
+}): Promise<FixBaseCheckout> {
+  const { container, worktreeDir, branch, sha, askpassEnv } = params;
+  const fetched = await runGit(container, ["fetch", REMOTE, branch], {
+    workingDir: worktreeDir,
+    env: askpassEnv,
+    timeoutMs: GIT_FETCH_TOTAL_MS,
+    idleTimeoutMs: GIT_IDLE_MS,
+  });
+  if (fetched.exitCode !== 0) {
+    const output = combine(fetched);
+    if (looksLikeAuthFailure(output)) return { kind: "auth_failed", output };
+    throw new Error(`git fetch ${REMOTE} ${branch} failed (exit ${fetched.exitCode}): ${output}`);
+  }
+  const checkout = await runGit(container, ["checkout", "-B", branch, sha], {
+    workingDir: worktreeDir,
+    env: askpassEnv,
+    timeoutMs: GIT_LOCAL_TOTAL_MS,
+    idleTimeoutMs: GIT_IDLE_MS,
+  });
+  if (checkout.exitCode !== 0) {
+    throw new Error(
+      `git checkout -B ${branch} ${sha} failed (exit ${checkout.exitCode}): ${combine(checkout)}`,
+    );
+  }
+  return { kind: "checked_out" };
+}
+
 /**
  * Config every salvage exec carries, ahead of whatever the tree's own
  * `.git/config` says: no hooks, no fsmonitor, no credential helper. Command
@@ -410,6 +451,7 @@ interface ExecCapture {
 // hung TLS connection mid-upload.
 const GIT_LOCAL_TOTAL_MS = 60_000;
 const GIT_PUSH_TOTAL_MS = 5 * 60 * 1000;
+const GIT_FETCH_TOTAL_MS = 5 * 60 * 1000;
 const GIT_IDLE_MS = 30_000;
 
 async function runGit(

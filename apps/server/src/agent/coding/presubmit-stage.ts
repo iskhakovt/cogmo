@@ -2,12 +2,13 @@
  * The skills repo's pre-submit: register's dry run on the task's pushed tip,
  * between `commit-and-push` and `transition-pushed`
  * (design/coding-delegation.md → Skills-repo pre-submit). The run records the
- * verdict on the task; a refusal or a stale base fails the task, and every
- * other verdict proceeds to the PR.
+ * verdict on the task. A refusal with a fix pass left is handed back to a fix
+ * pass; any other refusal and a stale base fail the task, and every other
+ * verdict proceeds to the PR.
  */
 
 import { ResultAsync } from "neverthrow";
-import { match } from "ts-pattern";
+import { isMatching, match, P } from "ts-pattern";
 import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
 import { cutDryRunText, type RegisterPause } from "../../skills/deploy/register-result.js";
@@ -21,7 +22,12 @@ import { REGISTER_TIMEOUT_MS } from "./auto-register-skill.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import { fitFindings } from "./presubmit-findings.js";
 import type { CodingRepoRow } from "./store/index.js";
-import type { PresubmitUnavailableCause, PresubmitVerdict, TaskFailure } from "./types.js";
+import {
+  PRESUBMIT_FIX_PASSES,
+  type PresubmitUnavailableCause,
+  type PresubmitVerdict,
+  type TaskFailure,
+} from "./types.js";
 import { OUTPUT_CAP_BYTES } from "./verify.js";
 
 export interface PresubmitDeps {
@@ -39,6 +45,8 @@ interface PresubmitArgs {
   /** The tip `commit-and-push` pushed, which the PR names. */
   branchSha: string;
   identity: GitHubIdentity;
+  /** The run's pass, from its trigger: the verdict's key with the run id. */
+  fixPass: number;
 }
 
 /** Why this stage, rather than a register check, judged nothing. */
@@ -54,14 +62,16 @@ function stageUnavailable(sha: string | null, cause: StageCause, detail: string)
   return { kind: "unavailable", sha, cause, detail: cutDryRunText(detail) };
 }
 
-/** The fix pass a verdict is keyed at: a task's first, and its only one. */
-const FIX_PASS = 0;
-
 /**
- * Where the run goes from the pre-submit: on to `transition-pushed`, or to
- * `transition-presubmit-failed` with the failure the verdict stands for.
+ * Where the run goes from the pre-submit: on to `transition-pushed`, to
+ * `transition-presubmit-failed` with the failure the verdict stands for, or
+ * back to a fix pass, carrying the failure a run that already failed the
+ * task on this refusal records.
  */
-export type PresubmitExit = { kind: "proceed" } | { kind: "fail"; failure: TaskFailure };
+export type PresubmitExit =
+  | { kind: "proceed" }
+  | { kind: "fail"; failure: TaskFailure }
+  | { kind: "hand_back"; failure: TaskFailure };
 
 /**
  * The `presubmit` step, on the skills repo only; the repo's name does not
@@ -80,23 +90,33 @@ export async function runPresubmit(
   const { verdict } = await run.stepRun("presubmit", async () => ({
     verdict: await presubmit(run, deps, stage, args),
   }));
-  return presubmitExit(verdict);
+  return presubmitExit(verdict, { runId: run.runId, fixPass: args.fixPass });
 }
 
 /**
  * Each verdict's transition (design/coding-delegation.md → Skills-repo
- * pre-submit → State machine). A refusal has no fix pass to take, so it fails
- * the task. `unavailable` judged nothing, and register runs the same checks
- * again with its own pausing outcome.
+ * pre-submit → State machine). A refusal keyed to another run or pass is a
+ * repeated one, and fails the task, as does one with no pass left.
+ * `unavailable` judged nothing, and register runs the same checks again with
+ * its own pausing outcome.
  */
-function presubmitExit(verdict: PresubmitVerdict): PresubmitExit {
+function presubmitExit(
+  verdict: PresubmitVerdict,
+  key: { runId: string; fixPass: number },
+): PresubmitExit {
   return match(verdict)
     .returnType<PresubmitExit>()
     .with({ kind: "passed" }, { kind: "unavailable" }, () => ({ kind: "proceed" }))
-    .with({ kind: "refused" }, ({ findings }) => ({
-      kind: "fail",
-      failure: { reason: "presubmit_refused", detail: refusedDetail(findings) },
-    }))
+    .with({ kind: "refused" }, (refused) => {
+      const failure: TaskFailure = {
+        reason: "presubmit_refused",
+        detail: refusedDetail(refused.findings),
+      };
+      const own = refused.runId === key.runId && refused.fixPass === key.fixPass;
+      return own && key.fixPass < PRESUBMIT_FIX_PASSES
+        ? { kind: "hand_back", failure }
+        : { kind: "fail", failure };
+    })
     .with({ kind: "stale_base" }, ({ sha, mainSha }) => ({
       kind: "fail",
       failure: {
@@ -120,9 +140,11 @@ function refusedDetail(findings: readonly string[]): string {
 
 /**
  * A verdict keyed to this run and pass is the step's own commit, whose result
- * Inngest lost: it is returned with no second dry run. Otherwise the tip is
- * judged and the verdict written under this run's key, conditional on
- * `verifying`.
+ * Inngest lost: it is returned with no second dry run. A refusal an earlier
+ * pass stored for the same tip and release is returned under that pass's key,
+ * with nothing written: the same tip under the same release gets the same
+ * verdict. Otherwise the tip is judged and the verdict written under this
+ * run's key, conditional on `verifying`.
  */
 async function presubmit(
   run: CodingRun,
@@ -133,12 +155,21 @@ async function presubmit(
   const task = await deps.runInTx((tx) => deps.store.getTask(tx, run.taskId));
   if (!task) throw new Error(`coding task ${run.taskId} vanished before presubmit`);
   const stored = task.presubmitVerdict;
-  if (stored !== null && stored.runId === run.runId && stored.fixPass === FIX_PASS) return stored;
+  if (stored !== null && stored.runId === run.runId && stored.fixPass === args.fixPass) {
+    return stored;
+  }
+  const repeated = {
+    kind: "refused",
+    fixPass: P.number.lt(args.fixPass),
+    sha: args.branchSha,
+    releaseVersion: stage.releaseVersion,
+  } as const;
+  if (isMatching(repeated, stored)) return stored;
 
   const verdict: PresubmitVerdict = {
     ...(await judgeTip(run, stage, args)),
     runId: run.runId,
-    fixPass: FIX_PASS,
+    fixPass: args.fixPass,
     checkedAt: new Date().toISOString(),
     releaseVersion: stage.releaseVersion,
   };

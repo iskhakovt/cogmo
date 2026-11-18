@@ -257,6 +257,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -331,6 +332,7 @@ describe("runCodingVerify", () => {
       >;
       const { taskId } = await seedTask();
       const result = await runCodingVerify({
+        fixPass: 0,
         taskId,
         runId: "run-test",
         deps,
@@ -364,6 +366,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -403,6 +406,7 @@ describe("runCodingVerify", () => {
 
       const { taskId } = await seedTask();
       const result = await runCodingVerify({
+        fixPass: 0,
         taskId,
         runId: "run-test",
         deps,
@@ -441,6 +445,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -469,6 +474,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -516,6 +522,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -550,6 +557,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -585,6 +593,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -623,6 +632,7 @@ describe("runCodingVerify", () => {
     );
 
     await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -655,6 +665,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -684,6 +695,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask({ remoteUrl: "not-a-url" });
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -732,6 +744,7 @@ describe("runCodingVerify", () => {
       const taskId = await seed();
 
       const result = await runCodingVerify({
+        fixPass: 0,
         taskId,
         runId: "run-test",
         deps,
@@ -772,6 +785,7 @@ describe("runCodingVerify", () => {
     const steps = recordingStepRun();
 
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -822,6 +836,7 @@ describe("runCodingVerify", () => {
     const steps = recordingStepRun();
 
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -856,6 +871,7 @@ describe("runCodingVerify", () => {
     const steps = recordingStepRun();
 
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -888,6 +904,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask({ status: "awaiting_approval" });
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -916,6 +933,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -960,6 +978,7 @@ describe("runCodingVerify", () => {
 
     await expect(
       runCodingVerify({
+        fixPass: 0,
         taskId,
         runId: "run-test",
         deps,
@@ -995,6 +1014,7 @@ describe("runCodingVerify", () => {
 
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,

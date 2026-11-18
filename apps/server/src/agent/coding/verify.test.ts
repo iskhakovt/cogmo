@@ -312,12 +312,15 @@ describe("runVerifyStreaming", () => {
       expect(Number.isInteger(result.durationMs)).toBe(true);
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
       await expect(
-        buildCodingTaskVerifyCompleteEvent({
-          taskId: "task-1",
-          ok: result.ok,
-          exitCode: result.exitCode,
-          durationMs: result.durationMs,
-        }).validate(),
+        buildCodingTaskVerifyCompleteEvent(
+          {
+            taskId: "task-1",
+            ok: result.ok,
+            exitCode: result.exitCode,
+            durationMs: result.durationMs,
+          },
+          0,
+        ).validate(),
       ).resolves.toBeUndefined();
     } finally {
       wallClock.mockRestore();

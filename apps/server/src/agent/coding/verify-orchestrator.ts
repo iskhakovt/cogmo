@@ -4,10 +4,10 @@
  * Triggered by `coding/task/cli-done` after the execute orchestrator flips
  * the task to `pending_verify`. Drives:
  *
- *   pending_verify → verifying → (failed) | pushed → pr_open
+ *   pending_verify → verifying → (failed) | (pending_fix) | pushed → pr_open
  *
  *   claim → credentials → verify sandbox → run verify → push branch →
- *   (skills repo) pre-submit → open PR
+ *   (skills repo) pre-submit → open PR, or hand back to a fix pass
  *
  * The execute run already reaped its container, so this one creates a
  * fresh container with the askpass mount bound, which only this run can
@@ -36,6 +36,7 @@ import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
 import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
 import { parseRemoteUrl } from "./open-pr.js";
+import { VerifySandboxLease } from "./presubmit-hand-back.js";
 import type { PresubmitDeps } from "./presubmit-stage.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
@@ -91,7 +92,7 @@ export interface VerifyOrchestratorDeps {
 }
 
 export interface VerifyOrchestratorResult {
-  status: "pr_open" | "pushed" | "failed" | "skipped";
+  status: "pr_open" | "pushed" | "pending_fix" | "failed" | "skipped";
   failure?: TaskFailure;
   prUrl?: string;
   prNumber?: number;
@@ -111,6 +112,7 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
       const durable = fromStepTools(step);
       return runCodingVerify({
         taskId: event.data.taskId,
+        fixPass: event.data.fixPass ?? 0,
         runId,
         deps,
         stepRun: durable.run,
@@ -123,6 +125,8 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
 
 interface RunParams {
   taskId: string;
+  /** The skills repo's fix pass that executed, from the trigger; never read from the row. */
+  fixPass: number;
   /** See {@link CodingRun.runId}. */
   runId: string;
   deps: VerifyOrchestratorDeps;
@@ -143,7 +147,7 @@ interface VerifyFailureContext {
  * and an inline shim in tests.
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
-  const { taskId, deps, inngest } = params;
+  const { taskId, fixPass, deps, inngest } = params;
   const run = codingRun(params, log);
   const { task, repo } = await loadTaskAndRepo(deps, taskId);
   if (!task.worktreeAssignment) {
@@ -156,7 +160,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   // task another run owns to `failed`. The cost is that a run failing one of
   // them passes through `verifying` for the millisecond the decrypts take —
   // invisible, as both statuses are non-terminal.
-  const claim = await claimTask(run, deps, CLAIMS.verify);
+  const claim = await claimTask(run, deps, CLAIMS.verify, fixPass);
   if (claim.kind === "lost") {
     run.log.info(
       { transition: claim.transition },
@@ -171,6 +175,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   const { remote, identity, env } = credentials.value;
 
   const askpassLease = new AskpassLease(deps.askpassBaseDir, taskId);
+  const lease = new VerifySandboxLease(deps.sandbox, askpassLease);
   try {
     const askpass = await askpassLease.provision(run, async () => identity);
     const state = await createVerifySandbox(run, deps, {
@@ -183,7 +188,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     });
     const container = lazySession(deps.sandbox, state);
 
-    const verdict = await runVerifyStage(run, inngest, { repo, container });
+    const verdict = await runVerifyStage(run, inngest, { repo, container, fixPass });
     if (!verdict.ok) return await failVerify(run, deps, failure, verifyFailure(verdict));
 
     const pushed = await pushVerifiedBranch(run, deps, inngest, {
@@ -193,6 +198,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       identity,
       askpass,
       container,
+      fixPass,
+      lease,
     });
     if (pushed.isErr()) return await failVerify(run, deps, failure, pushed.error);
     return await match(pushed.value)
@@ -200,6 +207,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       .with({ kind: "failed" }, (recorded) =>
         teardownFailedVerify(run, deps, failure, recorded.failure),
       )
+      .with({ kind: "handed_back" }, (): VerifyOrchestratorResult => ({ status: "pending_fix" }))
       .with({ kind: "pushed" }, ({ branchSha }) =>
         openPr(run, deps, inngest, failure, {
           task,
@@ -228,16 +236,9 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       .with({ kind: "ended" }, (): VerifyOrchestratorResult => ({ status: "skipped" }))
       .exhaustive();
   } finally {
-    // Unconditional sweep — idempotent at the label-index layer, reaps
-    // managed-backend state that survived a thrown create, and a no-op when
-    // no labelled sandbox exists.
-    await deps.sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
-      run.log.warn({ err }, "verify: deleteByTaskId failed");
-    });
-    // After the sweep: on Local-Docker `deleteByTaskId` already wiped the
-    // bind-mount source, and this second, idempotent release still removes
-    // the host dir on Daytona, where only the sandbox-side copy is wiped.
-    askpassLease.release();
+    // A no-op when no labelled sandbox exists, and skipped after a hand-back
+    // reaped both in `teardown-before-fix`.
+    await lease.release(run);
   }
 }
 
@@ -434,7 +435,7 @@ async function createVerifySandbox(
 async function runVerifyStage(
   run: CodingRun,
   inngest: EventPublisher,
-  args: { repo: CodingRepoRow; container: () => Promise<SandboxSession> },
+  args: { repo: CodingRepoRow; container: () => Promise<SandboxSession>; fixPass: number },
 ): Promise<VerifyResult> {
   const verdict = await run.stepRun("run-verify", async () =>
     runVerifyStreaming({
@@ -446,12 +447,15 @@ async function runVerifyStage(
   await run.stepRun("emit-verify-complete", () =>
     inngest
       .send(
-        buildCodingTaskVerifyCompleteEvent({
-          taskId: run.taskId,
-          ok: verdict.ok,
-          exitCode: verdict.exitCode,
-          durationMs: verdict.durationMs,
-        }),
+        buildCodingTaskVerifyCompleteEvent(
+          {
+            taskId: run.taskId,
+            ok: verdict.ok,
+            exitCode: verdict.exitCode,
+            durationMs: verdict.durationMs,
+          },
+          args.fixPass,
+        ),
       )
       .then(() => undefined),
   );

@@ -445,12 +445,46 @@ export const codingTaskPlanApproved = eventType("coding/task/plan-approved", {
  * Coding delegation — execute phase reached `pending_verify`. Triggers
  * the slice 4.0h `coding-task-verify` orchestrator function which runs
  * verify → push → PR. Emitted by the execute orchestrator after
- * the status transition committed durably; consumed exactly once per
- * task (Inngest dedup on the event id is implicit via task id).
+ * the status transition committed durably. `fixPass` is the skills repo's
+ * fix pass that executed, absent at pass 0.
  */
 export const codingTaskCliDone = eventType("coding/task/cli-done", {
   schema: z.object({
     taskId: z.string(),
+    fixPass: z.number().int().positive().optional(),
+  }),
+});
+
+/** The suffix of a per-pass event id: none at pass 0, `-f<n>` after. */
+function passSuffix(fixPass: number): string {
+  return fixPass === 0 ? "" : `-f${fixPass}`;
+}
+
+/**
+ * Build a `coding/task/cli-done` event under `cli-done-<taskId>`, suffixed
+ * per pass, which covers the crash window between the send and the step
+ * recording it.
+ */
+export function buildCodingTaskCliDoneEvent(data: { taskId: string; fixPass: number }) {
+  return {
+    ...codingTaskCliDone.create({
+      taskId: data.taskId,
+      ...(data.fixPass > 0 && { fixPass: data.fixPass }),
+    }),
+    id: `cli-done-${data.taskId}${passSuffix(data.fixPass)}`,
+  };
+}
+
+/**
+ * Coding delegation — the skills repo's pre-submit refused a task's pushed
+ * tip and granted fix pass `fixPass` (design/coding-delegation.md →
+ * Skills-repo pre-submit). The execute orchestrator takes it as its second
+ * trigger. It carries no findings: the fix session reads them from the row.
+ */
+export const codingTaskPresubmitRefused = eventType("coding/task/presubmit-refused", {
+  schema: z.object({
+    taskId: z.string(),
+    fixPass: z.number().int().positive(),
   }),
 });
 
@@ -473,10 +507,16 @@ export type CodingTaskVerifyCompleteData = z.infer<typeof codingTaskVerifyComple
 /**
  * Build a `coding/task/verify-complete` event. `send` validates the payload
  * against the schema. The bus-dedup `id` covers the crash window between the
- * send and the step recording it: one verify verdict per task.
+ * send and the step recording it: one verify verdict per task and pass.
  */
-export function buildCodingTaskVerifyCompleteEvent(data: CodingTaskVerifyCompleteData) {
-  return { ...codingTaskVerifyComplete.create(data), id: `verify-complete-${data.taskId}` };
+export function buildCodingTaskVerifyCompleteEvent(
+  data: CodingTaskVerifyCompleteData,
+  fixPass: number,
+) {
+  return {
+    ...codingTaskVerifyComplete.create(data),
+    id: `verify-complete-${data.taskId}${passSuffix(fixPass)}`,
+  };
 }
 
 /**

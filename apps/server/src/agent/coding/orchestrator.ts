@@ -7,14 +7,19 @@
  *   plan:    claim → allocate worktree → plan sandbox → plan session →
  *            persist plan → plan gate
  *   execute: claim → execute sandbox → execute session → (git-remote)
- *            push execute changes → hand off to verify
+ *            push execute changes → hand off to verify; on the skills repo
+ *            also a fix pass, claimed on a pre-submit refusal
  */
 
 import type { Inngest } from "inngest";
 import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { type EventPublisher, fromStepTools } from "../../inngest/durable.js";
-import { codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
+import {
+  codingTaskPlanApproved,
+  codingTaskPresubmitRefused,
+  codingTaskStart,
+} from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
@@ -26,12 +31,18 @@ import type { BackendUsage, CodingBackend } from "./backend.js";
 import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
 import {
   checkExecutable,
+  type ExecuteTrigger,
   endExecuteFailed,
   handOffToVerify,
   pushExecuteChanges,
 } from "./execute-outcomes.js";
 import { acquireExecuteSandbox, type ExecuteSandbox } from "./execute-sandbox.js";
-import { persistSessionUsage, runExecuteSession } from "./execute-session.js";
+import {
+  type ExecuteSession,
+  fixPassOf,
+  persistSessionUsage,
+  runExecuteSession,
+} from "./execute-session.js";
 import { parkPlanAtGate } from "./plan-gate-stage.js";
 import { preparePlanSandbox } from "./plan-sandbox.js";
 import { runPlanSession } from "./plan-session.js";
@@ -153,19 +164,30 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
  * the CLI resolves every tool call locally. `retries: 0` for the same
  * reason as the plan function: file edits inside the container are not
  * idempotent under retry.
+ *
+ * Also consumes `coding/task/presubmit-refused`, a skills-repo fix pass: a
+ * fresh session in a fresh sandbox, with no plan gate.
  */
 export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, inngest: Inngest) {
   return inngest.createFunction(
     {
       id: "coding-task-execute",
-      triggers: [codingTaskPlanApproved],
+      triggers: [codingTaskPlanApproved, codingTaskPresubmitRefused],
       retries: 0,
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step, runId }) => {
       const durable = fromStepTools(step);
+      // Matched on the payload, not the name: the SDK's event union also
+      // carries `inngest/function.invoked`, whose data is either payload.
+      const trigger = match(event.data)
+        .returnType<ExecuteTrigger>()
+        .with({ fixPass: P.number }, ({ fixPass }) => ({ kind: "fix", fixPass }))
+        .with({ approvedAt: P.string }, () => ({ kind: "approved" }))
+        .exhaustive();
       return runCodingExecute({
         taskId: event.data.taskId,
+        trigger,
         runId,
         deps,
         stepRun: durable.run,
@@ -189,6 +211,8 @@ interface RunParams {
 interface ExecuteRunParams extends RunParams {
   /** Emits `coding/task/cli-done`, the hand-off to the verify orchestrator. */
   inngest: EventPublisher;
+  /** The run's trigger; a fix pass's pass is read from it, never from the row. */
+  trigger: ExecuteTrigger;
 }
 
 /**
@@ -442,10 +466,11 @@ async function publishExecute(
     sandbox: ExecuteSandbox;
     container: () => Promise<SandboxSession>;
     usage: BackendUsage | undefined;
+    session: ExecuteSession;
   },
 ): Promise<CodingExecuteResult> {
-  const { task, exit, sandbox, container, usage } = args;
-  await persistSessionUsage(run, deps, usage);
+  const { task, exit, sandbox, container, usage, session } = args;
+  await persistSessionUsage(run, deps, usage, session);
   if (sandbox.push) {
     const pushed = await pushExecuteChanges(run, {
       task,
@@ -466,7 +491,11 @@ async function publishExecute(
       return executeResultOf(recorded);
     }
   }
-  const handOff = await handOffToVerify(run, deps, inngest, { ...exit, usage });
+  const handOff = await handOffToVerify(run, deps, inngest, {
+    ...exit,
+    usage,
+    fixPass: fixPassOf(session),
+  });
   return match(handOff)
     .with("handed_off", (): CodingExecuteResult => ({ status: "pending_verify" }))
     .with("left_executing", (): CodingExecuteResult => ({ status: "skipped" }))
@@ -477,11 +506,14 @@ async function publishExecute(
  * The execute orchestration. Same `stepRun` injection as `runCodingTask`.
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
-  const { deps } = params;
+  const { deps, trigger } = params;
   const run = codingRun(params, log);
   const { task, repo } = await loadTaskAndRepo(deps, run.taskId);
 
-  const claim = await claimTask(run, deps, CLAIMS.execute);
+  const claim = await match(trigger)
+    .with({ kind: "approved" }, () => claimTask(run, deps, CLAIMS.execute))
+    .with({ kind: "fix" }, ({ fixPass }) => claimTask(run, deps, CLAIMS.fix, fixPass))
+    .exhaustive();
   if (claim.kind === "lost") {
     run.log.info(
       { transition: claim.transition },
@@ -492,7 +524,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 
   // Ahead of the checks and the try, so every failure from here reaches it.
   const stream = await (deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM))(run.taskId);
-  const { sessionId, worktreeAssignment: assignment } = await checkExecutable(task, stream);
+  const { session, worktreeAssignment: assignment } = await checkExecutable(task, stream, trigger);
   const exit = { repo, assignment, stream };
 
   const askpass = new AskpassLease(deps.askpassBaseDir, run.taskId);
@@ -507,21 +539,28 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           logSuffix: "",
         }),
       );
-    const acquired = await acquireExecuteSandbox(run, deps, { task, repo, assignment, askpass });
+    const acquired = await acquireExecuteSandbox(run, deps, {
+      task,
+      repo,
+      assignment,
+      askpass,
+      session,
+    });
     if (acquired.isErr()) return await failSession(acquired.error);
     const sandbox = acquired.value;
     const container = lazySession(deps.sandbox, sandbox.state);
-    const session = await runExecuteSession(run, deps, {
-      task,
-      repo,
-      sessionId,
-      container,
-      stream,
-    });
-    return await match(session)
+    const ran = await runExecuteSession(run, deps, { task, repo, session, container, stream });
+    return await match(ran)
       .with({ kind: "errored" }, ({ failure }) => failSession(failure))
       .with({ kind: "completed" }, ({ usage }) =>
-        publishExecute(run, deps, params.inngest, { task, exit, sandbox, container, usage }),
+        publishExecute(run, deps, params.inngest, {
+          task,
+          exit,
+          sandbox,
+          container,
+          usage,
+          session,
+        }),
       )
       .exhaustive();
   } catch (err) {

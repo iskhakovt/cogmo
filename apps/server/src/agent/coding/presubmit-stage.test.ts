@@ -17,6 +17,7 @@ import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { CodingRun } from "./coding-run.js";
 import { type PresubmitDeps, runPresubmit } from "./presubmit-stage.js";
 import { type CodingRepoRow, type CodingTaskStatus, DrizzleCodingStore } from "./store/index.js";
+import { PRESUBMIT_FIX_PASSES, type PresubmitVerdict } from "./types.js";
 
 const execFileP = promisify(execFile);
 const git = async (...args: string[]) => (await execFileP("git", args)).stdout.trim();
@@ -157,6 +158,7 @@ describe("runPresubmit", () => {
       branch: BRANCH,
       branchSha: "a".repeat(40),
       identity: IDENTITY,
+      fixPass: 0,
     });
 
     expect(h.steps).toEqual([]);
@@ -171,7 +173,7 @@ describe("runPresubmit", () => {
     await runPresubmit(
       h.run,
       { ...h.deps, presubmit: null },
-      { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY },
+      { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY, fixPass: 0 },
     );
 
     expect(h.steps).toEqual([]);
@@ -190,7 +192,13 @@ describe("runPresubmit", () => {
     };
     h.skillRunner.checkRegister.mockResolvedValue(refused);
 
-    await runPresubmit(h.run, h.deps, { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY });
+    await runPresubmit(h.run, h.deps, {
+      repo,
+      branch: BRANCH,
+      branchSha: sha,
+      identity: IDENTITY,
+      fixPass: 0,
+    });
 
     expect(h.steps).toEqual(["presubmit"]);
     expect(h.skillRunner.checkRegister).toHaveBeenCalledWith({
@@ -210,7 +218,7 @@ describe("runPresubmit", () => {
   it("a re-run after its own write returns the stored verdict with no second dry run; a later run judges afresh", async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
-    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY };
+    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY, fixPass: 0 };
     // Each call stands for the step running again: Inngest recorded no result.
     const results: unknown[] = [];
     const h = harness(taskId, "verify-run-1");
@@ -245,6 +253,7 @@ describe("runPresubmit", () => {
       branch: BRANCH,
       branchSha: "c".repeat(40),
       identity: IDENTITY,
+      fixPass: 0,
     });
     expect(await verdictOf(taskId)).toMatchObject({
       kind: "unavailable",
@@ -260,6 +269,7 @@ describe("runPresubmit", () => {
       branch: missing,
       branchSha: sha,
       identity: IDENTITY,
+      fixPass: 0,
     });
     const failed = expectDefined(await verdictOf(taskId), "the verdict");
     expect(failed).toMatchObject({
@@ -278,7 +288,7 @@ describe("runPresubmit", () => {
   it("judges nothing at the deadline, and fails the step on any other throw", async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
-    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY };
+    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY, fixPass: 0 };
     const deadline = new AbortController();
     vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
     const h = harness(taskId, "verify-run-1");
@@ -341,7 +351,13 @@ describe("runPresubmit", () => {
       return new Promise<never>(() => {});
     });
 
-    await runPresubmit(h.run, h.deps, { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY });
+    await runPresubmit(h.run, h.deps, {
+      repo,
+      branch: BRANCH,
+      branchSha: sha,
+      identity: IDENTITY,
+      fixPass: 0,
+    });
 
     expect(await verdictOf(taskId)).toMatchObject({
       kind: "unavailable",
@@ -358,7 +374,7 @@ describe("runPresubmit", () => {
   }, async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
-    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY };
+    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY, fixPass: 0 };
     const late = Promise.withResolvers<RegisterDryRun>();
     const h = harness(taskId, "verify-run-1");
     const warn = vi.spyOn(h.run.log, "warn");
@@ -387,7 +403,7 @@ describe("runPresubmit", () => {
   }, async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
-    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY };
+    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY, fixPass: 0 };
     const late = Promise.withResolvers<RegisterDryRun>();
     const h = harness(taskId, "verify-run-1");
     const warn = vi.spyOn(h.run.log, "warn");
@@ -429,6 +445,7 @@ describe("runPresubmit", () => {
       branch: BRANCH,
       branchSha: sha,
       identity: IDENTITY,
+      fixPass: 0,
     });
 
     expect(await verdictOf(taskId)).toMatchObject({ kind: "passed", runId: "verify-run-1" });
@@ -439,7 +456,7 @@ describe("runPresubmit", () => {
     );
   });
 
-  it("a refusal fails the task presubmit_refused, its findings cut at 8 KiB at a finding boundary", async () => {
+  it("a refusal with no pass left fails the task presubmit_refused, its findings cut at 8 KiB at a finding boundary", async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
     const h = harness(taskId, "verify-run-1");
@@ -454,6 +471,7 @@ describe("runPresubmit", () => {
       branch: BRANCH,
       branchSha: sha,
       identity: IDENTITY,
+      fixPass: PRESUBMIT_FIX_PASSES,
     });
 
     assertKind(exit, "fail");
@@ -468,6 +486,105 @@ describe("runPresubmit", () => {
     expect(Buffer.byteLength(withOneMore)).toBeGreaterThan(8 * 1024);
   });
 
+  it.each([0, 1])(
+    "a refusal at pass %i, keyed to the run and pass, is handed back carrying its failure",
+    async (fixPass) => {
+      const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+      const sha = await pushBranch();
+      const h = harness(taskId, "verify-run-1");
+      const findings = ["ruff: skills/echo/skill.py:1:1: E501"];
+      h.skillRunner.checkRegister.mockResolvedValue({ kind: "refused", sha, findings });
+
+      const exit = await runPresubmit(h.run, h.deps, {
+        repo,
+        branch: BRANCH,
+        branchSha: sha,
+        identity: IDENTITY,
+        fixPass,
+      });
+
+      expect(exit).toEqual({
+        kind: "hand_back",
+        failure: { reason: "presubmit_refused", detail: findings[0] },
+      });
+      expect(await verdictOf(taskId)).toMatchObject({ runId: "verify-run-1", fixPass });
+    },
+  );
+
+  describe("a refusal an earlier pass stored", () => {
+    /** The row's verdict as pass 0's verify run left it, refusing `sha` under `releaseVersion`. */
+    async function storeEarlierRefusal(taskId: string, sha: string, releaseVersion: string) {
+      const earlier: PresubmitVerdict = {
+        kind: "refused",
+        sha,
+        findings: ["ruff: E501"],
+        runId: "verify-run-0",
+        fixPass: 0,
+        checkedAt: "2026-08-20T00:01:30.000Z",
+        releaseVersion,
+      };
+      await tx((trx) => store.setTaskPresubmitVerdict(trx, taskId, earlier));
+      return earlier;
+    }
+
+    it("for the same tip and release is returned under that pass's key with no dry run or write, and fails the task", async () => {
+      const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+      const sha = await pushBranch();
+      const earlier = await storeEarlierRefusal(taskId, sha, "2.17.0");
+      const results: unknown[] = [];
+      const h = harness(taskId, "verify-run-1");
+      h.run.stepRun = async (_id, fn) => {
+        const result = await fn();
+        results.push(result);
+        return result;
+      };
+
+      const exit = await runPresubmit(h.run, h.deps, {
+        repo,
+        branch: BRANCH,
+        branchSha: sha,
+        identity: IDENTITY,
+        fixPass: 1,
+      });
+
+      expect(results).toEqual([{ verdict: earlier }]);
+      expect(exit).toEqual({
+        kind: "fail",
+        failure: { reason: "presubmit_refused", detail: "ruff: E501" },
+      });
+      expect(h.skillRunner.checkRegister).not.toHaveBeenCalled();
+      expect(await verdictOf(taskId)).toEqual(earlier);
+      expect(await scratchRefs()).toBe("");
+    });
+
+    it.each([
+      { name: "a new release", release: "2.16.0", tip: (sha: string) => sha },
+      { name: "a moved tip", release: "2.17.0", tip: () => "d".repeat(40) },
+    ])("under $name gets a fresh dry run", async ({ release, tip }) => {
+      const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+      const sha = await pushBranch();
+      await storeEarlierRefusal(taskId, tip(sha), release);
+      const h = harness(taskId, "verify-run-1");
+      h.skillRunner.checkRegister.mockResolvedValue({ kind: "passed", sha, riskTier: "auto" });
+
+      const exit = await runPresubmit(h.run, h.deps, {
+        repo,
+        branch: BRANCH,
+        branchSha: sha,
+        identity: IDENTITY,
+        fixPass: 1,
+      });
+
+      expect(exit).toEqual({ kind: "proceed" });
+      expect(h.skillRunner.checkRegister).toHaveBeenCalledTimes(1);
+      expect(await verdictOf(taskId)).toMatchObject({
+        kind: "passed",
+        runId: "verify-run-1",
+        fixPass: 1,
+      });
+    });
+  });
+
   it("a stale base fails the task presubmit_stale_base naming both shas", async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
@@ -480,6 +597,7 @@ describe("runPresubmit", () => {
       branch: BRANCH,
       branchSha: sha,
       identity: IDENTITY,
+      fixPass: 0,
     });
 
     expect(exit).toEqual({
@@ -494,7 +612,7 @@ describe("runPresubmit", () => {
   it("a passed or unavailable verdict, the stage off and another repo all proceed", async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
-    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY };
+    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY, fixPass: 0 };
     const passed = harness(taskId, "verify-run-1");
     passed.skillRunner.checkRegister.mockResolvedValue({ kind: "passed", sha, riskTier: "auto" });
     expect(await runPresubmit(passed.run, passed.deps, args)).toEqual({ kind: "proceed" });
@@ -522,7 +640,13 @@ describe("runPresubmit", () => {
     const h = harness(taskId, "verify-run-1");
     h.skillRunner.checkRegister.mockResolvedValue({ kind: "passed", sha, riskTier: "notify" });
 
-    await runPresubmit(h.run, h.deps, { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY });
+    await runPresubmit(h.run, h.deps, {
+      repo,
+      branch: BRANCH,
+      branchSha: sha,
+      identity: IDENTITY,
+      fixPass: 0,
+    });
 
     expect(h.skillRunner.checkRegister).toHaveBeenCalledTimes(1);
     expect(

@@ -19,9 +19,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { InngestTestEngine } from "@inngest/test";
+import { InngestTestEngine, mockCtx } from "@inngest/test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import { inngest } from "../../inngest/client.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import {
@@ -33,7 +34,7 @@ import {
   statefulCodingStore,
 } from "../../test/coding-fixtures.js";
 import { emittedEventNames, fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
-import type { CodingBackend, CodingEvent } from "./backend.js";
+import type { CodingBackend, CodingEvent, FixContext } from "./backend.js";
 import {
   type CodingOrchestratorDeps,
   createCodingExecuteOrchestrator,
@@ -97,13 +98,20 @@ const EXECUTE_EVENTS: CodingEvent[] = [
 ];
 
 /** Counts invocations so a per-boundary re-entry shows up as a second call. */
-function countingBackend(events: { plan?: CodingEvent[]; execute?: CodingEvent[] }): {
+function countingBackend(events: {
+  plan?: CodingEvent[];
+  execute?: CodingEvent[];
+  fix?: CodingEvent[];
+}): {
   backend: CodingBackend;
   planCalls: () => number;
   executeCalls: () => number;
+  /** Each fix session's context, as the backend received it. */
+  fixCalls: () => ReadonlyArray<FixContext>;
 } {
   let planCalls = 0;
   let executeCalls = 0;
+  const fixCalls: FixContext[] = [];
   return {
     backend: {
       plan: async function* () {
@@ -114,9 +122,14 @@ function countingBackend(events: { plan?: CodingEvent[]; execute?: CodingEvent[]
         executeCalls++;
         for (const ev of events.execute ?? []) yield ev;
       },
+      fix: async function* (_ctx, fix) {
+        fixCalls.push(fix);
+        for (const ev of events.fix ?? []) yield ev;
+      },
     },
     planCalls: () => planCalls,
     executeCalls: () => executeCalls,
+    fixCalls: () => fixCalls,
   };
 }
 
@@ -677,5 +690,213 @@ describe("coding-task-execute — Inngest replay", () => {
     expect(result).toEqual({ status: "skipped" });
     expect(backend.executeCalls()).toBe(0);
     expect(current().status).toBe("pr_open");
+  });
+});
+
+describe("coding-task-execute — a skills-repo fix pass", () => {
+  const RUN_ID = "execute-run-1";
+  const pinRunId: NonNullable<InngestTestEngine.Options["transformCtx"]> = (ctx) => ({
+    ...mockCtx(ctx),
+    runId: RUN_ID,
+  });
+  const FINDINGS = ["ruff: skills/echo/skill.py:1:1: E501 Line too long"];
+
+  /** A task a verify run handed back at pass `fixPass - 1`, after the usage recorded so far. */
+  const handedBack = (fixPass: number, overrides: Partial<CodingTaskRow> = {}): CodingTaskRow =>
+    codingTaskRow({
+      status: "pending_fix",
+      presubmitFixPasses: fixPass,
+      planApprovedAt: new Date("2026-08-20T00:01:00Z"),
+      sessionId: "sess-AAA",
+      plan: "## Plan\n1. Do X\n",
+      worktreeAssignment: {
+        type: "host-path",
+        branch: "cogmo/abc",
+        worktreePath: join(baseDir, "worktrees", "cogmo", "abc"),
+      },
+      resourceUsage: { tokens_input: 30_000, tokens_output: 5_000, cost_usd: 0.5 },
+      presubmitVerdict: {
+        kind: "refused",
+        sha: "c".repeat(40),
+        findings: FINDINGS,
+        runId: "verify-run-1",
+        fixPass: fixPass - 1,
+        checkedAt: "2026-08-20T00:02:00.000Z",
+        releaseVersion: "dev",
+      },
+      ...overrides,
+    });
+
+  const refusedEvent = (fixPass: number) => ({
+    name: "coding/task/presubmit-refused",
+    data: { taskId: FIXTURE_TASK_ID, fixPass },
+  });
+
+  const FIX_EVENTS: CodingEvent[] = [
+    { kind: "session_started", sessionId: "sess-FIX" },
+    { kind: "text_delta", text: "Shortening the line\n" },
+    {
+      kind: "complete",
+      exitCode: 0,
+      isError: false,
+      usage: { inputTokens: 1_000, outputTokens: 200, costUsd: 0.25 },
+    },
+  ];
+
+  const CliDoneSchema = z.object({
+    payload: z.object({ name: z.string(), data: z.unknown(), id: z.string() }),
+  });
+  const cliDoneSent = () =>
+    sendSpy.mock.calls
+      .map(([arg]) => CliDoneSchema.safeParse(arg))
+      .flatMap((parsed) => (parsed.success ? [parsed.data.payload] : []))
+      .filter((event) => event.name === "coding/task/cli-done");
+
+  it.each([1, 2])(
+    "fix pass %i runs a fresh session in a fresh sandbox, adds its usage and hands off under its pass",
+    async (fixPass) => {
+      const { store, current } = statefulCodingStore(handedBack(fixPass), localRepo());
+      const backend = countingBackend({ fix: FIX_EVENTS });
+      const sandbox = fakeCodingSandbox();
+      sandbox.setResumable(true);
+      const fn = createCodingExecuteOrchestrator(
+        makeDeps({ store, backend: backend.backend, sandbox: sandbox.sandbox }),
+        inngest,
+      );
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [refusedEvent(fixPass)],
+        transformCtx: pinRunId,
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "pending_verify" });
+      expect(current()).toMatchObject({
+        status: "pending_verify",
+        claimedByRunId: RUN_ID,
+        presubmitFixPasses: fixPass,
+      });
+      expect(current().resourceUsage).toMatchObject({
+        tokens_input: 31_000,
+        tokens_output: 5_200,
+        cost_usd: 0.75,
+      });
+      expect(backend.executeCalls()).toBe(0);
+      expect(backend.fixCalls()).toEqual([{ findings: FINDINGS, tokenBudgetLeft: 65_000 }]);
+      // A live sandbox is never resumed: the fix pass creates its own.
+      expect(sandbox.sandbox.tryResumeByTaskId).not.toHaveBeenCalled();
+      expect(sandbox.sandbox.create).toHaveBeenCalledTimes(1);
+      expect(cliDoneSent()).toEqual([
+        {
+          name: "coding/task/cli-done",
+          data: { taskId: FIXTURE_TASK_ID, fixPass },
+          id: `cli-done-${FIXTURE_TASK_ID}-f${fixPass}`,
+        },
+      ]);
+    },
+  );
+
+  it("the approved plan's run hands off under pass 0's id, with no pass in the event", async () => {
+    const { store } = statefulCodingStore(
+      handedBack(1, { status: "awaiting_approval", presubmitFixPasses: 0, presubmitVerdict: null }),
+      localRepo(),
+    );
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: countingBackend({ execute: EXECUTE_EVENTS }).backend }),
+      inngest,
+    );
+
+    const { error } = await new InngestTestEngine({
+      function: fn,
+      events: [
+        {
+          name: "coding/task/plan-approved",
+          data: { taskId: FIXTURE_TASK_ID, approvedAt: "2026-08-20T00:01:00.000Z" },
+        },
+      ],
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(cliDoneSent()).toEqual([
+      {
+        name: "coding/task/cli-done",
+        data: { taskId: FIXTURE_TASK_ID },
+        id: `cli-done-${FIXTURE_TASK_ID}`,
+      },
+    ]);
+  });
+
+  it("a trigger from an earlier pass loses its claim before any failure machinery", async () => {
+    // Pass 1's trigger, redelivered once pass 2 is owed.
+    const { store, current } = statefulCodingStore(handedBack(2), localRepo());
+    const backend = countingBackend({ fix: FIX_EVENTS });
+    const sandbox = fakeCodingSandbox();
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend, sandbox: sandbox.sandbox }),
+      inngest,
+    );
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [refusedEvent(1)],
+      transformCtx: pinRunId,
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ status: "skipped" });
+    expect(current()).toMatchObject({ status: "pending_fix", claimedByRunId: null });
+    expect(backend.fixCalls()).toEqual([]);
+    expect(sandbox.sandbox.create).not.toHaveBeenCalled();
+    expect(store.failTaskIfNonTerminal).not.toHaveBeenCalled();
+  });
+
+  it("`stale` at `executing` under its own run id is `claim-fix-pass`'s own commit: the run carries on", async () => {
+    const { store, current } = statefulCodingStore(
+      handedBack(1, { status: "executing", claimedByRunId: RUN_ID }),
+      localRepo(),
+    );
+    const backend = countingBackend({ fix: FIX_EVENTS });
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend }),
+      inngest,
+    );
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [refusedEvent(1)],
+      transformCtx: pinRunId,
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ status: "pending_verify" });
+    expect(current().status).toBe("pending_verify");
+    expect(backend.fixCalls()).toHaveLength(1);
+  });
+
+  it("a plan-approved trigger at pending_fix loses the approval claim, as an older build's run of the fix-pass trigger does", async () => {
+    const { store, current } = statefulCodingStore(handedBack(1), localRepo());
+    const backend = countingBackend({ execute: EXECUTE_EVENTS, fix: FIX_EVENTS });
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend }),
+      inngest,
+    );
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [
+        {
+          name: "coding/task/plan-approved",
+          data: { taskId: FIXTURE_TASK_ID, approvedAt: "2026-08-20T00:01:00.000Z" },
+        },
+      ],
+      transformCtx: pinRunId,
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ status: "skipped" });
+    expect(current()).toMatchObject({ status: "pending_fix", claimedByRunId: null });
+    expect(backend.executeCalls()).toBe(0);
+    expect(backend.fixCalls()).toEqual([]);
   });
 });
