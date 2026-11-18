@@ -66,6 +66,7 @@ const GROUPS: Record<string, () => Promise<CommandTree>> = {
   "image-model": async () =>
     (await import("./cli/image-model.js")).imageModelCli(CONSOLE_IO, loadCore),
   skills: async () => (await import("./cli/skills.js")).skillsCli(CONSOLE_IO, loadSkillsDeps),
+  coding: async () => (await import("./cli/coding.js")).codingCli(CONSOLE_IO, loadCore),
   "migrate-memories": async () =>
     (await import("./cli/memory-migrations.js")).migrateMemoriesCli(loadMigrationDeps),
   backfill: async () => (await import("./cli/memory-migrations.js")).backfillCli(loadMigrationDeps),

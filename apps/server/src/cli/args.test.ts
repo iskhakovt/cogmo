@@ -1,6 +1,6 @@
 import { command, flag, runSafely } from "cmd-ts";
 import { describe, expect, it } from "vitest";
-import { identifier, intAtLeast, optionalOption } from "./args.js";
+import { identifier, intAtLeast, optionalOption, uuid } from "./args.js";
 
 describe("identifier", () => {
   const name = identifier("name");
@@ -15,6 +15,25 @@ describe("identifier", () => {
     ["-v", 'expected a value, got the flag "-v"'],
   ])("rejects %j", async (value, message) => {
     await expect(name.from(value)).rejects.toThrow(message);
+  });
+});
+
+describe("uuid", () => {
+  const id = uuid("task-id");
+  const TASK_ID = "019d0000-0000-7000-8000-000000000001";
+
+  it("passes a lowercase UUID through", async () => {
+    await expect(id.from(TASK_ID)).resolves.toBe(TASK_ID);
+  });
+
+  it.each([
+    ["not-a-uuid"],
+    [TASK_ID.toUpperCase()],
+    [` ${TASK_ID}`],
+    [TASK_ID.slice(0, -1)],
+    ["--all"],
+  ])("rejects %j", async (value) => {
+    await expect(id.from(value)).rejects.toThrow(`expected a lowercase UUID, got "${value}"`);
   });
 });
 
