@@ -1,4 +1,5 @@
 import { match } from "ts-pattern";
+import { redactSecretsInText } from "../../util/redact-secrets.js";
 import type { SkillSourceError } from "../skill-source.js";
 import type { SkillRiskTier } from "../store/index.js";
 import type { DeployFacts } from "./deploy-facts.js";
@@ -65,11 +66,16 @@ export type RegisterDryRun =
 /** The CPython runner's cut of one finding (design/skills.md → Register-time CPython checks). */
 const DRY_RUN_TEXT_CODE_POINTS = 400;
 
-/** `text` cut at 400 code points, its last an ellipsis, as a dry run's findings and details are. */
+/**
+ * `text` masked, then cut at 400 code points, its last an ellipsis, as a dry
+ * run's findings and details are. Masking comes first: a cut through a secret
+ * can leave too little of it for the mask to recognise.
+ */
 export function cutDryRunText(text: string): string {
-  const points = Array.from(text);
+  const masked = redactSecretsInText(text);
+  const points = Array.from(masked);
   return points.length <= DRY_RUN_TEXT_CODE_POINTS
-    ? text
+    ? masked
     : `${points.slice(0, DRY_RUN_TEXT_CODE_POINTS - 1).join("")}…`;
 }
 
