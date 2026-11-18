@@ -55,7 +55,7 @@ import {
 import { generateSshKeyPair } from "../../secrets/ssh-keygen.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectOk } from "../../test/assertions.js";
-import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
+import { idlePresubmitDeps, parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { FakeDaytonaSandboxClient } from "../../test/daytona-sandbox-fake.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -518,6 +518,7 @@ function makeDeps(opts: {
     devbaseImage: "ignored",
     defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
     taskTtlMs: 60_000,
+    presubmit: idlePresubmitDeps(),
     // The fake's "container" is the host, so the push stage's scratch repo
     // goes in the test's own directory rather than the host's `/tmp`.
     salvageScratchGitDir: join(workspaceRoot, "scratch.git"),
@@ -812,6 +813,7 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
       devbaseImage: "ignored",
       defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
       taskTtlMs: 60_000,
+      presubmit: idlePresubmitDeps(),
       octokitFactory: makeOctokitFactory({ capture }),
     };
     const inngestSend = vi.fn().mockResolvedValue(undefined);

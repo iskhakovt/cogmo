@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { REGISTER_PAUSES } from "../../skills/deploy/register-result.js";
+import { ClassifierLogSchema } from "../../skills/types.js";
 
 /**
  * Subset of `devcontainer.json` Cogmo actually parses. Slice 1 stores `null`
@@ -87,6 +89,72 @@ export const PrMetadataSchema = z
   })
   .strict();
 export type PrMetadata = z.infer<typeof PrMetadataSchema>;
+
+/** The key every pre-submit verdict carries: the run and fix pass that wrote it, when, under which release. */
+const PresubmitKeyShape = {
+  /** The verify run that claimed the task, its `claimed_by_run_id`. */
+  runId: z.string().min(1),
+  fixPass: z.number().int().nonnegative(),
+  checkedAt: z.string().datetime(),
+  releaseVersion: z.string().min(1),
+};
+
+/**
+ * Why a pre-submit judged nothing: a check register could not run, or the
+ * step's own fetch of the branch, a branch some other push moved, or the
+ * deadline.
+ */
+const PRESUBMIT_UNAVAILABLE_CAUSES = [
+  ...REGISTER_PAUSES,
+  "fetch_failed",
+  "branch_moved",
+  "deadline",
+] as const;
+export type PresubmitUnavailableCause = (typeof PRESUBMIT_UNAVAILABLE_CAUSES)[number];
+
+/**
+ * The skills repo's pre-submit verdict on a task's pushed tip
+ * (`coding_tasks.presubmit_verdict`): register's dry run (`RegisterDryRun`)
+ * under its key, flat so `->>'kind'` reads the variant
+ * (design/coding-delegation.md → Skills-repo pre-submit). `unavailable` has
+ * no sha when the fetch failed.
+ */
+export const PresubmitVerdictSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      ...PresubmitKeyShape,
+      kind: z.literal("passed"),
+      sha: BaseShaSchema,
+      riskTier: ClassifierLogSchema.shape.risk_tier,
+    })
+    .strict(),
+  z
+    .object({
+      ...PresubmitKeyShape,
+      kind: z.literal("refused"),
+      sha: BaseShaSchema,
+      findings: z.array(z.string()).readonly(),
+    })
+    .strict(),
+  z
+    .object({
+      ...PresubmitKeyShape,
+      kind: z.literal("stale_base"),
+      sha: BaseShaSchema,
+      mainSha: BaseShaSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...PresubmitKeyShape,
+      kind: z.literal("unavailable"),
+      sha: BaseShaSchema.nullable(),
+      cause: z.enum(PRESUBMIT_UNAVAILABLE_CAUSES),
+      detail: z.string(),
+    })
+    .strict(),
+]);
+export type PresubmitVerdict = z.infer<typeof PresubmitVerdictSchema>;
 
 /**
  * Aggregated stats per coding task. All fields optional — populated

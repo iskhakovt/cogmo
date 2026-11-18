@@ -122,6 +122,14 @@ export interface BootstrapOptions {
   /** Test seam — stub injected by replay tests in lieu of real GitHub. */
   octokitFactory?: (pat: string) => Octokit;
   /**
+   * Turn the skills repo's pre-submit off: the verify run plans no
+   * `presubmit` step, and `coding_tasks.presubmit_verdict` stays null. Used
+   * by the skill-authoring e2e, whose replay cannot recreate the recorded
+   * sandbox commit the dry run judges. Production wiring leaves this
+   * undefined, so the stage runs.
+   */
+  skipPresubmit?: true;
+  /**
    * Stand-in network for `ctx.http` — a resolver and a `fetch` that
    * answer a skill's request inside the test process, so a suite that
    * invokes a network-calling skill stays off the public internet. The

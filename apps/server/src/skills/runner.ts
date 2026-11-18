@@ -18,11 +18,12 @@ import {
   enableSkill,
 } from "./deploy/activation.js";
 import { approveDeploy } from "./deploy/approve.js";
+import { checkRegisterDryRun } from "./deploy/check-register-dry-run.js";
 import { type DenyDeployError, denyDeploy } from "./deploy/deny.js";
 import type { DeployDeps } from "./deploy/deploy-deps.js";
 import type { SkillDeployOrigin } from "./deploy/origin.js";
 import { registerSkill } from "./deploy/register.js";
-import type { RegisterResult } from "./deploy/register-result.js";
+import type { RegisterDryRun, RegisterResult } from "./deploy/register-result.js";
 import { rollbackSkill } from "./deploy/rollback.js";
 import {
   type RollbackDeployError,
@@ -86,7 +87,7 @@ export type {
 } from "./deploy/activation.js";
 export type { DenyDeployError } from "./deploy/deny.js";
 export type { SkillActor, SkillDeployOrigin } from "./deploy/origin.js";
-export type { RegisterResult } from "./deploy/register-result.js";
+export type { RegisterDryRun, RegisterResult } from "./deploy/register-result.js";
 export type { SkillRunResult } from "./invoke/run-result.js";
 export type { SkillSummary, SkillToolDef } from "./listing.js";
 export type { RegisterForTestsParams } from "./seed-for-tests.js";
@@ -133,6 +134,11 @@ export interface SkillRunner {
     origin: SkillDeployOrigin;
     signal?: AbortSignal;
   }): Promise<RegisterResult>;
+  /**
+   * Register's checks on `sha`, without its deploy (design/skills.md → Dry
+   * run). An abort of `signal` throws its reason, as `register`'s does.
+   */
+  checkRegister(opts: { sha: string; signal: AbortSignal }): Promise<RegisterDryRun>;
   /** A `user` origin is also recorded as the deploy's `approved_by`. */
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   /** `not_found` or `not_pending` (with the row's status) when nothing was pending to deny. */
@@ -546,6 +552,10 @@ export class SkillRunnerImpl implements SkillRunner {
     signal?: AbortSignal;
   }): Promise<RegisterResult> {
     return registerSkill(this.#deploy, opts);
+  }
+
+  checkRegister(opts: { sha: string; signal: AbortSignal }): Promise<RegisterDryRun> {
+    return checkRegisterDryRun(this.#deploy, opts);
   }
 
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult> {

@@ -6,6 +6,7 @@ import { classifyWithAst } from "../ast-classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
 import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
+import type { ImportedSchemas } from "../schema-import.js";
 import type { SkillsRepo } from "../skill-files.js";
 import { formatSkillFinding, runSkillGates } from "../skill-gates.js";
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
@@ -18,19 +19,18 @@ import { checkRegisterCpython, type RegisterCpythonRejection } from "./check-reg
 import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { describeLocateSkillRejection, locateSkill } from "./locate-skill.js";
-import { readManifestLockfile } from "./lockfile-check.js";
+import { type LockfileCheckError, readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMain } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
-import { type RegisterResult, rejectedResult } from "./register-result.js";
+import { type RegisterPause, type RegisterResult, rejectedResult } from "./register-result.js";
 import { registerSchemas } from "./schemas.js";
 
 const NON_FAST_FORWARD = "non_fast_forward: rebase branch onto main and retry";
 
 const log = logger.child({ component: "skills.runner" });
 
-/** A branch that passed every check `register` makes before its transaction. */
+/** A sha that passed every check `register` makes before its transaction. */
 interface PreparedRegister {
-  branchSha: string;
   manifest: SkillManifest;
   body: string;
   classifierLog: ClassifierLog;
@@ -51,13 +51,16 @@ export async function registerSkill(
   const repoPath = repo.path;
 
   opts.signal?.throwIfAborted();
-  const prepared = await prepareRegister(deps, repo, opts.branch, opts.signal);
+  const resolved = await resolveBranch(repoPath, opts.branch);
+  if (resolved.isErr()) return resolved.error;
+  const branchSha = resolved.value;
+  const prepared = await prepareRegister(deps, repo, branchSha, opts.signal);
   // The last point an abort stops the deploy: the transaction moves main.
   // Checked ahead of the outcome, so an abort surfaces as itself, not as a
   // rejection it caused.
   opts.signal?.throwIfAborted();
-  if (prepared.isErr()) return prepared.error;
-  const { branchSha, manifest, body, classifierLog, lockfile, schemas } = prepared.value;
+  if (prepared.isErr()) return rejectionResult(branchSha, prepared.error);
+  const { manifest, body, classifierLog, lockfile, schemas } = prepared.value;
 
   const schedule = manifest.schedule ?? null;
   const executed = await runDeployTx(deps.runInTx, (tx) =>
@@ -121,79 +124,117 @@ async function deleteFeatureBranch(repoPath: string, branch: string): Promise<vo
 }
 
 /**
- * Every check `register` makes before its transaction: the branch, its
- * manifest and body, the register-time gates and the classifier, the
- * lockfile and its runtime pins, Pyodide compatibility, the CPython checks,
- * and the schemas it puts live.
- * Errs with the rejection `register` returns.
+ * The branch's tip. `main` itself is refused: register would "fast-forward"
+ * main onto itself and then, after the commit, delete `refs/heads/main`, the
+ * only authoritative ref. `deleteRef` refuses too; refusing here gives a
+ * clear error before any git or DB work runs.
  */
-async function prepareRegister(
-  deps: DeployDeps,
-  repo: SkillsRepo,
+async function resolveBranch(
+  repoPath: string,
   branch: string,
-  signal: AbortSignal | undefined,
-): Promise<Result<PreparedRegister, RegisterResult>> {
-  const repoPath = repo.path;
-  // Reject branch=main at the boundary. Without this guard, the register
-  // flow would "fast-forward" main onto itself (no-op) and then, after the
-  // commit, call `deleteRef("refs/heads/main")`, which would drop the only
-  // authoritative ref. The deleteRef helper refuses too (defense in depth),
-  // but rejecting at the entry gives a clear error before any git/DB work
-  // runs.
+): Promise<Result<string, RegisterResult>> {
   if (branch === "main" || branch === "refs/heads/main") {
     return err(rejectedResult("", "invalid_branch: cannot register from 'main' itself"));
   }
-
   const resolved = await revParse(repoPath, `refs/heads/${branch}`);
-  if (resolved.isErr()) {
-    return err(rejectedResult("", `branch_not_found: ${branch}`));
-  }
-  const branchSha = resolved.value;
+  return resolved.mapErr(() => rejectedResult("", `branch_not_found: ${branch}`));
+}
 
+/** A rejection that is terminal for the sha, its errors as `RegisterResult.errors` words them. */
+interface Refused {
+  kind: "refused";
+  /** As `RegisterResult.name`: empty but on the schemas' rejections. */
+  name: string;
+  errors: readonly string[];
+}
+
+/** A check that could not run, which pauses the register. */
+interface Paused {
+  kind: "unavailable";
+  cause: RegisterPause;
+  /** As `RegisterResult.name`: empty but on the schemas' rejections. */
+  name: string;
+  /** As `RegisterResult.errors` words it. */
+  error: string;
+}
+
+/** Why `prepareRegister` refuses a sha: terminal, pausing, or a sha `main` is not an ancestor of. */
+type PrepareRejection = Refused | Paused | { kind: "stale_base"; mainSha: string };
+
+function refused(...errors: readonly string[]): Refused {
+  return { kind: "refused", name: "", errors };
+}
+
+function paused(cause: RegisterPause, error: string): Paused {
+  return { kind: "unavailable", cause, name: "", error };
+}
+
+/** A rejection as `register` returns it. */
+function rejectionResult(sha: string, rejection: PrepareRejection): RegisterResult {
+  const rejected = (name: string, errors: readonly string[]): RegisterResult => ({
+    name,
+    riskTier: "notify",
+    status: "rejected",
+    gitSha: sha,
+    errors,
+  });
+  return match(rejection)
+    .with({ kind: "stale_base" }, () => rejected("", [NON_FAST_FORWARD]))
+    .with({ kind: "refused" }, ({ name, errors }) => rejected(name, errors))
+    .with({ kind: "unavailable" }, ({ name, error }) => rejected(name, [error]))
+    .exhaustive();
+}
+
+/**
+ * Every check `register` makes of a sha before its transaction: the
+ * fast-forward, the skill it changes, its manifest and body, the
+ * register-time gates and the classifier, the lockfile and its runtime pins,
+ * Pyodide compatibility, the CPython checks, and the schemas it puts live.
+ * It writes only what the checks' sessions and caches write. Errs with why it
+ * refuses the sha.
+ */
+export async function prepareRegister(
+  deps: DeployDeps,
+  repo: SkillsRepo,
+  sha: string,
+  signal: AbortSignal | undefined,
+): Promise<Result<PreparedRegister, PrepareRejection>> {
+  const repoPath = repo.path;
   // Boot's layout commit gives main a sha before any register runs.
   const mainSha = await getMainSha(repoPath);
   if (mainSha === null) {
     throw new Error("register: the skills repo's main is unborn; boot makes the layout commit");
   }
-  // Fast-forward check: feature branch must descend from current main.
-  if (!(await isAncestor(repoPath, mainSha, branchSha))) {
-    return err(rejectedResult(branchSha, NON_FAST_FORWARD));
+  // Fast-forward check: the sha must descend from current main.
+  if (!(await isAncestor(repoPath, mainSha, sha))) {
+    return err({ kind: "stale_base", mainSha });
   }
 
-  const located = await locateSkill(deps, repo, mainSha, branchSha);
+  const located = await locateSkill(deps, repo, mainSha, sha);
   if (located.isErr()) {
-    return err(rejectedResult(branchSha, describeLocateSkillRejection(located.error)));
+    return err(refused(describeLocateSkillRejection(located.error)));
   }
   const name = located.value;
 
-  const source = await readSkillSource(repo, name, branchSha);
+  const source = await readSkillSource(repo, name, sha);
   if (source.isErr()) {
     return err(
       match(source.error)
         .with({ kind: "missing_file", file: SKILL_MANIFEST_FILE }, () =>
-          rejectedResult(
-            branchSha,
-            `missing_skill_md: skills/${name}/SKILL.md not found at branch tip`,
-          ),
+          refused(`missing_skill_md: skills/${name}/SKILL.md not found at branch tip`),
         )
         .with({ kind: "missing_file", file: SKILL_BODY_FILE }, () =>
-          rejectedResult(
-            branchSha,
-            `missing_skill_py: skills/${name}/skill.py not found at branch tip`,
-          ),
+          refused(`missing_skill_py: skills/${name}/skill.py not found at branch tip`),
         )
-        .with({ kind: "commit_not_found" }, () =>
-          rejectedResult(branchSha, "missing_commit: branch tip not found"),
-        )
-        .with({ kind: "invalid_manifest" }, ({ issues }) => rejectedResult(branchSha, ...issues))
+        .with({ kind: "commit_not_found" }, () => refused("missing_commit: branch tip not found"))
+        .with({ kind: "invalid_manifest" }, ({ issues }) => refused(...issues))
         .exhaustive(),
     );
   }
   const { manifest, body } = source.value;
   if (manifest.name !== name) {
     return err(
-      rejectedResult(
-        branchSha,
+      refused(
         `skill_name_mismatch: skills/${name}/SKILL.md names the skill '${manifest.name}'; its directory must be skills/${manifest.name}/`,
       ),
     );
@@ -207,21 +248,14 @@ async function prepareRegister(
     { name, manifest, body },
     deps.capabilities,
   );
-  if (checked.isErr()) {
-    return err(rejectedResult(branchSha, ...describeBodyRejection(checked.error)));
-  }
+  if (checked.isErr()) return err(bodyRejection(checked.error));
   const classifierLog = checked.value;
 
-  const lockfileResult = await readManifestLockfile(
-    deps.lockfileCompiler,
-    repo,
-    branchSha,
-    manifest,
-    { verifyFresh: true, ...(signal && { signal }) },
-  );
-  if (lockfileResult.isErr()) {
-    return err(rejectedResult(branchSha, lockfileResult.error));
-  }
+  const lockfileResult = await readManifestLockfile(deps.lockfileCompiler, repo, sha, manifest, {
+    verifyFresh: true,
+    ...(signal && { signal }),
+  });
+  if (lockfileResult.isErr()) return err(lockfileRejection(lockfileResult.error));
   const lockfile = lockfileResult.value;
 
   if (manifest.tier === "wasm" && lockfile !== null) {
@@ -234,9 +268,7 @@ async function prepareRegister(
         ...(signal && { signal }),
       },
     });
-    if (compat.isErr()) {
-      return err(rejectedResult(branchSha, formatPyodideCompatIssues(compat.error)));
-    }
+    if (compat.isErr()) return err(refused(formatPyodideCompatIssues(compat.error)));
   }
 
   // Before the schema import, which mounts the venv the checks' install
@@ -246,20 +278,10 @@ async function prepareRegister(
     { name, manifest, body, lockfile },
     { releaseVersion: deps.releaseVersion, signal },
   );
-  if (cpython.isErr()) {
-    return err(rejectedResult(branchSha, ...describeCpythonRejection(cpython.error)));
-  }
+  if (cpython.isErr()) return err(cpythonRejection(cpython.error));
 
   const schemas = await resolveSchemas(deps, { manifest, body, lockfile, signal });
-  if (schemas.isErr()) {
-    return err({
-      name: manifest.name,
-      riskTier: "notify",
-      status: "rejected",
-      gitSha: branchSha,
-      errors: schemas.error,
-    });
-  }
+  if (schemas.isErr()) return err({ ...schemas.error, name: manifest.name });
 
   // Compile the JSON Schemas BEFORE any filesystem / DB write. Without this,
   // an invalid `inputs` / `outputs` schema would only surface at first invoke
@@ -269,17 +291,10 @@ async function prepareRegister(
   // declarations.
   const schemaErrors = deps.sourceCache.prevalidate(schemas.value);
   if (schemaErrors.length > 0) {
-    return err({
-      name: manifest.name,
-      riskTier: "notify",
-      status: "rejected",
-      gitSha: branchSha,
-      errors: schemaErrors,
-    });
+    return err({ ...refused(...schemaErrors), name: manifest.name });
   }
 
   return ok({
-    branchSha,
     manifest,
     body,
     classifierLog: { ...classifierLog, ...cpython.value },
@@ -288,27 +303,46 @@ async function prepareRegister(
   });
 }
 
-/** A body-check rejection as `RegisterResult.errors`: one string per gate finding. */
-function describeBodyRejection(rejection: RegisterBodyRejection): readonly string[] {
+/** A body-check rejection: one string per gate finding, or the parser's pause. */
+function bodyRejection(rejection: RegisterBodyRejection): PrepareRejection {
   return match(rejection)
-    .with({ kind: "lint_failed" }, ({ findings }) => findings.map(formatSkillFinding))
-    .with({ kind: "classifier_rejected" }, ({ validationErrors }) => [validationErrors.join("; ")])
-    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) => [
-      `registrar_unavailable: ${cause}: ${detail}; retry the register`,
-    ])
+    .returnType<PrepareRejection>()
+    .with({ kind: "lint_failed" }, ({ findings }) => refused(...findings.map(formatSkillFinding)))
+    .with({ kind: "classifier_rejected" }, ({ validationErrors }) =>
+      refused(validationErrors.join("; ")),
+    )
+    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) =>
+      paused(
+        "registrar_unavailable",
+        `registrar_unavailable: ${cause}: ${detail}; retry the register`,
+      ),
+    )
     .exhaustive();
 }
 
-/** A CPython-check rejection as `RegisterResult.errors`: one string per finding. */
-function describeCpythonRejection(rejection: RegisterCpythonRejection): readonly string[] {
+/** A CPython-check rejection: one string per finding, or the sandbox's pause. */
+function cpythonRejection(rejection: RegisterCpythonRejection): PrepareRejection {
   return match(rejection)
-    .with({ kind: "lint_failed" }, ({ findings }) => findings.map(formatSkillFinding))
-    .with({ kind: "lockfile_invalid" }, ({ detail }) => [
-      `requirements_lock_uninstallable: ${detail}`,
-    ])
-    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) => [
-      `registrar_unavailable: ${cause}: ${detail}; retry the register`,
-    ])
+    .returnType<PrepareRejection>()
+    .with({ kind: "lint_failed" }, ({ findings }) => refused(...findings.map(formatSkillFinding)))
+    .with({ kind: "lockfile_invalid" }, ({ detail }) =>
+      refused(`requirements_lock_uninstallable: ${detail}`),
+    )
+    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) =>
+      paused(
+        "registrar_unavailable",
+        `registrar_unavailable: ${cause}: ${detail}; retry the register`,
+      ),
+    )
+    .exhaustive();
+}
+
+/** A lockfile rejection: a compile that could not run pauses; every other kind is terminal. */
+function lockfileRejection(error: LockfileCheckError): PrepareRejection {
+  return match(error)
+    .returnType<PrepareRejection>()
+    .with({ kind: "transport_failed" }, ({ message }) => paused("lockfile_transport", message))
+    .with({ kind: P.union("resolver_failed", "invalid") }, ({ message }) => refused(message))
     .exhaustive();
 }
 
@@ -328,28 +362,30 @@ async function resolveSchemas(
     lockfile: LockfileSnapshot | null;
     signal: AbortSignal | undefined;
   },
-): Promise<Result<SkillSchemas, string[]>> {
+): Promise<Result<SkillSchemas, Refused | Paused>> {
   const { manifest } = args;
+  const schemas = (imported: ImportedSchemas | null) =>
+    registerSchemas(manifest, imported).mapErr((errors) => refused(...errors));
   return match(manifest.tier)
     .with("container", async () => {
       const importer = deps.containerSchemas;
       if (importer === undefined || (args.lockfile !== null && !importer.installsDependencies)) {
-        return registerSchemas(manifest, null);
+        return schemas(null);
       }
       const imported = await importer.importSchemas(
         { body: args.body, lockfile: args.lockfile, resources: manifest.resources },
         args.signal,
       );
-      if (imported.isErr()) return err([describeSchemaImportError(imported.error)]);
-      return registerSchemas(manifest, imported.value);
+      if (imported.isErr()) return err(schemaImportRejection(imported.error));
+      return schemas(imported.value);
     })
     .with("wasm", async () => {
       const imported = await deps.wasm.importSchemas(
         { body: args.body, lockfile: args.lockfile, resources: manifest.resources },
         args.signal,
       );
-      if (imported.isErr()) return err([describeSchemaImportError(imported.error)]);
-      return registerSchemas(manifest, imported.value);
+      if (imported.isErr()) return err(schemaImportRejection(imported.error));
+      return schemas(imported.value);
     })
     .exhaustive();
 }
@@ -358,13 +394,14 @@ async function resolveSchemas(
  * A failed import as a rejection. A wheel that fails its hash, or has no pure
  * build, is a verdict on the lockfile; a network, cache or Pyodide-lockfile
  * failure is not, nor is a built-in whose cached or downloaded file fails
- * Pyodide's pinned sha256, and a retry may clear it.
+ * Pyodide's pinned sha256, and a retry may clear it: those pause.
  */
-function describeSchemaImportError(error: SkillSchemaImportError): string {
+function schemaImportRejection(error: SkillSchemaImportError): Refused | Paused {
   return match(error)
+    .returnType<Refused | Paused>()
     .with(
       { kind: "packages", error: { kind: P.union("hash_mismatch", "wheel_unavailable") } },
-      (e) => `wasm_dependency_unavailable: ${describeWasmPackagesError(e.error)}`,
+      (e) => refused(`wasm_dependency_unavailable: ${describeWasmPackagesError(e.error)}`),
     )
     .with(
       {
@@ -380,12 +417,17 @@ function describeSchemaImportError(error: SkillSchemaImportError): string {
         },
       },
       (e) =>
-        `schema_import_unavailable: the skill's packages were not fetched (${describeWasmPackagesError(e.error)}); retry the register`,
+        paused(
+          "schema_import_unavailable",
+          `schema_import_unavailable: the skill's packages were not fetched (${describeWasmPackagesError(e.error)}); retry the register`,
+        ),
     )
-    .with({ kind: "refused" }, (e) => `schema_import_failed: ${e.message}`)
-    .with(
-      { kind: "unavailable" },
-      (e) => `schema_import_unavailable: ${e.message}; retry the register`,
+    .with({ kind: "refused" }, (e) => refused(`schema_import_failed: ${e.message}`))
+    .with({ kind: "unavailable" }, (e) =>
+      paused(
+        "schema_import_unavailable",
+        `schema_import_unavailable: ${e.message}; retry the register`,
+      ),
     )
     .exhaustive();
 }

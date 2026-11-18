@@ -1,0 +1,3 @@
+ALTER TABLE "coding_tasks" DROP CONSTRAINT "chk_coding_tasks_queued_bare";--> statement-breakpoint
+ALTER TABLE "coding_tasks" ADD COLUMN "presubmit_verdict" jsonb;--> statement-breakpoint
+ALTER TABLE "coding_tasks" ADD CONSTRAINT "chk_coding_tasks_queued_bare" CHECK ("coding_tasks"."status" <> 'queued' OR ("coding_tasks"."worktree_assignment" IS NULL AND "coding_tasks"."session_id" IS NULL AND "coding_tasks"."container_id" IS NULL AND "coding_tasks"."plan" IS NULL AND "coding_tasks"."plan_approved_at" IS NULL AND "coding_tasks"."pr_metadata" IS NULL AND "coding_tasks"."resource_usage" IS NULL AND "coding_tasks"."claimed_by_run_id" IS NULL AND "coding_tasks"."presubmit_verdict" IS NULL));

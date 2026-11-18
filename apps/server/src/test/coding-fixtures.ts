@@ -14,6 +14,7 @@ import { match, P } from "ts-pattern";
 import { vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "../agent/coding/auth.js";
+import type { PresubmitDeps } from "../agent/coding/presubmit-stage.js";
 import {
   type CodingRepoRow,
   type CodingStore,
@@ -22,7 +23,7 @@ import {
   type CodingTaskStatus,
   isTerminalCodingTaskStatus,
 } from "../agent/coding/store/index.js";
-import type { PrMetadata } from "../agent/coding/types.js";
+import type { PresubmitVerdict, PrMetadata } from "../agent/coding/types.js";
 import type { Transactor } from "../db/index.js";
 import {
   type ExecStreamingHandle,
@@ -81,6 +82,7 @@ export function codingTaskRow(overrides: Partial<CodingTaskRow> = {}): CodingTas
     resourceUsage: null,
     idempotencyKey: null,
     claimedByRunId: null,
+    presubmitVerdict: null,
     createdAt: FIXTURE_EPOCH,
     ...overrides,
   };
@@ -159,6 +161,11 @@ export function statefulCodingStore(
   });
   store.setTaskPrMetadata.mockImplementation(async (_tx, _id, metadata) => {
     task = { ...task, prMetadata: metadata };
+  });
+  store.setTaskPresubmitVerdict.mockImplementation(async (_tx, _id, verdict) => {
+    if (task.status !== "verifying") return { kind: "left", status: task.status };
+    task = { ...task, presubmitVerdict: verdict };
+    return { kind: "recorded" };
   });
   store.setTaskContainerId.mockImplementation(async (_tx, _id, containerId) => {
     task = { ...task, containerId };
@@ -335,6 +342,26 @@ export const PARKED_PR_METADATA: PrMetadata = {
   branchSha: "a".repeat(40),
   openedAt: "2026-08-20T00:00:00.000Z",
 };
+
+/** Pre-submit deps for a run on another repo than the skills repo, which never reaches them. */
+export function idlePresubmitDeps(): PresubmitDeps {
+  return {
+    skillRunner: mock<PresubmitDeps["skillRunner"]>(),
+    skillsRepoPath: "/nonexistent/skills.git",
+    releaseVersion: "dev",
+  };
+}
+
+/** A pre-submit verdict written by the verify run `verify-run-1` at the first pass. */
+export const PASSED_PRESUBMIT_VERDICT = {
+  runId: "verify-run-1",
+  fixPass: 0,
+  checkedAt: "2026-08-20T00:01:30.000Z",
+  releaseVersion: "dev",
+  kind: "passed",
+  sha: "b".repeat(40),
+  riskTier: "notify",
+} as const satisfies PresubmitVerdict;
 
 /**
  * Drives a task row from its current status to `status` through the store's

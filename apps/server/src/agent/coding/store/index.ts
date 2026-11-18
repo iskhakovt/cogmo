@@ -21,6 +21,7 @@ import {
   type CodingTaskCancelReason,
   type CodingTaskFailureReason,
   type DevcontainerSpec,
+  type PresubmitVerdict,
   type PrMetadata,
   type ResourceUsage,
   ResourceUsageSchema,
@@ -181,6 +182,8 @@ export interface CodingTaskRow {
   idempotencyKey: string | null;
   /** Inngest run that most recently claimed this task via a status transition. */
   claimedByRunId: string | null;
+  /** The skills repo's latest pre-submit verdict; null until the first, and on every other repo. */
+  presubmitVerdict: PresubmitVerdict | null;
   createdAt: Date;
 }
 
@@ -329,6 +332,17 @@ export interface CodingStore {
 
   /** Persist the PR metadata blob once the PR is opened (slice 4.0g). */
   setTaskPrMetadata(tx: Transaction, id: string, metadata: PrMetadata): Promise<void>;
+
+  /**
+   * Records the pre-submit's verdict iff the task is `verifying`. `left`: the
+   * task moved out of `verifying` during the dry run, and keeps the row its
+   * Cancel left.
+   */
+  setTaskPresubmitVerdict(
+    tx: Transaction,
+    id: string,
+    verdict: PresubmitVerdict,
+  ): Promise<{ kind: "recorded" } | { kind: "left"; status: CodingTaskStatus }>;
 
   /**
    * **Shallow-merge** `patch` into the existing `resource_usage` JSONB
@@ -662,6 +676,27 @@ export class DrizzleCodingStore implements CodingStore {
 
   async setTaskPrMetadata(tx: Transaction, id: string, metadata: PrMetadata): Promise<void> {
     await tx.update(codingTasks).set({ prMetadata: metadata }).where(eq(codingTasks.id, id));
+  }
+
+  async setTaskPresubmitVerdict(
+    tx: Transaction,
+    id: string,
+    verdict: PresubmitVerdict,
+  ): Promise<{ kind: "recorded" } | { kind: "left"; status: CodingTaskStatus }> {
+    const updated = await tx
+      .update(codingTasks)
+      .set({ presubmitVerdict: verdict })
+      .where(and(eq(codingTasks.id, id), eq(codingTasks.status, "verifying")))
+      .returning({ id: codingTasks.id });
+    if (updated.length > 0) return { kind: "recorded" };
+    // The verify run that writes the verdict claimed this row.
+    const { status } = single(
+      await tx
+        .select({ status: codingTasks.status })
+        .from(codingTasks)
+        .where(eq(codingTasks.id, id)),
+    );
+    return { kind: "left", status };
   }
 
   async setTaskResourceUsage(
