@@ -25,3 +25,5 @@ design/web-ui/mockups/** linguist-generated=true
 *.png  binary
 *.webp binary
 *.gif  binary
+# Recorded git history (`git bundle`): a pack behind a text header.
+*.bundle binary

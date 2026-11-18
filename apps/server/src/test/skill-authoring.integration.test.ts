@@ -25,12 +25,11 @@
  *     the new skill onto it; `afterAll` closes the PR and deletes the test
  *     branches and `refs/cogmo-wip/` refs. Replay uses a local bare remote
  *     and a stub Octokit (`makeStubOctokitFactory`).
- *   - The skills repo's pre-submit is off in both modes (`skipPresubmit`).
- *     Its dry run judges the commit the sandbox pushed, and only when the
- *     fetched branch is that commit. A replay cannot recreate it: the push
- *     is recorded output, the branch the stub seeds is a fresh commit, and
- *     the replay's `main` is minted anew, so the dry run would judge
- *     nothing and the recording's sessions would not line up.
+ *   - Replay's git history is the record run's: the pushed branch and its
+ *     ancestry, which the record run bundles into `HISTORY_BUNDLE_PATH`.
+ *     The remote and the skills repo start at the recorded `main`, and the
+ *     replayed sandbox push lands the recorded tip (`landRecordedPush`), so
+ *     the skills repo's pre-submit dry-runs the commit the sandbox pushed.
  *
  * See `design/testing.md` -> Skill-Authoring Integration for the
  * contract.
@@ -48,15 +47,13 @@
  *      a name already has.
  *   2. `gh auth status` — the PAT comes from gh CLI's keyring. Scope
  *      requirements: `repo` (push branches, open + close PRs).
- *   3. `RECORD=1 pnpm test:integration src/test/skill-authoring.integration.test.ts`
- *   4. Copy every file under the recorded PR's `skills/<name>/` (`SKILL.md`,
- *      `skill.py`, `test_skill.py`) into
- *      `test/fixtures/skill-authoring-branch/`. `afterAll` deletes the
- *      branch, so fetch `pull/<n>/head`; `<n>` is in the `closed PR` log
- *      line.
+ *   3. Delete `test/fixtures/recorded/suites/skill-authoring/`: llmock
+ *      records only misses, and a new sandbox run changes the host's turns.
+ *   4. `RECORD=1 pnpm test:integration src/test/skill-authoring.integration.test.ts`
+ *      writes the Daytona cassette, the history bundle and the llmock misses.
  *   5. Re-run without `RECORD=1` to confirm replay is byte-stable.
- *   6. Commit the refreshed fixtures + any llmock recordings under
- *      `test/fixtures/recorded/` that bear today's date.
+ *   6. Commit the refreshed fixtures: the cassette, the bundle and the
+ *      llmock recordings under `test/fixtures/recorded/`.
  *
  * The first record run is expected to surface adjustments to the
  * scaffold (timeouts, polling cadence, assertion shapes) — that's the
@@ -71,16 +68,17 @@
  *     conventions) that the model's response would differ on.
  *   - Pinned model swap (currently `claude-haiku-4-5-20251001`).
  *   - The cogmo-skills repo's `SKILL.md` template or skill.py shape
- *     changes (the recorded fixture in
- *     `test/fixtures/skill-authoring-branch/` would also need to
- *     match).
+ *     changes.
+ *   - The release's skills-repo toolchain changes (`images/skills/toolchain/`,
+ *     `images/skills/src/cogmo_ctx/`): replay's boot commits it over the
+ *     recorded `main`, and `beforeAll` fails naming both shas.
  */
 
 import { execFile as execFileCb } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
@@ -99,6 +97,7 @@ import { DaytonaSandboxClient, snapshotNameFor } from "../sandbox/daytona/client
 import { deriveMasterKey, encrypt, parseMasterKey, toBase64 } from "../secrets/encryption.js";
 import { withGitAskpass } from "../secrets/git-askpass.js";
 import { secrets } from "../secrets/store/schema.js";
+import { getMainSha, runGitIn } from "../skills/git-ops.js";
 import { bootstrapSkillsRepo } from "../skills/repo.js";
 import { skillRuns, skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
@@ -116,10 +115,11 @@ const execFileP = promisify(execFileCb);
 const SCENARIO = "skill-authoring";
 const FIXTURE_DIR = "./test/fixtures/daytona";
 const FIXTURE_PATH = `${FIXTURE_DIR}/${SCENARIO}.json`;
-// Recorded SKILL.md + skill.py — in replay these are what the cassette's
-// sandbox is taken to have pushed, committed to the bare remote by the PR
-// stub. Refresh together with the cassette.
-const BRANCH_FIXTURE_DIR = "./test/fixtures/skill-authoring-branch";
+// The history the record run's dry run judged, as a git bundle: `main`, and
+// the pushed tip under `RECORDED_TIP_REF`. Refresh together with the cassette.
+const HISTORY_BUNDLE_PATH = "./test/fixtures/skill-authoring-history.bundle";
+/** Outside `refs/heads/`, so no fetch of a branch names it. */
+const RECORDED_TIP_REF = "refs/recorded/tip";
 const IS_RECORD = process.env.RECORD === "1";
 const HAS_RECORDING_INPUTS =
   !!process.env.DAYTONA_API_KEY &&
@@ -163,6 +163,10 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
   const createdPrNumbers: number[] = [];
   /** Tmp path for the replay-mode local bare remote; removed in afterAll. */
   let bareRemotePath: string | undefined;
+  /** The history replay is built from; unset in record mode, which writes it. */
+  let recorded: RecordedHistory | undefined;
+  /** The bare skills repo `bootstrap()` registers and register reads. */
+  let skillsPath: string;
 
   beforeAll(async () => {
     inngestBaseUrl = workerInngestBaseUrl();
@@ -172,6 +176,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 
     console.log(`[skill-authoring e2e] TEST_RUN_ID=${TEST_RUN_ID}`);
 
+    // Record → real GitHub. Replay → a local bare repo (file://) built from
+    // the recorded history.
     if (RECORDABLE) {
       // Pre-build the devbase snapshot from the local Dockerfile so the
       // test stays self-contained — no ghcr push required. Cogmo's
@@ -183,9 +189,16 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 
       // Reset origin/main on the throwaway skills repo so claude doesn't
       // pull leftover SKILL.md + skill.py from a previous successful run.
-      const remote = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
+      remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
+      remoteSlug = parseGitHubSlug(remoteUrl);
       const { pat } = await readGhAuth();
-      await resetRemoteMain(remote, pat);
+      await resetRemoteMain(remoteUrl, pat);
+    } else {
+      const bare = await createBareRemoteFromHistory();
+      remoteUrl = bare.url;
+      bareRemotePath = bare.path;
+      recorded = bare.recorded;
+      remoteSlug = "replay/local";
     }
 
     const mockOpts: DaytonaMockOptions = RECORDABLE
@@ -201,6 +214,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       : {
           mode: "replay",
           fixturePath: FIXTURE_PATH,
+          onExec: landRecordedPush(expectDefined(bareRemotePath), expectDefined(recorded).tip),
         };
     mock = await DaytonaMock.create(mockOpts);
     if (RECORDABLE) mock.beginScenario(SCENARIO);
@@ -218,17 +232,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
         }),
     });
 
-    // Record → real GitHub. Replay → local bare repo (file://).
-    if (RECORDABLE) {
-      remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
-      remoteSlug = parseGitHubSlug(remoteUrl);
-    } else {
-      const bare = await createLocalBareRemote();
-      remoteUrl = bare.url;
-      bareRemotePath = bare.path;
-      remoteSlug = "replay/local";
-    }
-
     // Replay doesn't talk to real GitHub — file:// remote needs no PAT
     // and the octokit stub ignores the token. Record-mode surfaces gh
     // failures (missing OR unauthenticated) so the operator notices.
@@ -239,7 +242,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 
     // Init the bare skills repo + wire origin BEFORE `bootstrap()` so
     // `ensureSkillsCodingRepo` reads the right `origin` for the row.
-    const skillsPath = expectDefined(
+    skillsPath = expectDefined(
       process.env.COGMO_SKILLS_PATH,
       "COGMO_SKILLS_PATH not set by integration setup",
     );
@@ -279,9 +282,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       // skill's own request, so a live CoinGecko would make the run depend
       // on its uptime and rate limits in replay and record alike.
       skillCtxHttpOverride: makeStubSkillNetwork(),
-      // See the header: the dry run judges the recorded sandbox commit,
-      // which a replay cannot recreate.
-      skipPresubmit: true,
       codingAuthOverride: async () =>
         // Pinned model + disabled thinking match `claude-cli.integration.test.ts`
         // and keep the recorded stream-json output stable across runs.
@@ -290,17 +290,24 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
           ANTHROPIC_MODEL: "claude-haiku-4-5-20251001",
           MAX_THINKING_TOKENS: "0",
         }),
-      // Replay-only: stub the GitHub bits the cassette can't reach. The
-      // git bits need no stub — seeding the branch into the bare remote
-      // (see `makeStubOctokitFactory`) leaves every host-side fetch, the
-      // skill-register one included, running its production path.
-      ...(!RECORDABLE && {
-        octokitFactory: makeStubOctokitFactory({
-          remotePath: expectDefined(bareRemotePath),
-          fixtureDir: BRANCH_FIXTURE_DIR,
-        }),
-      }),
+      // Replay-only: stub the GitHub bits the cassette can't reach. The git
+      // bits need no stub: the bare remote holds the recorded history, so
+      // every host-side fetch, the dry run's and the register's included,
+      // runs its production path.
+      ...(!RECORDABLE && { octokitFactory: makeStubOctokitFactory() }),
     });
+
+    // The dry run needs `main` to be an ancestor of the recorded tip. A boot
+    // on the recorded `main` leaves it there while the release's toolchain is
+    // the recording's; a changed one is committed on top.
+    if (recorded) {
+      const main = await getMainSha(skillsPath);
+      if (main !== recorded.main) {
+        throw new Error(
+          `the boot moved the skills repo's main from the recorded ${recorded.main} to ${main}: the release's toolchain differs from the recording's, so re-record`,
+        );
+      }
+    }
 
     const captureOutbound = bootstrapResult.inngest.createFunction(
       { id: "skill-authoring-capture-outbound", triggers: [directOutbound] },
@@ -388,8 +395,18 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       );
     }
     expect(task.status).toBe("pr_open");
-    // The pre-submit is off, so the verify run planned no dry run.
-    expect(task.presubmitVerdict).toBeNull();
+    // The dry run passed the pushed tip on the first verify run. Replay lands
+    // one recorded push, so a recording that took a fix pass fails here.
+    expect(task.presubmitVerdict).toMatchObject({ kind: "passed", fixPass: 0 });
+    const judged = expectDefined(task.presubmitVerdict?.sha, "the judged tip");
+    if (RECORDABLE) {
+      // The branch was cut at `baseSha`, the skills repo's `main` when the
+      // dry run read it: nothing advances `main` between the boot and the PR.
+      const main = expectDefined(task.worktreeAssignment?.baseSha, "the task's base");
+      await writeRecordedHistory(skillsPath, { main, tip: judged });
+    } else {
+      expect(judged).toBe(expectDefined(recorded).tip);
+    }
 
     // Track for cleanup. Branch name = `cogmo/run/<task-id>` (see `runBranchFor`).
     createdBranches.push(`cogmo/run/${task.id}`);
@@ -504,29 +521,81 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 
 // --- Helpers ─────────────────────────────────────────────────────────
 
-/** Replay-mode remote: bare git repo on disk, seeded with empty main. */
-async function createLocalBareRemote(): Promise<{ url: string; path: string }> {
+/** The history the record run's dry run judged: `main` as it read it, and the tip. */
+interface RecordedHistory {
+  main: string;
+  tip: string;
+}
+
+/**
+ * Record mode: bundle the judged history into `HISTORY_BUNDLE_PATH`. The
+ * scratch repo borrows the skills repo's objects, which hold the tip once the
+ * dry run has fetched it, so no ref of the skills repo moves.
+ */
+async function writeRecordedHistory(skillsPath: string, history: RecordedHistory): Promise<void> {
+  const scratch = await mkdtemp(join(tmpdir(), "skill-auth-history-"));
+  try {
+    await execFileP("git", ["init", "--bare", scratch]);
+    await writeFile(
+      join(scratch, "objects", "info", "alternates"),
+      `${resolve(skillsPath, "objects")}\n`,
+    );
+    await runGitIn(scratch, ["update-ref", "refs/heads/main", history.main]);
+    await runGitIn(scratch, ["update-ref", RECORDED_TIP_REF, history.tip]);
+    await runGitIn(scratch, [
+      "bundle",
+      "create",
+      resolve(HISTORY_BUNDLE_PATH),
+      "refs/heads/main",
+      RECORDED_TIP_REF,
+    ]);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Replay-mode remote: a bare repo on disk holding the recorded history, with
+ * `main` at the recorded `main`, which `setOriginAndFetch` gives the skills
+ * repo, and the tip's objects under `RECORDED_TIP_REF`.
+ */
+async function createBareRemoteFromHistory(): Promise<{
+  url: string;
+  path: string;
+  recorded: RecordedHistory;
+}> {
+  if (!existsSync(HISTORY_BUNDLE_PATH)) {
+    throw new Error(`${HISTORY_BUNDLE_PATH} is missing: a record run writes it with the cassette`);
+  }
   const bareDir = await mkdtemp(join(tmpdir(), "skill-auth-replay-remote-"));
   try {
     await execFileP("git", ["init", "--bare", "--initial-branch=main", bareDir]);
-    // `git fetch` against a refless bare fails; seed an empty main.
-    const seed = await mkdtemp(join(tmpdir(), "skill-auth-replay-seed-"));
-    try {
-      await execFileP("git", ["init", "--initial-branch=main", seed]);
-      await execFileP("git", ["-C", seed, "config", "user.email", "replay@cogmo.test"]);
-      await execFileP("git", ["-C", seed, "config", "user.name", "replay"]);
-      await execFileP("git", ["-C", seed, "commit", "--allow-empty", "-m", "initial"]);
-      await execFileP("git", ["-C", seed, "push", bareDir, "main:main"]);
-    } finally {
-      await rm(seed, { recursive: true, force: true });
-    }
+    await runGitIn(bareDir, ["fetch", resolve(HISTORY_BUNDLE_PATH), "+refs/*:refs/*"]);
+    const at = async (ref: string) => (await runGitIn(bareDir, ["rev-parse", ref])).trim();
+    const recorded = { main: await at("refs/heads/main"), tip: await at(RECORDED_TIP_REF) };
+    return { url: `file://${bareDir}`, path: bareDir, recorded };
   } catch (err) {
     // Partial failure between mkdtemp and successful return: caller
     // doesn't have `bareDir` to clean up. Drop it here, then rethrow.
     await rm(bareDir, { recursive: true, force: true }).catch(() => undefined);
     throw err;
   }
-  return { url: `file://${bareDir}`, path: bareDir };
+}
+
+/**
+ * Replay's stand-in for the sandbox's push of the task branch, which the
+ * cassette swallows: a replayed `git push origin <branch>` lands the recorded
+ * tip on `<branch>` in the bare remote, as the record run's push did, before
+ * the dry run fetches it. The execute run's push of the run branch
+ * (`HEAD:refs/heads/…`) is left alone: no host-side step reads it back.
+ */
+function landRecordedPush(remotePath: string, tip: string): (command: string) => Promise<void> {
+  return async (command) => {
+    const branch = /'push' 'origin' '([^':]+)'$/.exec(command)?.[1];
+    if (branch !== undefined) {
+      await runGitIn(remotePath, ["update-ref", `refs/heads/${branch}`, tip]);
+    }
+  };
 }
 
 /** The one endpoint the stand-in network serves. */
@@ -571,20 +640,10 @@ function makeStubSkillNetwork(): NonNullable<BootstrapOptions["skillCtxHttpOverr
 
 /**
  * Real Octokit + stub fetch — synthesizes the GitHub calls replay can't reach.
- *
- * `POST /pulls` also materializes the head branch in the bare remote. In
- * production the sandbox pushes `cogmo/<idShort>` to origin and the PR is
- * opened against it; on replay the sandbox is a cassette, so that push never
- * reaches the remote and every host-side consumer of the branch — the verify
- * orchestrator's fetch-back first — would look for a ref nobody wrote. PR
- * creation is the moment origin is supposed to know the branch, and it is
- * ordered strictly before the fetch-back, so the seam belongs here rather
- * than in a background poller racing the orchestrator.
+ * The PR's head branch is already on the bare remote, where
+ * `landRecordedPush` put it at the sandbox's push.
  */
-function makeStubOctokitFactory(opts: {
-  remotePath: string;
-  fixtureDir: string;
-}): (pat: string) => Octokit {
+function makeStubOctokitFactory(): (pat: string) => Octokit {
   const stubFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = init?.method ?? "GET";
@@ -593,20 +652,6 @@ function makeStubOctokitFactory(opts: {
       const [, owner, repo] = pullsMatch;
       const bodyText = typeof init?.body === "string" ? init.body : "";
       const body = bodyText ? (JSON.parse(bodyText) as { head?: string }) : {};
-      // Fail loud, like the unsupported-call branch below. Skipping here
-      // would strand the branch and surface much later as the register
-      // fetch's `couldn't find remote ref`, pointing at neither the missing
-      // head nor this stub. `owner:branch` is a valid head for a cross-repo
-      // PR that this seam does not model, so it is refused rather than
-      // materialized under a mangled ref name.
-      if (!body.head || body.head.includes(":")) {
-        throw new Error(`stub octokit: PR create needs a bare head branch, got ${bodyText}`);
-      }
-      await materializeBranchFromFixture({
-        branch: body.head,
-        repoPath: opts.remotePath,
-        fixtureDir: opts.fixtureDir,
-      });
       return new Response(
         JSON.stringify({
           number: 1,
@@ -630,106 +675,6 @@ function makeStubOctokitFactory(opts: {
     throw new Error(`stub octokit: unsupported ${method} ${url}`);
   };
   return (pat: string) => new Octokit({ auth: pat, request: { fetch: stubFetch } });
-}
-
-/**
- * Commit the fixture files into `skills/<name>/` on `branch` in `repoPath` —
- * the sandbox push the cassette swallows, replayed against the bare remote.
- *
- * Sole writer of that branch, and re-entrant: an existing ref is left alone
- * rather than replaced. Each call mints a fresh commit off the task's run
- * branch, so a second call for one branch offers a sibling of the first,
- * which `git push` refuses as a non-fast-forward. That refusal escapes
- * through the PR stub and `runOpenPr` reports it as `kind: "failed"`, so the
- * task lands in `failAndTeardown` carrying a git error that reads nothing
- * like its cause. Returning early also keeps whatever the verify
- * orchestrator's fetch-back has already pulled into the skills repo
- * authoritative.
- *
- * Both host-side readers — that fetch-back and the skill-register fetch —
- * take this branch from the remote, so one commit here is one commit
- * everywhere.
- */
-async function materializeBranchFromFixture(opts: {
-  branch: string;
-  repoPath: string;
-  fixtureDir: string;
-}): Promise<void> {
-  const { branch, repoPath, fixtureDir } = opts;
-  const alreadyPresent = await execFileP("git", [
-    "-C",
-    repoPath,
-    "show-ref",
-    "--verify",
-    "--quiet",
-    `refs/heads/${branch}`,
-  ]).then(
-    () => true,
-    () => false,
-  );
-  if (alreadyPresent) return;
-  const tmpRoot = await mkdtemp(join(tmpdir(), "skill-auth-fixture-"));
-  try {
-    await execFileP("git", ["clone", repoPath, tmpRoot]);
-    // The sandbox commits on the run branch the host pushed from the skills
-    // repo's main (allocate-task-worktree), so the branch descends from it.
-    const runBranches = (
-      await execFileP("git", [
-        "-C",
-        repoPath,
-        "for-each-ref",
-        "--format=%(refname:short)",
-        "refs/heads/cogmo/run/",
-      ])
-    ).stdout
-      .split("\n")
-      .filter((ref) => ref.length > 0);
-    if (runBranches.length !== 1) {
-      throw new Error(`expected one run branch on the remote, found: ${runBranches.join(", ")}`);
-    }
-    await execFileP("git", [
-      "-C",
-      tmpRoot,
-      "checkout",
-      "-b",
-      "fixture-staging",
-      `origin/${expectDefined(runBranches[0], "run branch")}`,
-    ]);
-    const entries = await readdir(fixtureDir);
-    if (entries.length === 0) {
-      throw new Error(
-        `branch fixture dir ${fixtureDir} is empty — refresh it alongside the Daytona cassette`,
-      );
-    }
-    const name = expectDefined(
-      /^name:\s*(\S+)/m.exec(await readFile(join(fixtureDir, "SKILL.md"), "utf8"))?.[1],
-      "the fixture manifest's name",
-    );
-    const skillDir = join(tmpRoot, "skills", name);
-    await mkdir(skillDir, { recursive: true });
-    await Promise.all(
-      entries.map((entry) => copyFile(join(fixtureDir, entry), join(skillDir, entry))),
-    );
-    await execFileP("git", ["-C", tmpRoot, "add", "."]);
-    await execFileP(
-      "git",
-      [
-        "-C",
-        tmpRoot,
-        "-c",
-        "user.email=fixture@cogmo.test",
-        "-c",
-        "user.name=fixture",
-        "commit",
-        "-m",
-        "fixture: replay-mode skill content",
-      ],
-      { env: { ...process.env, GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" } },
-    );
-    await execFileP("git", ["-C", tmpRoot, "push", repoPath, `HEAD:refs/heads/${branch}`]);
-  } finally {
-    await rm(tmpRoot, { recursive: true, force: true });
-  }
 }
 
 function parseGitHubSlug(url: string): string {

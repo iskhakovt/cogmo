@@ -308,6 +308,87 @@ describe("DaytonaMock", () => {
     });
   });
 
+  describe("replay mode — onExec", () => {
+    it("hands a session exec's command to onExec before the recorded response, and nothing else", async () => {
+      const fixturePath = join(fixtureDir, "replay-on-exec.json");
+      const execPath = "/toolbox/sb-1/process/session/s-1/exec";
+      await writeFixture(fixturePath, {
+        scenario: "on-exec",
+        calls: [
+          {
+            kind: "http",
+            method: "POST",
+            path: execPath,
+            request: {},
+            response: { status: 202, bodyJson: { cmdId: "cmd-1" } },
+          },
+          {
+            kind: "http",
+            method: "POST",
+            path: "/sandbox",
+            request: {},
+            response: { status: 200, bodyJson: { id: "sb-1" } },
+          },
+        ],
+      });
+      const seen: string[] = [];
+      const mock = await DaytonaMock.create({
+        mode: "replay",
+        fixturePath,
+        onExec: async (command) => {
+          // A pause the response would overtake if the hook were not awaited.
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          seen.push(command);
+        },
+      });
+      try {
+        const post = (path: string, body: unknown) =>
+          fetch(`${mock.url}${path}`, { method: "POST", body: JSON.stringify(body) });
+        const exec = await post(execPath, { command: "git push origin cogmo/x", runAsync: true });
+        seen.push("response");
+        expect(await exec.json()).toEqual({ cmdId: "cmd-1" });
+        await post("/sandbox", { command: "not an exec" });
+        expect(seen).toEqual(["git push origin cogmo/x", "response"]);
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("answers 500 with the error when onExec rejects, in place of the recorded response", async () => {
+      const fixturePath = join(fixtureDir, "replay-on-exec-rejects.json");
+      const execPath = "/toolbox/sb-1/process/session/s-1/exec";
+      await writeFixture(fixturePath, {
+        scenario: "on-exec-rejects",
+        calls: [
+          {
+            kind: "http",
+            method: "POST",
+            path: execPath,
+            request: {},
+            response: { status: 202, bodyJson: { cmdId: "cmd-1" } },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({
+        mode: "replay",
+        fixturePath,
+        onExec: async () => {
+          throw new Error("remote unwritable");
+        },
+      });
+      try {
+        const resp = await fetch(`${mock.url}${execPath}`, {
+          method: "POST",
+          body: JSON.stringify({ command: "git push origin cogmo/x" }),
+        });
+        expect(resp.status).toBe(500);
+        expect(await resp.text()).toMatch(/remote unwritable/);
+      } finally {
+        await mock.stop();
+      }
+    });
+  });
+
   describe("replay mode — body-bound headers", () => {
     it("strips recorded content-length so re-serialized body bytes don't trigger axios abort", async () => {
       // The recorded content-length is bound to the recorded byte

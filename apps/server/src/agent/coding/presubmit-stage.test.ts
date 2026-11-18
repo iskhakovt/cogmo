@@ -165,22 +165,6 @@ describe("runPresubmit", () => {
     expect(h.skillRunner.checkRegister).not.toHaveBeenCalled();
   });
 
-  it("plans no step and writes no verdict on the skills repo with the stage off", async () => {
-    const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
-    const sha = await pushBranch();
-    const h = harness(taskId, "verify-run-1");
-
-    await runPresubmit(
-      h.run,
-      { ...h.deps, presubmit: null },
-      { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY, fixPass: 0 },
-    );
-
-    expect(h.steps).toEqual([]);
-    expect(await verdictOf(taskId)).toBeNull();
-    expect(await scratchRefs()).toBe("");
-  });
-
   it("dry-runs the fetched tip and records the verdict under the run's key, the scratch ref gone", async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
@@ -609,7 +593,7 @@ describe("runPresubmit", () => {
     });
   });
 
-  it("a passed or unavailable verdict, the stage off and another repo all proceed", async () => {
+  it("a passed or unavailable verdict and another repo all proceed", async () => {
     const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();
     const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY, fixPass: 0 };
@@ -623,15 +607,12 @@ describe("runPresubmit", () => {
     ).toEqual({ kind: "proceed" });
     expect(await verdictOf(taskId)).toMatchObject({ kind: "unavailable", runId: "verify-run-2" });
 
-    const off = harness(taskId, "verify-run-3");
-    expect(await runPresubmit(off.run, { ...off.deps, presubmit: null }, args)).toEqual({
+    const other = harness(taskId, "verify-run-3");
+    const otherRepo = await seed("verifying", "cogmo");
+    expect(await runPresubmit(other.run, other.deps, { ...args, repo: otherRepo.repo })).toEqual({
       kind: "proceed",
     });
-    const other = await seed("verifying", "cogmo");
-    expect(await runPresubmit(off.run, off.deps, { ...args, repo: other.repo })).toEqual({
-      kind: "proceed",
-    });
-    expect(off.steps).toEqual([]);
+    expect(other.steps).toEqual([]);
   });
 
   it("leaves the row of a task that left verifying during the dry run as it is", async () => {

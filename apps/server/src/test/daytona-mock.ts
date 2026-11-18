@@ -360,7 +360,18 @@ export interface DaytonaMockReplayOptions {
    * per-call identity.
    */
   pathNormalizations?: ReadonlyArray<{ pattern: RegExp; replacement: string }>;
+  /**
+   * Called with the command of each replayed session exec, before its
+   * recorded response goes out. The cassette stands in for the sandbox, so
+   * what a command does outside it, such as a `git push` to a remote the
+   * test owns, happens only where the test applies it here.
+   */
+  onExec?: (command: string) => Promise<void>;
 }
+
+/** A session exec, the call `onExec` sees. */
+const SESSION_EXEC_PATH_RE = /\/process\/session\/[^/]+\/exec$/;
+const SessionExecBodySchema = z.object({ command: z.string() });
 
 export type DaytonaMockOptions = DaytonaMockRecordOptions | DaytonaMockReplayOptions;
 
@@ -818,7 +829,12 @@ export class DaytonaMock {
       const bodyBuf = await this.#readBody(req);
       await this.#recordAndForward(method, path, req.headers, bodyBuf, res);
     } else {
-      // Replay matches by `(method, path)` only — body is not consumed.
+      // Replay matches by `(method, path)` only; only `onExec` reads a body.
+      const onExec = this.#opts.mode === "replay" ? this.#opts.onExec : undefined;
+      if (onExec && method === "POST" && SESSION_EXEC_PATH_RE.test(path)) {
+        const body = JSON.parse((await this.#readBody(req)).toString("utf8"));
+        await onExec(SessionExecBodySchema.parse(body).command);
+      }
       this.#replayMatch(method, path, res);
     }
   }
