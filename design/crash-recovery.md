@@ -257,7 +257,7 @@ This is documented as accepted (same trigger class as before durable iterations 
 
 ## Test coverage `[confirmed]`
 
-`src/agent/handle-message.replay.test.ts` exercises the durability contract via `@inngest/test`'s `steps:` mechanism, which is Inngest's memoization model exposed for tests. Each test provides a step in `steps:` to simulate "this step already ran in a prior attempt" and asserts the step body's side effects do not repeat.
+`src/agent/handle-message.replay.test.ts` exercises the durability contract via `@inngest/test`'s `steps:` mechanism, which is Inngest's memoization model exposed for tests. Each test provides a step in `steps:` to simulate "this step already ran in a prior attempt" and asserts the step body's side effects do not repeat. `@inngest/test` mints a fresh `runId` on every invocation, where a real run keeps one, so a test of logic keyed on the run id pins it with `transformCtx`.
 
 The cases:
 

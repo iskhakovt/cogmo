@@ -92,6 +92,17 @@ describe("postCodingFailureNotice", () => {
     );
   });
 
+  it("fits a fix pass's other failure by its output's end, which is where it failed", async () => {
+    const output = Array.from({ length: 300 }, (_, i) => `test line ${i}`).join("\n");
+
+    const text = await postedText(notice({ reason: "verify_failed", detail: output }));
+
+    expect(text.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE_LENGTH);
+    expect(text).toMatch(/^❌ Verify failed: …/);
+    expect(text).toContain("test line 299\nBranch: cogmo/abc12345");
+    expect(text).not.toContain("more findings");
+  });
+
   it("posts nothing without a session on this channel", async () => {
     const sendMessage = vi.fn();
     const result = await postCodingFailureNotice({
