@@ -411,7 +411,10 @@ interface ReplayState {
    * One past the furthest call served, HTTP and WS alike: where the
    * replay has reached in the recording. {@link findReplayCall} prefers
    * matches at or after it, so duplicate `(method, path)` entries are
-   * served in recorded order. It never moves back ({@link claimReplayCall}).
+   * served in recorded order while the replay follows the recording. After
+   * a jump ahead, a later unconsumed duplicate can answer first: `[A, K1,
+   * B, K2]` replayed as A, B, K, K serves K2, then K1. It never moves back
+   * ({@link claimReplayCall}).
    */
   cursor: number;
   /** Indexes of the calls served, each once until every match is. */
