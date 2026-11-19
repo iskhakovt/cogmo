@@ -108,7 +108,7 @@ export function redis(network: StartedNetwork) {
     .withStartupTimeout(30_000);
 }
 
-const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.49.0";
+const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.52.0";
 
 /** `appUrl` pointing at the host must come from `exposeHostPort()` — there is no
  * `host.docker.internal` mapping on these containers. */
@@ -177,7 +177,7 @@ export const S3_TEST_SECRET_KEY = "cogmo-test-s3-secret";
 /** S3-compatible object store. Serves `/data`, the image's default volume. */
 export function rustfs(network: StartedNetwork) {
   return new GenericContainer(
-    "mirror.gcr.io/rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2",
+    "mirror.gcr.io/rustfs/rustfs:1.0.5@sha256:b81d16a90ee25bd9511280127ca1471788c6e874cf0f0da759645f46b2dc1d74",
   )
     .withNetwork(network)
     .withNetworkAliases("rustfs")
@@ -232,7 +232,7 @@ export function hindsight(
   // the Control Plane web UI (which Cogmo never talks to). Pinned within
   // `cogmo.hindsightCompat`: a floating `latest` drifts past the range and
   // trips the boot version check.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.2.0")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.2.1")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
@@ -302,7 +302,7 @@ export function hindsightSlim(
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
   // changes its LLM request format. Re-record the `hindsight/` cassette when a
   // bump changes those requests.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.2.0-slim")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.2.1-slim")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
