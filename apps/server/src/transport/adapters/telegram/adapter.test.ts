@@ -1,9 +1,13 @@
+import { Bot as MockBot } from "grammy";
+import type { UserFromGetMe } from "grammy/types";
 import { err, ok } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { logger } from "../../../logger.js";
 import { expectDefined, resolvesWithin } from "../../../test/assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import {
+  botApiError,
   botLifecycle,
   mockBotApi,
   resetGrammyMock,
@@ -11,6 +15,7 @@ import {
 } from "../../../test/telegram/grammy-mock.js";
 import { createAdapter } from "../../../test/telegram/harness.js";
 import type { StreamingAdapter } from "../../types.js";
+import { TelegramAdapter } from "./adapter.js";
 import { setup } from "./index.js";
 
 vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
@@ -95,7 +100,7 @@ describe("TelegramAdapter", () => {
     });
 
     it("logs a failed confirmation of the handled updates instead of throwing", async () => {
-      botLifecycle.polling = () => runUpdate(7, async () => {});
+      botLifecycle.polling = (stopped) => runUpdate(7, async () => {}).then(() => stopped);
       const failure = new Error("network down");
       mockBotApi.getUpdates.mockRejectedValueOnce(failure);
       const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
@@ -108,6 +113,365 @@ describe("TelegramAdapter", () => {
       } finally {
         warn.mockRestore();
       }
+    });
+  });
+
+  describe("polling supervision", () => {
+    const CONFLICT =
+      "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running";
+    const conflict = () => botApiError("getUpdates", 409, CONFLICT);
+    const HOUR_MS = 60 * 60_000;
+
+    function silenceLogs() {
+      return {
+        error: vi.spyOn(logger, "error").mockImplementation(() => {}),
+        warn: vi.spyOn(logger, "warn").mockImplementation(() => {}),
+      };
+    }
+    let logs: ReturnType<typeof silenceLogs>;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      // Each wait lands at three quarters of its ceiling.
+      vi.spyOn(Math, "random").mockReturnValue(0.5);
+      logs = silenceLogs();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    /** How many times the adapter has called `bot.start()`. */
+    function starts(): number {
+      return botLifecycle.registrations.filter((r) => r === "start").length;
+    }
+
+    /** Answer each `bot.start()` with the next loop; once they run out, poll until `bot.stop()`. */
+    function loops(...queue: Array<(stopped: Promise<void>) => Promise<void>>): void {
+      botLifecycle.polling = (stopped) => (queue.shift() ?? ((s) => s))(stopped);
+    }
+
+    const rejectWith = (failure: unknown) => () => Promise.reject(failure);
+
+    it("waits a backoff that doubles to a cap between consecutive 409s", async () => {
+      botLifecycle.polling = () => Promise.reject(conflict());
+      const { adapter } = await createAdapter();
+
+      // Three quarters of 5 s doubling to the 5 min cap.
+      for (const waitMs of [3_750, 7_500, 15_000, 30_000, 60_000, 120_000, 225_000, 225_000]) {
+        const before = starts();
+        await vi.advanceTimersByTimeAsync(waitMs - 1);
+        expect(starts()).toBe(before);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(starts()).toBe(before + 1);
+      }
+
+      expect(logs.error).toHaveBeenLastCalledWith(
+        { description: CONFLICT, conflicts: 9, retryInMs: 225_000 },
+        expect.stringContaining("409"),
+      );
+      await adapter.stop();
+    });
+
+    it.each([0, 0.999_999])(
+      "restarts 2.5–5 s after the first 409 (Math.random() = %s)",
+      async (random) => {
+        vi.mocked(Math.random).mockReturnValue(random);
+        loops(rejectWith(conflict()));
+        const { adapter } = await createAdapter();
+
+        await vi.advanceTimersByTimeAsync(2_499);
+        expect(starts()).toBe(1);
+        await vi.advanceTimersByTimeAsync(2_501);
+        expect(starts()).toBe(2);
+
+        await adapter.stop();
+      },
+    );
+
+    it.each([
+      ["starts the streak over", 10 * 60_000, 3_750],
+      ["keeps the streak", 10 * 60_000 - 1, 15_000],
+    ])("%s after a run of %i ms, waiting %i ms on its 409", async (_, runMs, waitMs) => {
+      const third = Promise.withResolvers<void>();
+      loops(rejectWith(conflict()), rejectWith(conflict()), () => third.promise);
+      const { adapter } = await createAdapter();
+      await vi.advanceTimersByTimeAsync(3_750 + 7_500);
+      expect(starts()).toBe(3);
+
+      await vi.advanceTimersByTimeAsync(runMs);
+      third.reject(conflict());
+      await vi.advanceTimersByTimeAsync(waitMs - 1);
+      expect(starts()).toBe(3);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(starts()).toBe(4);
+      await adapter.stop();
+    });
+
+    it.each(["getUpdates", "getMe"])(
+      "stays down after a 401 from %s, logging the token as revoked or invalid",
+      async (method) => {
+        loops(rejectWith(botApiError(method, 401, "Unauthorized")));
+        const { adapter } = await createAdapter();
+
+        await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+        expect(starts()).toBe(1);
+        expect(logs.error).toHaveBeenCalledWith(
+          { description: "Unauthorized" },
+          expect.stringMatching(/401.*revoked or invalid/),
+        );
+        await expect(adapter.stop()).resolves.toBeUndefined();
+      },
+    );
+
+    it.each<[string, unknown]>([
+      ["a 404 from a wrong apiRoot", botApiError("deleteWebhook", 404, "Not Found")],
+      ["a 400", botApiError("deleteWebhook", 400, "Bad Request: invalid parameter")],
+      ["an error that isn't the Bot API's", new Error("onStart threw")],
+    ])("stays down after %s, logging it", async (_, failure) => {
+      loops(rejectWith(failure));
+      const { adapter } = await createAdapter();
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+      expect(starts()).toBe(1);
+      expect(logs.error).toHaveBeenCalledWith({ err: failure }, expect.any(String));
+      await expect(adapter.stop()).resolves.toBeUndefined();
+    });
+
+    it("stays down when the loop ends without stop(), logging it", async () => {
+      loops(() => Promise.resolve());
+      const { adapter } = await createAdapter();
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+      expect(starts()).toBe(1);
+      expect(logs.error).toHaveBeenCalledWith(expect.stringContaining("without stop()"));
+      await expect(adapter.stop()).resolves.toBeUndefined();
+    });
+
+    it("clears the backoff on stop(), and starts nothing after it", async () => {
+      loops(rejectWith(conflict()));
+      const { adapter } = await createAdapter();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(vi.getTimerCount()).toBe(1);
+
+      await adapter.stop();
+
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(HOUR_MS);
+      expect(starts()).toBe(1);
+    });
+
+    it("leaves polling stopped after a stop() during a restart's setup", async () => {
+      // grammY rejects a setup that `bot.stop()` cuts short with "Aborted delay".
+      loops(rejectWith(conflict()), (stopped) =>
+        stopped.then(() => Promise.reject(new Error("Aborted delay"))),
+      );
+      const { adapter } = await createAdapter();
+      await vi.advanceTimersByTimeAsync(3_750);
+      expect(starts()).toBe(2);
+
+      await adapter.stop();
+      await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+      expect(starts()).toBe(2);
+      expect(logs.error).toHaveBeenCalledOnce();
+      expect(logs.warn).not.toHaveBeenCalled();
+    });
+
+    it("logs a 409 that settles after stop() as a warning, and starts nothing", async () => {
+      const failure = conflict();
+      loops((stopped) => stopped.then(() => Promise.reject(failure)));
+      const { adapter } = await createAdapter();
+
+      await adapter.stop();
+      await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+      expect(starts()).toBe(1);
+      expect(logs.warn).toHaveBeenCalledWith({ err: failure }, expect.stringContaining("stopping"));
+      expect(logs.error).not.toHaveBeenCalled();
+    });
+
+    it("settles a second stop() with the first one's drain", async () => {
+      const confirmed = Promise.withResolvers<void>();
+      let botStops = 0;
+      botLifecycle.stop = () => {
+        botStops += 1;
+        return confirmed.promise;
+      };
+      const { adapter } = await createAdapter();
+      let secondSettled = false;
+
+      const first = adapter.stop();
+      const second = adapter.stop().then(() => {
+        secondSettled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(secondSettled).toBe(false);
+      confirmed.resolve();
+      await Promise.all([first, second]);
+      expect(secondSettled).toBe(true);
+      expect(botStops).toBe(1);
+    });
+
+    it("refuses startPolling() once polling has started or stopped", async () => {
+      const adapter = new TelegramAdapter(new MockBot("fake"), mockAttachmentStore());
+      adapter.startPolling();
+      expect(() => adapter.startPolling()).toThrow("while polling");
+
+      await adapter.stop();
+      expect(() => adapter.startPolling()).toThrow("while stopped");
+    });
+
+    describe("on grammY's own Bot", () => {
+      const BOT_INFO: UserFromGetMe = {
+        id: 1,
+        is_bot: true,
+        first_name: "cogmo",
+        username: "cogmo_bot",
+        can_join_groups: false,
+        can_read_all_group_messages: false,
+        supports_inline_queries: false,
+        can_connect_to_business: false,
+        has_main_web_app: false,
+        has_topics_enabled: false,
+        allows_users_to_create_topics: false,
+        can_manage_bots: false,
+        supports_join_request_queries: false,
+      };
+
+      interface ApiCall {
+        method: string;
+        payload: Record<string, unknown>;
+      }
+
+      const isLongPoll = ({ method, payload }: ApiCall) =>
+        method === "getUpdates" && typeof payload.timeout === "number" && payload.timeout > 0;
+
+      /** Settles once grammY aborts the request. */
+      function openUntilAborted(signal: AbortSignal | null | undefined): Promise<Response> {
+        return new Promise((_, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason));
+        });
+      }
+
+      /** The `call`-th request (1-based) stays open until aborted; later calls to its method `retries`. */
+      interface Hold {
+        call: number;
+        retries: "succeed" | "fail";
+      }
+
+      /**
+       * A Bot API behind grammY's `fetch`: each long poll takes the next of
+       * `polls`, and once they run out it stays open until grammY aborts it.
+       * Every other call succeeds, except as `hold` says.
+       */
+      function fakeBotApi(polls: object[], hold?: Hold): { fetch: typeof fetch; calls: ApiCall[] } {
+        const calls: ApiCall[] = [];
+        const fetch: typeof globalThis.fetch = async (input, init) => {
+          const method = String(input).split("/").at(-1) ?? "";
+          const payload = z
+            .record(z.string(), z.unknown())
+            .parse(JSON.parse(String(init?.body ?? "{}")));
+          const call = { method, payload };
+          calls.push(call);
+          if (hold !== undefined && calls.length === hold.call)
+            return openUntilAborted(init?.signal);
+          if (
+            hold?.retries === "fail" &&
+            calls.length > hold.call &&
+            calls[hold.call - 1]?.method === method
+          ) {
+            throw new TypeError("fetch failed");
+          }
+          if (!isLongPoll(call)) {
+            return Response.json({ ok: true, result: method === "getUpdates" ? [] : true });
+          }
+          const next = polls.shift();
+          return next === undefined ? openUntilAborted(init?.signal) : Response.json(next);
+        };
+        return { fetch, calls };
+      }
+
+      async function grammyAdapter(polls: object[], hold?: Hold) {
+        const { Bot: GrammyBot } = await vi.importActual<typeof import("grammy")>("grammy");
+        const api = fakeBotApi(polls, hold);
+        const bot = new GrammyBot("123:fake", { botInfo: BOT_INFO, client: { fetch: api.fetch } });
+        const adapter = new TelegramAdapter(bot, mockAttachmentStore());
+        adapter.startPolling();
+        return { adapter, calls: api.calls };
+      }
+
+      const conflictPoll = { ok: false, error_code: 409, description: CONFLICT };
+
+      it("starts again after a 409 and resumes past the handled update", async () => {
+        const { adapter, calls } = await grammyAdapter([
+          { ok: true, result: [{ update_id: 41 }] },
+          conflictPoll,
+        ]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(calls.map((c) => c.method)).toEqual(["deleteWebhook", "getUpdates", "getUpdates"]);
+
+        await vi.advanceTimersByTimeAsync(3_750);
+
+        expect(calls.slice(3)).toEqual([
+          { method: "deleteWebhook", payload: {} },
+          { method: "getUpdates", payload: { offset: 42, timeout: 30, allowed_updates: [] } },
+        ]);
+        await adapter.stop();
+      });
+
+      it("calls nothing but the offset confirmation after a stop() during the backoff", async () => {
+        const { adapter, calls } = await grammyAdapter([
+          { ok: true, result: [{ update_id: 41 }] },
+          conflictPoll,
+        ]);
+        await vi.advanceTimersByTimeAsync(0);
+        const before = calls.length;
+
+        await adapter.stop();
+        await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+        expect(calls.slice(before)).toEqual([
+          { method: "getUpdates", payload: { offset: 42, limit: 1, timeout: 0 } },
+        ]);
+      });
+
+      // grammY retries the aborted deleteWebhook at once. Its success resolves
+      // the run; its failure ends the retry wait with "Aborted delay".
+      it.each(["succeed", "fail"] as const)(
+        "ends silently on a stop() during a restart's deleteWebhook whose retries %s, and polls no more",
+        async (retries) => {
+          const { adapter, calls } = await grammyAdapter(
+            [{ ok: true, result: [{ update_id: 41 }] }, conflictPoll],
+            { call: 4, retries },
+          );
+          await vi.advanceTimersByTimeAsync(3_750);
+          expect(calls.map((c) => c.method)).toEqual([
+            "deleteWebhook",
+            "getUpdates",
+            "getUpdates",
+            "deleteWebhook",
+          ]);
+
+          const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+
+          await adapter.stop();
+          await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+          const after = calls.slice(4);
+          expect(after.map((c) => c.method)).toContain("deleteWebhook");
+          expect(after.filter(isLongPoll)).toEqual([]);
+          expect(info).not.toHaveBeenCalledWith("telegram polling started");
+          expect(logs.error).toHaveBeenCalledOnce();
+          expect(logs.warn).not.toHaveBeenCalled();
+        },
+      );
     });
   });
 

@@ -7,6 +7,23 @@
 
 import { vi } from "vitest";
 
+/** grammY's own error classes, so the adapter's `instanceof` checks see what grammY throws. */
+const actual = await vi.importActual<typeof import("grammy")>("grammy");
+
+/** The Bot API refusing a call to `method`, as grammY throws it. */
+export function botApiError(
+  method: string,
+  code: number,
+  description: string,
+): InstanceType<typeof actual.GrammyError> {
+  return new actual.GrammyError(
+    `Call to '${method}' failed! (${code}: ${description})`,
+    { ok: false, error_code: code, description },
+    method,
+    {},
+  );
+}
+
 /**
  * Every handler `setup()` registered, keyed `command:<name>`, `on:<filter>`
  * or `callbackQuery:<pattern source>`.
@@ -54,11 +71,13 @@ type UpdateMiddleware = (ctx: UpdateCtx, next: () => Promise<void>) => Promise<v
  * What the mocked `bot.start()` (the polling loop) and `bot.stop()` (the
  * offset confirmation) return, the middleware `bot.use()` registered, the
  * options the bot was built with, and the order the bot's middleware went
- * in (`use`, `drop`, `callbackQuery`, `on:<filter>`, `start`), which is the
- * order grammY runs it in. Reset before each test.
+ * in (`use`, `drop`, `callbackQuery`, `on:<filter>`, `start` once per
+ * `bot.start()`), which is the order grammY runs it in. `polling` gets a
+ * promise that resolves once `bot.stop()` is called, and by default runs
+ * until then, as grammY's loop does. Reset before each test.
  */
 export const botLifecycle = {
-  polling: (): Promise<void> => Promise.resolve(),
+  polling: (stopped: Promise<void>): Promise<void> => stopped,
   stop: (): Promise<void> => Promise.resolve(),
   middleware: [] as UpdateMiddleware[],
   options: undefined as unknown,
@@ -101,6 +120,8 @@ class InputFile {
 }
 
 class MockBot {
+  /** Resolved by `stop()`, for the run the latest `start()` began. */
+  #stopped = Promise.withResolvers<void>();
   constructor(_token: string, options?: unknown) {
     botLifecycle.options = options;
   }
@@ -126,20 +147,23 @@ class MockBot {
     botLifecycle.registrations.push("use");
     botLifecycle.middleware.push(middleware);
   });
-  // Real grammY returns a Promise<void> that resolves when bot.stop() is
-  // called. The adapter awaits it on stop() to drain — without the
-  // Promise return type, `attachPolling` errors with "Cannot read
-  // properties of undefined (reading 'catch')".
+  // As in grammY, the promise settles once the polling loop ends; the
+  // adapter supervises it and awaits it on stop() to drain.
   start = vi.fn(({ onStart }: { onStart?: () => void } = {}) => {
     botLifecycle.registrations.push("start");
+    this.#stopped = Promise.withResolvers<void>();
     onStart?.();
-    return botLifecycle.polling();
+    return botLifecycle.polling(this.#stopped.promise);
   });
-  stop = vi.fn(() => botLifecycle.stop());
+  stop = vi.fn(() => {
+    this.#stopped.resolve();
+    return botLifecycle.stop();
+  });
 }
 
 export const grammyModule = {
   Bot: MockBot,
+  GrammyError: actual.GrammyError,
   InputFile,
   matchFilter: vi.fn(() => forwardFilter),
 };
@@ -147,7 +171,7 @@ export const grammyModule = {
 export function resetGrammyMock(): void {
   handlers.clear();
   vi.clearAllMocks();
-  botLifecycle.polling = () => Promise.resolve();
+  botLifecycle.polling = (stopped) => stopped;
   botLifecycle.stop = () => Promise.resolve();
   botLifecycle.middleware = [];
   botLifecycle.options = undefined;
