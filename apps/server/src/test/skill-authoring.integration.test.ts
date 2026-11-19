@@ -122,8 +122,9 @@ const HISTORY_BUNDLE_PATH = "./test/fixtures/skill-authoring-history.bundle";
 const RECORDED_TIP_REF = "refs/recorded/tip";
 /**
  * The commit author cogmo writes in both modes (`commit-push.ts` composes it
- * from the identity's `login` and `id`). A stand-in, so a recording carries no
- * account's name or noreply address; the PAT alone authenticates the pushes.
+ * from the identity's `login` and `id`). A stand-in, so the recorded commits
+ * carry no account's name or noreply address; the PAT alone authenticates the
+ * pushes.
  */
 const COMMIT_AUTHOR = { login: "test-user", id: "0" } as const;
 const IS_RECORD = process.env.RECORD === "1";
