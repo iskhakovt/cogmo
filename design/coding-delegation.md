@@ -725,7 +725,7 @@ A timeout fire is mapped to a task-level failure by the caller — `checkoutFeat
 A coding task on the skills repo ends in a PR that the auto-register deploys ([skills.md → Where the classifier runs](skills.md#where-the-classifier-runs)). A register refusal reaches the owner as a message after the task has ended, and never reaches the author. Register makes checks that the CLI's `.cogmo/verify` does not:
 
 - on the server, with its TypeScript and grammar: the gates (size, syntax, entrypoint, dynamic code, effects), the classifier, the path rules (a skill's four files, in one skill directory), the Pyodide check, and ajv over the schemas;
-- in skills-image sessions or the server's Pyodide child: Imports, CPython's compile, and the schema import;
+- in skills-image sessions or the server's Pyodide child: Imports, CPython's compile, the schema import, and `[proposed]` the skill's tests with no network and a 60 s cap ([skills.md → Register-time tests](skills.md#register-time-tests-proposed)), which `.cogmo/verify` runs on the sandbox's network, uncapped;
 - the checks `.cogmo/verify` shares (ruff, the format check, pyrefly, the suppression rule), with the release's toolchain, which a branch cut before the latest toolchain commit does not carry.
 
 The lockfile compile is not among them. The toolchain pins `python-version`, `generate-hashes` and `no-header`, so the author's plain `uv pip compile` writes register's bytes; only the package index moving between the two compiles makes them differ ([Residual](#residual)).
@@ -786,7 +786,7 @@ type DryRunUnavailable =
 
 **What register's code gains** (slice 1) `[confirmed]`. `prepareRegister` takes the tip's sha, and `registerSkill` resolves the branch first. `readManifestLockfile` returns the compile's error kind rather than a string. The rejection splits into terminal and pausing at the checks that know which: the gates' and the CPython runner's `registrar_unavailable`, the compile's `transport_failed`, and the schema import's `unavailable` variants. `registerSkill` flattens the rejection into `RegisterResult.errors`; the typed `RegisterRejection` union is S10's. The step's signal is the auto-register's 300 s deadline. The step body maps the deadline's abort, a failed fetch and a moved branch to `unavailable`; any other throw is a bug, and fails the task `unexpected_error` through the catch, as in every step.
 
-**Cost.** One dry run costs what one register's checks cost. The host gates take milliseconds. With a sandbox backend there is the check session. With dependencies there are also the lockfile compile and an install session, both reaching the package index, and on the wasm tier the Pyodide lookups. The container tier adds its schema-import session. That is one to four sessions. With no backend configured, register skips the compile and the checks, and so does the dry run.
+**Cost.** One dry run costs what one register's checks cost. The host gates take milliseconds. With a sandbox backend there is the check session. With dependencies there are also the lockfile compile and an install session, both reaching the package index, and on the wasm tier the Pyodide lookups. The container tier adds its schema-import session. `[proposed]` A tip with a `test_skill.py`, on a backend that creates sessions with no network, adds a test session. That is one to five sessions. With no backend configured, register skips the compile and the checks, and so does the dry run.
 
 ### The fix pass
 
