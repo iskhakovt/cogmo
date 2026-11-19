@@ -3938,6 +3938,63 @@ async def run(inputs, ctx):
       ]);
     });
 
+    it("masks a finding's secrets before its cut can hide them from the mask", async () => {
+      // The cut at 400 code points falls inside the password, before its `@`.
+      const cpythonChecks = mock<CpythonChecks>();
+      cpythonChecks.check.mockResolvedValue(
+        ok({
+          findings: [
+            {
+              id: "ruff" as const,
+              line: 1,
+              column: 1,
+              message: `fetches https://owner:${"p".repeat(600)}@example.com/data`,
+            },
+          ],
+          suppressions: [],
+          toolchainVersion: "dev",
+        }),
+      );
+      const runner = await makeRunner({ cpythonChecks });
+      const sha = await pushEcho();
+
+      const dryRun = await runner.checkRegister({ sha, signal: live() });
+
+      assertKind(dryRun, "refused");
+      const [finding] = dryRun.findings;
+      expect(finding).toContain("https://REDACTED@example.com/data");
+      expect(finding).not.toContain("ppp");
+    });
+
+    it("drops a secret the skills image's own cut ran through, which no mask can recognise", async () => {
+      // The image cuts a check's message at 400 code points, as check.py's `_cut` does.
+      const message = Array.from(`fetches https://owner:${"p".repeat(600)}@example.com/data`);
+      const cpythonChecks = mock<CpythonChecks>();
+      cpythonChecks.check.mockResolvedValue(
+        ok({
+          findings: [
+            {
+              id: "ruff" as const,
+              line: 1,
+              column: 1,
+              message: `${message.slice(0, 399).join("")}…`,
+            },
+          ],
+          suppressions: [],
+          toolchainVersion: "dev",
+        }),
+      );
+      const runner = await makeRunner({ cpythonChecks });
+      const sha = await pushEcho();
+
+      const dryRun = await runner.checkRegister({ sha, signal: live() });
+
+      assertKind(dryRun, "refused");
+      const [finding] = dryRun.findings;
+      expect(finding).toMatch(/: fetches https…$/);
+      expect(finding).not.toContain("ppp");
+    });
+
     it("judges a tip main is not an ancestor of stale, naming main", async () => {
       const runner = await makeRunner();
       const stale = await pushEcho();

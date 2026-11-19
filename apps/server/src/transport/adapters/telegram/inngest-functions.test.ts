@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type BoundaryResolvedData,
   boundaryResolvedEvent,
+  type CodingTaskFailureNoticeData,
+  codingTaskFailureNotice,
   pipelineGatePending,
   type SkillsDeployOutcomeData,
   skillsDeployOutcome,
@@ -104,13 +106,51 @@ describe("telegramFunctions", () => {
       );
     });
 
-    it("registers no outcome listener when skills are not wired", async () => {
+    it("posts a coding task's failure notice to the same session through bot.api.sendMessage", async () => {
+      const { inngest, ready } = setupWith(true);
+      await ready;
+
+      const registration = vi
+        .mocked(inngest.createFunction)
+        .mock.calls.find(
+          (call) => (call[0] as { id?: string }).id === "telegram-coding-failure-notice-tg-ch",
+        );
+      const [opts, handler] = expectDefined(registration) as [
+        { triggers: unknown[]; retries: number },
+        (ctx: { event: { data: CodingTaskFailureNoticeData } }) => Promise<unknown>,
+      ];
+      expect(opts.triggers).toEqual([codingTaskFailureNotice]);
+      expect(opts.retries).toBe(0);
+
+      const result = await handler({
+        event: {
+          data: {
+            conversationId: "conv-1",
+            taskId: "task-1",
+            reason: "presubmit_refused",
+            detail: "ruff: E501",
+            branch: "cogmo/abc12345",
+          },
+        },
+      });
+
+      expect(result).toEqual({ posted: true });
+      expect(mockBotApi.sendMessage).toHaveBeenCalledWith(
+        42,
+        "❌ The pre-submit refused the skill: ruff: E501\nBranch: cogmo/abc12345",
+      );
+    });
+
+    it("registers no outcome or failure-notice listener when skills are not wired", async () => {
       const { inngest, ready } = setupWith(false);
       await ready;
 
       const ids = vi.mocked(inngest.createFunction).mock.calls.map((call) => call[0]);
       expect(ids).not.toContainEqual(
         expect.objectContaining({ id: "telegram-skills-deploy-outcome-tg-ch" }),
+      );
+      expect(ids).not.toContainEqual(
+        expect.objectContaining({ id: "telegram-coding-failure-notice-tg-ch" }),
       );
     });
   });

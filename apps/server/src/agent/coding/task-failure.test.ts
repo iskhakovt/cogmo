@@ -10,6 +10,7 @@ import {
   failTaskFromCatch,
   maskTaskFailure,
   recordTaskFailed,
+  recordTaskFailedFrom,
 } from "./task-failure.js";
 import type { TaskFailure } from "./types.js";
 
@@ -89,6 +90,93 @@ describe("task failure channel", () => {
       /vanished/,
     );
     expect(h.inngest.send).not.toHaveBeenCalled();
+  });
+
+  describe("recordTaskFailedFrom", () => {
+    const PRESUBMIT: TaskFailure = { reason: "presubmit_refused", detail: DETAIL };
+    const MASKED_PRESUBMIT: TaskFailure = { reason: "presubmit_refused", detail: MASKED };
+    const transition = {
+      stepId: "transition-presubmit-failed",
+      from: "verifying",
+      settledAt: ["pushed", "pr_open"],
+    } as const;
+
+    it("fails the task from its status, emits and returns the masked failure", async () => {
+      const h = harness();
+      h.store.failTaskFromStatus.mockResolvedValue({ kind: "failed" });
+
+      const recorded = await recordTaskFailedFrom(h.run, h.deps, PRESUBMIT, transition);
+
+      expect(recorded).toEqual({ kind: "recorded", failure: MASKED_PRESUBMIT });
+      expect(h.store.failTaskFromStatus).toHaveBeenCalledWith(
+        expect.anything(),
+        "task-1",
+        "verifying",
+        MASKED_PRESUBMIT,
+      );
+      expect(h.inngest.send).toHaveBeenCalledWith(failedEvent(MASKED_PRESUBMIT));
+    });
+
+    it("reads `stale` at failed with its own reason as its own commit, and emits", async () => {
+      const h = harness();
+      h.store.failTaskFromStatus.mockResolvedValue({
+        kind: "stale",
+        status: "failed",
+        failureReason: "presubmit_refused",
+      });
+
+      const recorded = await recordTaskFailedFrom(h.run, h.deps, PRESUBMIT, transition);
+
+      expect(recorded).toEqual({ kind: "recorded", failure: MASKED_PRESUBMIT });
+      expect(h.inngest.send).toHaveBeenCalledWith(failedEvent(MASKED_PRESUBMIT));
+    });
+
+    it.each(["pushed", "pr_open"] as const)(
+      "reads `stale` at %s as settled, emitting nothing",
+      async (status) => {
+        const h = harness();
+        h.store.failTaskFromStatus.mockResolvedValue({
+          kind: "stale",
+          status,
+          failureReason: null,
+        });
+
+        expect(await recordTaskFailedFrom(h.run, h.deps, PRESUBMIT, transition)).toEqual({
+          kind: "settled",
+        });
+        expect(h.inngest.send).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      { status: "failed", failureReason: "run_terminated", via: "ended" },
+      { status: "cancelled", failureReason: "user_cancelled", via: "ended" },
+      { status: "pending_verify", failureReason: null, via: "moved" },
+    ] as const)(
+      "reads another writer's $status ($failureReason) as the task leaving",
+      async ({ status, failureReason, via }) => {
+        const h = harness();
+        const stale = { kind: "stale", status, failureReason } as const;
+        h.store.failTaskFromStatus.mockResolvedValue(stale);
+
+        expect(await recordTaskFailedFrom(h.run, h.deps, PRESUBMIT, transition)).toEqual({
+          kind: "left",
+          via,
+          transition: stale,
+        });
+        expect(h.inngest.send).not.toHaveBeenCalled();
+      },
+    );
+
+    it("throws on a vanished row", async () => {
+      const h = harness();
+      h.store.failTaskFromStatus.mockResolvedValue({ kind: "not_found" });
+
+      await expect(recordTaskFailedFrom(h.run, h.deps, PRESUBMIT, transition)).rejects.toThrow(
+        /vanished before transition-presubmit-failed/,
+      );
+      expect(h.inngest.send).not.toHaveBeenCalled();
+    });
   });
 
   it("failTaskFromCatch records the thrown error as unexpected_error, masked, and emits", async () => {

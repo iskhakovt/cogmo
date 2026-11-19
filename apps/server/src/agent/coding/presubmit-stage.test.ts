@@ -439,6 +439,83 @@ describe("runPresubmit", () => {
     );
   });
 
+  it("a refusal fails the task presubmit_refused, its findings cut at 8 KiB at a finding boundary", async () => {
+    const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+    const sha = await pushBranch();
+    const h = harness(taskId, "verify-run-1");
+    const findings = Array.from(
+      { length: 100 },
+      (_, i) => `ruff: skills/echo/skill.py:${i + 1}:1: E501 ${"é".repeat(150)}`,
+    );
+    h.skillRunner.checkRegister.mockResolvedValue({ kind: "refused", sha, findings });
+
+    const exit = await runPresubmit(h.run, h.deps, {
+      repo,
+      branch: BRANCH,
+      branchSha: sha,
+      identity: IDENTITY,
+    });
+
+    assertKind(exit, "fail");
+    expect(exit.failure.reason).toBe("presubmit_refused");
+    const lines = exit.failure.detail.split("\n");
+    const kept = lines.slice(0, -1);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept).toEqual(findings.slice(0, kept.length));
+    expect(lines.at(-1)).toBe(`[${findings.length - kept.length} more findings]`);
+    expect(Buffer.byteLength(exit.failure.detail)).toBeLessThanOrEqual(8 * 1024);
+    const withOneMore = [...findings.slice(0, kept.length + 1), "[0 more findings]"].join("\n");
+    expect(Buffer.byteLength(withOneMore)).toBeGreaterThan(8 * 1024);
+  });
+
+  it("a stale base fails the task presubmit_stale_base naming both shas", async () => {
+    const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+    const sha = await pushBranch();
+    const mainSha = "e".repeat(40);
+    const h = harness(taskId, "verify-run-1");
+    h.skillRunner.checkRegister.mockResolvedValue({ kind: "stale_base", sha, mainSha });
+
+    const exit = await runPresubmit(h.run, h.deps, {
+      repo,
+      branch: BRANCH,
+      branchSha: sha,
+      identity: IDENTITY,
+    });
+
+    expect(exit).toEqual({
+      kind: "fail",
+      failure: {
+        reason: "presubmit_stale_base",
+        detail: `main is at ${mainSha}, and the pushed tip ${sha} does not contain it. Merge main into the branch and register it by hand.`,
+      },
+    });
+  });
+
+  it("a passed or unavailable verdict, the stage off and another repo all proceed", async () => {
+    const { taskId, repo } = await seed("verifying", SKILLS_CODING_REPO_NAME);
+    const sha = await pushBranch();
+    const args = { repo, branch: BRANCH, branchSha: sha, identity: IDENTITY };
+    const passed = harness(taskId, "verify-run-1");
+    passed.skillRunner.checkRegister.mockResolvedValue({ kind: "passed", sha, riskTier: "auto" });
+    expect(await runPresubmit(passed.run, passed.deps, args)).toEqual({ kind: "proceed" });
+
+    const moved = harness(taskId, "verify-run-2");
+    expect(
+      await runPresubmit(moved.run, moved.deps, { ...args, branchSha: "c".repeat(40) }),
+    ).toEqual({ kind: "proceed" });
+    expect(await verdictOf(taskId)).toMatchObject({ kind: "unavailable", runId: "verify-run-2" });
+
+    const off = harness(taskId, "verify-run-3");
+    expect(await runPresubmit(off.run, { ...off.deps, presubmit: null }, args)).toEqual({
+      kind: "proceed",
+    });
+    const other = await seed("verifying", "cogmo");
+    expect(await runPresubmit(off.run, off.deps, { ...args, repo: other.repo })).toEqual({
+      kind: "proceed",
+    });
+    expect(off.steps).toEqual([]);
+  });
+
   it("leaves the row of a task that left verifying during the dry run as it is", async () => {
     const { taskId, repo } = await seed("pushed", SKILLS_CODING_REPO_NAME);
     const sha = await pushBranch();

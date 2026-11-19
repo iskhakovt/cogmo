@@ -392,6 +392,27 @@ export interface CodingStore {
   >;
 
   /**
+   * Atomic conditional fail: `failed` with `failure` iff the task is at
+   * `from`. `stale` carries the status and failure reason the row holds, so
+   * the caller tells its own committed write (`failed` with its reason) from
+   * another writer's.
+   */
+  failTaskFromStatus(
+    tx: Transaction,
+    id: string,
+    from: CodingTaskStatus,
+    failure: TaskFailure,
+  ): Promise<
+    | { kind: "failed" }
+    | {
+        kind: "stale";
+        status: CodingTaskStatus;
+        failureReason: CodingTaskFailureReason | null;
+      }
+    | { kind: "not_found" }
+  >;
+
+  /**
    * Atomic conditional status transition: `UPDATE ... SET status=$to
    * WHERE id=$1 AND status=$from RETURNING ...`. Returns the prior
    * status when the transition didn't fire (concurrent transition won
@@ -783,6 +804,37 @@ export class DrizzleCodingStore implements CodingStore {
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
     return { kind: "already_terminal" as const, status: row.status };
+  }
+
+  async failTaskFromStatus(
+    tx: Transaction,
+    id: string,
+    from: CodingTaskStatus,
+    failure: TaskFailure,
+  ): Promise<
+    | { kind: "failed" }
+    | {
+        kind: "stale";
+        status: CodingTaskStatus;
+        failureReason: CodingTaskFailureReason | null;
+      }
+    | { kind: "not_found" }
+  > {
+    const updated = await tx
+      .update(codingTasks)
+      .set({ status: "failed", ...failureColumns(failure) })
+      .where(and(eq(codingTasks.id, id), eq(codingTasks.status, from)))
+      .returning({ id: codingTasks.id });
+    if (updated.length > 0) return { kind: "failed" as const };
+
+    const rows = await tx
+      .select({ status: codingTasks.status, failureReason: codingTasks.failureReason })
+      .from(codingTasks)
+      .where(eq(codingTasks.id, id))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return { kind: "not_found" as const };
+    return { kind: "stale" as const, status: row.status, failureReason: row.failureReason };
   }
 
   async transitionTaskStatus(

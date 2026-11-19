@@ -530,6 +530,8 @@ const codingTaskFailureReasons = [
   "auth_failed",
   "verify_failed",
   "verify_timed_out",
+  "presubmit_refused",
+  "presubmit_stale_base",
   "pr_auth_failed",
   "pr_validation_failed",
   "pr_open_failed",
@@ -558,6 +560,35 @@ export const codingTaskFailed = eventType("coding/task/failed", {
     detail: z.string(),
   }),
 });
+
+/**
+ * Coding delegation — a skills-repo task's failure that no run renders,
+ * emitted by `coding-announce-task-failure` on `coding/task/failed`
+ * (design/coding-delegation.md → Skills-repo pre-submit → Announcing). A
+ * channel renders it in the session on `conversationId` as a coding-task
+ * failure, so a `skills/deploy/outcome` stays a register result alone.
+ * `detail` is the failure's, masked and at most 8 KiB; `branch` is the
+ * pushed `cogmo/<idShort>`.
+ */
+export const codingTaskFailureNotice = eventType("coding/task/failure-notice", {
+  schema: z.object({
+    conversationId: z.string(),
+    taskId: z.string(),
+    reason: z.enum(codingTaskFailureReasons),
+    detail: z.string(),
+    branch: z.string(),
+  }),
+});
+
+export type CodingTaskFailureNoticeData = z.infer<typeof codingTaskFailureNotice.schema>;
+
+/**
+ * Build a `coding/task/failure-notice` event. The bus-dedup `id` covers a
+ * re-run of the emitting step after a lost result: one notice per task.
+ */
+export function buildCodingTaskFailureNoticeEvent(data: CodingTaskFailureNoticeData) {
+  return { ...codingTaskFailureNotice.create(data), id: `failure-notice-${data.taskId}` };
+}
 
 /**
  * Inngest system event — fires environment-wide on every terminal-failed

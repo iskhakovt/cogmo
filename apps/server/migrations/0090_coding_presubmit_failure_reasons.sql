@@ -1,0 +1,2 @@
+ALTER TYPE "public"."coding_task_failure_reason" ADD VALUE 'presubmit_refused' BEFORE 'pr_auth_failed';--> statement-breakpoint
+ALTER TYPE "public"."coding_task_failure_reason" ADD VALUE 'presubmit_stale_base' BEFORE 'pr_auth_failed';

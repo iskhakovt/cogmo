@@ -83,7 +83,14 @@ type AdvanceOutcome = { kind: "advanced" } | TaskLeft;
 export interface TaskLeft {
   kind: "left";
   via: "ended" | "moved";
-  transition: TransitionResult;
+  /** The conditional write's `stale` read, as the run logs it. */
+  transition: { kind: "stale"; status: CodingTaskStatus };
+}
+
+/** A conditional write's `stale` read at a status the run does not own. */
+export function taskLeft(stale: { kind: "stale"; status: CodingTaskStatus }): TaskLeft {
+  const via = isTerminalCodingTaskStatus(stale.status) ? "ended" : "moved";
+  return { kind: "left", via, transition: stale };
 }
 
 interface Advance extends Claim {
@@ -120,14 +127,7 @@ export async function advanceTask(
       { kind: "stale", status: P.when((status) => settled.includes(status)) },
       (): AdvanceOutcome => ({ kind: "advanced" }),
     )
-    .with(
-      { kind: "stale", status: P.when(isTerminalCodingTaskStatus) },
-      (left): AdvanceOutcome => ({ kind: "left", via: "ended", transition: left }),
-    )
-    .with(
-      { kind: "stale" },
-      (left): AdvanceOutcome => ({ kind: "left", via: "moved", transition: left }),
-    )
+    .with({ kind: "stale" }, (stale): AdvanceOutcome => taskLeft(stale))
     .with({ kind: "not_found" }, () => {
       // The row this run claimed at its head cannot have gone missing.
       throw new Error(`coding task ${run.taskId} vanished before ${advance.stepId}`);

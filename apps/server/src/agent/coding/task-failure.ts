@@ -9,12 +9,13 @@
  * message and return value carry the same text.
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { codingTaskFailed } from "../../inngest/events.js";
 import { describeError } from "../../util/describe-error.js";
 import { redactSecretsInText } from "../../util/redact-secrets.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { CodingTaskStatus } from "./store/index.js";
+import { type TaskLeft, taskLeft } from "./task-lifecycle.js";
 import type { CodingTaskFailureReason, TaskFailure } from "./types.js";
 
 /** `failure`, its detail masked. */
@@ -36,6 +37,8 @@ const FAILURE_LABELS: Readonly<Record<CodingTaskFailureReason, string>> = {
   auth_failed: "The push was rejected: GitHub authentication failed",
   verify_failed: "Verify failed",
   verify_timed_out: "Verify timed out",
+  presubmit_refused: "The pre-submit refused the skill",
+  presubmit_stale_base: "The pre-submit refused a stale base",
   pr_auth_failed: "PR open failed: GitHub authentication failed",
   pr_validation_failed: "PR open failed: GitHub rejected the request",
   pr_open_failed: "PR open failed",
@@ -121,6 +124,59 @@ export async function recordTaskFailed(
     .with({ kind: "not_found" }, () => {
       // The row this run claimed at its head cannot have gone missing.
       throw new Error(`coding task ${run.taskId} vanished before its failure was recorded`);
+    })
+    .exhaustive();
+}
+
+/**
+ * `recorded`: as for {@link recordTaskFailed}. `settled`: the task already
+ * stood at one of the transition's `settledAt`, statuses only the run's own
+ * later steps write, and the run carries on to them. `left`: another writer
+ * moved the task out of `from`.
+ */
+export type ConditionalFailure =
+  | { kind: "recorded"; failure: TaskFailure }
+  | { kind: "settled" }
+  | TaskLeft;
+
+/**
+ * A failure the run's flow reached at one status: a conditional
+ * `from → failed` as its own step, then the event. A row at `failed` counts
+ * as recorded only with this failure's reason, the step's own commit whose
+ * result Inngest lost; any other `failed`, a Cancel, or a status the run
+ * does not own is the task leaving under the run.
+ */
+export async function recordTaskFailedFrom(
+  run: CodingRun,
+  deps: TaskStoreDeps,
+  failure: TaskFailure,
+  transition: {
+    stepId: string;
+    from: CodingTaskStatus;
+    settledAt: ReadonlyArray<CodingTaskStatus>;
+  },
+): Promise<ConditionalFailure> {
+  const masked = maskTaskFailure(failure);
+  const written = await run.stepRun(transition.stepId, () =>
+    deps.runInTx((tx) => deps.store.failTaskFromStatus(tx, run.taskId, transition.from, masked)),
+  );
+  return await match(written)
+    .with(
+      { kind: "failed" },
+      { kind: "stale", status: "failed", failureReason: masked.reason },
+      async (): Promise<ConditionalFailure> => {
+        await emitTaskFailed(run, masked);
+        return { kind: "recorded", failure: masked };
+      },
+    )
+    .with(
+      { kind: "stale", status: P.when((status) => transition.settledAt.includes(status)) },
+      (): ConditionalFailure => ({ kind: "settled" }),
+    )
+    .with({ kind: "stale" }, (stale): ConditionalFailure => taskLeft(stale))
+    .with({ kind: "not_found" }, () => {
+      // The row this run claimed at its head cannot have gone missing.
+      throw new Error(`coding task ${run.taskId} vanished before ${transition.stepId}`);
     })
     .exhaustive();
 }

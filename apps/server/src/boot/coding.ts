@@ -4,6 +4,7 @@
  * sandbox is configured.
  */
 
+import { createTaskFailureAnnouncer } from "../agent/coding/announce-task-failure.js";
 import { createAutoRegisterSkillSubscriber } from "../agent/coding/auto-register-skill.js";
 import { ClaudeCodeBackend } from "../agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "../agent/coding/cleanup-orphan-run-branches.js";
@@ -118,6 +119,15 @@ export function createCodingRuntime(
           publisher: inngest,
           skillsRepoPath: env.COGMO_SKILLS_PATH,
         },
+        inngest,
+      ),
+    );
+
+    // Posts a skills-repo task's pre-submit failure into its conversation,
+    // which no run's stream renders. No-op for other repos and reasons.
+    codingFunctions.push(
+      createTaskFailureAnnouncer(
+        { runInTx: core.runInTx, store: core.codingStore, publisher: inngest },
         inngest,
       ),
     );

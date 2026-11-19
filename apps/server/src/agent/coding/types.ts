@@ -236,6 +236,8 @@ export const CODING_TASK_FAILURE_REASONS = [
   "auth_failed",
   "verify_failed",
   "verify_timed_out",
+  "presubmit_refused",
+  "presubmit_stale_base",
   "pr_auth_failed",
   "pr_validation_failed",
   "pr_open_failed",

@@ -1,15 +1,17 @@
-/** The Inngest functions a Telegram channel serves: coding progress, skill deploy outcomes, pipeline gates, boundary-prompt cleanup. */
+/** The Inngest functions a Telegram channel serves: coding progress, skill deploy outcomes and coding failure notices, pipeline gates, boundary-prompt cleanup. */
 
 import type { Bot } from "grammy";
 import { startCodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
 import {
   boundaryResolvedEvent,
+  codingTaskFailureNotice,
   codingTaskStart,
   pipelineGatePending,
   skillsDeployOutcome,
 } from "../../../inngest/events.js";
 import type { AdapterDeps, AdapterSetupResult } from "../../adapter-module.js";
 import { editResolvedBoundaryPrompt } from "./boundary-prompt-editor.js";
+import { postCodingFailureNotice } from "./coding-failure-notice-poster.js";
 import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { postSkillsDeployOutcome } from "./skills-deploy-outcome-poster.js";
 
@@ -80,6 +82,25 @@ export function telegramFunctions(deps: AdapterDeps, bot: Bot): AdapterSetupResu
             runInTx,
             transportStore,
             sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
+          }),
+      ),
+    );
+    // A skills-repo coding task's failure that no run renders (a pre-submit
+    // refusal or stale base), posted where its deploy outcome would be.
+    functions.push(
+      inngest.createFunction(
+        {
+          id: `telegram-coding-failure-notice-${channelId}`,
+          triggers: [codingTaskFailureNotice],
+          retries: 0,
+        },
+        async ({ event }) =>
+          postCodingFailureNotice({
+            event: event.data,
+            channelId,
+            runInTx,
+            transportStore,
+            sendMessage: (chatId, text) => bot.api.sendMessage(chatId, text),
           }),
       ),
     );

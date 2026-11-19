@@ -1,4 +1,5 @@
 import { match } from "ts-pattern";
+import { redactSecretsInText, truncationSafeLength } from "../../util/redact-secrets.js";
 import type { SkillSourceError } from "../skill-source.js";
 import type { SkillRiskTier } from "../store/index.js";
 import type { DeployFacts } from "./deploy-facts.js";
@@ -65,12 +66,24 @@ export type RegisterDryRun =
 /** The CPython runner's cut of one finding (design/skills.md → Register-time CPython checks). */
 const DRY_RUN_TEXT_CODE_POINTS = 400;
 
-/** `text` cut at 400 code points, its last an ellipsis, as a dry run's findings and details are. */
+/** The mark a cut leaves, here and in the skills image's cut of its checks' messages. */
+const CUT_MARK = "…";
+
+/**
+ * `text` masked, then cut at 400 code points, its last an ellipsis, as a dry
+ * run's findings and details are. A text cut here or before it arrived can
+ * end inside a secret too short for the mask to recognise, so a cut text's
+ * last whitespace-free run goes whole when it could hold one.
+ */
 export function cutDryRunText(text: string): string {
-  const points = Array.from(text);
-  return points.length <= DRY_RUN_TEXT_CODE_POINTS
-    ? text
-    : `${points.slice(0, DRY_RUN_TEXT_CODE_POINTS - 1).join("")}…`;
+  const masked = redactSecretsInText(text);
+  const points = Array.from(masked);
+  const cutHere = points.length > DRY_RUN_TEXT_CODE_POINTS;
+  if (!cutHere && !masked.endsWith(CUT_MARK)) return masked;
+  const kept = cutHere
+    ? points.slice(0, DRY_RUN_TEXT_CODE_POINTS - 1).join("")
+    : masked.slice(0, -CUT_MARK.length);
+  return `${kept.slice(0, truncationSafeLength(kept))}${CUT_MARK}`;
 }
 
 export function rejectedResult(gitSha: string, ...errors: readonly string[]): RegisterResult {

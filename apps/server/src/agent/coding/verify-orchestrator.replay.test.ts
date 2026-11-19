@@ -412,19 +412,58 @@ describe("coding-task-verify — Inngest replay", () => {
       await rm(root, { recursive: true, force: true });
     });
 
+    const FINDING = "ruff: skills/echo/skill.py:1:1: E501 Line too long";
+    const MAIN_SHA = "e".repeat(40);
+
     function skillsSetup(task: CodingTaskRow) {
       const skillRunner = mock<PresubmitDeps["skillRunner"]>();
       skillRunner.checkRegister.mockResolvedValue({
         kind: "refused",
         sha: tip,
-        findings: ["ruff: skills/echo/skill.py:1:1: E501 Line too long"],
+        findings: [FINDING],
       });
       const repo = codingRepoRow({ name: "skills", remoteUrl: REMOTE });
       const presubmit = { skillRunner, skillsRepoPath: bare, releaseVersion: "dev" };
       return { ...setup(task, { repo, headSha: tip, presubmit }), skillRunner };
     }
 
-    it("dry-runs the pushed tip once across the run's boundaries, records the verdict and opens the PR", async () => {
+    /** The steps a run memoized up to its pre-submit, which judged the pushed tip refused. */
+    function refusedThroughPresubmit() {
+      return [
+        { id: "set-status-verifying", handler: () => ({ kind: "transitioned" }) },
+        {
+          id: "run-verify",
+          handler: () => ({
+            ok: true,
+            exitCode: 0,
+            output: "PASS",
+            durationMs: 1,
+            timedOut: false,
+          }),
+        },
+        { id: "emit-verify-complete", handler: () => null },
+        {
+          id: "commit-and-push",
+          handler: () => ({ kind: "pushed", commitSha: tip, output: "" }),
+        },
+        {
+          id: "presubmit",
+          handler: () => ({
+            verdict: {
+              kind: "refused",
+              sha: tip,
+              findings: [FINDING],
+              runId: "verify-run-1",
+              fixPass: 0,
+              checkedAt: "2026-08-20T00:01:30.000Z",
+              releaseVersion: "dev",
+            },
+          }),
+        },
+      ];
+    }
+
+    it("a refusal fails the task presubmit_refused with its findings, once across the run's boundaries, and opens no PR", async () => {
       const h = skillsSetup(verifiableTask());
       const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
@@ -434,22 +473,200 @@ describe("coding-task-verify — Inngest replay", () => {
       }).execute();
 
       expect(error).toBeUndefined();
-      // Advisory: a refusal changes nothing downstream.
-      expect(result).toMatchObject({ status: "pr_open", prNumber: 7 });
+      const failure = { reason: "presubmit_refused", detail: FINDING };
+      expect(result).toEqual({ status: "failed", failure });
+      expect(h.store.current()).toMatchObject({
+        status: "failed",
+        failureReason: "presubmit_refused",
+        failureDetail: FINDING,
+        presubmitVerdict: { kind: "refused", sha: tip, fixPass: 0 },
+      });
       expect(h.skillRunner.checkRegister).toHaveBeenCalledTimes(1);
       expect(h.skillRunner.checkRegister).toHaveBeenCalledWith({
         sha: tip,
         signal: expect.any(AbortSignal),
       });
-      expect(h.store.current().presubmitVerdict).toMatchObject({
-        kind: "refused",
-        sha: tip,
-        runId: expect.any(String),
-        fixPass: 0,
-      });
-      expect(h.create).toHaveBeenCalledTimes(1);
+      expect(h.log.push).toBe(1);
+      expect(h.create).not.toHaveBeenCalled();
+      expect(emittedEventNames(sendSpy)).toEqual([
+        "coding/task/verify-complete",
+        "coding/task/failed",
+      ]);
+      expect(h.sandbox.teardownCalls()).toBe(1);
       expect(await git("-C", bare, "for-each-ref", "refs/cogmo-presubmit/")).toBe("");
     });
+
+    it("a stale base fails the task presubmit_stale_base naming both shas", async () => {
+      const h = skillsSetup(verifiableTask());
+      h.skillRunner.checkRegister.mockResolvedValue({
+        kind: "stale_base",
+        sha: tip,
+        mainSha: MAIN_SHA,
+      });
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toMatchObject({
+        status: "failed",
+        failure: { reason: "presubmit_stale_base" },
+      });
+      const { failureReason, failureDetail } = h.store.current();
+      expect(failureReason).toBe("presubmit_stale_base");
+      expect(failureDetail).toContain(tip);
+      expect(failureDetail).toContain(MAIN_SHA);
+      expect(h.create).not.toHaveBeenCalled();
+      expect(emittedEventNames(sendSpy)).toEqual([
+        "coding/task/verify-complete",
+        "coding/task/failed",
+      ]);
+    });
+
+    it.each([
+      { name: "passed", judged: () => ({ kind: "passed", sha: tip, riskTier: "notify" }) as const },
+      {
+        name: "unavailable",
+        judged: () =>
+          ({
+            kind: "unavailable",
+            sha: tip,
+            cause: "registrar_unavailable",
+            detail: "no sandbox backend",
+          }) as const,
+      },
+    ])("a $name verdict proceeds to the PR", async ({ judged }) => {
+      const h = skillsSetup(verifiableTask());
+      h.skillRunner.checkRegister.mockResolvedValue(judged());
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toMatchObject({ status: "pr_open", prNumber: 7 });
+      expect(h.store.current().presubmitVerdict).toMatchObject({ kind: judged().kind });
+      expect(h.create).toHaveBeenCalledTimes(1);
+      expect(emittedEventNames(sendSpy)).toEqual([
+        "coding/task/verify-complete",
+        "coding/task/pushed",
+        "coding/task/pr-opened",
+      ]);
+    });
+
+    it("a run that memoized a refusal past `transition-pushed` reads `stale` at `pushed` as passed and opens the PR", async () => {
+      // A slice-1 run across the deploy: its pre-submit proceeded on a
+      // refusal. `transition-presubmit-failed` is new to it, finds the row at
+      // `pushed`, which only the run's own `transition-pushed` writes, and the
+      // run carries on through its memoized steps.
+      const h = skillsSetup(verifiableTask({ status: "pushed" }));
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        steps: [
+          ...refusedThroughPresubmit(),
+          { id: "transition-pushed", handler: () => ({ kind: "transitioned" }) },
+          { id: "emit-pushed", handler: () => null },
+        ],
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toMatchObject({ status: "pr_open", prNumber: 7 });
+      expect(h.store.current().status).toBe("pr_open");
+      expect(h.skillRunner.checkRegister).not.toHaveBeenCalled();
+      expect(h.create).toHaveBeenCalledTimes(1);
+      expect(emittedEventNames(sendSpy)).toEqual(["coding/task/pr-opened"]);
+    });
+
+    it("a run that memoized a refusal past `transition-pr-open` reads `stale` at `pr_open` as passed", async () => {
+      const h = skillsSetup(verifiableTask({ status: "pr_open" }));
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        steps: [
+          ...refusedThroughPresubmit(),
+          { id: "transition-pushed", handler: () => ({ kind: "transitioned" }) },
+          { id: "emit-pushed", handler: () => null },
+          {
+            id: "open-pr",
+            handler: () => ({
+              kind: "opened",
+              url: "https://github.com/user/cogmo/pull/7",
+              number: 7,
+              branchSha: tip,
+              openedAt: "2026-08-20T00:02:00Z",
+            }),
+          },
+          { id: "set-pr-metadata", handler: () => null },
+          { id: "transition-pr-open", handler: () => ({ kind: "transitioned" }) },
+          { id: "emit-pr-opened", handler: () => null },
+        ],
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toMatchObject({ status: "pr_open", prNumber: 7 });
+      expect(h.store.current().status).toBe("pr_open");
+      expect(h.create).not.toHaveBeenCalled();
+      expect(emittedEventNames(sendSpy)).toEqual([]);
+    });
+
+    it("`stale` at `failed` with the refusal's reason is the run's own commit: it announces the failure", async () => {
+      // `transition-presubmit-failed` committed, then Inngest lost its result.
+      const h = skillsSetup(
+        verifiableTask({
+          status: "failed",
+          failureReason: "presubmit_refused",
+          failureDetail: FINDING,
+        }),
+      );
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        steps: refusedThroughPresubmit(),
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({
+        status: "failed",
+        failure: { reason: "presubmit_refused", detail: FINDING },
+      });
+      expect(h.create).not.toHaveBeenCalled();
+      expect(emittedEventNames(sendSpy)).toEqual(["coding/task/failed"]);
+    });
+
+    it.each([
+      { status: "cancelled", failureReason: "user_cancelled", failureDetail: null },
+      { status: "failed", failureReason: "run_terminated", failureDetail: "worker died" },
+    ] as const)(
+      "a task another writer ended at $status ($failureReason) is left as it is, unannounced",
+      async (ended) => {
+        const h = skillsSetup(verifiableTask(ended));
+        const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+        const { result, error } = await new InngestTestEngine({
+          function: fn,
+          events: [cliDoneEvent],
+          steps: refusedThroughPresubmit(),
+        }).execute();
+
+        expect(error).toBeUndefined();
+        expect(result).toEqual({ status: "skipped" });
+        expect(h.store.current()).toMatchObject(ended);
+        expect(h.create).not.toHaveBeenCalled();
+        expect(emittedEventNames(sendSpy)).toEqual([]);
+      },
+    );
 
     it("a run in flight across the deploy that added the step, past `transition-pushed`, runs it and carries on", async () => {
       // The step is new, so it runs where the run is: the dry run's sessions
