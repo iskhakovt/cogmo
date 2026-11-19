@@ -75,20 +75,17 @@ export type PresubmitExit =
 
 /**
  * The `presubmit` step, on the skills repo only; the repo's name does not
- * change under a run. With `deps.presubmit` null the stage is off, and no
- * step is planned (`BootstrapOptions.skipPresubmit`). Durable: it runs sandbox
- * sessions against the network, and its result, `{ verdict }`, selects the
- * steps that follow.
+ * change under a run. Durable: it runs sandbox sessions against the network,
+ * and its result, `{ verdict }`, selects the steps that follow.
  */
 export async function runPresubmit(
   run: CodingRun,
-  deps: TaskStoreDeps & { presubmit: PresubmitDeps | null },
+  deps: TaskStoreDeps & { presubmit: PresubmitDeps },
   args: PresubmitArgs,
 ): Promise<PresubmitExit> {
-  const stage = deps.presubmit;
-  if (stage === null || args.repo.name !== SKILLS_CODING_REPO_NAME) return { kind: "proceed" };
+  if (args.repo.name !== SKILLS_CODING_REPO_NAME) return { kind: "proceed" };
   const { verdict } = await run.stepRun("presubmit", async () => ({
-    verdict: await presubmit(run, deps, stage, args),
+    verdict: await presubmit(run, deps, args),
   }));
   return presubmitExit(verdict, { runId: run.runId, fixPass: args.fixPass });
 }
@@ -148,8 +145,7 @@ function refusedDetail(findings: readonly string[]): string {
  */
 async function presubmit(
   run: CodingRun,
-  deps: TaskStoreDeps,
-  stage: PresubmitDeps,
+  deps: TaskStoreDeps & { presubmit: PresubmitDeps },
   args: PresubmitArgs,
 ): Promise<PresubmitVerdict> {
   const task = await deps.runInTx((tx) => deps.store.getTask(tx, run.taskId));
@@ -162,16 +158,16 @@ async function presubmit(
     kind: "refused",
     fixPass: P.number.lt(args.fixPass),
     sha: args.branchSha,
-    releaseVersion: stage.releaseVersion,
+    releaseVersion: deps.presubmit.releaseVersion,
   } as const;
   if (isMatching(repeated, stored)) return stored;
 
   const verdict: PresubmitVerdict = {
-    ...(await judgeTip(run, stage, args)),
+    ...(await judgeTip(run, deps.presubmit, args)),
     runId: run.runId,
     fixPass: args.fixPass,
     checkedAt: new Date().toISOString(),
-    releaseVersion: stage.releaseVersion,
+    releaseVersion: deps.presubmit.releaseVersion,
   };
   const written = await deps.runInTx((tx) =>
     deps.store.setTaskPresubmitVerdict(tx, run.taskId, verdict),

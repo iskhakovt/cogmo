@@ -76,7 +76,7 @@ export interface OpenTaskPrArgs {
  */
 export async function pushVerifiedBranch(
   run: CodingRun,
-  deps: TaskStoreDeps & { presubmit: PresubmitDeps | null },
+  deps: TaskStoreDeps & { presubmit: PresubmitDeps },
   inngest: EventPublisher,
   args: {
     task: CodingTaskRow;

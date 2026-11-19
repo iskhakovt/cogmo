@@ -90,13 +90,11 @@ export function createCodingRuntime(
         {
           ...sandboxTaskDeps,
           ...octokit,
-          presubmit: opts.skipPresubmit
-            ? null
-            : {
-                skillRunner,
-                skillsRepoPath: env.COGMO_SKILLS_PATH,
-                releaseVersion: env.VERSION,
-              },
+          presubmit: {
+            skillRunner,
+            skillsRepoPath: env.COGMO_SKILLS_PATH,
+            releaseVersion: env.VERSION,
+          },
         },
         inngest,
       ),

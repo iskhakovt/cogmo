@@ -116,7 +116,7 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 
 1. Turn 1 asks for `btc-spot`: fetch the CoinGecko BTC/USD price with `ctx.http.get`, return `{ price }`. The prompt forbids third-party HTTP libraries, declared dependencies and a `requirements.lock`.
 2. The agent calls `delegate_coding` against the auto-registered `skills` repo. The profile's `codingAutoapproveMode` is `on`, so the plan gate clears without a human tap.
-3. The task runs in a Daytona sandbox on `cogmo-devbase:<v>` through `DaytonaMock`: plan and execute drive the in-sandbox `claude` CLI over the production PTY path, then verify, push and PR open. The task ends `pr_open`.
+3. The task runs in a Daytona sandbox on `cogmo-devbase:<v>` through `DaytonaMock`: plan and execute drive the in-sandbox `claude` CLI over the production PTY path, then verify and push, the skills repo's pre-submit dry-runs register on the pushed tip, and the PR opens. The task ends `pr_open`.
 4. `coding/task/pr-opened` triggers `coding-auto-register-skill`, which fetches the PR head branch into the bare skills repo and registers it. The skill is stdlib-only `tier: wasm`, so register compiles no lockfile.
 5. Turn 2 ("What's bitcoin at? Use the btc-spot skill.") lists the `btc-spot` tool and calls it, named so the turn tests that the new tool runs, not which of it and `web_answer` the model prefers; the skill runs in the wasm-tier Pyodide worker.
 6. The reply goes out as `adapter/direct/outbound`.
@@ -126,27 +126,32 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 | Assert (deterministic) | Don't assert (model-drift bait) |
 |-|-|
 | Coding task reaches `pr_open` | Plan and `SKILL.md` wording |
+| Its `presubmit_verdict` is `passed` at pass 0, in replay on the recorded tip | The verdict's risk tier |
 | A `skills` row named `btc-spot` exists | Tool arguments the model chose |
 | The skill's newest finished `skill_runs` row has `status: "success"` and `output.price` equal to the stand-in network's figure | Number of edits the CLI makes |
 | An `adapter/direct/outbound` event to the session carries a price-shaped number | Exact reply text, wall-clock duration |
 
 **Skill network.** The authored skill's `ctx.http` call is answered in-process by a stand-in network: a resolver and a `fetch` passed through `BootstrapOptions.skillCtxHttpOverride`, serving the one CoinGecko endpoint the skill calls. It applies in record mode as well as replay. The cassettes cover the chat and the sandbox, not the skill's own request, so without it the suite would depend on a public API's uptime and rate limits and fail offline. The allowlist and address checks still run against what the stand-in answers, since the override replaces the network, not the policy. A loopback stub server is not an alternative. A manifest can list `127.0.0.1` in `network.allow`, but the resolved-address check refuses loopback, so reaching a local server would take an injected resolver that misreports its address. That goes around the guard instead of through it. For the same reason the override takes both halves or neither: a resolver alone would pass the guard on its own answer while the global `fetch` connects wherever the name really points.
 
-**No pre-submit.** The suite boots with `BootstrapOptions.skipPresubmit`, so the verify run plans no `presubmit` step and the task's `presubmit_verdict` stays null, which the test asserts. The dry run judges the pushed commit, which in replay is the record run's sandbox commit, and no replay can recreate it ([coding-delegation.md](coding-delegation.md) → Skills-repo pre-submit); unit tests cover the stage.
+**Recorded history.** The pre-submit's dry run judges the commit the sandbox pushed, fetched from the remote, and refuses it unless the skills repo's `main` is its ancestor ([coding-delegation.md](coding-delegation.md) → Skills-repo pre-submit). In replay that commit is the record run's, so the record run bundles the history the dry run judged into `test/fixtures/skill-authoring-history.bundle`: `refs/heads/main` at the task's `baseSha`, which was `main` when the dry run read it, and the tip under `refs/recorded/tip`.
 
-**Git remote.** Record mode pushes to the throwaway GitHub repo `COGMO_TEST_SKILLS_REMOTE` names, with the PAT from `gh auth token`. It resets that repo's `main` to an empty commit first and afterwards closes the PR and deletes the test branches and `refs/cogmo-wip/` refs. Replay uses a local bare `file://` remote and a stub Octokit. Its `POST /pulls` commits `test/fixtures/skill-authoring-branch/` onto the PR's head branch in the bare remote, standing in for the sandbox push the cassette swallows, so the verify fetch-back and the register fetch run their production path. It accepts the run-branch `DELETE` and throws on any other call.
+- **Replay's `main` is the recorded one.** The remote is built from the bundle, and the skills repo's `main` is fetched from it before the boot. The boot then finds the record run's layout commit on `main` and the release's toolchain already there, so it commits nothing. A release whose toolchain differs commits it on top, and `beforeAll` fails naming both shas.
+- **The replayed push lands the recorded tip.** `DaytonaMock`'s `onExec` sees the replayed `git push origin <branch>` and points `<branch>` in the remote at the recorded tip, where the dry run, the fetch-back and the register fetch read it.
+- **One push.** A recording whose dry run took a fix pass pushed more than one tip, so it can't replay, and the verdict assertion fails it at record time.
 
-**Fixtures.** `RECORD=1` writes the Daytona cassette and the llmock misses; the branch fixture is copied by hand from the recorded PR's head branch:
+**Git remote.** Record mode pushes to the throwaway GitHub repo `COGMO_TEST_SKILLS_REMOTE` names, with the PAT from `gh auth token`. It resets that repo's `main` to an empty commit first and afterwards closes the PR and deletes the test branches and `refs/cogmo-wip/` refs. Replay uses a local bare `file://` remote built from the recorded history, and a stub Octokit that answers `POST /pulls`, accepts the run-branch `DELETE` and throws on any other call.
+
+**Fixtures.** `RECORD=1` writes the Daytona cassette, the history bundle and the llmock misses. llmock records only misses, so a re-record deletes the suite's llmock cassette first:
 
 | Fixture | What | Re-record trigger |
 |-|-|-|
-| `test/fixtures/daytona/skill-authoring.json` | Daytona HTTP + WS: snapshot lookup, sandbox create and delete, file upload, git clone, exec sessions, and the PTY frames carrying the in-sandbox CLI's stream-json (`claude-haiku-4-5-20251001`, thinking off) | New `cogmo-devbase:<v>`, `@daytona/sdk` bump, coding prompt or CLI flag change |
-| `test/fixtures/recorded/suites/skill-authoring/` | Anthropic `/v1/messages` for the host agent loop's two turns | Agent prompt change, model swap, tool registry change |
-| `test/fixtures/skill-authoring-branch/` | The `SKILL.md` and `skill.py` the recorded sandbox pushed | Any Daytona cassette refresh |
+| `test/fixtures/daytona/skill-authoring.json` | Daytona HTTP + WS: snapshot lookup, sandbox create and delete, file upload, git clone, exec sessions, and the PTY frames carrying the in-sandbox CLI's stream-json (`claude-haiku-4-5-20251001`, thinking off) | New `cogmo-devbase:<v>`, `@daytona/sdk` bump, coding prompt or CLI flag change, any change under `images/skills/toolchain/` or `images/skills/src/cogmo_ctx/` |
+| `test/fixtures/recorded/suites/skill-authoring/` | Anthropic `/v1/messages` for the host agent loop's two turns | Agent prompt change, model swap, tool registry change, any Daytona cassette refresh (turn 2 offers the recorded skill) |
+| `test/fixtures/skill-authoring-history.bundle` | The pushed branch the dry run judged, with its ancestry | Any Daytona cassette refresh; a change to the skills repo toolchain (`images/skills/toolchain/`, `images/skills/src/cogmo_ctx/`) |
 
 The suite skips unless the Daytona cassette exists or `RECORD=1` runs with `DAYTONA_API_KEY`, `ANTHROPIC_API_KEY` and `COGMO_TEST_SKILLS_REMOTE` set. A record run also needs a `COGMO_DEVBASE_IMAGE` with a non-`latest` tag and an authenticated `gh`; without them it fails in setup. It builds the devbase snapshot from the bake target and waits for the deps-cache volume before the run; the test file's header has the steps.
 
-**Cost and cadence.** Replay costs nothing and runs in the integration tier on every PR that changes code. A record run costs ~$1-2 of Daytona compute and Anthropic tokens; it runs locally and the operator commits the refreshed fixtures.
+**Cost and cadence.** Replay costs nothing and runs in the integration tier on every PR that changes code. A record run costs ~$1-2 of Daytona compute and Anthropic tokens; it runs locally and the operator commits the refreshed fixtures. Any change under `images/skills/toolchain/` or `images/skills/src/cogmo_ctx/` needs a paid live re-record: only a record run refreshes the history bundle, and replay refuses a toolchain that differs from the recorded `main`'s.
 
 **Non-goals.**
 

@@ -34,7 +34,6 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { dirname } from "node:path";
-import * as R from "remeda";
 import WebSocket, { WebSocketServer } from "ws";
 import { z } from "zod";
 import { logger } from "../logger.js";
@@ -125,33 +124,22 @@ const CallSchema = z.discriminatedUnion("kind", [HttpCallSchema, WsCallSchema]);
 type Call = z.infer<typeof CallSchema>;
 
 /**
- * Cursor-first FIFO scan with wrap-around fallback. Walks the fixture
- * starting at `cursor`, wrapping past the end, and returns the first
- * `{ i, call }` whose `call` passes `predicate`. Polling drift (record
- * polls a slow API N times, replay's mock fires once and skips ahead)
- * doesn't strand subsequent unique calls. Mirrors Polly.js's
- * `order: false` fallback.
- *
- * Trade-off: there's no consumed-set — only the cursor — so a fixture
- * with duplicate `(method, path)` entries can re-match an already-played
- * entry after the cursor wraps past the end. Strict FIFO would catch
- * this; we accept it because the alternative (stranded calls when poll
- * counts diverge) is worse for our recorded integration flows. O(n) per
- * lookup is fine at fixture sizes in the low hundreds.
+ * The recorded call a request replays. Each entry is served once: the first
+ * unconsumed match at or after the cursor, else the first unconsumed one
+ * anywhere, which is a call arriving after one recorded later, as
+ * concurrent calls can. Once every match is consumed, the last one again,
+ * so a poll the replay repeats more often than the recording did sees the
+ * final state. A replay that polls less often skips ahead without
+ * stranding the calls after it. O(n) per lookup is fine at fixture sizes in
+ * the low hundreds.
  */
-function findWrappedCall<T extends Call>(
-  calls: ReadonlyArray<Call>,
-  cursor: number,
+function findReplayCall<T extends Call>(
+  replay: ReplayState,
   predicate: (call: Call) => call is T,
 ): { i: number; call: T } | undefined {
-  return R.pipe(
-    R.range(0, calls.length),
-    R.map((j) => (cursor + j) % calls.length),
-    R.map((i) => ({ i, call: calls[i] })),
-    R.find(
-      (entry): entry is { i: number; call: T } => entry.call !== undefined && predicate(entry.call),
-    ),
-  );
+  const matches = replay.fixture.calls.flatMap((call, i) => (predicate(call) ? [{ i, call }] : []));
+  const unconsumed = matches.filter(({ i }) => !replay.consumed.has(i));
+  return unconsumed.find(({ i }) => i >= replay.cursor) ?? unconsumed[0] ?? matches.at(-1);
 }
 
 /**
@@ -360,7 +348,19 @@ export interface DaytonaMockReplayOptions {
    * per-call identity.
    */
   pathNormalizations?: ReadonlyArray<{ pattern: RegExp; replacement: string }>;
+  /**
+   * Called with the command of each session exec the cassette answers,
+   * before its recorded response goes out; an exec it lacks gets its 503
+   * without the call. The cassette stands in for the sandbox, so
+   * what a command does outside it, such as a `git push` to a remote the
+   * test owns, happens only where the test applies it here.
+   */
+  onExec?: (command: string) => Promise<void>;
 }
+
+/** A session exec, the call `onExec` sees. */
+const SESSION_EXEC_PATH_RE = /\/process\/session\/[^/]+\/exec$/;
+const SessionExecBodySchema = z.object({ command: z.string() });
 
 export type DaytonaMockOptions = DaytonaMockRecordOptions | DaytonaMockReplayOptions;
 
@@ -408,17 +408,31 @@ interface InFlightScenario {
 interface ReplayState {
   fixture: LoadedFixture;
   /**
-   * Index of the next call to match. Advances on each successful
-   * HTTP or WS match — they share one cursor. Order-fragile: replay
-   * must invoke calls in the same sequence as recording, including
-   * HTTP/WS interleaving. A WS upgrade with N HTTP calls recorded
-   * after it can't be matched first; the cursor would skip past
-   * those HTTP calls and they'd 503 on the next replay. Today the
-   * sole scenario interleaves deterministically, so this is fine —
-   * promote to per-kind cursors when a second scenario needs a
-   * different order.
+   * One past the furthest call served, HTTP and WS alike: where the
+   * replay has reached in the recording. {@link findReplayCall} prefers
+   * matches at or after it, so duplicate `(method, path)` entries are
+   * served in recorded order while the replay follows the recording. After
+   * a jump ahead, a later unconsumed duplicate can answer first: `[A, K1,
+   * B, K2]` replayed as A, B, K, K serves K2, then K1. It never moves back
+   * ({@link claimReplayCall}).
    */
   cursor: number;
+  /** Indexes of the calls served, each once until every match is. */
+  consumed: Set<number>;
+}
+
+/**
+ * Serve a match: mark it consumed and move the cursor past it, never back.
+ * A match behind the cursor is a call arriving after one recorded later;
+ * moving the cursor back to it would match the calls after it against an
+ * earlier stretch of the recording. It is logged, so order drift shows.
+ */
+function claimReplayCall(replay: ReplayState, i: number, request: Record<string, string>): void {
+  if (i < replay.cursor) {
+    log.debug({ ...request, index: i, cursor: replay.cursor }, "replay match behind the cursor");
+  }
+  replay.consumed.add(i);
+  replay.cursor = Math.max(replay.cursor, i + 1);
 }
 
 export class DaytonaMock {
@@ -486,7 +500,7 @@ export class DaytonaMock {
       ]);
       const parsed = FixtureSchema.parse(JSON.parse(raw));
       const fixture: LoadedFixture = { ...parsed, recordedAt: statRes.mtime };
-      mock.#replay = { fixture, cursor: 0 };
+      mock.#replay = { fixture, cursor: 0, consumed: new Set() };
     }
     server.on("request", (req, res) => {
       mock.#handleRequest(req, res).catch((err: Error) => {
@@ -706,9 +720,8 @@ export class DaytonaMock {
     }
     const extra = this.#opts.mode === "replay" ? (this.#opts.pathNormalizations ?? []) : [];
     const normalizedIncoming = normalizePath(path, extra);
-    const match = findWrappedCall(
-      replay.fixture.calls,
-      replay.cursor,
+    const match = findReplayCall(
+      replay,
       (call): call is WsCall =>
         call.kind === "ws" && normalizePath(call.path, extra) === normalizedIncoming,
     );
@@ -717,7 +730,7 @@ export class DaytonaMock {
       ws.close(1011, "no fixture match");
       return;
     }
-    replay.cursor = match.i + 1;
+    claimReplayCall(replay, match.i, { path });
     this.#emitFrames(ws, match.call.frames);
   }
 
@@ -818,8 +831,7 @@ export class DaytonaMock {
       const bodyBuf = await this.#readBody(req);
       await this.#recordAndForward(method, path, req.headers, bodyBuf, res);
     } else {
-      // Replay matches by `(method, path)` only — body is not consumed.
-      this.#replayMatch(method, path, res);
+      await this.#replayMatch(method, path, req, res);
     }
   }
 
@@ -987,15 +999,20 @@ export class DaytonaMock {
   }
 
   /**
-   * Match an incoming HTTP request to the next unconsumed call in
-   * `#replay.fixture.calls`. Match key is `(method, path)` only —
-   * the request body is intentionally NOT part of the match. Strict
-   * body comparison would force re-records on every UUID/timestamp;
-   * we rely on `(method, path)` + FIFO ordering to keep replays
-   * deterministic. See the `ReplayState.cursor` docstring for the
-   * HTTP/WS interleaving caveat.
+   * Match an incoming HTTP request to a call in `#replay.fixture.calls`
+   * ({@link findReplayCall}). Match key is `(method, path)` only — the
+   * request body is intentionally NOT part of the match. Strict body
+   * comparison would force re-records on every UUID/timestamp; we rely
+   * on `(method, path)` + recorded order to keep replays deterministic.
+   * A matched session exec goes to `onExec` before its response; an
+   * unmatched one never reaches it.
    */
-  #replayMatch(method: string, path: string, res: ServerResponse): void {
+  async #replayMatch(
+    method: string,
+    path: string,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     const replay = this.#replay;
     if (!replay) {
       res.statusCode = 500;
@@ -1004,9 +1021,8 @@ export class DaytonaMock {
     }
     const extra = this.#opts.mode === "replay" ? (this.#opts.pathNormalizations ?? []) : [];
     const normalizedIncoming = normalizePath(path, extra);
-    const match = findWrappedCall(
-      replay.fixture.calls,
-      replay.cursor,
+    const match = findReplayCall(
+      replay,
       (call): call is HttpCall =>
         call.kind === "http" &&
         call.method === method &&
@@ -1021,7 +1037,12 @@ export class DaytonaMock {
       );
       return;
     }
-    replay.cursor = match.i + 1;
+    claimReplayCall(replay, match.i, { method, path });
+    const onExec = this.#opts.mode === "replay" ? this.#opts.onExec : undefined;
+    if (onExec && method === "POST" && SESSION_EXEC_PATH_RE.test(path)) {
+      const body = JSON.parse((await this.#readBody(req)).toString("utf8"));
+      await onExec(SessionExecBodySchema.parse(body).command);
+    }
     res.statusCode = match.call.response.status;
     for (const [k, v] of Object.entries(match.call.response.headers ?? {})) {
       // Skip headers Node computes from the actual body; recorded values

@@ -308,6 +308,110 @@ describe("DaytonaMock", () => {
     });
   });
 
+  describe("replay mode — onExec", () => {
+    it("hands a session exec's command to onExec before the recorded response, and nothing else", async () => {
+      const fixturePath = join(fixtureDir, "replay-on-exec.json");
+      const execPath = "/toolbox/sb-1/process/session/s-1/exec";
+      await writeFixture(fixturePath, {
+        scenario: "on-exec",
+        calls: [
+          {
+            kind: "http",
+            method: "POST",
+            path: execPath,
+            request: {},
+            response: { status: 202, bodyJson: { cmdId: "cmd-1" } },
+          },
+          {
+            kind: "http",
+            method: "POST",
+            path: "/sandbox",
+            request: {},
+            response: { status: 200, bodyJson: { id: "sb-1" } },
+          },
+        ],
+      });
+      const seen: string[] = [];
+      const mock = await DaytonaMock.create({
+        mode: "replay",
+        fixturePath,
+        onExec: async (command) => {
+          // A pause the response would overtake if the hook were not awaited.
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          seen.push(command);
+        },
+      });
+      try {
+        const post = (path: string, body: unknown) =>
+          fetch(`${mock.url}${path}`, { method: "POST", body: JSON.stringify(body) });
+        const exec = await post(execPath, { command: "git push origin cogmo/x", runAsync: true });
+        seen.push("response");
+        expect(await exec.json()).toEqual({ cmdId: "cmd-1" });
+        await post("/sandbox", { command: "not an exec" });
+        expect(seen).toEqual(["git push origin cogmo/x", "response"]);
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("answers an exec the cassette lacks with 503, without calling onExec", async () => {
+      const fixturePath = join(fixtureDir, "replay-on-exec-unrecorded.json");
+      await writeFixture(fixturePath, { scenario: "on-exec-unrecorded", calls: [] });
+      const seen: string[] = [];
+      const mock = await DaytonaMock.create({
+        mode: "replay",
+        fixturePath,
+        onExec: async (command) => {
+          seen.push(command);
+        },
+      });
+      try {
+        const resp = await fetch(`${mock.url}/toolbox/sb-1/process/session/s-9/exec`, {
+          method: "POST",
+          body: JSON.stringify({ command: "git push origin cogmo/x" }),
+        });
+        expect(resp.status).toBe(503);
+        expect(seen).toEqual([]);
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("answers 500 with the error when onExec rejects, in place of the recorded response", async () => {
+      const fixturePath = join(fixtureDir, "replay-on-exec-rejects.json");
+      const execPath = "/toolbox/sb-1/process/session/s-1/exec";
+      await writeFixture(fixturePath, {
+        scenario: "on-exec-rejects",
+        calls: [
+          {
+            kind: "http",
+            method: "POST",
+            path: execPath,
+            request: {},
+            response: { status: 202, bodyJson: { cmdId: "cmd-1" } },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({
+        mode: "replay",
+        fixturePath,
+        onExec: async () => {
+          throw new Error("remote unwritable");
+        },
+      });
+      try {
+        const resp = await fetch(`${mock.url}${execPath}`, {
+          method: "POST",
+          body: JSON.stringify({ command: "git push origin cogmo/x" }),
+        });
+        expect(resp.status).toBe(500);
+        expect(await resp.text()).toMatch(/remote unwritable/);
+      } finally {
+        await mock.stop();
+      }
+    });
+  });
+
   describe("replay mode — body-bound headers", () => {
     it("strips recorded content-length so re-serialized body bytes don't trigger axios abort", async () => {
       // The recorded content-length is bound to the recorded byte
@@ -398,12 +502,86 @@ describe("DaytonaMock", () => {
       }
     });
 
-    it("re-matches an already-played entry after wrap (trade-off vs strict FIFO)", async () => {
-      // Pinning the documented trade-off in findWrappedCall: there's
-      // no consumed-set, so a fixture with a single call can satisfy
-      // multiple identical requests via wrap. Strict FIFO would 503
-      // here. If a future change tightens this, the test will fail
-      // and force an explicit decision.
+    it("keeps the cursor where it is when a call matches behind it", async () => {
+      // A and B run at once, recorded as [A, B] and arriving as [B, A], so A
+      // matches behind the cursor. K after them must get the K recorded
+      // after B; a cursor moved back to A would serve the K before B.
+      const fixturePath = join(fixtureDir, "replay-no-rewind.json");
+      const call = (method: string, path: string, id: string) => ({
+        kind: "http",
+        method,
+        path,
+        request: {},
+        response: { status: 200, bodyJson: { id } },
+      });
+      await writeFixture(fixturePath, {
+        scenario: "no-rewind",
+        calls: [
+          call("DELETE", "/sandbox/a", "a"),
+          call("POST", "/sandbox", "old"),
+          call("DELETE", "/sandbox/b", "b"),
+          call("POST", "/sandbox", "new"),
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const send = async (method: string, path: string): Promise<unknown> =>
+          (await fetch(`${mock.url}${path}`, { method })).json();
+        expect(await send("DELETE", "/sandbox/b")).toEqual({ id: "b" });
+        expect(await send("DELETE", "/sandbox/a")).toEqual({ id: "a" });
+        expect(await send("POST", "/sandbox")).toEqual({ id: "new" });
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("serves each recorded poll once after a later call ran early, then repeats the last", async () => {
+      // Recorded: the command pending, then complete, then a unique
+      // delete. Replay sends the delete first, which moves the cursor past
+      // both polls; they still reach `complete`, and an extra poll stays there.
+      const fixturePath = join(fixtureDir, "replay-poll-after-skip.json");
+      const poll = (state: string) => ({
+        kind: "http",
+        method: "GET",
+        path: "/command/1",
+        request: {},
+        response: { status: 200, bodyJson: { state } },
+      });
+      await writeFixture(fixturePath, {
+        scenario: "poll-after-skip",
+        calls: [
+          poll("pending"),
+          poll("complete"),
+          {
+            kind: "http",
+            method: "DELETE",
+            path: "/session/1",
+            request: {},
+            response: { status: 204 },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        expect((await fetch(`${mock.url}/session/1`, { method: "DELETE" })).status).toBe(204);
+        const states = [];
+        for (let n = 0; n < 3; n++) {
+          states.push(await (await fetch(`${mock.url}/command/1`)).json());
+        }
+        expect(states).toEqual([
+          { state: "pending" },
+          { state: "complete" },
+          { state: "complete" },
+        ]);
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("reuses the last match once every match is consumed", async () => {
+      // One recorded poll answers each repeat: with every match consumed,
+      // the last is served again, so a replay that polls more often than
+      // the recording did sees the final state rather than a 503.
       const fixturePath = join(fixtureDir, "replay-wrap-duplicate.json");
       await writeFixture(fixturePath, {
         scenario: "wrap-dup",

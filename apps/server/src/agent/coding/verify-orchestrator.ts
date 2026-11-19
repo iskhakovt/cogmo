@@ -73,11 +73,8 @@ export interface VerifyOrchestratorDeps {
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;
   taskTtlMs: number;
-  /**
-   * The skills repo's pre-submit: register's dry run on the pushed tip. Null
-   * turns the stage off (`BootstrapOptions.skipPresubmit`, a test seam).
-   */
-  presubmit: PresubmitDeps | null;
+  /** The skills repo's pre-submit: register's dry run on the pushed tip. */
+  presubmit: PresubmitDeps;
   /**
    * Optional Octokit factory. Tests inject a stub; production omits it
    * and `runOpenPr` constructs a real client from the resolved PAT.
