@@ -47,10 +47,10 @@ variable "UV_DIGEST" {
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
 variable "PNPM_VERSION" {
-  default = "12.17.0"
+  default = "12.20.0"
 }
 variable "PNPM_DIGEST" {
-  default = "sha256:172468925f0ca368313c09867081a43e298eaeb13dee8f7e4356bfad45dd8b15"
+  default = "sha256:6999b0d11d81065126ef0a226705b9d22eb9b552830d782505043d280c46ff00"
 }
 variable "NPM_VERSION" {
   default = "12.2.2"
