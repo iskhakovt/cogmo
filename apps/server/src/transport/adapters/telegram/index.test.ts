@@ -1,6 +1,7 @@
 import { err } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
+import { logger } from "../../../logger.js";
 import {
   mockAttachmentStore,
   mockInngest,
@@ -8,6 +9,7 @@ import {
   mockTransportDeep,
 } from "../../../test/factories.js";
 import {
+  botApiError,
   botLifecycle,
   deliverUpdate,
   mockBotApi,
@@ -99,7 +101,10 @@ describe("setup", () => {
     const handler = vi.fn(async () => {
       throw new Error("handler failed");
     });
-    botLifecycle.polling = () => runUpdate(5, handler).catch(() => {});
+    botLifecycle.polling = (stopped) =>
+      runUpdate(5, handler)
+        .catch(() => {})
+        .then(() => stopped);
     const { adapter } = await setupWith({ token: "fake" });
 
     await adapter.stop();
@@ -110,13 +115,46 @@ describe("setup", () => {
 
   it("counts an update the sender gate drops as handled", async () => {
     const handler = vi.fn(async () => {});
-    botLifecycle.polling = () => runUpdate(5, handler);
+    botLifecycle.polling = (stopped) => runUpdate(5, handler).then(() => stopped);
     const { adapter } = await setupOn(strangerTransport(), { token: "fake" });
 
     await adapter.stop();
 
     expect(handler).not.toHaveBeenCalled();
     expect(mockBotApi.getUpdates).toHaveBeenCalledWith({ offset: 6, limit: 1, timeout: 0 });
+  });
+});
+
+describe("polling", () => {
+  beforeEach(() => {
+    resetGrammyMock();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts polling again after getUpdates answers 409", async () => {
+    const error = vi.spyOn(logger, "error").mockImplementation(() => {});
+    try {
+      let conflicted = false;
+      botLifecycle.polling = (stopped) => {
+        if (conflicted) return stopped;
+        conflicted = true;
+        return Promise.reject(
+          botApiError("getUpdates", 409, "Conflict: terminated by other getUpdates request"),
+        );
+      };
+      const { adapter } = await setupWith({ token: "fake" });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(botLifecycle.registrations.filter((r) => r === "start")).toHaveLength(2);
+      await adapter.stop();
+    } finally {
+      error.mockRestore();
+    }
   });
 });
 
