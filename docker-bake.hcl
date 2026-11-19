@@ -39,10 +39,10 @@ variable "VERSION" {
 // declare these ARGs without defaults. Base-image FROM digests stay literal in
 // each Dockerfile for Dependabot. uv is shared by devbase + skills.
 variable "UV_VERSION" {
-  default = "0.13.7"
+  default = "0.13.8"
 }
 variable "UV_DIGEST" {
-  default = "sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490"
+  default = "sha256:5cc1805e2426484abca4ad46ea783bab281fdb225fd82d8ce6d66a81254bac85"
 }
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
