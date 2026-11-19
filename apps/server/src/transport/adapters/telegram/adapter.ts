@@ -137,7 +137,7 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
       match(exit)
         .with({ kind: "ended" }, () => undefined)
         .with({ kind: P.union("conflict", "unauthorized", "rejected") }, ({ err }) =>
-          logger.warn({ err }, "telegram: polling failed while stopping"),
+          logger.warn({ err }, "telegram polling: failed while stopping"),
         )
         .exhaustive();
       return;
@@ -150,16 +150,16 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
       .with({ kind: "unauthorized" }, ({ err }) => {
         logger.error(
           { description: err.description },
-          "telegram: the Bot API refused the bot token (401), revoked or invalid; polling stays down until the channel's token is replaced and cogmo restarts",
+          "telegram polling: the Bot API refused the bot token (401), revoked or invalid; down until the channel's token is replaced and cogmo restarts",
         );
         this.#polling = { kind: "failed", reason: "unauthorized" };
       })
       .with({ kind: "rejected" }, ({ err }) => {
-        logger.error({ err }, "telegram: polling failed; it stays down until cogmo restarts");
+        logger.error({ err }, "telegram polling: failed; down until cogmo restarts");
         this.#polling = { kind: "failed", reason: "rejected" };
       })
       .with({ kind: "ended" }, () => {
-        logger.error("telegram: polling ended without stop(); it stays down until cogmo restarts");
+        logger.error("telegram polling: ended without stop(); down until cogmo restarts");
         this.#polling = { kind: "failed", reason: "ended" };
       })
       .exhaustive();
@@ -169,10 +169,12 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
     const retryInMs = conflictBackoffMs(conflicts);
     logger.error(
       { description, conflicts, retryInMs },
-      "telegram: getUpdates conflict (409): another poller or a webhook is using the bot token; polling starts again after a backoff",
+      "telegram polling: conflict (409), another poller or a webhook is using the bot token; starting again after a backoff",
     );
     // `stop()` clears it; unref'd, so a backoff alone never holds the process open.
-    const timer = setTimeout(() => this.#poll(conflicts), retryInMs).unref();
+    const timer = setTimeout(() => {
+      if (this.#polling.kind === "backoff" && this.#polling.timer === timer) this.#poll(conflicts);
+    }, retryInMs).unref();
     this.#polling = { kind: "backoff", timer };
   }
 

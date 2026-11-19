@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot as MockBot } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
 import { err, ok } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -320,7 +320,7 @@ describe("TelegramAdapter", () => {
     });
 
     it("refuses startPolling() once polling has started or stopped", async () => {
-      const adapter = new TelegramAdapter(new Bot("fake"), mockAttachmentStore());
+      const adapter = new TelegramAdapter(new MockBot("fake"), mockAttachmentStore());
       adapter.startPolling();
       expect(() => adapter.startPolling()).toThrow("while polling");
 
@@ -350,35 +350,57 @@ describe("TelegramAdapter", () => {
         payload: Record<string, unknown>;
       }
 
+      const isLongPoll = ({ method, payload }: ApiCall) =>
+        method === "getUpdates" && typeof payload.timeout === "number" && payload.timeout > 0;
+
+      /** Settles once grammY aborts the request. */
+      function openUntilAborted(signal: AbortSignal | null | undefined): Promise<Response> {
+        return new Promise((_, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason));
+        });
+      }
+
+      /** The `call`-th request (1-based) stays open until aborted; later calls to its method `retries`. */
+      interface Hold {
+        call: number;
+        retries: "succeed" | "fail";
+      }
+
       /**
        * A Bot API behind grammY's `fetch`: each long poll takes the next of
        * `polls`, and once they run out it stays open until grammY aborts it.
-       * Every other call succeeds.
+       * Every other call succeeds, except as `hold` says.
        */
-      function fakeBotApi(polls: object[]): { fetch: typeof fetch; calls: ApiCall[] } {
+      function fakeBotApi(polls: object[], hold?: Hold): { fetch: typeof fetch; calls: ApiCall[] } {
         const calls: ApiCall[] = [];
         const fetch: typeof globalThis.fetch = async (input, init) => {
           const method = String(input).split("/").at(-1) ?? "";
           const payload = z
             .record(z.string(), z.unknown())
             .parse(JSON.parse(String(init?.body ?? "{}")));
-          calls.push({ method, payload });
-          const longPoll = typeof payload.timeout === "number" && payload.timeout > 0;
-          if (method !== "getUpdates" || !longPoll) {
+          const call = { method, payload };
+          calls.push(call);
+          if (hold !== undefined && calls.length === hold.call)
+            return openUntilAborted(init?.signal);
+          if (
+            hold?.retries === "fail" &&
+            calls.length > hold.call &&
+            calls[hold.call - 1]?.method === method
+          ) {
+            throw new TypeError("fetch failed");
+          }
+          if (!isLongPoll(call)) {
             return Response.json({ ok: true, result: method === "getUpdates" ? [] : true });
           }
           const next = polls.shift();
-          if (next !== undefined) return Response.json(next);
-          return new Promise<Response>((_, reject) => {
-            init?.signal?.addEventListener("abort", () => reject(init?.signal?.reason));
-          });
+          return next === undefined ? openUntilAborted(init?.signal) : Response.json(next);
         };
         return { fetch, calls };
       }
 
-      async function grammyAdapter(polls: object[]) {
+      async function grammyAdapter(polls: object[], hold?: Hold) {
         const { Bot: GrammyBot } = await vi.importActual<typeof import("grammy")>("grammy");
-        const api = fakeBotApi(polls);
+        const api = fakeBotApi(polls, hold);
         const bot = new GrammyBot("123:fake", { botInfo: BOT_INFO, client: { fetch: api.fetch } });
         const adapter = new TelegramAdapter(bot, mockAttachmentStore());
         adapter.startPolling();
@@ -419,6 +441,32 @@ describe("TelegramAdapter", () => {
           { method: "getUpdates", payload: { offset: 42, limit: 1, timeout: 0 } },
         ]);
       });
+
+      // grammY retries the aborted deleteWebhook at once. Its success resolves
+      // the run; its failure ends the retry wait with "Aborted delay".
+      it.each(["succeed", "fail"] as const)(
+        "ends silently on a stop() during a restart's deleteWebhook whose retries %s, and polls no more",
+        async (retries) => {
+          const { adapter, calls } = await grammyAdapter(
+            [{ ok: true, result: [{ update_id: 41 }] }, conflictPoll],
+            { call: 4, retries },
+          );
+          await vi.advanceTimersByTimeAsync(3_750);
+          expect(calls.map((c) => c.method)).toEqual([
+            "deleteWebhook",
+            "getUpdates",
+            "getUpdates",
+            "deleteWebhook",
+          ]);
+
+          await adapter.stop();
+          await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+          expect(calls.slice(4).filter(isLongPoll)).toEqual([]);
+          expect(logs.error).toHaveBeenCalledOnce();
+          expect(logs.warn).not.toHaveBeenCalled();
+        },
+      );
     });
   });
 
