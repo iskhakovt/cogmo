@@ -8,3 +8,6 @@ plugins:
     opt:
       - target=ts
       - import_extension=js
+      # Keeps the plugin version out of each file's header, so a plugin bump
+      # fails CI's drift check only when it changes the generated code.
+      - elide_plugin_version=true
