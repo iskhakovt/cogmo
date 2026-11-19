@@ -124,7 +124,12 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
       startedAt: performance.now(),
       conflicts,
       run: this.#bot
-        .start({ onStart: () => logger.info("telegram polling started") })
+        .start({
+          // grammY calls it once setup succeeds, even after `bot.stop()`.
+          onStart: () => {
+            if (this.#polling.kind !== "stopped") logger.info("telegram polling started");
+          },
+        })
         .then((): PollingExit => ({ kind: "ended" }), classifyRejection)
         .then((exit) => this.#settle(state, exit)),
     };

@@ -151,14 +151,14 @@ A run's exit moves the state only while the state is still that run. Once `stop(
 | Failure | State left | Why it is safe, or the residual |
 |-|-|-|
 | 409 while polling | `backoff`, then `polling` | grammY keeps its offset across `bot.start()` calls, so a restart neither redelivers nor skips an update. The loop finishes a batch before its next `getUpdates`, so no handler is in flight at the 409 |
-| Another poller stays | `polling` and `backoff` in turn, at the cap | Each 409 logs at error. Residual: an update reaches whichever poller holds the token when it arrives, and once the other poller exits, polling resumes up to 5 min later |
+| Another poller stays | `polling` and `backoff` in turn, at the cap | Each 409 logs at error. Residual: an update reaches whichever poller holds the token when it arrives, and once the other poller exits, the next restart comes up to 5 min later |
 | `stop()` during `backoff` | `stopped` | `stop()` clears the timer before its first `await`, so no run starts after it. grammY isn't polling, so there is no long poll to abort |
-| `stop()` during the first start's setup | `stopped` | Residual: grammY hands the first `getMe` no abort signal, so `bot.stop()` can't cut its retries short. `stop()` waits on them, bounded by shutdown's step |
-| `stop()` during a restart's setup | `stopped` | The timer's callback calls `bot.start()`, which marks grammY as polling before it returns, so `stop()` finds `polling` and `bot.stop()` aborts the setup. The run resolves or rejects with `Aborted delay`, silently |
+| `stop()` during the first start's setup | `stopped` | Residual: grammY hands the first `getMe` no abort signal, so `bot.stop()` can't cut its retries short. Once setup's `deleteWebhook` has finished, `stop()` waits on them, bounded by shutdown's step; before that, the aborted `deleteWebhook` ends the run and the retries outlive it |
+| `stop()` during a restart's setup | `stopped` | The timer's callback calls `bot.start()`, which marks grammY as polling before it returns, so `stop()` finds `polling` and `bot.stop()` aborts the setup |
 | 409 during `stop()` | `stopped` | grammY drops a `getUpdates` error once `bot.stop()` has run. A 409 that ended the run but settles after `stop()` began logs a warning and starts nothing. A 409 on an offset confirmation logs a warning; Telegram redelivers those updates on the next start |
 | 401 | `failed` | A revoked token stays revoked, so nothing retries it. Replace the channel's token and restart cogmo |
 | Unknown rejection | `failed` | A 4xx from setup (a 404 from a wrong `apiRoot`) or a bug, logged at error with the error; a restart would repeat it |
-| Process exit or crash | — | Nothing to recover: the next process starts at `idle`, and Telegram keeps the offset |
+| Process exit or crash | — | The next process starts at `idle`, and Telegram keeps the offset. Residual: Telegram redelivers the batch in flight, handled updates included |
 
 ## Module Layout
 

@@ -459,10 +459,15 @@ describe("TelegramAdapter", () => {
             "deleteWebhook",
           ]);
 
+          const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+
           await adapter.stop();
           await vi.advanceTimersByTimeAsync(HOUR_MS);
 
-          expect(calls.slice(4).filter(isLongPoll)).toEqual([]);
+          const after = calls.slice(4);
+          expect(after.map((c) => c.method)).toContain("deleteWebhook");
+          expect(after.filter(isLongPoll)).toEqual([]);
+          expect(info).not.toHaveBeenCalledWith("telegram polling started");
           expect(logs.error).toHaveBeenCalledOnce();
           expect(logs.warn).not.toHaveBeenCalled();
         },
