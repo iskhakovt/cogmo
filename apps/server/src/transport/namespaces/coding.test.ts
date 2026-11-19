@@ -252,6 +252,18 @@ describe("coding (plan-callback surface)", () => {
     });
   });
 
+  it("cancelTask: task_not_found when the row is gone by the cancel", async () => {
+    const cancel = vi.fn().mockResolvedValue({ kind: "not_found" });
+    const { coding } = buildTransport({
+      task: { conversationId },
+      conversation: { userId: ownerUserId },
+      tapperUserId: ownerUserId,
+      cancelTaskIfActive: cancel,
+    });
+    const res = await coding.cancelTask(taskId, "owner-tg-id", "user_cancelled");
+    expect(res._unsafeUnwrapErr()).toEqual({ code: "task_not_found", taskId });
+  });
+
   it("returns sandbox_disabled when no codingStore is supplied", async () => {
     const coding = createCoding({
       channelId: "ch-1",

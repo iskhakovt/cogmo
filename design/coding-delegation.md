@@ -300,7 +300,7 @@ Every `→ failed` and `→ cancelled` edge is conditional on a non-terminal row
 | non-terminal → `failed` | each orchestrator's catch, `record-catch-failure` (`failTaskFromCatch` → `failTaskIfNonTerminal`) | conditional on non-terminal `[proposed]`: a task already terminal (`pr_open` after a failed `emit-pr-opened`, `failed` after a failed in-run `emit-task-failed`, a Cancel) keeps its status and reason, and nothing is emitted; writes `unexpected_error` + the error's text `[proposed]`; the emit follows the write |
 | non-terminal → `failed` | `coding-task-reconcile`, `failTaskIfNonTerminal` | conditional on non-terminal; writes `run_terminated` + the run and error text `[confirmed]` |
 | `queued → failed` | `delegate`, when the start emit throws (`failQueuedTask`) | conditional on `queued`; writes `start_emit_failed` + the error's text `[confirmed]` |
-| non-terminal → `cancelled` | the plan keyboard's Cancel / Revise, `cancelTaskIfActive` | conditional on non-terminal; writes `user_cancelled` / `user_requested_revisions`, `failure_detail` null `[confirmed]` |
+| non-terminal → `cancelled` | the plan keyboard's Cancel / Revise and `cogmo coding cancel`, `cancelCodingTask` → `cancelTaskIfActive` | conditional on non-terminal; writes `user_cancelled` / `user_requested_revisions`, `failure_detail` null `[confirmed]` |
 
 #### Per-state data `[confirmed]`
 
@@ -337,7 +337,7 @@ The per-state data stays in columns rather than one JSONB blob per state: the re
 | `run_terminated` | `coding-task-reconcile` on `inngest/function.failed` | the run id, function id and error message |
 | `start_emit_failed` | `delegate`, `failQueuedTask` | the send error |
 | `unexpected_error` | every orchestrator's catch, `failTaskFromCatch`; migration 0080's backfill, for any other text on a `failed` row (the catch's free text) | `describeError(err)`: a thrown step (`StepError`), the CLI exec hitting its cap (`exec.wait()` throws the timed-out `ExecError` out of `plan-cli` / `execute-cli`), a `23514` from a write the CHECKs refuse |
-| `user_cancelled`, `user_requested_revisions` | the plan keyboard, `cancelTaskIfActive` | null |
+| `user_cancelled`, `user_requested_revisions` | the plan keyboard and `cogmo coding cancel`, `cancelTaskIfActive` | null |
 | `presubmit_refused` `[proposed]` | verify's `transition-presubmit-failed`, on a `refused` pre-submit verdict with no fix pass left, or a repeated one, keyed to an earlier pass | the findings, at most 8 KiB |
 | `presubmit_stale_base` `[proposed]` | verify's `transition-presubmit-failed`, on a `stale_base` verdict | the tip's and `main`'s shas |
 | `unknown` | migration 0080's backfill, for any other text on a `cancelled` row, and for a `failed` / `cancelled` row with no or empty text | the stored text, or null |
@@ -356,7 +356,8 @@ Every reason ends the task and the user re-delegates once the cause is fixed; a 
 | Cancel during `plan-cli` | `cancelled` | `set-status-plan-ready` reads `left`; the run reclaims worktree, sandbox and stream (`reclaimEndedTask`) |
 | Cancel during `execute-cli` | `cancelled` | `transition-pending-verify` reads `left`; the run reclaims and emits no `cli-done`. On git-remote the pushed `cogmo/run/<task-id>` is kept until the retention sweep, as on `failed`: after execute's push it is the only copy of the work |
 | Cancel during `plan-cli` or `execute-cli`, then the session errors or the execute push fails | `cancelled` | `transition-failed` / `transition-failed-after-push` read `already_terminal`; the run reclaims (`reclaimEndedTask`), emits no `coding/task/failed` and returns `skipped`. On git-remote the pushed `cogmo/run/<task-id>` is kept until the retention sweep, as on `failed` |
-| Cancel at `awaiting_approval` or `pending_verify` (no run holds the task) | `cancelled` | the next claim skips it. **Residual:** a bind-mount host worktree is left behind; `cancelTask` does no cleanup |
+| Cancel at `queued` (no run holds the task) | `cancelled` | the plan run's claim skips it; nothing was allocated (`chk_coding_tasks_queued_bare`) |
+| Cancel at `awaiting_approval` or `pending_verify` (no run holds the task) | `cancelled` | the next claim skips it. **Residual:** a bind-mount host worktree is left behind; `cancelCodingTask` does no cleanup |
 | Cancel during the verify suite or the push, whether the suite then passes or fails | `cancelled` | `transition-pushed` reads `left`, or `transition-failed` reads `already_terminal`: no `pushed` or `failed` event, no PR; the run reclaims the worktree and sandbox. **Residual:** a `cogmo/<idShort>` that `commit-and-push` already pushed stays on the remote, as after a failed PR open; on git-remote the run branch is kept until the retention sweep, as on `failed` |
 | Cancel between `transition-pushed` and `transition-pr-open` | `cancelled`; `pr_metadata` set when `open-pr` ran | `open-pr` has no status gate of its own, so the PR may open after the Cancel; `transition-pr-open` then reads `left` and `coding/task/pr-opened` is withheld, so no skill auto-registers and no run-branch cleanup fires. **Residual:** the PR stays open for the user to close; `pr_metadata` says which |
 | Cancel, then the body throws (any orchestrator) `[proposed]` | `cancelled` | the catch's write reads `already_terminal`; nothing is emitted and the run returns `skipped` after its teardown |
@@ -917,7 +918,7 @@ An `unavailable` verdict judged nothing.
 |-|-|-|
 | 1 `[confirmed]` | The dry run and an advisory stage: `checkRegisterDryRun` (`prepareRegister` on a sha, the terminal and pausing split, `readManifestLockfile`'s error kind, the verdict union and its bounds) and `SkillRunner.checkRegister`; the keyed `presubmit_verdict` column; `presubmit-stage.ts` (the scratch-ref fetch, the deadline, the keyed verdict write and its recovery) between the push and `transition-pushed`. It always proceeds, so refusal rates can be measured before anything acts on them | 400–450 |
 | 2 | A refusal or a stale base fails the task: `transition-presubmit-failed` with its `stale` rules, `presubmit_refused` and `presubmit_stale_base`, the 8 KiB detail; the announcing subscriber, its `coding/task/failure-notice` event and the channel's rendering of it, fitted to 4096 characters | 270–330 |
-| 3 | The fresh-session fix pass: `pending_fix` and the counter, in two migration files with the CHECKs; the pass-keyed claims; `transition-pending-fix`, `teardown-before-fix`, the `finally` change, the event, per-pass ids and the repeated-refusal check; the execute trigger, `claim-fix-pass`, the create path without `try-resume`, and the git-remote checkout at the verdict's sha; `CodingBackend.fix` and the `fix` prompt; additive usage; the announcer's fix-pass case; `cogmo coding cancel` | 500–600 |
+| 3 | The fresh-session fix pass: `pending_fix` and the counter, in two migration files with the CHECKs; the pass-keyed claims; `transition-pending-fix`, `teardown-before-fix`, the `finally` change, the event, per-pass ids and the repeated-refusal check; the execute trigger, `claim-fix-pass`, the create path without `try-resume`, and the git-remote checkout at the verdict's sha; `CodingBackend.fix` and the `fix` prompt; additive usage; the announcer's fix-pass case | 440–540 |
 
 **What each slice stores.**
 
@@ -925,7 +926,7 @@ An `unavailable` verdict judged nothing.
 - **Slice 2** adds `presubmit_refused` and `presubmit_stale_base` to `coding_task_failure_reason`, in one migration file, since no CHECK names them.
 - **Slice 3** adds two files. The first is `ADD VALUE 'pending_fix'`. The second holds the `presubmit_fix_passes` column, `chk_coding_tasks_fix_passes_bound`, `chk_coding_tasks_fix_owed`, the count in `chk_coding_tasks_queued_bare`, and `pending_fix` in the two gate CHECKs.
 
-That is 1.17k to 1.38k production lines. Tests run two to three times that: replay tests on both orchestrators, PGlite tests of the guards and CHECKs, a migration test, and a test that a tip the dry run passes registers. The skill-authoring e2e runs with the pre-submit off (`BootstrapOptions.skipPresubmit`) until slice 2, since its replay cannot recreate the recorded sandbox commit the dry run judges; unit tests cover the stage. Slice 3 holds together, since a `pending_fix` with no claimant strands the task, but `cogmo coding cancel` (about 60 lines) can ship ahead of it on its own: it also frees a task stuck at `pending_verify`. Nothing here is new infrastructure.
+That is 1.11k to 1.32k production lines. Tests run two to three times that: replay tests on both orchestrators, PGlite tests of the guards and CHECKs, a migration test, and a test that a tip the dry run passes registers. The skill-authoring e2e runs with the pre-submit off (`BootstrapOptions.skipPresubmit`) until slice 2, since its replay cannot recreate the recorded sandbox commit the dry run judges; unit tests cover the stage. Slice 3 holds together, since a `pending_fix` with no claimant strands the task; `cogmo coding cancel` is the owner's way out, as for a task stuck at `pending_verify`. Nothing here is new infrastructure.
 
 ## Autonomy Gates `[proposed]`
 
