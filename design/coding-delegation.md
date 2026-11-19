@@ -725,7 +725,7 @@ A timeout fire is mapped to a task-level failure by the caller — `checkoutFeat
 A coding task on the skills repo ends in a PR that the auto-register deploys ([skills.md → Where the classifier runs](skills.md#where-the-classifier-runs)). A register refusal reaches the owner as a message after the task has ended, and never reaches the author. Register makes checks that the CLI's `.cogmo/verify` does not:
 
 - on the server, with its TypeScript and grammar: the gates (size, syntax, entrypoint, dynamic code, effects), the classifier, the path rules (a skill's four files, in one skill directory), the Pyodide check, and ajv over the schemas;
-- in skills-image sessions or the server's Pyodide child: Imports, CPython's compile, the schema import, and `[proposed]` a container-tier skill's tests with no network and a 60 s cap ([skills.md → Register-time tests](skills.md#register-time-tests-proposed)), which `.cogmo/verify` runs on the sandbox's network, uncapped;
+- in skills-image sessions or the server's Pyodide child: Imports, CPython's compile, the schema import, and `[proposed]` a container-tier skill's tests with no network interface and a 60 s cap ([skills.md → Register-time tests](skills.md#register-time-tests-proposed)), which `.cogmo/verify` runs on the sandbox's network, uncapped;
 - the checks `.cogmo/verify` shares (ruff, the format check, pyrefly, the suppression rule), with the release's toolchain, which a branch cut before the latest toolchain commit does not carry.
 
 The lockfile compile is not among them. The toolchain pins `python-version`, `generate-hashes` and `no-header`, so the author's plain `uv pip compile` writes register's bytes; only the package index moving between the two compiles makes them differ ([Residual](#residual)).
