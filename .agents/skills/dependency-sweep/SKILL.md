@@ -24,10 +24,10 @@ single group:
    is the known one: nothing reports it stale, and a missing model silently
    falls back to `DEFAULT_LIMITS` (128k context, 4096 output) with only a
    deduplicated WARN. Refresh it with `pnpm tsx scripts/refresh-litellm-models.ts`
-   from `apps/server`, then diff it for removed keys and grep the repo for any
-   it names before taking it: upstream retires models, and LiteLLM has dropped a
-   whole provider namespace (`openrouter/*`, which now comes from OpenRouter's
-   own list).
+   from `apps/server` (LiteLLM's registry, and OpenRouter's list for
+   `openrouter/*`), then diff it for removed keys and grep the repo for any it
+   names before taking it: upstream retires models, and a source can drop a
+   whole namespace.
 
 ## For every major: diff the behaviour, not just the types
 
