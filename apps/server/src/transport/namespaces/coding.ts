@@ -1,5 +1,6 @@
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
+import { cancelCodingTask } from "../../agent/coding/cancel-coding-task.js";
 import { planGateEmission } from "../../agent/coding/plan-gate.js";
 import type { CodingStore } from "../../agent/coding/store/index.js";
 import type { CodingTaskCancelReason } from "../../agent/coding/types.js";
@@ -90,15 +91,20 @@ export function createCoding(
       if (!codingStore) return err({ code: "sandbox_disabled" as const });
       const identityCheck = await checkTaskOwnership(taskId, tapperPlatformHandle);
       if (identityCheck.isErr()) return err(identityCheck.error);
-      const result = await runInTx((tx) => codingStore.cancelTaskIfActive(tx, taskId, reason));
-      return match(result)
-        .returnType<Result<{ taskId: string }, TransportError>>()
-        .with({ kind: "cancelled" }, () => ok({ taskId }))
-        .with({ kind: "already_terminal" }, ({ status }) =>
-          err({ code: "task_already_terminal", taskId, status }),
-        )
-        .with({ kind: "not_found" }, () => err({ code: "task_not_found", taskId }))
-        .exhaustive();
+      const cancelled = await cancelCodingTask({ runInTx, codingStore }, { taskId, reason });
+      return cancelled
+        .map(() => ({ taskId }))
+        .mapErr((e) =>
+          match(e)
+            .returnType<TransportError>()
+            .with({ kind: "already_terminal" }, ({ status }) => ({
+              code: "task_already_terminal",
+              taskId,
+              status,
+            }))
+            .with({ kind: "not_found" }, () => ({ code: "task_not_found", taskId }))
+            .exhaustive(),
+        );
     },
   };
 

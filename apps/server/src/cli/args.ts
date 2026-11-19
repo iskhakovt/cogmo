@@ -6,6 +6,7 @@
  */
 
 import { extendType, multioption, oneOf, string, type Type } from "cmd-ts";
+import { isUuid } from "../util/uuid.js";
 
 /**
  * A name or id, not blank. An option always consumes the token after it, so
@@ -17,6 +18,20 @@ export function identifier(displayName: string): Type<string, string> {
     async from(value) {
       if (value.trim() === "") throw new Error(`expected a value, got "${value}"`);
       if (value.startsWith("-")) throw new Error(`expected a value, got the flag "${value}"`);
+      return value;
+    },
+  });
+}
+
+/**
+ * A row id: a lowercase UUID, as `UuidSchema` takes ids. Other text is a usage
+ * error here rather than a failed `uuid` cast in the store.
+ */
+export function uuid(displayName: string): Type<string, string> {
+  return extendType(string, {
+    displayName,
+    async from(value) {
+      if (!isUuid(value)) throw new Error(`expected a lowercase UUID, got "${value}"`);
       return value;
     },
   });
