@@ -1,5 +1,6 @@
 import { ENTRYPOINT_RULE, ENTRYPOINT_SIGNATURE } from "../../skills/ast-rules.js";
 import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
+import type { FixContext } from "./backend.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
 /**
@@ -105,6 +106,12 @@ const SKILLS_REPO_CONVENTION = [
   "```",
 ].join("\n");
 
+/** A code fence no finding can close: one backtick longer than the longest run in them, at least 3. */
+function findingsFence(findings: readonly string[]): string {
+  const runs = findings.flatMap((f) => Array.from(f.matchAll(/`+/g), ([run]) => run.length));
+  return "`".repeat(Math.max(3, ...runs.map((length) => length + 1)));
+}
+
 function repoConvention(repo: CodingRepoRow): string {
   if (repo.name === SKILLS_CODING_REPO_NAME) return `\n${SKILLS_REPO_CONVENTION}\n`;
   return "";
@@ -169,5 +176,45 @@ export function buildExecutePrompt(repo: CodingRepoRow): string {
     repoConvention(repo),
     "# Verify command",
     repo.verifyCommand,
+  ].join("\n");
+}
+
+/**
+ * A skills-repo fix pass's prompt, for a fresh execute session after
+ * register's dry run refused the pushed tip (design/coding-delegation.md →
+ * Skills-repo pre-submit → The fix pass). The session has no scrollback, so
+ * it carries the goal, the approved plan and the findings verbatim.
+ */
+export function buildFixPrompt(task: CodingTaskRow, repo: CodingRepoRow, fix: FixContext): string {
+  if (!task.worktreeAssignment || task.plan === null) {
+    throw new Error(`buildFixPrompt called for task ${task.id} without a worktree and a plan`);
+  }
+  return [
+    "# Task",
+    task.goal,
+    "",
+    "# Approved plan",
+    task.plan,
+    "",
+    "# Register refused the branch",
+    `The branch ${task.worktreeAssignment.branch} already holds the work for this plan, and is`,
+    "checked out in /workspace. Registration's checks refused its tip with these findings:",
+    findingsFence(fix.findings),
+    ...fix.findings,
+    findingsFence(fix.findings),
+    "",
+    "# What to do",
+    "- Change only what the findings name. A finding about a file outside the skill's directory is fixed by restoring it to `main`'s version, or deleting it if `main` has none.",
+    "- Where the task asks for something the findings refuse, the findings win.",
+    "- Commit on top of the branch. Do not amend, rebase or reset the commits already on it.",
+    "- Git credentials are NOT available — do not `git push` or `gh pr create`.",
+    "- Run the verify command and iterate until it passes.",
+    repoConvention(repo),
+    "# Verify command",
+    repo.verifyCommand,
+    "",
+    "# Budget",
+    `About ${fix.tokenBudgetLeft} tokens of the task's budget are left. ` +
+      "Narrow scope rather than run over.",
   ].join("\n");
 }

@@ -156,6 +156,9 @@ export const PresubmitVerdictSchema = z.discriminatedUnion("kind", [
 ]);
 export type PresubmitVerdict = z.infer<typeof PresubmitVerdictSchema>;
 
+/** Fix passes a task is granted after pre-submit refusals; `chk_coding_tasks_fix_passes_bound` holds the same bound. */
+export const PRESUBMIT_FIX_PASSES = 2;
+
 /**
  * Aggregated stats per coding task. All fields optional — populated
  * incrementally as the task runs (memory_bytes at task start from CLAUDE.md
@@ -188,9 +191,15 @@ export const ResourceUsageSchema = z
      * USD spend reported by the CLI's `result` event, when available. It is
      * the session's running total, and the execute run resumes the plan
      * session, so it covers both phases; `tokens_input`/`tokens_output` are
-     * the execute run's alone.
+     * the execute run's alone. Each skills-repo fix pass adds its fresh
+     * session's to all three.
      */
     cost_usd: z.number().nonnegative().optional(),
+    /**
+     * The latest skills-repo fix pass whose session the three counters above
+     * include, so `addTaskResourceUsage` counts each pass once.
+     */
+    counted_fix_pass: z.number().int().positive().optional(),
     /**
      * Execute-phase sandbox lifecycle. Captured Cogmo-side, so it works
      * uniformly across backends without depending on per-sandbox usage
@@ -216,6 +225,17 @@ export const ResourceUsageSchema = z
   })
   .strict();
 export type ResourceUsage = z.infer<typeof ResourceUsageSchema>;
+
+/** The counters a CLI session reports, which a fix pass adds to the task's. */
+export const SessionUsageSchema = ResourceUsageSchema.pick({
+  tokens_input: true,
+  tokens_output: true,
+  cost_usd: true,
+});
+
+/** `T`, which compiles only while every key is a number: `addTaskResourceUsage` sums them as `numeric`. */
+type NumericCounters<T extends Partial<Record<keyof T, number | undefined>>> = T;
+export type SessionUsage = NumericCounters<z.infer<typeof SessionUsageSchema>>;
 
 /**
  * Why a task ended at `failed` or `cancelled`, as `coding_tasks.failure_reason`

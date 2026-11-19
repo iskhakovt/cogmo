@@ -1,9 +1,11 @@
 /**
  * The execute phase's sandbox stage: re-attach to the plan phase's task
- * container if it is still alive, otherwise create a fresh one.
+ * container if it is still alive, otherwise create a fresh one. A fix pass
+ * always creates one.
  */
 
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import {
   isLocalDockerSessionState,
@@ -14,6 +16,8 @@ import type { ResourceLimits } from "../../sandbox/types.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
 import type { AskpassLease } from "./askpass-lease.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
+import type { ExecuteSession } from "./execute-session.js";
+import { checkoutFixBaseStep } from "./fix-pass.js";
 import { loadIdentity } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import {
@@ -67,6 +71,10 @@ export interface ExecuteSandbox {
  * phase's mount, a fresh create mounts it. The identity loads inside each
  * step body that uses it, never as a step result, so the bare body depends
  * only on the memoized verdict.
+ *
+ * A fix pass plans no `try-resume`, so its CLI never runs in a sandbox the
+ * hand-back failed to reap. On git-remote it checks out the refused tip,
+ * whose fetch the remote can refuse on auth.
  */
 export async function acquireExecuteSandbox(
   run: CodingRun,
@@ -76,13 +84,19 @@ export async function acquireExecuteSandbox(
     repo: CodingRepoRow;
     assignment: WorktreeAssignment;
     askpass: AskpassLease;
+    session: ExecuteSession;
   },
 ): Promise<Result<ExecuteSandbox, TaskFailure>> {
   const { sandbox } = deps;
-  const resumed = await run.stepRun("try-resume", async () => {
-    const existing = await sandbox.tryResumeByTaskId(run.taskId);
-    return existing?.state ?? null;
-  });
+  const resumed = await match(args.session)
+    .with({ kind: "resume" }, () =>
+      run.stepRun("try-resume", async () => {
+        const existing = await sandbox.tryResumeByTaskId(run.taskId);
+        return existing?.state ?? null;
+      }),
+    )
+    .with({ kind: "fix" }, async () => null)
+    .exhaustive();
 
   const gitRemote = sandbox.capabilities.workingTreeTransport === "git-remote";
   const credentials = await checkTaskCredentials(run, deps, {
@@ -112,8 +126,17 @@ export async function acquireExecuteSandbox(
       deps.runInTx((tx) => deps.store.setTaskContainerId(tx, run.taskId, containerRowId)),
     );
   }
-  if (gitRemote) {
-    await checkoutFeatureBranchStep(run, sandbox, state, args.assignment.branch);
+  if (push) {
+    const { branch } = args.assignment;
+    const { askpass } = push;
+    const checkedOut = await match(args.session)
+      .with({ kind: "resume" }, async () => {
+        await checkoutFeatureBranchStep(run, sandbox, state, branch);
+        return ok<void, TaskFailure>(undefined);
+      })
+      .with({ kind: "fix" }, () => checkoutFixBaseStep(run, deps, { state, branch, askpass }))
+      .exhaustive();
+    if (checkedOut.isErr()) return err(checkedOut.error);
   }
   return ok({ state, push });
 }

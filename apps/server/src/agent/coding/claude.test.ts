@@ -115,6 +115,7 @@ const task: CodingTaskRow = {
   idempotencyKey: null,
   claimedByRunId: null,
   presubmitVerdict: null,
+  presubmitFixPasses: 0,
   createdAt: new Date(),
 };
 
@@ -460,6 +461,31 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(() => backend.execute({ task: taskWithSession, repo, container }, "")).toThrow(
       /without a session id/,
     );
+  });
+});
+
+describe("ClaudeCodeBackend.fix", () => {
+  const fix = { findings: ["ruff: skills/echo/skill.py:1:1: E501"], tokenBudgetLeft: 42_000 };
+  const planned = { ...task, sessionId: "sess-plan-prior", plan: "## Plan\n1. Do X\n" };
+
+  it("starts a fresh execute session, no --resume, with the fix prompt on stdin", async () => {
+    const { container, execStreaming, stdinChunks } = fakeContainer(EXECUTE_FIXTURE);
+    const events = await collect(
+      new ClaudeCodeBackend().fix({ task: planned, repo, container }, fix),
+    );
+
+    const [cmd, opts] = expectDefined(execStreaming.mock.calls[0], "execStreaming call");
+    expect(cmd).not.toContain("--resume");
+    expect(cmd[cmd.indexOf("--permission-mode") + 1]).toBe("bypassPermissions");
+    expect(opts).toMatchObject({ timeoutMs: 30 * 60 * 1000, idleTimeoutMs: 5 * 60 * 1000 });
+    const firstFrame = stdinChunks
+      .join("")
+      .split("\n")
+      .find((line) => line.trim().length > 0);
+    const content = StdinFrameSchema.parse(JSON.parse(firstFrame ?? "")).message.content;
+    expect(content).toContain("# Approved plan");
+    expect(content).toContain(fix.findings[0]);
+    expect(events.map((e) => e.kind)).not.toContain("plan_ready");
   });
 });
 

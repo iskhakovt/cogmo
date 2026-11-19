@@ -83,6 +83,32 @@ describe("announceTaskFailure", () => {
     },
   );
 
+  it.each(["cli_exit_error", "verify_failed", "unexpected_error"] as const)(
+    "announces a %s after a fix pass, which no run renders either",
+    async (reason) => {
+      const h = harness({ task: { presubmitFixPasses: 1 } });
+
+      expect(await announceTaskFailure(h.deps, failed(reason, "the detail"))).toEqual({
+        kind: "announced",
+      });
+      expect(h.publisher.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "coding/task/failure-notice",
+          data: expect.objectContaining({ reason, detail: "the detail" }),
+        }),
+      );
+    },
+  );
+
+  it("announces nothing after a fix pass on another repo", async () => {
+    const h = harness({ repoName: "cogmo", task: { presubmitFixPasses: 1 } });
+
+    expect(await announceTaskFailure(h.deps, failed("verify_failed", "x"))).toEqual({
+      kind: "skipped",
+      reason: "not_skills_repo",
+    });
+  });
+
   it("announces nothing on another repo", async () => {
     const h = harness({ repoName: "cogmo" });
 

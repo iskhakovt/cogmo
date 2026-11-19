@@ -36,7 +36,11 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { idlePresubmitDeps, parkCodingTaskAt } from "../../test/coding-fixtures.js";
+import {
+  idlePresubmitDeps,
+  parkCodingTaskAt,
+  REFUSED_PRESUBMIT_VERDICT,
+} from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent, nullStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "./auth.js";
@@ -89,7 +93,7 @@ vi.mock("./worktree.js", () => ({
   removeWorktree: worktreeMocks.removeWorktree,
 }));
 
-import { expectOk } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 // `vi.mock` is hoisted by Vitest, so static imports below see the mocked
 // modules. Type imports are erased at compile time and don't trigger
 // module loading.
@@ -186,7 +190,11 @@ async function seedTask(repo: CodingRepoRow): Promise<CodingTaskRow> {
 interface FakeGitRemoteSandboxResult {
   sandbox: SandboxClient;
   createSpecs: SessionSpec[];
-  execCalls: Array<{ cmd: ReadonlyArray<string>; workingDir: string | undefined }>;
+  execCalls: Array<{
+    cmd: ReadonlyArray<string>;
+    workingDir: string | undefined;
+    env?: Readonly<Record<string, string>> | undefined;
+  }>;
 }
 
 interface FakeExecResult {
@@ -227,7 +235,7 @@ function fakeGitRemoteSandbox(execScript?: ExecScript): FakeGitRemoteSandboxResu
   const session: SandboxSession = {
     state: { type: "daytona", taskId: "t", sandboxId: "sb-fake" },
     execStreaming: vi.fn(async (cmd, opts) => {
-      execCalls.push({ cmd, workingDir: opts?.workingDir });
+      execCalls.push({ cmd, workingDir: opts?.workingDir, env: opts?.env });
       return noopExec(execScript?.(cmd));
     }),
     exec: vi.fn(async () => ({
@@ -274,6 +282,9 @@ function backendYielding(events: CodingEvent[]): CodingBackend {
       for (const ev of events) yield ev;
     },
     execute: async function* () {
+      for (const ev of events) yield ev;
+    },
+    fix: async function* () {
       for (const ev of events) yield ev;
     },
   };
@@ -559,6 +570,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const execute = vi.spyOn(backend, "execute");
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend, secretsStore }),
@@ -607,6 +619,7 @@ describe("runCodingExecute — git-remote transport", () => {
     );
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
@@ -710,6 +723,7 @@ describe("runCodingExecute — git-remote transport", () => {
     );
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
@@ -792,6 +806,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const streamFailures: string[] = [];
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
@@ -879,12 +894,14 @@ describe("runCodingExecute — git-remote transport", () => {
     const streamFailures: string[] = [];
 
     const result = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: {
           plan: backendYielding([]).plan,
+          fix: backendYielding([]).fix,
           // A Cancel tap lands while `execute-cli` streams; the push that
           // follows is then rejected.
           execute: async function* () {
@@ -980,6 +997,96 @@ async function seedTaskReadyForVerify(): Promise<{ task: CodingTaskRow; branch: 
   return { task, branch };
 }
 
+describe("runCodingExecute — a git-remote fix pass", () => {
+  /** A git-remote task a verify run handed back at pass 0, refusing {@link REFUSED_PRESUBMIT_VERDICT}'s tip. */
+  async function seedHandedBack(): Promise<{ task: CodingTaskRow; branch: string }> {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const branch = `cogmo/${task.id.replaceAll("-", "").slice(0, 12)}`;
+    await parkCodingTaskAt(tx, store, task.id, "planning");
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, { type: "git-remote", branch }),
+    );
+    await parkCodingTaskAt(tx, store, task.id, "pending_fix");
+    return { task, branch };
+  }
+
+  function oauthSecrets(): SecretsStore {
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+    return secretsStore;
+  }
+
+  const runFixPass = (taskId: string, sandbox: SandboxClient, backend: CodingBackend) =>
+    runCodingExecute({
+      trigger: { kind: "fix", fixPass: 1 },
+      taskId,
+      runId: "run-fix-1",
+      deps: makeDeps({ sandbox, backend, secretsStore: oauthSecrets() }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+  it("fetches the branch under the askpass env and checks out the refused tip in a fresh sandbox", async () => {
+    const { task, branch } = await seedHandedBack();
+    const { sandbox, createSpecs, execCalls } = fakeGitRemoteSandbox();
+    const backend = backendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
+    const fix = vi.spyOn(backend, "fix");
+    fakeInngest.send.mockClear();
+
+    const result = await runFixPass(task.id, sandbox, backend);
+
+    expect(result).toEqual({ status: "pending_verify" });
+    expect(sandbox.tryResumeByTaskId).not.toHaveBeenCalled();
+    expect(createSpecs).toHaveLength(1);
+    const git = execCalls.filter((c) => c.cmd[0] === "git");
+    const fetch = expectDefined(
+      git.find((c) => gitSubcommand(c.cmd) === "fetch"),
+      "the fetch",
+    );
+    expect(fetch.cmd.slice(-3)).toEqual(["fetch", "origin", branch]);
+    expect(fetch.env).toEqual({
+      GIT_ASKPASS: "/tmp/cogmo-askpass/helper",
+      GIT_TERMINAL_PROMPT: "0",
+    });
+    const checkouts = git.filter((c) => gitSubcommand(c.cmd) === "checkout");
+    expect(checkouts.map((c) => c.cmd.slice(-4))).toEqual([
+      ["checkout", "-B", branch, REFUSED_PRESUBMIT_VERDICT.sha],
+    ]);
+    expect(git.indexOf(fetch)).toBeLessThan(git.indexOf(expectDefined(checkouts[0], "checkout")));
+    expect(fix).toHaveBeenCalledTimes(1);
+    expect(fakeInngest.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "coding/task/cli-done",
+        data: { taskId: task.id, fixPass: 1 },
+      }),
+    );
+  });
+
+  it("an auth refusal on the fetch fails the task auth_failed before the session", async () => {
+    const { task } = await seedHandedBack();
+    const refusal = "fatal: Authentication failed for 'https://github.com/owner/cogmo.git/'";
+    const { sandbox } = fakeGitRemoteSandbox((cmd) =>
+      gitSubcommand(cmd) === "fetch" ? { stderr: refusal, exitCode: 128 } : undefined,
+    );
+    const backend = backendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
+    const fix = vi.spyOn(backend, "fix");
+
+    const result = await runFixPass(task.id, sandbox, backend);
+
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "auth_failed", detail: refusal },
+    });
+    expect(fix).not.toHaveBeenCalled();
+    const row = await tx((trx) => store.getTask(trx, task.id));
+    expect([row?.status, row?.failureReason]).toEqual(["failed", "auth_failed"]);
+  });
+});
+
 describe("runCodingVerify — git-remote transport", () => {
   it("stays pr_open when the post-PR fetch-back fails", async () => {
     // The fetch-back exists to stop the host mirror lagging origin. By the
@@ -999,6 +1106,7 @@ describe("runCodingVerify — git-remote transport", () => {
     const inngest = { send: inngestSend };
 
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId: task.id,
       runId: "run-test",
       deps: makeVerifyDeps({
@@ -1039,6 +1147,7 @@ describe("runCodingVerify — git-remote transport", () => {
     const inngest = { send: inngestSend };
 
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId: task.id,
       runId: "run-test",
       deps: makeVerifyDeps({

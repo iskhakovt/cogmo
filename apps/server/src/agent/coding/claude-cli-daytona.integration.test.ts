@@ -117,6 +117,7 @@ function makeTask(taskId: string): CodingTaskRow {
     idempotencyKey: null,
     claimedByRunId: null,
     presubmitVerdict: null,
+    presubmitFixPasses: 0,
     createdAt: new Date(),
   };
 }

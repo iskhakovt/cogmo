@@ -17,8 +17,8 @@ export type CancelCodingTaskError =
  * Cancel a task that has not ended, which frees its repo's admission slot. A
  * run holding the task finds it cancelled at its next conditional transition
  * and reclaims what it holds; a task no run holds is skipped by the next
- * claim, and at `awaiting_approval` or `pending_verify` its bind-mount
- * worktree stays (design/coding-delegation.md → Task lifecycle).
+ * claim, and at `awaiting_approval`, `pending_verify` or `pending_fix` its
+ * bind-mount worktree stays (design/coding-delegation.md → Task lifecycle).
  */
 export async function cancelCodingTask(
   deps: CancelCodingTaskDeps,

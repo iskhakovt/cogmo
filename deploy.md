@@ -372,7 +372,7 @@ The image entrypoint dispatches based on the first arg:
 | `subagent`, `image-provider`, `image-model` | Manage sub-agents, image providers and image models. |
 | `skills` | Register, approve, deny, roll back, deregister, run and list skills. |
 | `connector` | Add a connector and print its token once, rotate or revoke its token, and list connectors. See [Connectors](#connectors). |
-| `coding cancel <task-id>` | Cancel a coding task that has not ended, freeing its repo's admission slot. A run working on it stops at its next status change, and a PR it was already opening can still open: close that by hand. A task stopped at `awaiting_approval` or `pending_verify` keeps its bind-mount worktree. The task id is the `taskId` in the server's logs, and on git-remote the suffix of its `cogmo/run/<task-id>` branch. |
+| `coding cancel <task-id>` | Cancel a coding task that has not ended, freeing its repo's admission slot. A run working on it stops at its next status change, and a PR it was already opening can still open: close that by hand. A task stopped at `awaiting_approval`, `pending_verify` or `pending_fix` keeps its bind-mount worktree. The task id is the `taskId` in the server's logs, and on git-remote the suffix of its `cogmo/run/<task-id>` branch. |
 | `migrate-memories`, `backfill`, `migrate-skills-remote` | One-off data migrations; run `cogmo <command> --help`. |
 
 `serve` logs to stdout. Every other command logs to stderr, so its stdout carries only its output.

@@ -543,6 +543,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
     const inngestSend = vi.fn().mockResolvedValue(undefined);
 
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -611,6 +612,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
     };
 
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,
@@ -819,6 +821,7 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
     const inngestSend = vi.fn().mockResolvedValue(undefined);
 
     const result = await runCodingVerify({
+      fixPass: 0,
       taskId,
       runId: "run-test",
       deps,

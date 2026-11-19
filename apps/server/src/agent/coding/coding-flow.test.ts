@@ -132,6 +132,9 @@ function flowBackend(args: {
     execute: async function* () {
       for (const ev of args.executeEvents) yield ev;
     },
+    fix: async function* () {
+      for (const ev of args.executeEvents) yield ev;
+    },
   };
 }
 
@@ -414,6 +417,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     // Container is still alive (TTL hasn't expired), so reuse path runs —
     // no second createTaskContainer call.
     const executeResult = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId,
       runId: "run-test",
       deps: {
@@ -543,6 +547,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     // Straight into execute on that event — no Transport.approvePlan call,
     // because no human is in this loop.
     const executeResult = await runCodingExecute({
+      trigger: { kind: "approved" },
       taskId: task.id,
       runId: "run-execute",
       deps,

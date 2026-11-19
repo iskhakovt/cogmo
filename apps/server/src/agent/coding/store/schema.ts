@@ -5,6 +5,7 @@ import {
   integer,
   pgEnum,
   pgTable,
+  smallint,
   text,
   timestamp,
   unique,
@@ -39,6 +40,7 @@ export const codingTaskStatus = pgEnum("coding_task_status", [
   "executing",
   "pending_verify",
   "verifying",
+  "pending_fix",
   "pushed",
   "pr_open",
   "failed",
@@ -162,6 +164,10 @@ export const codingTasks = pgTable(
     // fix pass that wrote it; null until the task's first, and on every other
     // repo's task (design/coding-delegation.md → Skills-repo pre-submit).
     presubmitVerdict: jsonbZod("presubmit_verdict", PresubmitVerdictSchema),
+    // Fix passes granted after pre-submit refusals, moved only by
+    // `transition-pending-fix`. The default starts every task's count and
+    // backfills the rows before it.
+    presubmitFixPasses: smallint("presubmit_fix_passes").notNull().default(0),
     createdAt: ts(),
   },
   (t) => [
@@ -179,24 +185,32 @@ export const codingTasks = pgTable(
     // Nothing is allocated, captured or claimed before the plan run's claim.
     check(
       "chk_coding_tasks_queued_bare",
-      sql`${t.status} <> 'queued' OR (${t.worktreeAssignment} IS NULL AND ${t.sessionId} IS NULL AND ${t.containerId} IS NULL AND ${t.plan} IS NULL AND ${t.planApprovedAt} IS NULL AND ${t.prMetadata} IS NULL AND ${t.resourceUsage} IS NULL AND ${t.claimedByRunId} IS NULL AND ${t.presubmitVerdict} IS NULL)`,
+      sql`${t.status} <> 'queued' OR (${t.worktreeAssignment} IS NULL AND ${t.sessionId} IS NULL AND ${t.containerId} IS NULL AND ${t.plan} IS NULL AND ${t.planApprovedAt} IS NULL AND ${t.prMetadata} IS NULL AND ${t.resourceUsage} IS NULL AND ${t.claimedByRunId} IS NULL AND ${t.presubmitVerdict} IS NULL AND ${t.presubmitFixPasses} = 0)`,
     ),
     // `persist-plan` precedes `set-status-plan-ready`.
     check(
       "chk_coding_tasks_plan_at_gate",
-      sql`${t.status} NOT IN ('awaiting_approval', 'executing', 'pending_verify', 'verifying', 'pushed', 'pr_open') OR ${t.plan} IS NOT NULL`,
+      sql`${t.status} NOT IN ('awaiting_approval', 'executing', 'pending_verify', 'verifying', 'pending_fix', 'pushed', 'pr_open') OR ${t.plan} IS NOT NULL`,
     ),
     // `approvePlanIfPending` stamps it at `awaiting_approval`, and only
     // `coding/task/plan-approved` triggers the execute claim.
     check(
       "chk_coding_tasks_approval_after_gate",
-      sql`(${t.planApprovedAt} IS NULL OR ${t.status} <> 'planning') AND (${t.status} NOT IN ('executing', 'pending_verify', 'verifying', 'pushed', 'pr_open') OR ${t.planApprovedAt} IS NOT NULL)`,
+      sql`(${t.planApprovedAt} IS NULL OR ${t.status} <> 'planning') AND (${t.status} NOT IN ('executing', 'pending_verify', 'verifying', 'pending_fix', 'pushed', 'pr_open') OR ${t.planApprovedAt} IS NOT NULL)`,
     ),
     // `set-pr-metadata` runs at `pushed`, ahead of `transition-pr-open`; a
     // Cancel or a failure can land between the two.
     check(
       "chk_coding_tasks_pr_metadata_after_push",
       sql`(${t.prMetadata} IS NULL OR ${t.status} IN ('pushed', 'pr_open', 'failed', 'cancelled')) AND (${t.status} <> 'pr_open' OR ${t.prMetadata} IS NOT NULL)`,
+    ),
+    // `PRESUBMIT_FIX_PASSES` holds the same bound; the two change together.
+    check("chk_coding_tasks_fix_passes_bound", sql`${t.presubmitFixPasses} BETWEEN 0 AND 2`),
+    // A fix pass is owed only after a refusal granted one. COALESCE, since a
+    // null verdict's `->>` is NULL, which a CHECK accepts.
+    check(
+      "chk_coding_tasks_fix_owed",
+      sql`${t.status} <> 'pending_fix' OR (COALESCE(${t.presubmitVerdict}->>'kind' = 'refused', false) AND ${t.presubmitFixPasses} >= 1)`,
     ),
   ],
 );

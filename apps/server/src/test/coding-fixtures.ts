@@ -83,6 +83,7 @@ export function codingTaskRow(overrides: Partial<CodingTaskRow> = {}): CodingTas
     idempotencyKey: null,
     claimedByRunId: null,
     presubmitVerdict: null,
+    presubmitFixPasses: 0,
     createdAt: FIXTURE_EPOCH,
     ...overrides,
   };
@@ -124,17 +125,39 @@ export function statefulCodingStore(
   const store = mock<CodingStore>();
   store.getTask.mockImplementation(async () => task);
   store.getRepoById.mockImplementation(async () => repo);
-  store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to, claimedByRunId) => {
-    // Mirrors the real store, including the claim's adoption arm: a row
-    // already at the target with no claimant is bound to this run. Without
-    // that here, a replay test would see the caller's tolerance path rather
-    // than the transition's, which is where production resolves it.
-    const adoptable =
-      claimedByRunId !== undefined && task.status === to && task.claimedByRunId === null;
-    if (task.status !== from && !adoptable) {
-      return { kind: "stale", status: task.status, claimedByRunId: task.claimedByRunId };
+  store.transitionTaskStatus.mockImplementation(
+    async (_tx, _id, from, to, claimedByRunId, fixPasses) => {
+      // Mirrors the real store, including the claim's adoption arm: a row
+      // already at the target with no claimant is bound to this run. Without
+      // that here, a replay test would see the caller's tolerance path rather
+      // than the transition's, which is where production resolves it.
+      const adoptable =
+        claimedByRunId !== undefined && task.status === to && task.claimedByRunId === null;
+      const atPass = fixPasses === undefined || task.presubmitFixPasses === fixPasses;
+      if ((task.status !== from && !adoptable) || !atPass) {
+        return { kind: "stale", status: task.status, claimedByRunId: task.claimedByRunId };
+      }
+      task = { ...task, status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) };
+      return { kind: "transitioned" };
+    },
+  );
+  store.transitionTaskPendingFix.mockImplementation(async (_tx, _id, { runId, fixPass }) => {
+    const verdict = task.presubmitVerdict;
+    const owed =
+      task.status === "verifying" &&
+      task.presubmitFixPasses === fixPass &&
+      verdict?.kind === "refused" &&
+      verdict.runId === runId &&
+      verdict.fixPass === fixPass;
+    if (!owed) {
+      return {
+        kind: "stale",
+        status: task.status,
+        fixPasses: task.presubmitFixPasses,
+        failureReason: task.failureReason,
+      };
     }
-    task = { ...task, status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) };
+    task = { ...task, status: "pending_fix", presubmitFixPasses: fixPass + 1 };
     return { kind: "transitioned" };
   });
   store.failTaskIfNonTerminal.mockImplementation(async (_tx, _id, failure) => {
@@ -185,6 +208,25 @@ export function statefulCodingStore(
   store.setTaskResourceUsage.mockImplementation(async (_tx, _id, usage) => {
     // The real store merges into the existing blob rather than replacing it.
     task = { ...task, resourceUsage: { ...(task.resourceUsage ?? {}), ...usage } };
+  });
+  store.addTaskResourceUsage.mockImplementation(async (_tx, _id, usage, fixPass) => {
+    const prior = task.resourceUsage ?? {};
+    if ((prior.counted_fix_pass ?? 0) >= fixPass) return { kind: "already_counted" };
+    const sum = (key: keyof typeof usage) => {
+      const added = usage[key];
+      return added === undefined ? {} : { [key]: (prior[key] ?? 0) + added };
+    };
+    task = {
+      ...task,
+      resourceUsage: {
+        ...prior,
+        ...sum("tokens_input"),
+        ...sum("tokens_output"),
+        ...sum("cost_usd"),
+        counted_fix_pass: fixPass,
+      },
+    };
+    return { kind: "added" };
   });
   store.setTaskSandboxDeletedAt.mockImplementation(async (_tx, _id, deletedAt) => {
     // Real store gates on a sandbox block existing AND `deleted_at` being
@@ -375,13 +417,25 @@ export const PASSED_PRESUBMIT_VERDICT = {
   riskTier: "notify",
 } as const satisfies PresubmitVerdict;
 
+/** A refusal written by the verify run `verify-run-1` at the first pass. */
+export const REFUSED_PRESUBMIT_VERDICT = {
+  runId: "verify-run-1",
+  fixPass: 0,
+  checkedAt: "2026-08-20T00:01:30.000Z",
+  releaseVersion: "dev",
+  kind: "refused",
+  sha: "c".repeat(40),
+  findings: ["ruff: skills/echo/skill.py:1:1: E501 Line too long"],
+} as const satisfies PresubmitVerdict;
+
 /**
  * Drives a task row from its current status to `status` through the store's
  * own writers, so the row carries the per-state data its CHECKs tie to each
  * status: a plan from `awaiting_approval`, an approval from `executing`, PR
- * metadata at `pr_open`. A `failed` row records `unexpected_error`; a
- * `cancelled` row `user_cancelled`. The claim writers are called without a
- * run id, so `claimed_by_run_id` stays null.
+ * metadata at `pr_open`, and at `pending_fix` the first pass granted on
+ * {@link REFUSED_PRESUBMIT_VERDICT}. A `failed` row records
+ * `unexpected_error`; a `cancelled` row `user_cancelled`. The claim writers
+ * are called without a run id, so `claimed_by_run_id` stays null.
  */
 export async function parkCodingTaskAt(
   runInTx: Transactor,
@@ -396,6 +450,7 @@ export async function parkCodingTaskAt(
   }
   const forwardTarget = match(status)
     .with("failed", "cancelled", () => row.status)
+    .with("pending_fix", () => "verifying" as const)
     .with(P.union(...FORWARD_STATUSES), (forward) => forward)
     .exhaustive();
   const path = FORWARD_PATH.slice(
@@ -432,6 +487,13 @@ export async function parkCodingTaskAt(
     )
     .with("cancelled", () =>
       runInTx((tx) => store.cancelTaskIfActive(tx, taskId, "user_cancelled")),
+    )
+    .with("pending_fix", () =>
+      runInTx(async (tx) => {
+        await store.setTaskPresubmitVerdict(tx, taskId, REFUSED_PRESUBMIT_VERDICT);
+        const { runId, fixPass } = REFUSED_PRESUBMIT_VERDICT;
+        await store.transitionTaskPendingFix(tx, taskId, { runId, fixPass });
+      }),
     )
     .with(P.union(...FORWARD_STATUSES), () => Promise.resolve())
     .exhaustive();

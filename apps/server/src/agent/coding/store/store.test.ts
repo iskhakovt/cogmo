@@ -4,15 +4,16 @@ import type { Database, Transactor } from "../../../db/index.js";
 import { findPgErrorByCode } from "../../../db/pg-errors.js";
 import { DrizzleSandboxStore } from "../../../sandbox/store/index.js";
 import type { ContainerLabels, ResourceLimits } from "../../../sandbox/types.js";
-import { expectOk } from "../../../test/assertions.js";
+import { expectDefined, expectOk } from "../../../test/assertions.js";
 import {
   PARKED_PR_METADATA,
   PASSED_PRESUBMIT_VERDICT,
   parkCodingTaskAt,
+  REFUSED_PRESUBMIT_VERDICT,
 } from "../../../test/coding-fixtures.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
 import { DrizzleAgentStore } from "../../store/index.js";
-import type { PresubmitVerdict } from "../types.js";
+import { PRESUBMIT_FIX_PASSES, type PresubmitVerdict } from "../types.js";
 import { type CodingBackend, type CodingTaskStatus, DrizzleCodingStore } from "./index.js";
 
 let db: Database;
@@ -1691,6 +1692,252 @@ describe("DrizzleCodingStore", () => {
         "fetch failed",
       ]);
       expect(await tx((trx) => store.failQueuedTask(trx, id, failure))).toBe(false);
+    });
+
+    describe("the pre-submit's fix passes", () => {
+      const KEY = {
+        runId: REFUSED_PRESUBMIT_VERDICT.runId,
+        fixPass: REFUSED_PRESUBMIT_VERDICT.fixPass,
+      };
+      const row = async (id: string) =>
+        expectDefined(await tx((trx) => store.getTask(trx, id)), "task");
+      const setPasses = (id: string, n: number) =>
+        db.execute(sql`UPDATE coding_tasks SET presubmit_fix_passes = ${n} WHERE id = ${id}`);
+
+      it("a new task starts at 0 passes", async () => {
+        expect((await row(await seedTask())).presubmitFixPasses).toBe(0);
+      });
+
+      it("holds the count between 0 and PRESUBMIT_FIX_PASSES", async () => {
+        const id = await seedTask();
+        await parkCodingTaskAt(tx, store, id, "verifying");
+        await setPasses(id, PRESUBMIT_FIX_PASSES);
+        expect(await violatedCheck(setPasses(id, PRESUBMIT_FIX_PASSES + 1))).toBe(
+          "chk_coding_tasks_fix_passes_bound",
+        );
+        expect(await violatedCheck(setPasses(id, -1))).toBe("chk_coding_tasks_fix_passes_bound");
+      });
+
+      it("refuses a count on a queued task", async () => {
+        const id = await seedTask();
+        expect(await violatedCheck(setPasses(id, 1))).toBe("chk_coding_tasks_queued_bare");
+      });
+
+      it("refuses pending_fix without a refused verdict or a granted pass", async () => {
+        const id = await seedTask();
+        await parkCodingTaskAt(tx, store, id, "verifying");
+        const toPendingFix = sql`UPDATE coding_tasks SET status = 'pending_fix', presubmit_fix_passes = 1 WHERE id = ${id}`;
+        expect(await violatedCheck(db.execute(toPendingFix))).toBe("chk_coding_tasks_fix_owed");
+        await tx((trx) => store.setTaskPresubmitVerdict(trx, id, PASSED_PRESUBMIT_VERDICT));
+        expect(await violatedCheck(db.execute(toPendingFix))).toBe("chk_coding_tasks_fix_owed");
+        await tx((trx) => store.setTaskPresubmitVerdict(trx, id, REFUSED_PRESUBMIT_VERDICT));
+        expect(
+          await violatedCheck(
+            db.execute(sql`UPDATE coding_tasks SET status = 'pending_fix' WHERE id = ${id}`),
+          ),
+        ).toBe("chk_coding_tasks_fix_owed");
+        await db.execute(toPendingFix);
+        expect((await row(id)).status).toBe("pending_fix");
+      });
+
+      it("holds the plan and its approval at pending_fix", async () => {
+        const id = await seedTask();
+        await parkCodingTaskAt(tx, store, id, "pending_fix");
+        expect(
+          await violatedCheck(
+            db.execute(sql`UPDATE coding_tasks SET plan = NULL WHERE id = ${id}`),
+          ),
+        ).toBe("chk_coding_tasks_plan_at_gate");
+        expect(
+          await violatedCheck(
+            db.execute(sql`UPDATE coding_tasks SET plan_approved_at = NULL WHERE id = ${id}`),
+          ),
+        ).toBe("chk_coding_tasks_approval_after_gate");
+        expect(
+          await violatedCheck(tx((trx) => store.setTaskPrMetadata(trx, id, PARKED_PR_METADATA))),
+        ).toBe("chk_coding_tasks_pr_metadata_after_push");
+      });
+
+      it("transitionTaskPendingFix grants the next pass on the run's own refusal at its pass", async () => {
+        const id = await seedTask();
+        await parkCodingTaskAt(tx, store, id, "verifying");
+        await tx((trx) => store.setTaskPresubmitVerdict(trx, id, REFUSED_PRESUBMIT_VERDICT));
+
+        expect(await tx((trx) => store.transitionTaskPendingFix(trx, id, KEY))).toEqual({
+          kind: "transitioned",
+        });
+        expect(await row(id)).toMatchObject({ status: "pending_fix", presubmitFixPasses: 1 });
+        expect(await tx((trx) => store.transitionTaskPendingFix(trx, id, KEY))).toEqual({
+          kind: "stale",
+          status: "pending_fix",
+          fixPasses: 1,
+          failureReason: null,
+        });
+      });
+
+      it.each([
+        { name: "another run's refusal", key: { ...KEY, runId: "verify-run-2" }, verdict: {} },
+        { name: "another pass's refusal", key: { ...KEY, fixPass: 1 }, verdict: {} },
+        {
+          name: "a verdict that is not a refusal",
+          key: KEY,
+          verdict: { kind: "passed", riskTier: "auto", findings: undefined },
+        },
+      ])("transitionTaskPendingFix refuses $name", async ({ key, verdict }) => {
+        const id = await seedTask();
+        await parkCodingTaskAt(tx, store, id, "verifying");
+        const stored = JSON.stringify({ ...REFUSED_PRESUBMIT_VERDICT, ...verdict });
+        await db.execute(
+          sql`UPDATE coding_tasks SET presubmit_verdict = ${stored}::jsonb WHERE id = ${id}`,
+        );
+
+        expect(await tx((trx) => store.transitionTaskPendingFix(trx, id, key))).toEqual({
+          kind: "stale",
+          status: "verifying",
+          fixPasses: 0,
+          failureReason: null,
+        });
+        expect((await row(id)).status).toBe("verifying");
+      });
+
+      it("transitionTaskPendingFix refuses a count other than the run's pass, and a task past verifying", async () => {
+        const id = await seedTask();
+        await parkCodingTaskAt(tx, store, id, "verifying");
+        await tx((trx) => store.setTaskPresubmitVerdict(trx, id, REFUSED_PRESUBMIT_VERDICT));
+        await setPasses(id, 1);
+        expect(await tx((trx) => store.transitionTaskPendingFix(trx, id, KEY))).toMatchObject({
+          kind: "stale",
+          status: "verifying",
+          fixPasses: 1,
+        });
+        await setPasses(id, 0);
+        await tx((trx) => store.cancelTaskIfActive(trx, id, "user_cancelled"));
+        expect(await tx((trx) => store.transitionTaskPendingFix(trx, id, KEY))).toEqual({
+          kind: "stale",
+          status: "cancelled",
+          fixPasses: 0,
+          failureReason: "user_cancelled",
+        });
+      });
+
+      it("a pass-keyed claim matches the count: the fix claim, then the next verify claim", async () => {
+        const id = await seedTask();
+        await parkCodingTaskAt(tx, store, id, "pending_fix");
+        const claim = (from: CodingTaskStatus, to: "executing" | "verifying", n: number) =>
+          tx((trx) => store.transitionTaskStatus(trx, id, from, to, "run-1", n));
+
+        expect(await claim("pending_fix", "executing", 0)).toEqual({
+          kind: "stale",
+          status: "pending_fix",
+          claimedByRunId: null,
+        });
+        expect(await claim("pending_fix", "executing", 1)).toEqual({ kind: "transitioned" });
+        await tx((trx) => store.transitionTaskStatus(trx, id, "executing", "pending_verify"));
+        expect(await claim("pending_verify", "verifying", 0)).toMatchObject({ kind: "stale" });
+        expect(await claim("pending_verify", "verifying", 1)).toEqual({ kind: "transitioned" });
+        expect(await row(id)).toMatchObject({ status: "verifying", presubmitFixPasses: 1 });
+      });
+    });
+  });
+
+  describe("addTaskResourceUsage", () => {
+    async function seedPlanning(): Promise<string> {
+      const repoId = await seedRepo();
+      const t = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
+      return t.id;
+    }
+    const usageOf = async (id: string) =>
+      (await tx((trx) => store.getTask(trx, id)))?.resourceUsage ?? null;
+
+    it("sums each counter with the row's in one write, keeping the other keys", async () => {
+      const id = await seedPlanning();
+      await tx((trx) =>
+        store.setTaskResourceUsage(trx, id, {
+          tokens_input: 100,
+          tokens_output: 20,
+          cost_usd: 0.05,
+          memory_bytes: { managed: 1, user: 2, project: 3 },
+        }),
+      );
+
+      await tx((trx) =>
+        store.addTaskResourceUsage(
+          trx,
+          id,
+          { tokens_input: 40, tokens_output: 7, cost_usd: 0.1 },
+          1,
+        ),
+      );
+
+      expect(await usageOf(id)).toEqual({
+        tokens_input: 140,
+        tokens_output: 27,
+        cost_usd: 0.15,
+        memory_bytes: { managed: 1, user: 2, project: 3 },
+        counted_fix_pass: 1,
+      });
+    });
+
+    it("reads a null column, or a missing counter, as 0", async () => {
+      const id = await seedPlanning();
+      await tx((trx) => store.addTaskResourceUsage(trx, id, { tokens_output: 5 }, 1));
+      await tx((trx) =>
+        store.addTaskResourceUsage(trx, id, { tokens_input: 3, tokens_output: 5 }, 2),
+      );
+
+      expect(await usageOf(id)).toEqual({
+        tokens_input: 3,
+        tokens_output: 10,
+        counted_fix_pass: 2,
+      });
+    });
+
+    it("leaves the counters as they are for an empty patch", async () => {
+      const id = await seedPlanning();
+      await tx((trx) => store.setTaskResourceUsage(trx, id, { tokens_input: 3 }));
+      await tx((trx) => store.addTaskResourceUsage(trx, id, {}, 1));
+
+      expect(await usageOf(id)).toEqual({ tokens_input: 3, counted_fix_pass: 1 });
+    });
+
+    it("adds a pass's usage once: a second add for the same pass changes nothing, a later pass adds", async () => {
+      const id = await seedPlanning();
+      await tx((trx) => store.setTaskResourceUsage(trx, id, { tokens_input: 100, cost_usd: 0.5 }));
+      const pass1 = { tokens_input: 40, cost_usd: 0.25 };
+
+      await tx((trx) => store.addTaskResourceUsage(trx, id, pass1, 1));
+      expect(await tx((trx) => store.addTaskResourceUsage(trx, id, pass1, 1))).toEqual({
+        kind: "already_counted",
+      });
+      expect(await usageOf(id)).toMatchObject({ tokens_input: 140, cost_usd: 0.75 });
+
+      expect(
+        await tx((trx) => store.addTaskResourceUsage(trx, id, { tokens_input: 2 }, 2)),
+      ).toEqual({
+        kind: "added",
+      });
+      expect(await usageOf(id)).toMatchObject({
+        tokens_input: 142,
+        cost_usd: 0.75,
+        counted_fix_pass: 2,
+      });
+    });
+
+    it("rejects a counter outside the session's", async () => {
+      const id = await seedPlanning();
+      await expect(
+        // @ts-expect-error: intentionally invalid input — verifies runtime Zod rejection
+        tx((trx) => store.addTaskResourceUsage(trx, id, { cpu_seconds: 1 }, 1)),
+      ).rejects.toThrow();
     });
   });
 });

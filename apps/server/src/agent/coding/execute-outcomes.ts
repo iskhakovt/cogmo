@@ -7,12 +7,13 @@
 import { err, ok, type Result } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { EventPublisher } from "../../inngest/durable.js";
+import { buildCodingTaskCliDoneEvent } from "../../inngest/events.js";
 import type { SandboxSession } from "../../sandbox/index.js";
 import type { BackendUsage } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import type { ExecutePushCredentials } from "./execute-sandbox.js";
-import { completionTokens } from "./execute-session.js";
+import { completionTokens, type ExecuteSession } from "./execute-session.js";
 import { runBranchFor } from "./git-as-transport.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
@@ -36,6 +37,9 @@ interface ExecuteExitContext {
   stream: ExecuteStreamHandle;
 }
 
+/** What started an execute run: the plan gate clearing, or a pre-submit refusal granting fix pass `fixPass`. */
+export type ExecuteTrigger = { kind: "approved" } | { kind: "fix"; fixPass: number };
+
 /**
  * Below the claim on purpose: a throw here fails the function, which sends
  * `coding-task-reconcile` at a row that — before the claim — this run has no
@@ -43,12 +47,14 @@ interface ExecuteExitContext {
  * them, so checking them in the bare body is stable across replays. The
  * row's CHECKs hold `plan_approved_at` set at `executing`; `session_id` and
  * `worktree_assignment` have no CHECK, since the plan run advances to
- * `awaiting_approval` whether or not the backend reported a session id.
+ * `awaiting_approval` whether or not the backend reported a session id. A
+ * fix pass starts a fresh session, so needs no session id.
  */
 export async function checkExecutable(
   task: CodingTaskRow,
   stream: ExecuteStreamHandle,
-): Promise<{ sessionId: string; worktreeAssignment: WorktreeAssignment }> {
+  trigger: ExecuteTrigger,
+): Promise<{ session: ExecuteSession; worktreeAssignment: WorktreeAssignment }> {
   const failedCheck = async (message: string): Promise<Error> => {
     await stream.fail(message).catch(() => {});
     return new Error(message);
@@ -58,15 +64,23 @@ export async function checkExecutable(
       `coding task ${task.id} has no plan_approved_at — execute fired prematurely`,
     );
   }
-  if (!task.sessionId) {
-    throw await failedCheck(
-      `coding task ${task.id} has no session_id — plan phase didn't capture it`,
-    );
-  }
+  const { sessionId } = task;
+  const session = await match(trigger)
+    .returnType<Promise<ExecuteSession>>()
+    .with({ kind: "approved" }, async () => {
+      if (!sessionId) {
+        throw await failedCheck(
+          `coding task ${task.id} has no session_id — plan phase didn't capture it`,
+        );
+      }
+      return { kind: "resume", sessionId };
+    })
+    .with({ kind: "fix" }, async ({ fixPass }) => ({ kind: "fix", fixPass }))
+    .exhaustive();
   if (!task.worktreeAssignment) {
     throw await failedCheck(`coding task ${task.id} has no worktree_assignment`);
   }
-  return { sessionId: task.sessionId, worktreeAssignment: task.worktreeAssignment };
+  return { session, worktreeAssignment: task.worktreeAssignment };
 }
 
 /**
@@ -204,8 +218,9 @@ type HandOffOutcome = "handed_off" | "left_executing";
  * `pending_verify`, then reap this container before emitting
  * `coding/task/cli-done`, so the verify run gets a fresh container with its
  * own secrets bound rather than reusing this one. The step boundary covers
- * replay; the `cli-done-<taskId>` id covers the crash window it can't, and
- * past the bus's window the verify claim skips a duplicate.
+ * replay; the `cli-done-<taskId>` id, suffixed per fix pass, covers the
+ * crash window it can't, and past the bus's window the verify claim skips a
+ * duplicate.
  *
  * The transition is conditional on `executing`, so a Cancel that landed
  * during `execute-cli` stays cancelled, and the run reclaims the worktree
@@ -215,7 +230,7 @@ export async function handOffToVerify(
   run: CodingRun,
   deps: ExecuteOutcomeDeps,
   inngest: EventPublisher,
-  exit: ExecuteExitContext & { usage: BackendUsage | undefined },
+  exit: ExecuteExitContext & { usage: BackendUsage | undefined; fixPass: number },
 ): Promise<HandOffOutcome> {
   // `transition-pending-verify` supersedes `set-status-pending-verify`, an
   // unconditional write that memoized `void`. A run in flight that already
@@ -244,11 +259,7 @@ export async function handOffToVerify(
   await stampSandboxDeleted(run, deps, "persist-sandbox-deleted");
   await run.stepRun("emit-cli-done", () =>
     inngest
-      .send({
-        name: "coding/task/cli-done",
-        data: { taskId: run.taskId },
-        id: `cli-done-${run.taskId}`,
-      })
+      .send(buildCodingTaskCliDoneEvent({ taskId: run.taskId, fixPass: exit.fixPass }))
       .then(() => undefined),
   );
   // After the durable work: a subscriber failure (a transient Telegram error

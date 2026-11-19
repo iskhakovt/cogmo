@@ -18,14 +18,17 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { InngestTestEngine } from "@inngest/test";
+import { InngestTestEngine, mockCtx } from "@inngest/test";
 import type { Octokit } from "@octokit/rest";
+import { StepError } from "inngest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import { inngest } from "../../inngest/client.js";
 import {
   type GitHubIdentity,
@@ -44,7 +47,13 @@ import {
   type StatefulCodingStore,
   statefulCodingStore,
 } from "../../test/coding-fixtures.js";
-import { emittedEventNames, fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
+import {
+  directStep,
+  emittedEventNames,
+  fakeRunInTx,
+  invokeInngestFn,
+  spyOnInngestSend,
+} from "../../test/factories.js";
 import type { PresubmitDeps } from "./presubmit-stage.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import {
@@ -175,6 +184,26 @@ const cliDoneEvent = {
   name: "coding/task/cli-done",
   data: { taskId: FIXTURE_TASK_ID },
 } as const;
+
+/** The run's id. Inngest keeps one per run; the test engine mints one per invocation unless pinned. */
+const RUN_ID = "verify-run-1";
+const pinRunId: NonNullable<InngestTestEngine.Options["transformCtx"]> = (ctx) => ({
+  ...mockCtx(ctx),
+  runId: RUN_ID,
+});
+
+const EmittedSchema = z.object({
+  payload: z.union([z.array(z.unknown()), z.unknown()]),
+});
+const EventSchema = z.object({ name: z.string(), data: z.unknown(), id: z.string().optional() });
+
+/** Every event the spy saw: name, data and dedup id. */
+function emittedEvents(spy: ReturnType<typeof spyOnInngestSend>) {
+  return spy.mock.calls.flatMap(([arg]) => {
+    const { payload } = EmittedSchema.parse(arg);
+    return (Array.isArray(payload) ? payload : [payload]).map((event) => EventSchema.parse(event));
+  });
+}
 
 describe("coding-task-verify — Inngest replay", () => {
   it("verifies, pushes, and opens the PR exactly once across the run's boundaries", async () => {
@@ -424,7 +453,50 @@ describe("coding-task-verify — Inngest replay", () => {
       });
       const repo = codingRepoRow({ name: "skills", remoteUrl: REMOTE });
       const presubmit = { skillRunner, skillsRepoPath: bare, releaseVersion: "dev" };
-      return { ...setup(task, { repo, headSha: tip, presubmit }), skillRunner };
+      const h = setup(task, { repo, headSha: tip, presubmit });
+      const askpassBaseDir = join(root, "askpass");
+      return {
+        ...h,
+        deps: { ...h.deps, askpassBaseDir },
+        askpassDir: join(askpassBaseDir, FIXTURE_TASK_ID),
+        skillRunner,
+      };
+    }
+
+    /** Pass `fixPass`'s `cli-done`, and a task that pass's execute run handed off. */
+    const passEvent = (fixPass: number) => ({
+      name: "coding/task/cli-done",
+      data: { taskId: FIXTURE_TASK_ID, fixPass },
+    });
+    const atPass = (fixPass: number, overrides: Partial<CodingTaskRow> = {}) =>
+      verifiableTask({
+        presubmitFixPasses: fixPass,
+        ...(fixPass > 0 && {
+          presubmitVerdict: {
+            kind: "refused",
+            sha: "f".repeat(40),
+            findings: [FINDING],
+            runId: "verify-run-0",
+            fixPass: fixPass - 1,
+            checkedAt: "2026-08-20T00:01:00.000Z",
+            releaseVersion: "dev",
+          },
+        }),
+        ...overrides,
+      });
+
+    /** The fix pass's execute run provisioning the same askpass path once the emit is out. */
+    function provisionOnEmit(askpassDir: string): void {
+      sendSpy.mockImplementation(async (arg) => {
+        const { payload } = EmittedSchema.parse(arg);
+        const events = (Array.isArray(payload) ? payload : [payload]).map((e) =>
+          EventSchema.parse(e),
+        );
+        if (events.some((e) => e.name === "coding/task/presubmit-refused")) {
+          mkdirSync(askpassDir, { recursive: true });
+        }
+        return { ids: [] };
+      });
     }
 
     /** The steps a run memoized up to its pre-submit, which judged the pushed tip refused. */
@@ -463,13 +535,81 @@ describe("coding-task-verify — Inngest replay", () => {
       ];
     }
 
-    it("a refusal fails the task presubmit_refused with its findings, once across the run's boundaries, and opens no PR", async () => {
-      const h = skillsSetup(verifiableTask());
+    it.each([0, 1])(
+      "a refusal at pass %i hands the task back to the next pass, reaping before the emit, and opens no PR",
+      async (fixPass) => {
+        const h = skillsSetup(atPass(fixPass));
+        provisionOnEmit(h.askpassDir);
+        const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+        const { result, error } = await new InngestTestEngine({
+          function: fn,
+          events: [fixPass === 0 ? cliDoneEvent : passEvent(fixPass)],
+          transformCtx: pinRunId,
+        }).execute();
+
+        expect(error).toBeUndefined();
+        expect(result).toEqual({ status: "pending_fix" });
+        expect(h.store.current()).toMatchObject({
+          status: "pending_fix",
+          presubmitFixPasses: fixPass + 1,
+          failureReason: null,
+          presubmitVerdict: { kind: "refused", sha: tip, runId: RUN_ID, fixPass },
+        });
+        expect(h.skillRunner.checkRegister).toHaveBeenCalledTimes(1);
+        expect(h.log.push).toBe(1);
+        expect(h.create).not.toHaveBeenCalled();
+        const suffix = fixPass === 0 ? "" : `-f${fixPass}`;
+        expect(emittedEvents(sendSpy)).toEqual([
+          expect.objectContaining({
+            name: "coding/task/verify-complete",
+            id: `verify-complete-${FIXTURE_TASK_ID}${suffix}`,
+          }),
+          {
+            name: "coding/task/presubmit-refused",
+            data: { taskId: FIXTURE_TASK_ID, fixPass: fixPass + 1 },
+            id: `presubmit-refused-${FIXTURE_TASK_ID}-f${fixPass + 1}`,
+          },
+        ]);
+        // `teardown-before-fix` reaped once; the `finally` neither swept again
+        // nor released the path the fix pass has provisioned since.
+        expect(h.sandbox.teardownCalls()).toBe(1);
+        expect(existsSync(h.askpassDir)).toBe(true);
+        expect(await git("-C", bare, "for-each-ref", "refs/cogmo-presubmit/")).toBe("");
+      },
+    );
+
+    it("a reap that fails inside `teardown-before-fix` is swallowed, and the hand-back still emits", async () => {
+      const h = skillsSetup(atPass(0));
+      vi.mocked(h.sandbox.sandbox.deleteByTaskId).mockRejectedValue(new Error("daytona 503"));
       const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
       const { result, error } = await new InngestTestEngine({
         function: fn,
         events: [cliDoneEvent],
+        transformCtx: pinRunId,
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "pending_fix" });
+      expect(h.store.current()).toMatchObject({ status: "pending_fix", presubmitFixPasses: 1 });
+      expect(emittedEventNames(sendSpy)).toEqual([
+        "coding/task/verify-complete",
+        "coding/task/presubmit-refused",
+      ]);
+      // The step's reap alone: the `finally` does not sweep again.
+      expect(h.sandbox.sandbox.deleteByTaskId).toHaveBeenCalledTimes(1);
+      expect(existsSync(h.askpassDir)).toBe(false);
+    });
+
+    it("a refusal with no pass left fails the task presubmit_refused with its findings", async () => {
+      const h = skillsSetup(atPass(2));
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [passEvent(2)],
+        transformCtx: pinRunId,
       }).execute();
 
       expect(error).toBeUndefined();
@@ -479,21 +619,208 @@ describe("coding-task-verify — Inngest replay", () => {
         status: "failed",
         failureReason: "presubmit_refused",
         failureDetail: FINDING,
-        presubmitVerdict: { kind: "refused", sha: tip, fixPass: 0 },
+        presubmitFixPasses: 2,
+        presubmitVerdict: { kind: "refused", sha: tip, fixPass: 2 },
       });
-      expect(h.skillRunner.checkRegister).toHaveBeenCalledTimes(1);
-      expect(h.skillRunner.checkRegister).toHaveBeenCalledWith({
-        sha: tip,
-        signal: expect.any(AbortSignal),
-      });
-      expect(h.log.push).toBe(1);
       expect(h.create).not.toHaveBeenCalled();
       expect(emittedEventNames(sendSpy)).toEqual([
         "coding/task/verify-complete",
         "coding/task/failed",
       ]);
       expect(h.sandbox.teardownCalls()).toBe(1);
-      expect(await git("-C", bare, "for-each-ref", "refs/cogmo-presubmit/")).toBe("");
+      expect(existsSync(h.askpassDir)).toBe(false);
+    });
+
+    it("a repeated refusal, the tip and release an earlier pass refused, fails the task with no dry run", async () => {
+      const h = skillsSetup(
+        atPass(1, {
+          presubmitVerdict: {
+            kind: "refused",
+            sha: tip,
+            findings: [FINDING],
+            runId: "verify-run-0",
+            fixPass: 0,
+            checkedAt: "2026-08-20T00:01:00.000Z",
+            releaseVersion: "dev",
+          },
+        }),
+      );
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [passEvent(1)],
+        transformCtx: pinRunId,
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({
+        status: "failed",
+        failure: { reason: "presubmit_refused", detail: FINDING },
+      });
+      expect(h.skillRunner.checkRegister).not.toHaveBeenCalled();
+      expect(h.store.current()).toMatchObject({
+        status: "failed",
+        presubmitFixPasses: 1,
+        presubmitVerdict: { runId: "verify-run-0", fixPass: 0 },
+      });
+      expect(emittedEventNames(sendSpy)).toEqual([
+        "coding/task/verify-complete",
+        "coding/task/failed",
+      ]);
+    });
+
+    it("a trigger from an earlier pass loses its claim before any failure machinery", async () => {
+      // Pass 0's `cli-done`, redelivered while pass 1's execute run holds the task.
+      const h = skillsSetup(atPass(1));
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        transformCtx: pinRunId,
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "skipped" });
+      expect(h.store.current()).toMatchObject({ status: "pending_verify", claimedByRunId: null });
+      expect(h.log.verify).toBe(0);
+      expect(h.deps.store.failTaskIfNonTerminal).not.toHaveBeenCalled();
+      expect(h.sandbox.teardownCalls()).toBe(0);
+    });
+
+    it("`stale` at `pending_fix` with the next count is `transition-pending-fix`'s own commit: it reaps and emits", async () => {
+      const h = skillsSetup(atPass(0, { status: "pending_fix", presubmitFixPasses: 1 }));
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        transformCtx: pinRunId,
+        steps: refusedThroughPresubmit(),
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "pending_fix" });
+      expect(h.skillRunner.checkRegister).not.toHaveBeenCalled();
+      expect(emittedEventNames(sendSpy)).toEqual(["coding/task/presubmit-refused"]);
+      expect(h.sandbox.teardownCalls()).toBe(1);
+    });
+
+    it("`transition-pending-fix` finding the run's own `verifying` at another count throws in the step", async () => {
+      const h = skillsSetup(
+        atPass(0, {
+          status: "verifying",
+          presubmitFixPasses: 1,
+          presubmitVerdict: {
+            kind: "refused",
+            sha: tip,
+            findings: [FINDING],
+            runId: RUN_ID,
+            fixPass: 0,
+            checkedAt: "2026-08-20T00:01:30.000Z",
+            releaseVersion: "dev",
+          },
+        }),
+      );
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        transformCtx: pinRunId,
+        steps: refusedThroughPresubmit(),
+      }).execute();
+
+      expect(String(JSON.stringify(error))).toContain("not this run's refusal at pass 0");
+      expect(h.store.current()).toMatchObject({ status: "verifying", presubmitFixPasses: 1 });
+      expect(emittedEventNames(sendSpy)).not.toContain("coding/task/presubmit-refused");
+    });
+
+    /**
+     * Drives the run's handler with a step whose `failing` id has exhausted
+     * its retries, as the SDK hands that back: `InngestTestEngine` resolves a
+     * throwing mock as `undefined` instead (see `directStep`).
+     */
+    async function runWithFailedStep(
+      h: ReturnType<typeof skillsSetup>,
+      failing: { run: string | null; sendEvent?: string; onSend?: () => void },
+    ) {
+      const step = directStep({}, failing.run);
+      step.sendEvent.mockImplementation(async (id: string) => {
+        if (id !== failing.sendEvent) return { ids: [] };
+        failing.onSend?.();
+        throw new StepError(id, new Error(`step "${id}" failed after retries`));
+      });
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+      return invokeInngestFn(fn, { event: cliDoneEvent, step, runId: RUN_ID });
+    }
+
+    it("an `emit-presubmit-refused` that fails fails the task, and the `finally` skips its sweep and release", async () => {
+      const h = skillsSetup(atPass(0));
+
+      const result = await runWithFailedStep(h, {
+        run: null,
+        sendEvent: "emit-presubmit-refused",
+        // The send reached the bus: the fix pass provisions the same path.
+        onSend: () => mkdirSync(h.askpassDir, { recursive: true }),
+      });
+
+      expect(result).toMatchObject({ status: "failed", failure: { reason: "unexpected_error" } });
+      expect(h.store.current()).toMatchObject({
+        status: "failed",
+        failureReason: "unexpected_error",
+        presubmitFixPasses: 1,
+      });
+      // `teardown-before-fix`'s reap alone.
+      expect(h.sandbox.teardownCalls()).toBe(1);
+      expect(existsSync(h.askpassDir)).toBe(true);
+    });
+
+    it("a run whose `teardown-before-fix` never returned sweeps and releases in its `finally`", async () => {
+      const h = skillsSetup(atPass(0));
+
+      const result = await runWithFailedStep(h, { run: "teardown-before-fix" });
+
+      expect(result).toMatchObject({ status: "failed", failure: { reason: "unexpected_error" } });
+      expect(h.store.current()).toMatchObject({ status: "failed", presubmitFixPasses: 1 });
+      expect(h.sandbox.teardownCalls()).toBe(1);
+      expect(existsSync(h.askpassDir)).toBe(false);
+    });
+
+    it("a run that memoized slice 2's `transition-presubmit-failed` takes the failure as its own across this deploy", async () => {
+      // Its trigger has no `fixPass`, its pre-submit memo is pass 0's, and the
+      // task reads `failed` with the refusal: `transition-pending-fix` is new to
+      // it, reads that as the run's own failure, and the run announces it.
+      const h = skillsSetup(
+        verifiableTask({
+          status: "failed",
+          failureReason: "presubmit_refused",
+          failureDetail: FINDING,
+        }),
+      );
+      mkdirSync(h.askpassDir, { recursive: true });
+      const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+      const { result, error } = await new InngestTestEngine({
+        function: fn,
+        events: [cliDoneEvent],
+        transformCtx: pinRunId,
+        steps: [
+          ...refusedThroughPresubmit(),
+          { id: "transition-presubmit-failed", handler: () => ({ kind: "failed" }) },
+        ],
+      }).execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({
+        status: "failed",
+        failure: { reason: "presubmit_refused", detail: FINDING },
+      });
+      expect(h.store.current()).toMatchObject({ status: "failed", presubmitFixPasses: 0 });
+      expect(emittedEventNames(sendSpy)).toEqual(["coding/task/failed"]);
+      expect(h.sandbox.teardownCalls()).toBe(1);
+      expect(existsSync(h.askpassDir)).toBe(false);
     });
 
     it("a stale base fails the task presubmit_stale_base naming both shas", async () => {
@@ -508,6 +835,7 @@ describe("coding-task-verify — Inngest replay", () => {
       const { result, error } = await new InngestTestEngine({
         function: fn,
         events: [cliDoneEvent],
+        transformCtx: pinRunId,
       }).execute();
 
       expect(error).toBeUndefined();
@@ -546,6 +874,7 @@ describe("coding-task-verify — Inngest replay", () => {
       const { result, error } = await new InngestTestEngine({
         function: fn,
         events: [cliDoneEvent],
+        transformCtx: pinRunId,
       }).execute();
 
       expect(error).toBeUndefined();
@@ -561,15 +890,16 @@ describe("coding-task-verify — Inngest replay", () => {
 
     it("a run that memoized a refusal past `transition-pushed` reads `stale` at `pushed` as passed and opens the PR", async () => {
       // A slice-1 run across the deploy: its pre-submit proceeded on a
-      // refusal. `transition-presubmit-failed` is new to it, finds the row at
-      // `pushed`, which only the run's own `transition-pushed` writes, and the
-      // run carries on through its memoized steps.
+      // refusal at pass 0. `transition-pending-fix` is new to it, finds the
+      // row at `pushed`, which only the run's own `transition-pushed` writes,
+      // and the run carries on through its memoized steps.
       const h = skillsSetup(verifiableTask({ status: "pushed" }));
       const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
       const { result, error } = await new InngestTestEngine({
         function: fn,
         events: [cliDoneEvent],
+        transformCtx: pinRunId,
         steps: [
           ...refusedThroughPresubmit(),
           { id: "transition-pushed", handler: () => ({ kind: "transitioned" }) },
@@ -592,6 +922,7 @@ describe("coding-task-verify — Inngest replay", () => {
       const { result, error } = await new InngestTestEngine({
         function: fn,
         events: [cliDoneEvent],
+        transformCtx: pinRunId,
         steps: [
           ...refusedThroughPresubmit(),
           { id: "transition-pushed", handler: () => ({ kind: "transitioned" }) },
@@ -633,6 +964,7 @@ describe("coding-task-verify — Inngest replay", () => {
       const { result, error } = await new InngestTestEngine({
         function: fn,
         events: [cliDoneEvent],
+        transformCtx: pinRunId,
         steps: refusedThroughPresubmit(),
       }).execute();
 
@@ -657,6 +989,7 @@ describe("coding-task-verify — Inngest replay", () => {
         const { result, error } = await new InngestTestEngine({
           function: fn,
           events: [cliDoneEvent],
+          transformCtx: pinRunId,
           steps: refusedThroughPresubmit(),
         }).execute();
 
@@ -677,6 +1010,7 @@ describe("coding-task-verify — Inngest replay", () => {
       const { result, error } = await new InngestTestEngine({
         function: fn,
         events: [cliDoneEvent],
+        transformCtx: pinRunId,
         steps: [
           { id: "set-status-verifying", handler: () => ({ kind: "transitioned" }) },
           {

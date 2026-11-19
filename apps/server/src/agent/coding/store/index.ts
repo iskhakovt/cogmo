@@ -7,6 +7,7 @@ import {
   getTableColumns,
   inArray,
   isNull,
+  lt,
   ne,
   notInArray,
   or,
@@ -25,6 +26,8 @@ import {
   type PrMetadata,
   type ResourceUsage,
   ResourceUsageSchema,
+  type SessionUsage,
+  SessionUsageSchema,
   type TaskFailure,
   type WorktreeAssignment,
 } from "../types.js";
@@ -52,6 +55,7 @@ export type CodingTaskStatus =
   | "executing"
   | "pending_verify"
   | "verifying"
+  | "pending_fix"
   | "pushed"
   | "pr_open"
   | "failed"
@@ -184,6 +188,8 @@ export interface CodingTaskRow {
   claimedByRunId: string | null;
   /** The skills repo's latest pre-submit verdict; null until the first, and on every other repo. */
   presubmitVerdict: PresubmitVerdict | null;
+  /** Fix passes granted after pre-submit refusals, 0 to `PRESUBMIT_FIX_PASSES`. */
+  presubmitFixPasses: number;
   createdAt: Date;
 }
 
@@ -356,6 +362,19 @@ export interface CodingStore {
   setTaskResourceUsage(tx: Transaction, id: string, patch: Partial<ResourceUsage>): Promise<void>;
 
   /**
+   * Adds fix pass `fixPass`'s session `usage` to the row's `resource_usage`
+   * counters in one UPDATE, a missing counter read as 0, and records the
+   * pass in `counted_fix_pass`. `already_counted`: the counters include this
+   * pass or a later one, and nothing is written.
+   */
+  addTaskResourceUsage(
+    tx: Transaction,
+    id: string,
+    usage: SessionUsage,
+    fixPass: number,
+  ): Promise<{ kind: "added" } | { kind: "already_counted" }>;
+
+  /**
    * Stamp `resource_usage.sandbox.deleted_at` to `deletedAt` via
    * `jsonb_set` — single atomic UPDATE, no read. No-op when the
    * `sandbox` block isn't present (resume-path tasks that never wrote
@@ -436,9 +455,31 @@ export interface CodingStore {
      * every delivery. Omit for transitions that aren't ownership claims.
      */
     claimedByRunId?: string,
+    /** Also matches `presubmit_fix_passes`: a claim keyed by the trigger's pass. */
+    fixPasses?: number,
   ): Promise<
     | { kind: "transitioned" }
     | { kind: "stale"; status: CodingTaskStatus; claimedByRunId: string | null }
+    | { kind: "not_found" }
+  >;
+
+  /**
+   * `verifying → pending_fix`, moving `presubmit_fix_passes` to `fixPass + 1`,
+   * iff the task is `verifying` at `fixPass` with a refused verdict keyed to
+   * `runId` at that pass. `stale` carries what the row holds.
+   */
+  transitionTaskPendingFix(
+    tx: Transaction,
+    id: string,
+    key: { runId: string; fixPass: number },
+  ): Promise<
+    | { kind: "transitioned" }
+    | {
+        kind: "stale";
+        status: CodingTaskStatus;
+        fixPasses: number;
+        failureReason: CodingTaskFailureReason | null;
+      }
     | { kind: "not_found" }
   >;
 
@@ -744,6 +785,40 @@ export class DrizzleCodingStore implements CodingStore {
       .where(eq(codingTasks.id, id));
   }
 
+  async addTaskResourceUsage(
+    tx: Transaction,
+    id: string,
+    usage: SessionUsage,
+    fixPass: number,
+  ): Promise<{ kind: "added" } | { kind: "already_counted" }> {
+    // Validated here: the raw-SQL merge below bypasses the `jsonbZod`
+    // toDriver path that would otherwise run validation.
+    const added = JSON.stringify(SessionUsageSchema.parse(usage));
+    const marker = JSON.stringify(
+      ResourceUsageSchema.pick({ counted_fix_pass: true }).parse({ counted_fix_pass: fixPass }),
+    );
+    const usageJson = codingTasks.resourceUsage;
+    const updated = await tx
+      .update(codingTasks)
+      .set({
+        // Each key of `added` summed with the row's (the aggregate is null
+        // for an empty patch), then the pass recorded.
+        resourceUsage: sql`COALESCE(${usageJson}, '{}'::jsonb) || COALESCE((
+          SELECT jsonb_object_agg(key, COALESCE((${usageJson}->key)::numeric, 0) + value::numeric)
+          FROM jsonb_each(${added}::jsonb)
+        ), '{}'::jsonb) || ${marker}::jsonb`,
+      })
+      .where(
+        and(
+          eq(codingTasks.id, id),
+          // A JSONB path, which the typed API does not reach.
+          lt(sql`COALESCE((${usageJson}->>'counted_fix_pass')::int, 0)`, fixPass),
+        ),
+      )
+      .returning({ id: codingTasks.id });
+    return updated.length > 0 ? { kind: "added" } : { kind: "already_counted" };
+  }
+
   async setTaskSandboxDeletedAt(tx: Transaction, id: string, deletedAt: string): Promise<void> {
     // `jsonb_set` updates the nested `sandbox.deleted_at` path
     // atomically. The WHERE clause gates on (a) the `sandbox` block
@@ -843,6 +918,7 @@ export class DrizzleCodingStore implements CodingStore {
     from: CodingTaskStatus,
     to: CodingTaskForwardStatus,
     claimedByRunId?: string,
+    fixPasses?: number,
   ): Promise<
     | { kind: "transitioned" }
     | { kind: "stale"; status: CodingTaskStatus; claimedByRunId: string | null }
@@ -869,7 +945,13 @@ export class DrizzleCodingStore implements CodingStore {
     const updated = await tx
       .update(codingTasks)
       .set({ status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) })
-      .where(and(eq(codingTasks.id, id), claimable))
+      .where(
+        and(
+          eq(codingTasks.id, id),
+          claimable,
+          fixPasses === undefined ? undefined : eq(codingTasks.presubmitFixPasses, fixPasses),
+        ),
+      )
       .returning({ id: codingTasks.id });
     if (updated.length > 0) return { kind: "transitioned" as const };
 
@@ -881,6 +963,51 @@ export class DrizzleCodingStore implements CodingStore {
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
     return { kind: "stale" as const, status: row.status, claimedByRunId: row.claimedByRunId };
+  }
+
+  async transitionTaskPendingFix(
+    tx: Transaction,
+    id: string,
+    key: { runId: string; fixPass: number },
+  ): Promise<
+    | { kind: "transitioned" }
+    | {
+        kind: "stale";
+        status: CodingTaskStatus;
+        fixPasses: number;
+        failureReason: CodingTaskFailureReason | null;
+      }
+    | { kind: "not_found" }
+  > {
+    const verdict = codingTasks.presubmitVerdict;
+    const updated = await tx
+      .update(codingTasks)
+      .set({ status: "pending_fix", presubmitFixPasses: key.fixPass + 1 })
+      .where(
+        and(
+          eq(codingTasks.id, id),
+          eq(codingTasks.status, "verifying"),
+          eq(codingTasks.presubmitFixPasses, key.fixPass),
+          // JSONB paths, which the typed API does not reach.
+          sql`${verdict}->>'kind' = 'refused'`,
+          sql`${verdict}->>'runId' = ${key.runId}`,
+          sql`${verdict}->>'fixPass' = ${String(key.fixPass)}`,
+        ),
+      )
+      .returning({ id: codingTasks.id });
+    if (updated.length > 0) return { kind: "transitioned" as const };
+    const rows = await tx
+      .select({
+        status: codingTasks.status,
+        fixPasses: codingTasks.presubmitFixPasses,
+        failureReason: codingTasks.failureReason,
+      })
+      .from(codingTasks)
+      .where(eq(codingTasks.id, id))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return { kind: "not_found" as const };
+    return { kind: "stale" as const, ...row };
   }
 
   async approvePlanIfPending(
