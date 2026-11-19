@@ -82,12 +82,13 @@ guards on its own upstream key, so only adapters with keys in `.env` re-record.
 Re-record when prompt structure, tool sets, models, or an SDK's wire format
 changed. Then **verify each cassette in replay mode**, the mode CI runs.
 
-Any change to the skills repo toolchain (`images/skills/toolchain/`,
-`images/skills/src/cogmo_ctx/`) makes `skill-authoring.integration.test.ts`
-refuse to replay until it is re-recorded (its header has the steps). A uv bump
-or a `TOOL_PINS` bump in `src/skills/toolchain-codegen.ts` is one. The record run bills Daytona and
-Anthropic and force-resets `main` on the throwaway skills repo, so get the
-owner's go-ahead when the bump is planned, not after the rest is done.
+Anything that changes `images/skills/toolchain/` or `images/skills/src/cogmo_ctx/`
+(uv, `TOOL_PINS` in `src/skills/toolchain-codegen.ts`, pydantic, the skills
+image's Python, a Dependabot patch included) makes
+`skill-authoring.integration.test.ts` refuse to replay until it is re-recorded
+(its header has the steps). The record run bills Daytona and Anthropic and
+force-resets `main` on the throwaway skills repo, so get the owner's go-ahead
+before starting the bump.
 
 Two traps:
 
