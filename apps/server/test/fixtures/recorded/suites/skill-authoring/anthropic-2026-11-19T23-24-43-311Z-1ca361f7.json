@@ -11,32 +11,32 @@
         "content": "Bitcoin is currently at **$64,725 USD**.",
         "usage": {
           "input_tokens": 2,
-          "cache_creation_input_tokens": 150,
-          "cache_read_input_tokens": 14942,
+          "cache_creation_input_tokens": 192,
+          "cache_read_input_tokens": 15036,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 150
+            "ephemeral_1h_input_tokens": 192
           },
           "output_tokens": 22
         }
       },
       "recordedTimings": {
-        "ttftMs": 612,
+        "ttftMs": 1067,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          48,
-          42,
+          49,
+          45,
           0,
-          1,
+          2,
           0
         ],
-        "totalDurationMs": 703
+        "totalDurationMs": 1163
       },
       "metadata": {
-        "systemHash": "e3a0c9e4",
-        "toolsHash": "46deb234"
+        "systemHash": "20886bcb",
+        "toolsHash": "30bce4ef"
       }
     }
   ]
