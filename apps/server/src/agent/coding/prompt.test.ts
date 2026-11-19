@@ -102,10 +102,17 @@ describe("buildFixPrompt", () => {
     expect(out).toContain("cogmo/abc123 already holds the work");
   });
 
-  it("asks for commits on top, no amend or rebase, inside the skill, with the verify rerun", () => {
+  it("asks for commits on top, no amend or rebase, findings first, with the verify rerun", () => {
     const out = buildFixPrompt(planned(), repo({ name: SKILLS_CODING_REPO_NAME }), fix);
     expect(out).toMatch(/Commit on top of the branch\. Do not amend, rebase or reset/);
-    expect(out).toContain("Change only what the findings name, inside the skill's directory.");
+    expect(out).toContain("Change only what the findings name.");
+    // An `owned_paths` finding is fixed outside the skill's directory.
+    expect(out).toContain(
+      "A finding about a file outside the skill's directory is fixed by restoring it to `main`'s version, or deleting it if `main` has none.",
+    );
+    expect(out).toContain(
+      "Where the task asks for something the findings refuse, the findings win.",
+    );
     expect(out).toContain("Run the verify command");
     expect(out).toContain("pnpm typecheck && pnpm lint && pnpm test");
     expect(out).toContain(ENTRYPOINT_RULE);
