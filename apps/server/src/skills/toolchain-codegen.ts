@@ -36,10 +36,10 @@ const TOOLCHAIN_ENTRIES = ["pyproject.toml", "uv.lock", "CLAUDE.md", ".gitignore
  * `RUNTIME_PACKAGES`.
  */
 const TOOL_PINS: Readonly<Record<string, string>> = {
-  pyrefly: "1.4.0",
+  pyrefly: "1.4.1",
   pytest: "9.2.0",
-  "pytest-asyncio": "1.4.1",
-  ruff: "0.17.3",
+  "pytest-asyncio": "1.5.0",
+  ruff: "0.17.5",
 };
 
 /**
