@@ -135,7 +135,7 @@ describe("polling", () => {
     vi.useRealTimers();
   });
 
-  it("starts polling again after getUpdates answers 409", async () => {
+  it("hands polling to the adapter, which starts again after getUpdates answers 409", async () => {
     const error = vi.spyOn(logger, "error").mockImplementation(() => {});
     try {
       let conflicted = false;

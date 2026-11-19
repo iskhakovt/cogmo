@@ -40,7 +40,7 @@ type PollingState =
   | PollingRun
   | { kind: "backoff"; timer: NodeJS.Timeout }
   | { kind: "failed"; reason: "unauthorized" | "rejected" | "ended" }
-  | { kind: "stopped" };
+  | { kind: "stopped"; drained: Promise<void> };
 
 /** How a `bot.start()` ended. */
 type PollingExit =
@@ -50,11 +50,7 @@ type PollingExit =
   | { kind: "unauthorized"; err: GrammyError }
   | { kind: "rejected"; err: unknown };
 
-/**
- * grammY retries network errors, 5xx and 429 itself, so `bot.start()` rejects
- * only on a 401 or 409 from `getUpdates`, on any other 4xx from its setup
- * calls, and with "Aborted delay" when `bot.stop()` interrupts a setup retry.
- */
+/** What `bot.start()` rejects with (design/transport/telegram.md → Polling Supervision). */
 function classifyRejection(err: unknown): PollingExit {
   return match(err)
     .returnType<PollingExit>()
@@ -114,6 +110,11 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
    * registering every handler: grammY refuses middleware once polling starts.
    */
   startPolling(): void {
+    if (this.#polling.kind !== "idle") {
+      throw new Error(
+        `telegram: startPolling() while ${this.#polling.kind}; setup() starts it once`,
+      );
+    }
     this.#poll(0);
   }
 
@@ -278,13 +279,22 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
     }
   }
 
-  async stop(): Promise<void> {
+  /** Idempotent: a later call settles with the first call's drain. */
+  stop(): Promise<void> {
+    if (this.#polling.kind === "stopped") return this.#polling.drained;
     const from = this.#polling;
-    this.#polling = { kind: "stopped" };
+    const drained = Promise.withResolvers<void>();
+    // First, so a run that exits from here on settles silently and starts nothing.
+    this.#polling = { kind: "stopped", drained: drained.promise };
+    drained.resolve(this.#drain(from));
+    return drained.promise;
+  }
+
+  async #drain(from: Exclude<PollingState, { kind: "stopped" }>): Promise<void> {
     await match(from)
       .with({ kind: "polling" }, ({ run }) => this.#stopRun(run))
       .with({ kind: "backoff" }, ({ timer }) => clearTimeout(timer))
-      .with({ kind: P.union("idle", "failed", "stopped") }, () => undefined)
+      .with({ kind: P.union("idle", "failed") }, () => undefined)
       .exhaustive();
     // `bot.stop()` fixes its offset before the loop finishes the batch, and
     // confirms nothing once polling is down, so the updates handled since

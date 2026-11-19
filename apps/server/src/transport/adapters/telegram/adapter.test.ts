@@ -1,5 +1,8 @@
+import { Bot } from "grammy";
+import type { UserFromGetMe } from "grammy/types";
 import { err, ok } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { logger } from "../../../logger.js";
 import { expectDefined, resolvesWithin } from "../../../test/assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
@@ -12,6 +15,7 @@ import {
 } from "../../../test/telegram/grammy-mock.js";
 import { createAdapter } from "../../../test/telegram/harness.js";
 import type { StreamingAdapter } from "../../types.js";
+import { TelegramAdapter } from "./adapter.js";
 import { setup } from "./index.js";
 
 vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
@@ -253,6 +257,7 @@ describe("TelegramAdapter", () => {
       loops(rejectWith(conflict()));
       const { adapter } = await createAdapter();
       await vi.advanceTimersByTimeAsync(1_000);
+      expect(vi.getTimerCount()).toBe(1);
 
       await adapter.stop();
 
@@ -289,6 +294,131 @@ describe("TelegramAdapter", () => {
       expect(starts()).toBe(1);
       expect(logs.warn).toHaveBeenCalledWith({ err: failure }, expect.stringContaining("stopping"));
       expect(logs.error).not.toHaveBeenCalled();
+    });
+
+    it("settles a second stop() with the first one's drain", async () => {
+      const confirmed = Promise.withResolvers<void>();
+      let botStops = 0;
+      botLifecycle.stop = () => {
+        botStops += 1;
+        return confirmed.promise;
+      };
+      const { adapter } = await createAdapter();
+      let secondSettled = false;
+
+      const first = adapter.stop();
+      const second = adapter.stop().then(() => {
+        secondSettled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(secondSettled).toBe(false);
+      confirmed.resolve();
+      await Promise.all([first, second]);
+      expect(secondSettled).toBe(true);
+      expect(botStops).toBe(1);
+    });
+
+    it("refuses startPolling() once polling has started or stopped", async () => {
+      const adapter = new TelegramAdapter(new Bot("fake"), mockAttachmentStore());
+      adapter.startPolling();
+      expect(() => adapter.startPolling()).toThrow("while polling");
+
+      await adapter.stop();
+      expect(() => adapter.startPolling()).toThrow("while stopped");
+    });
+
+    describe("on grammY's own Bot", () => {
+      const BOT_INFO: UserFromGetMe = {
+        id: 1,
+        is_bot: true,
+        first_name: "cogmo",
+        username: "cogmo_bot",
+        can_join_groups: false,
+        can_read_all_group_messages: false,
+        supports_inline_queries: false,
+        can_connect_to_business: false,
+        has_main_web_app: false,
+        has_topics_enabled: false,
+        allows_users_to_create_topics: false,
+        can_manage_bots: false,
+        supports_join_request_queries: false,
+      };
+
+      interface ApiCall {
+        method: string;
+        payload: Record<string, unknown>;
+      }
+
+      /**
+       * A Bot API behind grammY's `fetch`: each long poll takes the next of
+       * `polls`, and once they run out it stays open until grammY aborts it.
+       * Every other call succeeds.
+       */
+      function fakeBotApi(polls: object[]): { fetch: typeof fetch; calls: ApiCall[] } {
+        const calls: ApiCall[] = [];
+        const fetch: typeof globalThis.fetch = async (input, init) => {
+          const method = String(input).split("/").at(-1) ?? "";
+          const payload = z
+            .record(z.string(), z.unknown())
+            .parse(JSON.parse(String(init?.body ?? "{}")));
+          calls.push({ method, payload });
+          const longPoll = typeof payload.timeout === "number" && payload.timeout > 0;
+          if (method !== "getUpdates" || !longPoll) {
+            return Response.json({ ok: true, result: method === "getUpdates" ? [] : true });
+          }
+          const next = polls.shift();
+          if (next !== undefined) return Response.json(next);
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init?.signal?.reason));
+          });
+        };
+        return { fetch, calls };
+      }
+
+      async function grammyAdapter(polls: object[]) {
+        const { Bot: GrammyBot } = await vi.importActual<typeof import("grammy")>("grammy");
+        const api = fakeBotApi(polls);
+        const bot = new GrammyBot("123:fake", { botInfo: BOT_INFO, client: { fetch: api.fetch } });
+        const adapter = new TelegramAdapter(bot, mockAttachmentStore());
+        adapter.startPolling();
+        return { adapter, calls: api.calls };
+      }
+
+      const conflictPoll = { ok: false, error_code: 409, description: CONFLICT };
+
+      it("starts again after a 409 and resumes past the handled update", async () => {
+        const { adapter, calls } = await grammyAdapter([
+          { ok: true, result: [{ update_id: 41 }] },
+          conflictPoll,
+        ]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(calls.map((c) => c.method)).toEqual(["deleteWebhook", "getUpdates", "getUpdates"]);
+
+        await vi.advanceTimersByTimeAsync(3_750);
+
+        expect(calls.slice(3)).toEqual([
+          { method: "deleteWebhook", payload: {} },
+          { method: "getUpdates", payload: { offset: 42, timeout: 30, allowed_updates: [] } },
+        ]);
+        await adapter.stop();
+      });
+
+      it("calls nothing but the offset confirmation after a stop() during the backoff", async () => {
+        const { adapter, calls } = await grammyAdapter([
+          { ok: true, result: [{ update_id: 41 }] },
+          conflictPoll,
+        ]);
+        await vi.advanceTimersByTimeAsync(0);
+        const before = calls.length;
+
+        await adapter.stop();
+        await vi.advanceTimersByTimeAsync(HOUR_MS);
+
+        expect(calls.slice(before)).toEqual([
+          { method: "getUpdates", payload: { offset: 42, limit: 1, timeout: 0 } },
+        ]);
+      });
     });
   });
 
