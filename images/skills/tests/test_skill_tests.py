@@ -277,6 +277,15 @@ def test_a_line_that_is_not_a_decimal_number_is_no_line() -> None:
     assert (finding.line, finding.message) == (None, "test_a: boom")
 
 
+def test_a_line_past_the_int_conversion_limit_is_no_line() -> None:
+    long = "1" * (sys.get_int_max_str_digits() + 1)
+    failed = f'<testcase classname="test_skill" name="test_a" line="{long}"><failure message="boom" /></testcase>'
+
+    [finding] = skill_tests.judge(1, _cases(failed), "")
+
+    assert (finding.line, finding.message) == (None, "test_a: boom")
+
+
 def test_a_report_over_the_bound_is_refused_unread(suite: Suite) -> None:
     [(line, message)] = _findings(_run(suite, 'def test_a():\n    raise AssertionError("x" * 5_000_000)\n'))
 
@@ -291,6 +300,18 @@ def test_a_quoted_tail_drops_the_run_its_cut_ran_through() -> None:
     output = f"setup https://owner:{'hunter2' * 60}@example.com/data failed\n"
 
     [finding] = skill_tests.judge(3, _cases(), output)
+
+    assert finding.message == "pytest exited 3: … failed"
+
+
+def test_the_output_read_drops_the_run_its_seek_landed_in(tmp_path: Path) -> None:
+    # The seek lands inside the URL's userinfo; whitespace fills the rest, so too little is left for the quote's cut.
+    secret = f"{'hunter2' * 10}@example.com/data"
+    head = f"setup https://owner:{secret}"
+    output = tmp_path / "output.log"
+    output.write_text(f"{head}{' ' * (64 * 1024 - len(secret) + 10)}failed\n")
+
+    [finding] = skill_tests.judge(3, _cases(), skill_tests._output_tail(os.fspath(output)))
 
     assert finding.message == "pytest exited 3: … failed"
 
@@ -349,6 +370,49 @@ def test_the_runner_leaves_its_directory_to_the_session(suite: Suite, scratch: P
 
     [base] = scratch.iterdir()
     assert (base / "skill" / "test_skill.py").read_text() == "def test_a():\n    pass\n"
+
+
+def _exited_unreaped(argv: list[str]) -> subprocess.Popen[bytes]:
+    child = subprocess.Popen(argv)
+    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+    return child
+
+
+def test_an_exit_first_seen_at_the_deadline_is_at_the_cap() -> None:
+    child = _exited_unreaped([sys.executable, "-c", "pass"])
+    try:
+        assert not skill_tests._exited_by(child.pid, time.monotonic())
+        assert skill_tests._exited_by(child.pid, time.monotonic() + 30)
+    finally:
+        child.wait()
+
+
+class _Clock:
+    """A clock in place of the `time` module the wait reads, recording each sleep."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def test_the_wait_sleeps_no_longer_than_the_time_left(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(skill_tests, "time", clock)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    try:
+        assert not skill_tests._exited_by(child.pid, 0.07)
+    finally:
+        child.kill()
+        child.wait()
+
+    assert clock.slept == pytest.approx([0.05, 0.02])
 
 
 def _gone(pid: int) -> bool:

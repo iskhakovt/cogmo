@@ -171,6 +171,22 @@ describe("makeSandboxSkillTests", () => {
     },
   );
 
+  it("masks a secret the fatal reply quotes from pytest's output", async () => {
+    const h = sessionHarness(
+      {},
+      reply({
+        type: "fatal",
+        error: "pytest refused its command line: fetching https://owner:hunter2@example.com/plugin",
+      }),
+    );
+
+    expect((await run(h))._unsafeUnwrapErr()).toEqual({
+      kind: "unavailable",
+      detail:
+        "the suite could not run: pytest refused its command line: fetching https://REDACTED@example.com/plugin",
+    });
+  });
+
   it("reads a session that does not start as a suite that could not run", async () => {
     const h = sessionHarness({});
     vi.mocked(h.sandbox.create).mockRejectedValueOnce(new Error("daemon unreachable"));

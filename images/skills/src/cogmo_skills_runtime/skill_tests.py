@@ -52,6 +52,12 @@ _POLL_S = 0.05
 # A traceback's exception line in a JUnit failure or error.
 _RAISED = re.compile(r"^E\s+(\S.*)$")
 
+# What a seek into pytest's output drops: the run of text it lands in, through the whitespace ending it.
+_PARTIAL_RUN = re.compile(r"\S*\s")
+
+# The most digits a testcase's line takes: far past a bounded file's, and far short of CPython's int-conversion limit.
+_LINE_DIGITS = 9
+
 
 @dataclass(frozen=True)
 class Suite:
@@ -169,12 +175,12 @@ def _pytest(suite: Suite, directory: str, report: str, output: str, python_path:
 
 
 def _exited_by(pid: int, deadline: float) -> bool:
-    """Whether child `pid` exited by `deadline`, leaving it unreaped."""
-    while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(_POLL_S)
-    return True
+    """Whether child `pid` exited by `deadline`, leaving it unreaped. An exit first seen at `deadline` is at the cap."""
+    while (now := time.monotonic()) < deadline:
+        if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None:
+            return True
+        time.sleep(min(_POLL_S, deadline - now))
+    return False
 
 
 def _report(path: str) -> list[ET.Element] | str:
@@ -189,9 +195,16 @@ def _report(path: str) -> list[ET.Element] | str:
 
 
 def _output_tail(path: str) -> str:
+    """The last `_OUTPUT_READ` bytes of pytest's output. A seek that cut drops the run of text it landed in, which
+    could be a secret missing the start a mask recognises it by."""
+    size = os.path.getsize(path)
     with open(path, "rb") as f:
-        f.seek(max(os.path.getsize(path) - _OUTPUT_READ, 0))
-        return f.read().decode("utf-8", errors="replace")
+        f.seek(max(size - _OUTPUT_READ, 0))
+        text = f.read().decode("utf-8", errors="replace")
+    if size <= _OUTPUT_READ:
+        return text
+    partial = _PARTIAL_RUN.match(text)
+    return f"… {text[partial.end() :]}" if partial else "…"
 
 
 def _quoted(output: str) -> str:
@@ -217,7 +230,8 @@ def _case_finding(case: ET.Element) -> Finding | None:
     line = case.get("line", "")
     test = "::".join([*classname.split(".")[1:], case.get("name", "")])
     kind = "error: " if outcome.tag == "error" else ""
-    return Finding("tests", int(line) + 1 if line.isdecimal() else None, None, f"{test}: {kind}{reason}")
+    number = int(line) + 1 if line.isdecimal() and len(line) <= _LINE_DIGITS else None
+    return Finding("tests", number, None, f"{test}: {kind}{reason}")
 
 
 def _definition(body: str, test: str) -> int | None:

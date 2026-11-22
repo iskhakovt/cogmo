@@ -1,6 +1,7 @@
 import { err, ok, type Result } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { ResourceLimits } from "../../sandbox/index.js";
+import { cutDryRunText } from "../deploy/register-result.js";
 import { DEFAULT_DEPENDENCY_SESSION_LIMITS, RUNTIME_PYTHON } from "../deps.js";
 import { SkillTestsReplySchema, type SkillTestsRequest } from "../protocol.js";
 import type { SkillTests, SkillTestsError } from "../skill-tests.js";
@@ -83,23 +84,26 @@ export function makeSandboxSkillTests(opts: SandboxSkillTestsOptions): SkillTest
         },
       );
       if (replied.isErr()) return err(replied.error);
-      return match(replied.value)
-        .returnType<Result<number, SkillTestsError>>()
-        .with({ type: "test_findings", findings: [], count: P.number.positive() }, ({ count }) =>
-          ok(count),
-        )
-        .with({ type: "test_findings" }, ({ findings }) =>
-          err({
-            kind: "failed",
-            // A pass that counts no test is a reply code under test wrote.
-            findings:
-              findings.length > 0 ? findings : [{ line: null, message: "a pass with no test" }],
-          }),
-        )
-        .with({ type: "fatal" }, ({ error }) =>
-          err(unavailable(`the suite could not run: ${error}`)),
-        )
-        .exhaustive();
+      return (
+        match(replied.value)
+          .returnType<Result<number, SkillTestsError>>()
+          .with({ type: "test_findings", findings: [], count: P.number.positive() }, ({ count }) =>
+            ok(count),
+          )
+          .with({ type: "test_findings" }, ({ findings }) =>
+            err({
+              kind: "failed",
+              // A pass that counts no test is a reply code under test wrote.
+              findings:
+                findings.length > 0 ? findings : [{ line: null, message: "a pass with no test" }],
+            }),
+          )
+          // A fatal reply can quote pytest's output, which a test controls.
+          .with({ type: "fatal" }, ({ error }) =>
+            err(unavailable(`the suite could not run: ${cutDryRunText(error)}`)),
+          )
+          .exhaustive()
+      );
     },
   };
 }
