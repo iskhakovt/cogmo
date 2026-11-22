@@ -8,7 +8,7 @@ Decided by the owner, 2026-11-22 ([decisions.md](decisions.md) → Orchestration
 
 - **Cogmo moves to Temporal when engineering time allows**, keeping function configuration declarative through a flow layer of about 450 lines ([The flow layer](#the-flow-layer-proposed)).
 - **The official SDK, `@temporalio/*`, is approved as a runtime dependency.** It is the only TypeScript SDK, and it ships the native bridge its worker needs.
-- **The data-model changes the plan needs are approved:** the four turn tables and the user row's unique index. The turn's design review settles their exact shape ([Entry criteria](#entry-criteria-for-the-turns-design-review)).
+- **The data-model changes the plan needs are approved:** the four turn tables, the user row's unique index, and slice 4's keyed cooldown write if it extends `CooldownStateSchema`. The turn's design review settles the turn's exact shape ([Entry criteria](#entry-criteria-for-the-turns-design-review)).
 - **Two tripwires make it sooner:**
   1. Inngest gates a feature cogmo uses behind its cloud or a paid plan: concurrency keys, debounce, connect, or system events.
   2. A blocking upstream bug that cogmo can't fix or work around itself.
