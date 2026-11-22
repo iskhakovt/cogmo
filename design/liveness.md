@@ -93,7 +93,7 @@ A pure `channelCheck(liveness, now)` turns a projection into a reading ([Verdict
 
 ## Telegram receive loop `[proposed]`
 
-This extends the polling supervisor's `PollingState` ([design/transport/telegram.md → Polling Supervision](transport/telegram.md#polling-supervision-proposed), #800), and adds no second machine. The unit is one channel's loop in one `cogmo serve` process, keyed by the channel id.
+This extends the polling supervisor's `PollingState` ([design/transport/telegram.md → Polling Supervision](transport/telegram.md#polling-supervision-confirmed), #800), and adds no second machine. The unit is one channel's loop in one `cogmo serve` process, keyed by the channel id.
 
 ```ts
 type ReceiveState =
@@ -250,7 +250,7 @@ Owned by `liveness/store/` in the new `src/liveness/`, which also holds the regi
 
 **Baseline.** Once `bootstrapRuntime` has built the functions, it inserts a row per recorded cron through `ON CONFLICT (function_id) DO UPDATE` with a no-op SET, `RETURNING` every row, so an existing row keeps its `created_at` and tick. The order is fixed: the baseline, the registry seeded from its rows, then the web UI and connector server, then `connect` (`main.ts`). So no cron runs before its row exists, and every cron has a verdict before any request reads one. The baseline runs under the tick write's bounds, and an error or timeout fails boot, so a held row lock stalls boot for at most 10 s. Failing beats degrading: a database that can't take one write in 10 s fails the first request too, and boot fails closed on such a dependency (design/infrastructure.md → Boot-Time Blocking Policy).
 
-**Replays.** The step adds one boundary per run, so a bare-body log line repeats once more, and one after the last step logs twice (`ticker fan-out`). `sandbox-reaper` runs `runReap` and its log in a `reap` step. About 5,800 updates a day, on an unindexed column.
+**Replays.** The step adds one boundary per run, so a bare-body log line repeats once more, and one after the last step logs twice (`ticker fan-out`). `sandbox-reaper` runs `runReap` and its log in a `reap` step. About 6,200 updates a day, on an unindexed column.
 
 **Check.** An evaluation reads an entry `overdue` when now is more than 5 minutes past the second scheduled tick after its reference: `last_tick`, or `created_at` with none. Ticks come from croner in UTC, like Inngest's; a cron given Inngest's `jitter` needs the grace to cover it. A cron missing from a read, its row deleted out of band, reads `unrecorded`. Evaluations run every 15 s, so any stretch with no tick served longer than two periods, 5 minutes and 15 s warns, whatever stopped it: the Inngest server (#427), the worker's connection, or a cron failing every run. About 7 minutes for a per-minute ticker, two days for a daily cron, two weeks for the weekly sweep. A shorter stretch, or one missed run, passes unseen. A warning lasts until the next served tick.
 
