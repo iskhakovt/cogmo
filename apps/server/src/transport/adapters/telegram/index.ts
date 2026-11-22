@@ -62,11 +62,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
 
   await publishCommandMenu(bot.api);
 
-  adapter.attachPolling(
-    bot.start({
-      onStart: () => logger.info("telegram adapter started"),
-    }),
-  );
+  adapter.startPolling();
 
   return { adapter, functions: telegramFunctions(deps, bot) };
 }
