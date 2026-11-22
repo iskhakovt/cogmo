@@ -172,14 +172,14 @@ stateDiagram-v2
 |-|-|-|-|
 | — | `open` | `signalWithStart` on the lane id: the server starts a run only when none is open | Workflow start with `{ key, limit, carried: [] }`, and the signal |
 | — | `queued` | `enqueue` handler: the job id is not already queued. The lane never refuses a job. | Queue append. A job is its function id, workflow type, job id and event; events carry ids and small data, so a job is a few hundred bytes. Past 1,000 queued, the lane logs at error and records a metric through an activity. |
-| `queued` | `running` | Fewer than `limit` running; the job is the queue's head; fewer than 200 started in this run | Child workflow start: id = job id, `REJECT_DUPLICATE` |
+| `queued` | `running` | Fewer than `limit` running; the job is the queue's head; fewer than 200 started in this run, unless the queue no longer fits a continue-as-new | Child workflow start: id = job id, `REJECT_DUPLICATE` |
 | `running` | `ran` | The child completed | Counter |
 | `running` | `duplicate` | The server refused the start: the id is running, or closed within [retention](#event-fan-out) | Counter |
 | `running` | `failed` | Anything else: the child failed, timed out, was cancelled or terminated, or the lane's own code threw. The slot is released on every outcome. | `reportFailure` activity: emits `flow/function.failed`, id `failed:<jobId>`, carrying `{ functionId, jobId, event, reason, failure }`. `reason` is `failed`, `timed_out`, `cancelled`, `terminated` or `lane_error`; `failure` is the child's `ApplicationFailure` type and details, or null. |
 | `open` | `closing` | Nothing running, queue empty, every signal handler finished | Completion command |
 | `closing` | `open` | A signal reached the server first: it refuses the completion, and the next workflow task sees the job | — |
 | `closing` | completed | The server accepted the completion. The next enqueue starts a new run. | — |
-| `open` | `open`, new run | 200 jobs started or the server suggests it; nothing running | Continue-as-new, the queue in its arguments |
+| `open` | `open`, new run | 200 jobs started or the server suggests it; nothing running; the queue fits the payload limit | Continue-as-new, the queue in its arguments |
 
 Illegal: two open runs for one key and a job running twice. The server's workflow-id uniqueness excludes both.
 
@@ -192,7 +192,7 @@ Illegal: two open runs for one key and a job running twice. The server's workflo
 | A deploy with the lane open | `open` | [Versioning](#versioning) |
 | Two producers enqueue at once | Both `queued` | The server orders the signals. Order is arrival at the server. |
 | The same event delivered twice | One job | Dropped while queued, `duplicate` while running or after it closed. |
-| A backlog, or a storm of signals, while a long job runs | `open`, queue and history growing | The lane continues-as-new only while its queue fits the payload limit (roughly 4,000 jobs in 2 MB), and otherwise keeps running in its current history. Alarms fire at 1,000 queued and when a continue-as-new is skipped. Residual: past the server's history limit the lane is terminated and its queue lost. What the server does with an over-limit continue-as-new input is `[research]`, pinned by a slice 1 test. |
+| A backlog, or a storm of signals, while a long job runs | `open`, queue and history growing | The lane continues-as-new only while its queue fits the payload limit (roughly 4,000 jobs in 2 MB), and otherwise keeps starting jobs in its current history, continuing as new once the queue fits again. Alarms fire at 1,000 queued and when a continue-as-new is skipped. Residual: past the server's history limit the lane is terminated and its queue lost. What the server does with an over-limit continue-as-new input is `[research]`, pinned by a slice 1 test. |
 | An enqueue races the lane's completion or its continue-as-new | `open`, or a new run | The server refuses either command while a signal is buffered. Residual until the test in [Testing](#testing-proposed) pins it. |
 | The lane is terminated by an operator | The queue lost; the running child terminated with it; nothing reported | Operator action only. The lane's reporting path dies with it, so domain rows are the backstop: a turn's inbounds are re-batched by the next arrival, and the sweepers find the rest. |
 
@@ -308,7 +308,7 @@ Cogmo is one process, so a deploy replays every open workflow on the new code; w
 | Idempotency window | 24 h | The namespace's retention ([Event fan-out](#event-fan-out)) |
 | Fan-out | Atomic in the event bus | Not atomic; idempotent by id |
 | Worker death | Fails the run; `onFailure` may not fire | The workflow waits: an activity times out and retries when a worker returns |
-| A failed run | `onFailure`, and `inngest/function.failed` | The lane's `flow/function.failed` event. Every function with an `onFailure` or a reconciler today is laned, and the two worker-death reconcilers are deleted with the functions they watch. |
+| A failed run | `onFailure`, and `inngest/function.failed` | The lane's `flow/function.failed` event. Every function with an `onFailure` or a reconciler today is laned, and the two worker-death reconcilers are deleted one deploy after the copies they watch, at N+1, so a copy failing while it drains still has one. |
 
 ## The step model `[proposed]`
 
@@ -413,7 +413,7 @@ The system prompt snapshot, the turn context and the summary are rows already.
 
 ### Turn `[proposed]`
 
-**Unit:** one run of a turn. Id: the turn workflow's id, which is its lane job id and derives from the trigger event's id. A second run of the same batch (a stale window's turn, an operator re-run) is a different turn with its own rows; it shares only the batch's user row.
+**Unit:** one run of a turn. Id: the turn workflow's id, which is its lane job id and derives from the trigger event's id. A second run of the same batch (a stale window's turn, an operator re-run) is a different turn with its own rows; it shares the batch's user row, and the keyed tool effects of calls repeated at the same iteration and position with the same arguments.
 
 **Storage:** `turns` in `agent/store/`.
 
@@ -430,7 +430,7 @@ The system prompt snapshot, the turn context and the summary are rows already.
 ```mermaid
 stateDiagram-v2
   [*] --> open: admitted
-  open --> paused: an iteration failed with a pausing kind
+  open --> paused: an activity failed with a pausing kind
   paused --> open: the pause's sleep ended
   open --> completed: reply persisted
   open --> superseded: another reply owns the batch
@@ -456,7 +456,8 @@ Illegal: any transition out of `completed`, `superseded` or `failed`.
 
 | Result | Does |
 |-|-|
-| `transitioned`, or `stale` with `failed` (`failTurn` got there first) | Emits `conversation/errored` and notifies the user |
+| `transitioned`, or `stale` with `failed` (`failTurn` got there first) | Marks the refused attachments (`agent/handle-message/report-turn-failure.ts:75`), emits `conversation/errored` and notifies the user |
+| `not_found`: the workflow failed before `admitTurn` committed | Emits `conversation/errored` and notifies the user, as today |
 | `stale` with `completed` or `superseded` | Logs only: the turn ended, and what failed came after it |
 
 **Errors.** `llmIteration`'s use case returns `Result<IterationVerdict, IterationError>`, and the workflow branches on the kind once the activity is out of attempts:
@@ -470,7 +471,7 @@ Illegal: any transition out of `completed`, `superseded` or `failed`.
 
 A paused turn keeps its conversation lane, sleeps on a workflow timer (1 minute, doubling to 1 hour), then resumes and runs the same activity again. The ceiling is 24 hours from the workflow's start: the last sleep is clamped to it and it is checked before each resume, so downtime can't carry a reply past it; then the turn fails with the pause's reason. A pausing kind out of `transcribeVoice`, `prepareTurnContext` or `degradedReply` pauses the turn the same way.
 
-While a turn is paused, later inbounds and same-key pipeline stages queue behind it, so none starts before the pause is recorded, which a cooldown set by a separate function allows. The cost: they get no in-cooldown reply (`agent/handle-message/admit-turn.ts:157`), a newer inbound doesn't supersede the paused turn, and nothing lets an operator retry it at once or abandon it. These are [entry criteria](#entry-criteria-for-the-turns-design-review).
+While a turn is paused, later inbounds and same-key pipeline stages queue behind it, so none starts before the pause is recorded, which a cooldown set by a separate function allows. The cost: they get no in-cooldown reply (`agent/handle-message/admit-turn.ts:174-194`), a newer inbound doesn't supersede the paused turn, and nothing lets an operator retry it at once or abandon it. These are [entry criteria](#entry-criteria-for-the-turns-design-review).
 
 ### Turn iteration `[proposed]`
 
@@ -512,7 +513,7 @@ stateDiagram-v2
 | `awaiting_tools` | `completed` | `completeIteration` | `WHERE id = $1 AND status = 'awaiting_tools'`. In the same transaction, each call the workflow reports as failed gets an `is_error` result row, and every position has one. | Missing result rows |
 | `open`, `awaiting_tools` | `failed` | The turn's `failed` transition | `WHERE turn_id = $1 AND status IN ('open', 'awaiting_tools')` | — |
 
-Illegal: any transition out of `completed`, `degraded`, `superseded` or `failed`, and opening iteration `n` before `n-1` is `completed`. An iteration stays `open` while its turn is paused. Each transition, the turn's included, is a store method returning `{ kind: "transitioned" } | { kind: "stale"; status }`, and each activity is one use-case file.
+Illegal: any transition out of `completed`, `degraded`, `superseded` or `failed`, and opening iteration `n` before `n-1` is `completed`. An iteration stays `open` while its turn is paused. Each transition, the turn's included, is a store method returning `{ kind: "transitioned" } | { kind: "stale"; status } | { kind: "not_found" }`, and each activity is one use-case file.
 
 `llmIteration` re-entered finds its row and branches on it:
 
@@ -545,7 +546,7 @@ Illegal: any transition out of `completed`, `degraded`, `superseded` or `failed`
 | A new turn of a batch whose earlier turn failed or was superseded | A new `turns` row and new iterations from 1; the batch's one user row | The earlier turn's rows aren't read. Tool idempotency keys derive from the batch's first inbound (`agent/handle-message/run-turn-loop.ts:105`, `agent/loop.ts:626`), so the new turn recovers the first's keyed tool effects instead of repeating them. The superseded check and `persistTurn`'s conditions decide ownership as today. |
 | Two turns of one batch at once | Two turns, one user row | The lane excludes it. If it happens anyway, the same checks decide, with their residuals in [crash-recovery.md](crash-recovery.md) → Late replies. |
 | The process dies after the final outcome commits, before `finishStream` | Iteration `completed`, the reply's tail not streamed | Residual: the recovered outcome isn't re-streamed, and `deliverReply`'s fallback reaches only batch targets and sessions whose stream failed at finish (`agent/handle-message/run-turn-loop.ts:153`). An [entry criterion](#entry-criteria-for-the-turns-design-review). |
-| Workflow-task failure or replay | Unchanged | The workflow does no I/O and holds no content: replay re-derives the loop position, the pause count and the paused time from history. |
+| Workflow-task failure or replay | Unchanged | The workflow does no I/O and holds no content: replay re-derives the loop position, the pause count and the workflow's start time from history. |
 | A deploy mid-turn | Whatever the rows hold | The new build's activities read rows the old build wrote, so the row schemas are the contract: a field added to `outcome` or `inputs` is optional ([Versioning](#versioning)). |
 | Two attempts of one iteration at once | One outcome | The first conditional UPDATE wins; the loser gets `stale` and returns the stored outcome. Residual: both streamed into one handle. |
 
@@ -573,8 +574,9 @@ This section is where that review starts. It must settle:
 - **Which activities are local.** A local activity can rerun before its completion marker is durable, so only short idempotent reads qualify.
 - **The duplicate user rows** present before the unique index, and the index's exact predicate.
 - **What a paused turn blocks.** Whether the in-cooldown reply moves ahead of the lane, whether a newer inbound supersedes a paused turn, and an operator's retry-now and abandon.
-- **Cooldown ordering on exit.** If `report-turn-failure` plus `recover-conversation` survives, the next queued turn can be admitted before the cooldown commits, the pause ceiling included, and persistence clears the cooldown by conversation id alone (`agent/handle-message/persist-turn.ts:145`), so a probe can erase a newer one. The cooldown is armed before the lane releases, and a turn clears only the cooldown it probed.
+- **Cooldown ordering on exit.** If `report-turn-failure` plus `recover-conversation` survives, the next queued turn can be admitted before the cooldown commits, the pause ceiling included, and persistence clears the cooldown by conversation id alone (`agent/handle-message/persist-turn.ts:150`), so a probe can erase a newer one. The cooldown is armed before the lane releases, and a turn clears only the cooldown it probed.
 - **The pause clock:** wall-clock age, as here, or cumulative paused time.
+- **The cutover hold.** Whether slice 6 holds `inbound/ready` and `pipeline/stage.due` until Inngest is verified quiescent, which would exclude the overlap of an old and a new turn of one conversation rather than guard it.
 - **Per-process state in tool handlers** beyond the file-freshness map ([crash-recovery.md](crash-recovery.md) → Durable LLM iterations), which hasn't been audited.
 
 ## Inngest-specific contracts `[proposed]`
@@ -633,8 +635,8 @@ Both engines run side by side until the last slice.
 - **A function lives on one engine.** Functions sharing a concurrency key move together: the two engines' limits don't see each other. From deploy N a moved function's Inngest copy admits no new run.
 - **The engine that accepted an event owns its run.** Every emit goes through one publisher that requires an event id and delivers to each engine hosting something the event concerns: a function it triggers, a `cancelOn` it matches, or a `waitForEvent` it satisfies. Inside an Inngest function the publisher call sits in a step. Nothing forwards an event it received, and nothing compares timestamps.
 - **Each slice is two deploys.**
-  - *Deploy N* registers the function on Temporal, and its publisher routes every new emit for it there. The Inngest copy keeps its function id and body but takes no new triggers: its cron is removed and its event trigger gets an `if` that never matches, so neither Inngest's scheduler nor an event still sent to Inngest for another consumer starts a run of it. What Inngest already admitted finishes there: runs in flight, queued runs, open debounce windows, sleepers. That Inngest keeps those alive across the trigger change is `[research]`; if it doesn't, a function moves together with every Inngest consumer of its trigger event, and its copy is removed at N.
-  - *Deploy N+1* removes the copy on verified quiescence: Inngest reports no run of the function id that is running, queued, inside a debounce window, or sleeping. Whether the self-hosted API reports pending runs is `[research]`. Waiting out a horizon instead is allowed only where admission-to-completion is bounded: a cron, or a waiter with a timeout. A debounce with no ceiling or a long retrying run has no bound and needs the verified check.
+  - *Deploy N* registers the function on Temporal, and its publisher routes every new emit for it there. The Inngest copy keeps its function id and body but takes no new triggers: its cron is removed and its event trigger gets an `if` that never matches, so neither Inngest's scheduler nor an event still sent to Inngest for another consumer starts a run of it. What Inngest already admitted finishes there: runs in flight, queued runs, open debounce windows, sleepers. That Inngest keeps those alive across the trigger change is `[research]`; if it doesn't, a function moves together with every Inngest consumer of its trigger event, and its copy keeps its trigger and drains until N+1, since nothing sends that event to Inngest any more. Only a cron copy, whose schedule can't stay, is removed at N, and that deploy lands between ticks, verified by the same drain check.
+  - *Deploy N+1* removes the copy on verified quiescence: Inngest reports no run of the function id that is running, queued, inside a debounce window, or sleeping. Whether the self-hosted API reports pending runs is `[research]`. Waiting out a horizon instead is allowed only where admission-to-completion is bounded: a cron, or a waiter with a timeout. A debounce with no ceiling or a long retrying run has no bound and needs the verified check; if the API can't give it, the copy stays registered until slice 7, which applies the same check.
 - **Ids don't dedupe across engines.** With no new admissions on the copy, the one cross-engine duplicate is an emit whose first attempt reached Inngest under N-1 and whose retry under N reaches Temporal. Its unit's domain key catches it:
 
   | Unit | Key |
@@ -643,7 +645,7 @@ Both engines run side by side until the last slice.
   | Skill run, coding task, pipeline run | `idempotency_key` on the row |
   | Task, run and gate transitions; observations | Conditional UPDATEs |
   | Turn | Admission's staleness guard, the keyed user row, `persistTurn`'s conditions |
-  | `conversation/errored` | None. Residual: `recover-conversation` advances the cooldown on every invocation (`agent/recover-conversation.ts:42`), so a duplicate advances it twice. Slice 4 keys that write on the event's id. |
+  | `conversation/errored` | None. Residual: `recover-conversation` advances the cooldown on every invocation (`agent/recover-conversation.ts:79-80`), so a duplicate advances it twice. Slice 4 keys that write on the event's id. |
 
 | Failure | State left | Why it is safe, or the residual |
 |-|-|-|
@@ -654,7 +656,8 @@ Both engines run side by side until the last slice.
 | An emit retried across N: Inngest got the first attempt, Temporal gets the retry | A run on each engine | The domain keys above. |
 | An Inngest debounce window open at N | Fires on Inngest; a Temporal window may fire for the same key | Each handler emits its `inbound/ready` to wherever the turn lives, and the second turn finds the inbounds answered. |
 | A waiter or idle timer sleeping on Inngest at N | Wakes on Inngest | Its cancel event still reaches Inngest through the publisher while the copy is registered. Every waiter and timer armed after N is on Temporal, since the copy admits none. |
-| An old Inngest run and a new Temporal run of one key overlap during the drain | Both running | Guarded transitions decide. For turns it is excluded: slice 6 verifies quiescence before Temporal admits one. |
+| An external client posts an event to Inngest after a fence | Accepted, no run | Excluded: `direct-inbound` is the only function external clients trigger, and it stays on Inngest, unfenced, until slice 7 gives them a cogmo ingress. |
+| An old Inngest run and a new Temporal run of one key overlap during the drain | Both running | Guarded transitions decide. For turns, the superseded check and `persistTurn`'s conditions decide ([Turn failure modes](#turn-failure-modes)); a hold that excludes the overlap is an [entry criterion](#entry-criteria-for-the-turns-design-review). |
 | The process dies between the publisher's deliveries to the two engines | One engine delivered | The publisher call is inside a step or an activity, which retries both. |
 | N+1 deploys with a run still pending | The run can't resume and fails, or never starts | Residual of a wrong drain check or too short a wait: `inngest/function.failed` and the domain reconcilers handle a failed run as a worker death; a sleeper that never wakes costs one idle fire or one gate reminder, and the gate's row stays parked for the operator. |
 | N is rolled back with Temporal runs open | Their workflow types are unregistered and their tasks stall; boot deletes the Schedules the old build doesn't declare | Roll forward. The stalled runs resume, and the Schedules are recreated, on the next build that registers them. |
@@ -663,12 +666,12 @@ Both engines run side by side until the last slice.
 |-|-|
 | 0 | A tripwire fires; this doc is reviewed against the Inngest version current then. |
 | 1 | `src/temporal/`: client, worker in boot, the flow layer with its tests, the publisher, the container factory, the drain check, deployment docs. A Temporal rule file in `.agents/rules/` with its AGENTS.md section and `CLAUDE.md` import, an amendment to state-machines.md for workflow-internal units ([Where state lives](#where-state-lives-proposed)), the testing.md amendment, and a Temporal section in the reviewer's checklist. No function moves. |
-| 2 | Class-A leaves, one PR per group, each with the functions that share its trigger: the crons, tickers, reapers and sweepers; `scheduled-task-fire`; `idle-timer`; the boundary waiter and janitor with Telegram's boundary function (`transport/adapters/telegram/inngest-functions.ts:144`); the coding leaf functions with Telegram's deploy-outcome and failure-notice functions (`:75`, `:94`); the model-catalog refresh; `direct-inbound` (`transport/adapters/direct.ts:113`). |
+| 2 | Class-A leaves, one PR per group, each with the functions that share its trigger: the crons, tickers, reapers and sweepers; `scheduled-task-fire`; `idle-timer`; the boundary waiter and janitor with Telegram's boundary function (`transport/adapters/telegram/inngest-functions.ts:144`); the coding leaf functions with Telegram's deploy-outcome and failure-notice functions (`:75`, `:94`); the model-catalog refresh. `direct-inbound` (`transport/adapters/direct.ts:113`) doesn't move here: external clients post `adapter/direct/inbound` to Inngest's event API (`scripts/console.ts:32`, [deploy.md](../deploy.md) → Securing internal services), and only cogmo can reach Temporal's frontend, so it stays on Inngest, unfenced, until slice 7. |
 | 3 | The debounce router. The fallback state machine and its events are deleted. |
 | 4 | The Observer; `recover-conversation`, with its keyed cooldown write; the skills cron fire; the pipeline gate resolver and gate waiter with Telegram's gate function (`transport/adapters/telegram/inngest-functions.ts:119`), which share `pipeline/gate.pending`. |
 | 5 | The coding orchestrators with Telegram's coding-progress function (`transport/adapters/telegram/inngest-functions.ts:31`), which shares their `coding/task/start` trigger: class-B rebuilds, cleanup as activities. |
-| 6 | `handle-message` and `pipeline-stage-runner` together, after the turn's design review, in a maintenance window. No turn in flight includes pending work: no queued run of either function and no open debounce window. The copies' never-matching triggers fence off old admissions while that is verified. |
-| 7 | Inngest removed: `src/inngest/`, `@inngest/test`, the server and Redis from the deployment. `.agents/rules/inngest.md` is deleted with its `CLAUDE.md` import, and every reference to it rewritten: state-machines.md (its re-entry-guard and idempotency-key bullets), store-pattern.md (the keyed-insert shape), testing.md, the Inngest and `Durable` sections of AGENTS.md, section 4 of the reviewer's checklist; and crash-recovery.md, scheduling.md and architecture.md → Orchestration Coupling. |
+| 6 | `handle-message` and `pipeline-stage-runner` together, after the turn's design review, in a maintenance window with no turn running, queued or debouncing on Inngest. The copies' never-matching triggers fence off new admissions; work Inngest admitted before the fence is guarded, not excluded (the overlap row above). |
+| 7 | First an authenticated cogmo HTTP ingress that publishes `adapter/direct/inbound` with a caller-supplied event id, and a replacement for `adapter/direct/outbound` (`transport/adapters/direct.ts:127-150`); `scripts/console.ts` and the integration and e2e tiers move to them, then `direct-inbound` moves. Then Inngest removed: `src/inngest/`, `@inngest/test`, the server and Redis from the deployment. `.agents/rules/inngest.md` is deleted with its `CLAUDE.md` import, and every reference to it rewritten: state-machines.md (its re-entry-guard and idempotency-key bullets), store-pattern.md (the keyed-insert shape), testing.md, the Inngest and `Durable` sections of AGENTS.md, section 4 of the reviewer's checklist; and crash-recovery.md, scheduling.md and architecture.md → Orchestration Coupling. |
 
 ## Measurements
 
