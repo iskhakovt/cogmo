@@ -174,16 +174,19 @@ describe("TelegramAdapter", () => {
       await adapter.stop();
     });
 
-    it.each([0, 0.999_999])(
-      "restarts 2.5–5 s after the first 409 (Math.random() = %s)",
-      async (random) => {
+    it.each([
+      [0, 2_500],
+      [0.999_999, 5_000],
+    ])(
+      "restarts after the first 409 at the jittered wait (Math.random() = %s: %s ms)",
+      async (random, waitMs) => {
         vi.mocked(Math.random).mockReturnValue(random);
         loops(rejectWith(conflict()));
         const { adapter } = await createAdapter();
 
-        await vi.advanceTimersByTimeAsync(2_499);
+        await vi.advanceTimersByTimeAsync(waitMs - 1);
         expect(starts()).toBe(1);
-        await vi.advanceTimersByTimeAsync(2_501);
+        await vi.advanceTimersByTimeAsync(1);
         expect(starts()).toBe(2);
 
         await adapter.stop();
@@ -410,6 +413,7 @@ describe("TelegramAdapter", () => {
       const conflictPoll = { ok: false, error_code: 409, description: CONFLICT };
 
       it("starts again after a 409 and resumes past the handled update", async () => {
+        const info = vi.spyOn(logger, "info").mockImplementation(() => {});
         const { adapter, calls } = await grammyAdapter([
           { ok: true, result: [{ update_id: 41 }] },
           conflictPoll,
@@ -423,6 +427,9 @@ describe("TelegramAdapter", () => {
           { method: "deleteWebhook", payload: {} },
           { method: "getUpdates", payload: { offset: 42, timeout: 30, allowed_updates: [] } },
         ]);
+        expect(info.mock.calls.filter(([msg]) => msg === "telegram polling started")).toHaveLength(
+          2,
+        );
         await adapter.stop();
       });
 
