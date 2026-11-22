@@ -122,6 +122,7 @@
 
 ### Agent loop, context & conversations
 
+- [ ] `p2` Key the turn's user row. `create-user-message` inserts it with no conflict key (`agent/handle-message/record-user-message.ts:94-110`), so a crash after the commit and before Inngest records the step inserts a second user row on retry. Write it through `ON CONFLICT DO UPDATE` on a unique key the batch determines (conversation and last inbound), as the keyed-insert shape in `.agents/rules/inngest.md` describes. (Temporal design review 2026-11-22)
 - [ ] `p2` Fail a stream that ends without the provider's terminal event. Both adapters start the stop reason at `end_turn` and yield `done` when the body ends, so a dropped connection persists half a reply as complete. Also map an unknown OpenAI-compatible finish reason to an error rather than `end_turn`, and read its `refusal` field ([design/providers.md](design/providers.md)). (deep review 2026-10-27, M4)
 - [ ] `p2` Gate `admit-turn`'s `in-cooldown-reply` step on durable state. It is planned from a bare-body clock, so a replay after the cooldown lapses runs a full turn after the waiting reply. (deep review 2026-10-27, M5)
 - [ ] `p2` Mark what design/prompt-caching.md describes ahead of the code as pending: the `assertEpochOpening` / `assertThinkingNeverReturns` harness helpers (step 10). (deep review 2026-10-27, D2)
