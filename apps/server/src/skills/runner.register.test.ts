@@ -3720,6 +3720,33 @@ async def run(inputs, ctx):
       );
     });
 
+    it("masks a secret a finding quotes, and drops one the image's cut ran through", async () => {
+      const at = { id: "pyrefly" as const, file: "test_skill.py" as const, line: 2, column: 5 };
+      const cut = `bad-assignment \`Literal['https://owner:${"p".repeat(600)}']\``;
+      const cpythonChecks = checksAnswering(
+        ok({
+          findings: [
+            {
+              ...at,
+              message: "bad-assignment `Literal['https://owner:hunter2@example.com/data']`",
+            },
+            { ...at, line: 3, message: `${Array.from(cut).slice(0, 399).join("")}…` },
+          ],
+          suppressions: [],
+          toolchainVersion: VERSION,
+          testRunner: true,
+        }),
+      );
+
+      const { result } = await registerEcho({ cpythonChecks });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "pyrefly: skills/echo/test_skill.py:2:5: bad-assignment `Literal['https://REDACTED@example.com/data']`",
+        "pyrefly: skills/echo/test_skill.py:3:5: bad-assignment `Literal['https…",
+      ]);
+    });
+
     it("reads uv refusing the lockfile's content as a rejection of the lockfile", async () => {
       const detail = "Because sdistonly==1.0 has no usable wheels and you require sdistonly==1.0";
       const cpythonChecks = checksAnswering(err({ kind: "lockfile_invalid", detail }));

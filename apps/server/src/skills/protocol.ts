@@ -324,22 +324,29 @@ const CPYTHON_CHECK_IDS = [
   "suppression",
 ] as const;
 
+const CheckFindingFields = {
+  id: z.enum(CPYTHON_CHECK_IDS),
+  // Literals, not `skill-source.ts`'s names: the wasm child bundles this
+  // module, and that module's imports break the bundle.
+  file: z.enum(["skill.py", "test_skill.py"]).optional(),
+  message: z.string().min(1),
+};
+
 /**
  * One CPython check's finding in `file`, which an image older than the test
  * file's checks leaves absent for `skill.py`. Lines are 1-based; columns are
  * 1-based UTF-16 code units, as the register-time gates count them. Both are
  * null for a finding about the file, and the column alone where the tool
- * names no column.
+ * names no column; a column never stands without its line.
  */
-const CheckFindingSchema = z.object({
-  id: z.enum(CPYTHON_CHECK_IDS),
-  // Literals, not `skill-source.ts`'s names: the wasm child bundles this
-  // module, and that module's imports break the bundle.
-  file: z.enum(["skill.py", "test_skill.py"]).optional(),
-  line: z.number().int().positive().nullable(),
-  column: z.number().int().positive().nullable(),
-  message: z.string().min(1),
-});
+const CheckFindingSchema = z.union([
+  z.object({
+    ...CheckFindingFields,
+    line: z.number().int().positive(),
+    column: z.number().int().positive().nullable(),
+  }),
+  z.object({ ...CheckFindingFields, line: z.null(), column: z.null() }),
+]);
 export type CheckFinding = z.infer<typeof CheckFindingSchema>;
 
 /**

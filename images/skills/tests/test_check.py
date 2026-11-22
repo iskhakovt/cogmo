@@ -304,6 +304,45 @@ def test_a_ruff_failure_status_is_fatal(
     assert str(reply["error"]).startswith(error)
 
 
+@pytest.mark.parametrize(
+    ("tool", "output"),
+    [
+        (
+            "ruff",
+            [
+                {
+                    "filename": "/elsewhere/other.py",
+                    "code": "F401",
+                    "message": "unused",
+                    "location": {"row": 1, "column": 1},
+                }
+            ],
+        ),
+        (
+            "pyrefly",
+            {
+                "errors": [
+                    {"path": "/elsewhere/other.py", "line": 1, "column": 1, "name": "x", "concise_description": "y"}
+                ]
+            },
+        ),
+    ],
+)
+def test_a_finding_in_a_file_the_tool_was_not_given_is_fatal(
+    toolchain: Toolchain, tmp_path: Path, tool: str, output: object
+) -> None:
+    script = tmp_path / tool
+    script.write_text(f"#!/bin/sh\necho '{json.dumps(output)}'\nexit 1\n")
+    script.chmod(0o755)
+
+    reply = _check(_CLEAN, Toolchain(**{**toolchain.__dict__, tool: str(script)}))
+
+    assert reply == {
+        "type": "fatal",
+        "error": f"{tool} reported a finding in /elsewhere/other.py, a file it was not given",
+    }
+
+
 def test_a_ruff_that_does_not_start_is_fatal(toolchain: Toolchain, tmp_path: Path) -> None:
     reply = _check(_CLEAN, Toolchain(**{**toolchain.__dict__, "ruff": str(tmp_path / "absent")}))
 

@@ -3,9 +3,10 @@ import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import type { CpythonChecks } from "../cpython-checks.js";
 import type { LockfileSnapshot } from "../deps.js";
+import type { CheckFinding } from "../protocol.js";
 import { skillDir } from "../skill-files.js";
 import type { SkillFinding } from "../skill-gates.js";
-import { SKILL_BODY_FILE } from "../skill-source.js";
+import { SKILL_BODY_FILE, type SKILL_TEST_FILE } from "../skill-source.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
 
 const log = logger.child({ component: "skills.register" });
@@ -90,7 +91,7 @@ export async function checkRegisterCpython(
       kind: "lint_failed",
       findings: findings.map(({ file, ...finding }) => ({
         ...finding,
-        path: `${skillDir(skill.name)}${file ?? SKILL_BODY_FILE}`,
+        path: `${skillDir(skill.name)}${findingFile(file)}`,
       })),
     });
   }
@@ -98,4 +99,14 @@ export async function checkRegisterCpython(
     record: { toolchain_version: toolchainVersion, suppressions: [...suppressions] },
     testRunner,
   });
+}
+
+/**
+ * The skill file a finding names: `skill.py` where an image older than the
+ * test file's checks names none. `protocol.ts` spells the names as literals,
+ * so the return type ties them to `skill-source.ts`'s: a rename on either side
+ * fails typecheck here.
+ */
+function findingFile(file: CheckFinding["file"]): typeof SKILL_BODY_FILE | typeof SKILL_TEST_FILE {
+  return file ?? SKILL_BODY_FILE;
 }

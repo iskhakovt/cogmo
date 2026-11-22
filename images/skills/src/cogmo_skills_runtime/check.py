@@ -181,8 +181,13 @@ class _Files:
         return [os.path.join(self.directory, file) for file in self.lines]
 
     def at(self, check_id: str, path: str, line: int, column: int, message: str) -> Finding:
-        """A tool's finding in the file at `path`, its 1-based code point `column` as UTF-16 code units."""
+        """A tool's finding in the file at `path`, its 1-based code point `column` as UTF-16 code units.
+
+        Raises `CheckFailed` when `path` names neither file the tool was given.
+        """
         file = Path(path).name
+        if file not in self.lines:
+            raise CheckFailed(f"{check_id} reported a finding in {path}, a file it was not given")
         return Finding(check_id, file, line, self.lines[file].from_code_points(line, column), message)
 
 

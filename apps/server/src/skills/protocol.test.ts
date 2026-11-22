@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CheckReplySchema,
   CtxCallSchema,
   CtxResultSchema,
   fromTaskResult,
@@ -440,5 +441,26 @@ describe("WorkerMessageSchema (discriminated union)", () => {
 
   it("rejects unknown type literal", () => {
     expect(() => WorkerMessageSchema.parse({ type: "task_started", id: "t" })).toThrow();
+  });
+});
+
+describe("CheckReplySchema", () => {
+  const reply = (line: number | null, column: number | null) => ({
+    type: "check_findings",
+    findings: [{ id: "syntax", file: "skill.py", line, column, message: "invalid syntax" }],
+    suppressions: [],
+    toolchainVersion: "2.18.0",
+  });
+
+  it.each([
+    [3, 7],
+    [3, null],
+    [null, null],
+  ])("accepts a finding at line %s, column %s", (line, column) => {
+    expect(CheckReplySchema.safeParse(reply(line, column)).success).toBe(true);
+  });
+
+  it("refuses a finding with a column but no line", () => {
+    expect(CheckReplySchema.safeParse(reply(null, 7)).success).toBe(false);
   });
 });

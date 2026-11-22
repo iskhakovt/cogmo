@@ -488,62 +488,99 @@
             "findings": {
               "type": "array",
               "items": {
-                "type": "object",
-                "properties": {
-                  "id": {
-                    "type": "string",
-                    "enum": [
-                      "syntax",
-                      "ruff",
-                      "format",
-                      "pyrefly",
-                      "imports",
-                      "suppression"
-                    ]
-                  },
-                  "file": {
-                    "type": "string",
-                    "enum": [
-                      "skill.py",
-                      "test_skill.py"
-                    ]
-                  },
-                  "line": {
-                    "anyOf": [
-                      {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "enum": [
+                          "syntax",
+                          "ruff",
+                          "format",
+                          "pyrefly",
+                          "imports",
+                          "suppression"
+                        ]
+                      },
+                      "file": {
+                        "type": "string",
+                        "enum": [
+                          "skill.py",
+                          "test_skill.py"
+                        ]
+                      },
+                      "message": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "line": {
                         "type": "integer",
                         "exclusiveMinimum": 0,
                         "maximum": 9007199254740991
                       },
-                      {
-                        "type": "null"
+                      "column": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
-                    ]
+                    },
+                    "required": [
+                      "id",
+                      "message",
+                      "line",
+                      "column"
+                    ],
+                    "additionalProperties": false
                   },
-                  "column": {
-                    "anyOf": [
-                      {
-                        "type": "integer",
-                        "exclusiveMinimum": 0,
-                        "maximum": 9007199254740991
+                  {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "enum": [
+                          "syntax",
+                          "ruff",
+                          "format",
+                          "pyrefly",
+                          "imports",
+                          "suppression"
+                        ]
                       },
-                      {
+                      "file": {
+                        "type": "string",
+                        "enum": [
+                          "skill.py",
+                          "test_skill.py"
+                        ]
+                      },
+                      "message": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "line": {
+                        "type": "null"
+                      },
+                      "column": {
                         "type": "null"
                       }
-                    ]
-                  },
-                  "message": {
-                    "type": "string",
-                    "minLength": 1
+                    },
+                    "required": [
+                      "id",
+                      "message",
+                      "line",
+                      "column"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "required": [
-                  "id",
-                  "line",
-                  "column",
-                  "message"
-                ],
-                "additionalProperties": false
+                ]
               }
             },
             "suppressions": {

@@ -115,3 +115,17 @@ def test_a_refusal_after_non_ascii_text_is_at_its_code_point_column(rule: Module
 def test_a_source_that_does_not_parse_raises(rule: ModuleType) -> None:
     with pytest.raises(SyntaxError):
         rule.scan("import (\n", "skill.py", [], {})
+
+
+def test_only_test_skill_py_may_import_the_test_roots(rule: ModuleType) -> None:
+    source = "import pytest\nimport pytest_asyncio\nfrom skill import run\nimport requests\n"
+    allowed = "the standard library, pydantic, pydantic_core, cogmo_ctx"
+    rest = "or a module a declared dependency installs"
+
+    assert rule.scan(source, "test_skill.py", [], {}) == [
+        (4, 1, f"'requests' is not {allowed}, pytest, pytest_asyncio, skill {rest}")
+    ]
+    assert rule.scan(source, "skill.py", [], {}) == [
+        (line, 1, f"'{root}' is not {allowed} {rest}")
+        for line, root in [(1, "pytest"), (2, "pytest_asyncio"), (3, "skill"), (4, "requests")]
+    ]
