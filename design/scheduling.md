@@ -350,6 +350,6 @@ We use Connect + Checkpointing. No inbound ports needed.
 
 See `decisions.md` for the full eliminated options table. Key points:
 - **BullMQ:** No durable execution, no events, no HITL. Building durability on top is a known trap.
-- **Temporal:** Best durability but TS SDK requires sandboxed V8 (no normal Node.js in workflows). Heavy self-hosting (2-4GB). Overkill.
-- **DBOS Transact:** Library approach (no extra service), MIT, PostgreSQL-only. But smallest community (1.1K stars vs Inngest's 5.1K). No event model. Viable fallback.
+- **Temporal:** not eliminated. It is the decided replacement for Inngest, when engineering time allows ([orchestration-temporal.md](orchestration-temporal.md)).
+- **DBOS Transact:** Library approach (no extra service), MIT, PostgreSQL-only, with queues, a debouncer and cron. No event-triggered functions, and its Conductor recovery layer needs a paid key in production.
 - **Restate:** Clean API, light binary, but no cron/scheduling. Would need a separate scheduler.
