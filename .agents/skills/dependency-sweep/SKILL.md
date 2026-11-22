@@ -23,9 +23,11 @@ single group:
 5. Vendored artefacts no dependency tool watches. `apps/server/data/litellm-models.json`
    is the known one: nothing reports it stale, and a missing model silently
    falls back to `DEFAULT_LIMITS` (128k context, 4096 output) with only a
-   deduplicated WARN. Diff the refresh for removed keys before taking it:
-   upstream has dropped whole provider namespaces (`openrouter/*`), and the
-   snapshot is held until `todo.md`'s OpenRouter limits entry lands.
+   deduplicated WARN. Refresh it with `pnpm tsx scripts/refresh-litellm-models.ts`
+   from `apps/server` (LiteLLM's registry, and OpenRouter's list for
+   `openrouter/*`), then diff it for removed keys and grep the repo for any it
+   names before taking it: upstream retires models, and a source can drop a
+   whole namespace.
 
 ## For every major: diff the behaviour, not just the types
 
@@ -79,6 +81,15 @@ Five mocks share `RECORD=1` (llmock, fal, openai-voice, xAI, daytona) and each
 guards on its own upstream key, so only adapters with keys in `.env` re-record.
 Re-record when prompt structure, tool sets, models, or an SDK's wire format
 changed. Then **verify each cassette in replay mode**, the mode CI runs.
+
+Boot commits the toolchain (the entries `images/skills/toolchain/.cogmo/paths`
+lists, and `images/skills/src/cogmo_ctx/`) into the skills repo, so any change
+to it makes `skill-authoring.integration.test.ts` refuse to replay until it is
+re-recorded (its header has the steps): uv, `TOOL_PINS` in
+`src/skills/toolchain-codegen.ts`, pydantic, the skills image's Python,
+Dependabot patches included. The record run bills Daytona and Anthropic and
+force-resets `main` on the throwaway skills repo, so get the owner's go-ahead
+before starting the bump.
 
 Two traps:
 

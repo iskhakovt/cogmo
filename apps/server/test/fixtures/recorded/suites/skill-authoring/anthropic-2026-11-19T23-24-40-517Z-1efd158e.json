@@ -12,39 +12,39 @@
           {
             "name": "btc-spot",
             "arguments": "{}",
-            "id": "toolu_01Dju3Qx9whtVti1qbPCj2tw"
+            "id": "toolu_012HBQn1pw7dVnQNLkzhZGU5"
           }
         ],
         "usage": {
           "input_tokens": 2,
-          "cache_creation_input_tokens": 12795,
+          "cache_creation_input_tokens": 15036,
           "cache_read_input_tokens": 0,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 12795
+            "ephemeral_1h_input_tokens": 15036
           },
-          "output_tokens": 121
+          "output_tokens": 136
         }
       },
       "recordedTimings": {
-        "ttftMs": 636,
+        "ttftMs": 945,
         "interChunkDelaysMs": [
           0,
-          1065,
+          935,
           0,
           0,
           0,
           0,
           0,
-          101,
-          1,
+          100,
+          0,
           0
         ],
-        "totalDurationMs": 1803
+        "totalDurationMs": 1980
       },
       "metadata": {
-        "systemHash": "0a28e9d1",
-        "toolsHash": "d2ce31fb"
+        "systemHash": "20886bcb",
+        "toolsHash": "30bce4ef"
       }
     }
   ]
