@@ -1935,10 +1935,6 @@
     "contextWindow": 200000,
     "maxOutputTokens": 50000
   },
-  "bedrock/us-gov-east-1/claude-sonnet-4-5-20250929-v1:0": {
-    "contextWindow": 200000,
-    "maxOutputTokens": 50000
-  },
   "bedrock/us-gov-west-1/amazon.nova-lite-v1:0": {
     "contextWindow": 300000,
     "maxOutputTokens": 10000
@@ -1964,10 +1960,6 @@
     "maxOutputTokens": 10500
   },
   "bedrock/us-gov-west-1/anthropic.claude-sonnet-4-5-20250929-v1:0": {
-    "contextWindow": 200000,
-    "maxOutputTokens": 50000
-  },
-  "bedrock/us-gov-west-1/claude-sonnet-4-5-20250929-v1:0": {
     "contextWindow": 200000,
     "maxOutputTokens": 50000
   },
@@ -2283,6 +2275,26 @@
     "contextWindow": 128000,
     "maxOutputTokens": 4096
   },
+  "c4ai-aya-vision-32b": {
+    "contextWindow": 16384,
+    "maxOutputTokens": 4000
+  },
+  "command-a-reasoning-08-2025": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "command-a-vision-07-2025": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "north-mini-code-1.0": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 64000
+  },
+  "north-small-translate-1.0": {
+    "contextWindow": 16000,
+    "maxOutputTokens": 4000
+  },
   "coralbricks/glm-5.3-fast": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -2472,6 +2484,10 @@
     "maxOutputTokens": 64000
   },
   "dashscope/qwen3.8-max": {
+    "contextWindow": 991808,
+    "maxOutputTokens": 64000
+  },
+  "dashscope/qwen4-max": {
     "contextWindow": 991808,
     "maxOutputTokens": 64000
   },
@@ -3036,8 +3052,8 @@
     "maxOutputTokens": 32000
   },
   "databricks/databricks-meta-llama-3-1-8b-instruct": {
-    "contextWindow": 200000,
-    "maxOutputTokens": 50000
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "databricks/databricks-meta-llama-3-3-70b-instruct": {
     "contextWindow": 128000,
@@ -3615,6 +3631,10 @@
     "contextWindow": 512000,
     "maxOutputTokens": 64000
   },
+  "fireworks_ai/accounts/fireworks/routers/minimax-latest": {
+    "contextWindow": 512000,
+    "maxOutputTokens": 64000
+  },
   "fireworks_ai/accounts/fireworks/models/mixtral-8x22b-instruct-hf": {
     "contextWindow": 65536,
     "maxOutputTokens": 16384
@@ -3703,14 +3723,6 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
-  "friendliai/deepseek-ai/DeepSeek-V3.2": {
-    "contextWindow": 163840,
-    "maxOutputTokens": 40960
-  },
-  "friendliai/MiniMaxAI/MiniMax-M2.5": {
-    "contextWindow": 196608,
-    "maxOutputTokens": 49152
-  },
   "friendliai/zai-org/GLM-5.1": {
     "contextWindow": 202752,
     "maxOutputTokens": 50688
@@ -3780,8 +3792,8 @@
     "maxOutputTokens": 16384
   },
   "gemini-3.1-flash-image": {
-    "contextWindow": 65536,
-    "maxOutputTokens": 16384
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
   },
   "gemini-3.1-flash-image-preview": {
     "contextWindow": 65536,
@@ -4248,15 +4260,15 @@
     "maxOutputTokens": 64000
   },
   "chatgpt/gpt-5.6-luna": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "chatgpt/gpt-5.6-sol": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "chatgpt/gpt-5.6-terra": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "chatgpt/gpt-5.4": {
@@ -5315,6 +5327,10 @@
     "contextWindow": 10000000,
     "maxOutputTokens": 8192
   },
+  "meta/muse-ember-1.0": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "meta/muse-spark-1.1": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -5500,12 +5516,12 @@
     "maxOutputTokens": 64000
   },
   "mistral/ministral-3b-2512": {
-    "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
   },
   "mistral/ministral-3b-latest": {
-    "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
   },
   "mistral/mistral-medium-3": {
     "contextWindow": 262144,
@@ -5564,7 +5580,7 @@
     "maxOutputTokens": 64000
   },
   "mistral/mistral-large-latest": {
-    "contextWindow": 262144,
+    "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
   "mistral/mistral-large-3": {
@@ -6667,6 +6683,10 @@
     "contextWindow": 524288,
     "maxOutputTokens": 64000
   },
+  "together_ai/thinkingmachines/inkling": {
+    "contextWindow": 524288,
+    "maxOutputTokens": 64000
+  },
   "together_ai/zai-org/GLM-5.2": {
     "contextWindow": 1048575,
     "maxOutputTokens": 64000
@@ -6805,11 +6825,11 @@
   },
   "us.deepseek.v3.2": {
     "contextWindow": 163840,
-    "maxOutputTokens": 40960
+    "maxOutputTokens": 8000
   },
   "eu.deepseek.v3.2": {
     "contextWindow": 163840,
-    "maxOutputTokens": 40960
+    "maxOutputTokens": 8000
   },
   "us.meta.llama3-1-405b-instruct-v1:0": {
     "contextWindow": 128000,
@@ -6866,6 +6886,18 @@
   "v0/v0-1.5-md": {
     "contextWindow": 128000,
     "maxOutputTokens": 32000
+  },
+  "vispark/vision-small": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "vispark/vision-medium": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "vispark/vision-large": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
   },
   "vercel_ai_gateway/alibaba/qwen-3-14b": {
     "contextWindow": 40960,
@@ -7279,11 +7311,27 @@
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
+  "vertex_ai/claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "vertex_ai/claude-fable-5@default": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
   "vertex_ai/claude-fable-5-1@default": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/claude-fable-5-2@default": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/claude-mythos-5-2@default": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
@@ -7380,8 +7428,8 @@
     "maxOutputTokens": 16384
   },
   "vertex_ai/gemini-3.1-flash-image": {
-    "contextWindow": 65536,
-    "maxOutputTokens": 16384
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
   },
   "vertex_ai/gemini-3.1-flash-image-preview": {
     "contextWindow": 65536,
@@ -8903,6 +8951,34 @@
     "contextWindow": 200000,
     "maxOutputTokens": 50000
   },
+  "sarvam/sarvam-105b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "sarvam/sarvam-105b-conversations": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "sarvam/glm5.3": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sarvam/glm5.3-flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sarvam/gemma4": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "sarvam/deepseekv4.1-flash-1017": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sarvam/deepseekv4.1-flash-1017-interactive": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "gpt-4o-mini-transcribe-2025-03-20": {
     "contextWindow": 16000,
     "maxOutputTokens": 2000
@@ -9020,7 +9096,7 @@
     "maxOutputTokens": 64000
   },
   "bedrock_mantle/openai.gpt-daybreak-blue-5.6-sol": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "bedrock_mantle/openai.gpt-5.6-luna": {
@@ -9035,7 +9111,27 @@
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
+  "us.openai.gpt-daybreak-blue-5.6-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "global.openai.gpt-daybreak-blue-5.6-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "us.openai.gpt-5.6-cyber": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "global.openai.gpt-5.6-cyber": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
   "us.openai.gpt-5.6-terra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "us-gov.openai.gpt-5.6-terra": {
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
@@ -9047,7 +9143,15 @@
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
+  "us-gov.openai.gpt-5.6-luna": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
   "us.openai.gpt-5.4": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "us-gov.openai.gpt-5.4": {
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
@@ -9531,6 +9635,10 @@
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
+  "claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "claude-mythos-preview": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
@@ -9576,6 +9684,10 @@
     "maxOutputTokens": 64000
   },
   "fireworks_ai/accounts/fireworks/models/kimi-k3": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "fireworks_ai/accounts/fireworks/routers/kimi-latest": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -9648,6 +9760,10 @@
     "maxOutputTokens": 64000
   },
   "fireworks_ai/accounts/fireworks/routers/kimi-k3-fast": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "fireworks_ai/accounts/fireworks/routers/kimi-fast-latest": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -10203,6 +10319,14 @@
     "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
+  "deepinfra/zai-org/GLM-5.3-Flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "deepinfra/tencent/Hy4-preview": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "gemini/gemini-omni-1.1-flash": {
     "contextWindow": 131072,
     "maxOutputTokens": 32768
@@ -10275,6 +10399,10 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "fireworks_ai/accounts/fireworks/routers/glm-latest": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "fireworks_ai/accounts/fireworks/routers/glm-5p3-us": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -10291,11 +10419,19 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "fireworks_ai/accounts/fireworks/routers/glm-fast-latest": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "fireworks_ai/glm-5p3-fast": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
   "fireworks_ai/accounts/fireworks/models/glm-5p3-flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "fireworks_ai/accounts/fireworks/routers/glm-flash-latest": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -10395,6 +10531,10 @@
     "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
+  "azure_ai/deepseek-v4.1-flash-1017": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "azure_ai/deepseek-v4.1-flash": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
@@ -10471,6 +10611,10 @@
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
+  "bedrock/us-gov-west-1/anthropic.claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "bedrock/us-gov-east-1/nvidia.nemotron-nano-3-30b": {
     "contextWindow": 262144,
     "maxOutputTokens": 8192
@@ -10512,6 +10656,10 @@
     "maxOutputTokens": 64000
   },
   "bedrock/us-gov-east-1/anthropic.claude-fable-5-1": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-gov-east-1/anthropic.claude-fable-5-2": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
@@ -10567,6 +10715,14 @@
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
+  "bedrock_mantle/us-gov-east-1/openai.gpt-5.6-terra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/us-gov-east-1/openai.gpt-5.6-luna": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
   "bedrock_mantle/us-gov-east-1/xai.grok-4.6": {
     "contextWindow": 500000,
     "maxOutputTokens": 64000
@@ -10591,6 +10747,102 @@
     "contextWindow": 256000,
     "maxOutputTokens": 8000
   },
+  "bedrock_mantle/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/mistral.mistral-large-3-675b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/moonshotai.kimi-k2.5": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
   "bedrock_mantle/qwen.qwen3-32b": {
     "contextWindow": 32000,
     "maxOutputTokens": 8000
@@ -10610,6 +10862,34 @@
   "bedrock_mantle/qwen.qwen3-vl-235b-a22b-instruct": {
     "contextWindow": 256000,
     "maxOutputTokens": 8000
+  },
+  "azure/us-gov/gpt-4.1": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "azure/us-gov/gpt-4.1-mini": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "azure/us-gov/gpt-4o": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "azure/us-gov/gpt-4o-mini": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "azure/us-gov/gpt-5.6-luna": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/us-gov/gpt-5.6-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/us-gov/gpt-5.6-terra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
   },
   "azure/us-gov/gpt-5.1": {
     "contextWindow": 272000,
@@ -11703,6 +11983,10 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "fireworks_ai/accounts/fireworks/routers/deepseek-flash-latest": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "github_copilot/claude-sonnet-4.6": {
     "contextWindow": 200000,
     "maxOutputTokens": 50000
@@ -11956,6 +12240,14 @@
     "maxOutputTokens": 64000
   },
   "bedrock_mantle/openai.gpt-6.1-terra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/openai.gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/openai.gpt-6.2-astra": {
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
@@ -12896,7 +13188,7 @@
     "maxOutputTokens": 64000
   },
   "baseten/moonshotai/Kimi-K3.1-Pro": {
-    "contextWindow": 1000000,
+    "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
   "bedrock/us-gov-east-1/moonshotai.kimi-k3": {
@@ -12983,6 +13275,3234 @@
     "contextWindow": 32000,
     "maxOutputTokens": 4096
   },
+  "anthropic.claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "anthropic.claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "eu.anthropic.claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "eu.anthropic.claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "global.anthropic.claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "global.anthropic.claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us-gov.anthropic.claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us-gov.anthropic.claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us.anthropic.claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us.anthropic.claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/claude_platform/claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/claude-mythos-5-2-fast": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/claude-fable-5-2-fast": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-gov-east-1/anthropic.claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-gov-west-1/anthropic.claude-mythos-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "github_copilot/claude-fable-5.2": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "together_ai/elorian-labs/glimpse-1.0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "gemini/gemini-4-carbon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/gemini-4-carbon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/gemini-4-carbon-cyber-permissive": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "github_copilot/gemini-4-carbon": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "databricks/databricks-claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "databricks/system.ai.claude-fable-5-2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "replicate/google/gemini-4-carbon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/mistral-large-4-latest": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/us-gov-east-1/openai.gpt-5.6-cyber": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "databricks/databricks-gemini-4-carbon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "databricks/system.ai.gemini-4-carbon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "gemini/gemini-4-hydrogen": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/gemini-4-hydrogen": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/thinkingmachines/Inkling-2-Small": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "github_copilot/gemini-4-hydrogen": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock_mantle/anthropic.claude-fable-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/anthropic.claude-mythos-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/anthropic.claude-opus-4-7": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/anthropic.claude-opus-4-8": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/anthropic.claude-opus-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/anthropic.claude-sonnet-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/mantle/anthropic.claude-fable-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/mantle/anthropic.claude-mythos-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/mantle/anthropic.claude-opus-4-7": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/mantle/anthropic.claude-opus-4-8": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/mantle/anthropic.claude-opus-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/mantle/anthropic.claude-sonnet-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/mantle/anthropic.claude-haiku-4-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/mantle/anthropic.claude-opus-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "databricks/system.ai.gemini-4-hydrogen": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "chatgpt/gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "chatgpt/gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "gpt-6.2-astra-law": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "chatgpt/gpt-6.2-astra-law": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/us/gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/eu/gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/apac/gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/us/gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/eu/gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/apac/gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "global.openai.gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "global.openai.gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "us.openai.gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "us.openai.gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "openai.gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "openai.gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "github_copilot/mai-code-2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "github_copilot/mai-code-2-flash": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "github_copilot/gpt-6.2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "github_copilot/gpt-6.2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/Qwen/Qwen4-Max": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure/us-gov/gpt-4-turbo": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "azure/us-gov/gpt-4o-2024-05-13": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "azure/us-gov/gpt-4o-2024-11-20": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "azure/us-gov/o3-mini-2025-01-31": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/ap-east-2/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-northeast-1/amazon.nova-2-5-sonic": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-northeast-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-northeast-1/amazon.nova-2-sonic-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-northeast-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-1/apac.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-1/apac.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-1/deepseek.v3-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-northeast-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-northeast-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-northeast-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/mistral.mistral-large-3-675b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-northeast-1/moonshot.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/ap-northeast-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-northeast-1/openai.gpt-oss-120b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-northeast-1/openai.gpt-oss-20b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-northeast-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/ap-northeast-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/ap-northeast-1/qwen.qwen3-235b-a22b-2507-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/ap-northeast-1/qwen.qwen3-32b-v1:0": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/ap-northeast-1/qwen.qwen3-coder-480b-a35b-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-northeast-1/qwen.qwen3-vl-235b-a22b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-northeast-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/ap-northeast-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/ap-northeast-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/ap-northeast-2/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-2/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-2/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-2/apac.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-2/apac.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-northeast-2/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-south-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-south-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-south-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-south-1/apac.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-south-1/apac.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-south-1/deepseek.v3-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-south-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-south-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-south-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/mistral.mistral-7b-instruct-v0:2": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ap-south-1/mistral.mistral-large-2402-v1:0": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ap-south-1/mistral.mistral-large-3-675b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-south-1/mistral.mixtral-8x7b-instruct-v0:1": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ap-south-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/ap-south-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/ap-south-1/moonshot.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/ap-south-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-south-1/openai.gpt-oss-120b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-south-1/openai.gpt-oss-20b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-south-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/ap-south-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/ap-south-1/qwen.qwen3-235b-a22b-2507-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/ap-south-1/qwen.qwen3-32b-v1:0": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/ap-south-1/qwen.qwen3-coder-480b-a35b-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-south-1/qwen.qwen3-vl-235b-a22b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-south-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/ap-south-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/ap-south-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/ap-southeast-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-1/apac.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-1/apac.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-southeast-2/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-2/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-2/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-2/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-southeast-2/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-southeast-2/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-southeast-2/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-southeast-2/mistral.mistral-7b-instruct-v0:2": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ap-southeast-2/mistral.mistral-large-2402-v1:0": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ap-southeast-2/mistral.mixtral-8x7b-instruct-v0:1": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ap-southeast-2/moonshotai.kimi-k2.5": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/ap-southeast-2/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-southeast-2/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/ap-southeast-2/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/ap-southeast-2/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/ap-southeast-2/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/ap-southeast-3/deepseek.v3-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/ap-southeast-3/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-southeast-3/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-southeast-3/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/ap-southeast-3/openai.gpt-oss-120b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-southeast-3/openai.gpt-oss-20b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-southeast-3/qwen.qwen3-235b-a22b-2507-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/ap-southeast-3/qwen.qwen3-32b-v1:0": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/ap-southeast-3/qwen.qwen3-coder-480b-a35b-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/ap-southeast-3/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/ap-southeast-3/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/ap-southeast-3/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/ap-southeast-4/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-4/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-4/apac.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-4/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-southeast-5/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-5/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-southeast-6/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ap-southeast-7/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ap-southeast-7/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ca-central-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ca-central-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/ca-central-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ca-central-1/mistral.mistral-7b-instruct-v0:2": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ca-central-1/mistral.mistral-large-2402-v1:0": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ca-central-1/mistral.mixtral-8x7b-instruct-v0:1": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/ca-west-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/ca-west-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-central-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-central-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-central-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-central-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-central-1/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-central-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-central-1/meta.llama3-2-1b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-central-1/meta.llama3-2-3b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-central-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-central-1/moonshotai.kimi-k2.5": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-central-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-central-1/openai.gpt-oss-120b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-central-1/openai.gpt-oss-20b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-central-1/qwen.qwen3-235b-a22b-2507-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-central-1/qwen.qwen3-32b-v1:0": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-central-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-central-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-central-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/eu-north-1/amazon.nova-2-5-sonic": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-north-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-north-1/amazon.nova-2-sonic-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-north-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-north-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-north-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-north-1/eu.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-north-1/eu.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-north-1/eu.amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-north-1/eu.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-north-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-north-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-north-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-north-1/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-north-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-north-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-north-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/eu-south-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-south-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-1/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/eu.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-south-1/eu.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-1/eu.amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-1/eu.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-south-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-south-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-south-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-south-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-south-1/moonshotai.kimi-k2.5": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-south-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-south-1/openai.gpt-oss-120b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-south-1/openai.gpt-oss-20b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-south-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-south-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-south-1/qwen.qwen3-235b-a22b-2507-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-south-1/qwen.qwen3-32b-v1:0": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-south-1/qwen.qwen3-vl-235b-a22b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-south-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-south-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-south-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/eu-south-2/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-south-2/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-2/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-2/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-2/eu.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-south-2/eu.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-2/eu.amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-2/eu.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-south-2/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-west-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-west-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-1/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/eu.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-west-1/eu.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-1/eu.amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-1/eu.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-1/eu.meta.llama3-2-1b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-1/eu.meta.llama3-2-3b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-west-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/meta.llama3-2-1b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-1/meta.llama3-2-3b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-west-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-west-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/mistral.mistral-7b-instruct-v0:2": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-1/mistral.mistral-large-2402-v1:0": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-1/mistral.mixtral-8x7b-instruct-v0:1": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-west-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-west-1/moonshotai.kimi-k2.5": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-west-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-west-1/openai.gpt-oss-120b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-west-1/openai.gpt-oss-20b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-west-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-west-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-west-1/qwen.qwen3-32b-v1:0": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-west-1/qwen.qwen3-vl-235b-a22b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-west-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-west-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/eu-west-2/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-2/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-2/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-2/deepseek.v3-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-west-2/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-west-2/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/eu-west-2/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/mistral.mistral-7b-instruct-v0:2": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-2/mistral.mistral-large-2402-v1:0": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-2/mistral.mixtral-8x7b-instruct-v0:1": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-2/moonshotai.kimi-k2.5": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-west-2/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/openai.gpt-oss-120b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-west-2/openai.gpt-oss-20b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-west-2/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-west-2/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/eu-west-2/qwen.qwen3-235b-a22b-2507-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-west-2/qwen.qwen3-32b-v1:0": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/eu-west-2/qwen.qwen3-coder-480b-a35b-v1:0": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/eu-west-2/qwen.qwen3-vl-235b-a22b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/eu-west-2/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-west-2/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/eu-west-2/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/eu-west-3/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-west-3/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-3/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-3/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-3/eu.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-west-3/eu.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-3/eu.amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-3/eu.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/eu-west-3/eu.meta.llama3-2-3b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-3/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/eu-west-3/meta.llama3-2-1b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/eu-west-3/meta.llama3-2-3b-instruct-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/il-central-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/il-central-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/il-central-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/il-central-1/apac.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/il-central-1/apac.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/il-central-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/me-central-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/me-central-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/me-central-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/me-central-1/apac.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/sa-east-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/sa-east-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/sa-east-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/mistral.mistral-7b-instruct-v0:2": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/sa-east-1/mistral.mistral-large-2402-v1:0": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/sa-east-1/mistral.mistral-large-3-675b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/sa-east-1/mistral.mixtral-8x7b-instruct-v0:1": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "bedrock/sa-east-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/sa-east-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/sa-east-1/moonshot.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/sa-east-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock/sa-east-1/openai.gpt-oss-120b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/sa-east-1/openai.gpt-oss-20b-1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "bedrock/sa-east-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/sa-east-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock/sa-east-1/qwen.qwen3-32b-v1:0": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock/sa-east-1/qwen.qwen3-vl-235b-a22b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock/sa-east-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/sa-east-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock/sa-east-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock/us-east-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-east-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-east-1/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-east-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-east-2/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-east-2/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-east-2/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-east-2/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-west-1/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-west-1/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-west-1/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-west-1/global.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-west-1/us.amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-west-1/us.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-west-1/us.amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-west-2/amazon.nova-2-5-sonic": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-west-2/amazon.nova-2-lite-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-west-2/amazon.nova-2-sonic-v1:0": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-west-2/amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-west-2/amazon.nova-micro-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 10000
+  },
+  "bedrock/us-west-2/amazon.nova-pro-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "ca.amazon.nova-lite-v1:0": {
+    "contextWindow": 300000,
+    "maxOutputTokens": 10000
+  },
+  "ca.anthropic.claude-haiku-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "ca.anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "in.anthropic.claude-opus-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "in.anthropic.claude-sonnet-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "in.openai.gpt-5.6-luna": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "in.openai.gpt-5.6-terra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/ap-northeast-1/deepseek.v3.1": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-northeast-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-northeast-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/mistral.mistral-large-3-675b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-northeast-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/ap-northeast-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/ap-northeast-1/moonshotai.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-northeast-1/moonshotai.kimi-k2.5": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-northeast-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-northeast-1/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/ap-northeast-1/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/ap-northeast-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-northeast-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-northeast-1/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-northeast-1/qwen.qwen3-coder-480b-a35b-instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-northeast-1/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-northeast-1/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-northeast-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/ap-northeast-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/ap-northeast-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock_mantle/ap-south-1/deepseek.v3.1": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-south-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-south-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/mistral.mistral-large-3-675b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-south-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/ap-south-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/ap-south-1/moonshotai.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-south-1/moonshotai.kimi-k2.5": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-south-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-south-1/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/ap-south-1/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/ap-south-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-south-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-south-1/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-south-1/qwen.qwen3-coder-480b-a35b-instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-south-1/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-south-1/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-south-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/ap-south-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/ap-south-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock_mantle/ap-southeast-2/deepseek.v3.1": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-southeast-2/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-southeast-2/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/mistral.mistral-large-3-675b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-southeast-2/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/ap-southeast-2/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/ap-southeast-2/moonshotai.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-2/moonshotai.kimi-k2.5": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-2/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-southeast-2/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/ap-southeast-2/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/ap-southeast-2/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-2/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-2/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-2/qwen.qwen3-coder-480b-a35b-instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-2/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-2/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-2/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/ap-southeast-2/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/ap-southeast-2/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock_mantle/ap-southeast-3/deepseek.v3.1": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-southeast-3/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-southeast-3/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/ap-southeast-3/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/ap-southeast-3/moonshotai.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-3/moonshotai.kimi-k2.5": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-3/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/ap-southeast-3/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/ap-southeast-3/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/ap-southeast-3/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-3/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-3/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-3/qwen.qwen3-coder-480b-a35b-instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-3/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/ap-southeast-3/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/ap-southeast-3/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/ap-southeast-3/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/ap-southeast-3/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock_mantle/eu-central-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/google.gemma-4-26b-a4b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/eu-central-1/google.gemma-4-31b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/eu-central-1/google.gemma-4-e2b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-central-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-central-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-central-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-central-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-central-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-central-1/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/eu-central-1/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/eu-central-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-central-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-central-1/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-central-1/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-central-1/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-central-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/eu-north-1/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-north-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-north-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-north-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-north-1/moonshotai.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-north-1/moonshotai.kimi-k2.5": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-north-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-north-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-north-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-north-1/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-north-1/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-north-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/eu-north-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/eu-north-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock_mantle/eu-south-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-south-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-south-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-south-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-south-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-south-1/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/eu-south-1/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/eu-south-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-south-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-south-1/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-south-1/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-south-1/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-south-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/eu-west-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-west-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-west-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-west-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-west-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-west-1/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/eu-west-1/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/eu-west-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-1/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-1/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-1/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/eu-west-2/deepseek.v3.1": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-west-2/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-west-2/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-west-2/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/eu-west-2/moonshotai.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-2/moonshotai.kimi-k2.5": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-2/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/eu-west-2/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/eu-west-2/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/eu-west-2/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-2/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-2/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-2/qwen.qwen3-coder-480b-a35b-instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-2/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/eu-west-2/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/eu-west-2/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/eu-west-2/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/eu-west-2/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock_mantle/sa-east-1/deepseek.v3.1": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/deepseek.v3.2": {
+    "contextWindow": 156000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/google.gemma-3-12b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/google.gemma-3-27b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/google.gemma-3-4b-it": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/minimax.minimax-m2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/minimax.minimax-m2.1": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/minimax.minimax-m2.5": {
+    "contextWindow": 196000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/mistral.devstral-2-123b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/sa-east-1/mistral.magistral-small-2509": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/sa-east-1/mistral.ministral-3-14b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/mistral.ministral-3-3b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/mistral.ministral-3-8b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/mistral.mistral-large-3-675b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/sa-east-1/mistral.voxtral-mini-3b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/sa-east-1/mistral.voxtral-small-24b-2507": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "bedrock_mantle/sa-east-1/moonshotai.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/sa-east-1/moonshotai.kimi-k2.5": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/sa-east-1/nvidia.nemotron-nano-12b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/nvidia.nemotron-nano-3-30b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/nvidia.nemotron-nano-9b-v2": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/nvidia.nemotron-super-3-120b": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 32000
+  },
+  "bedrock_mantle/sa-east-1/openai.gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/sa-east-1/openai.gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384
+  },
+  "bedrock_mantle/sa-east-1/openai.gpt-oss-safeguard-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/sa-east-1/openai.gpt-oss-safeguard-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/sa-east-1/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/sa-east-1/qwen.qwen3-coder-480b-a35b-instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/sa-east-1/qwen.qwen3-coder-next": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/sa-east-1/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/sa-east-1/zai.glm-4.7": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/sa-east-1/zai.glm-4.7-flash": {
+    "contextWindow": 203000,
+    "maxOutputTokens": 50750
+  },
+  "bedrock_mantle/sa-east-1/zai.glm-5": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "bedrock_mantle/us-gov-west-1/anthropic.claude-fable-5-1": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/us-gov-west-1/anthropic.claude-opus-4-8": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/us-gov-west-1/anthropic.claude-opus-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/us-gov-west-1/anthropic.claude-sonnet-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "databricks/system.ai.gpt-6-2-astra": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "databricks/system.ai.gpt-6-2-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "gemini/gemini-4-neon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/gemini-4-neon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "github_copilot/gemini-4-neon": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "openrouter/google/gemini-4-neon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/google/gemini-4-neon:batch": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.2-astra-pro": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.2-astra-pro:batch": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.2-astra": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.2-astra:batch": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.2-sol-pro": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.2-sol-pro:batch": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.2-sol": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.2-sol:batch": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/tencent/hy4-flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/qwen/qwen4-max": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/inclusionai/ling-3.2-flash:free": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/google/gemini-4-hydrogen": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/google/gemini-4-hydrogen:batch": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/baidu/ernie-5.5-flash-preview:free": {
+    "contextWindow": 1024000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/baidu/ernie-light-dt-1.0-intl": {
+    "contextWindow": 1024000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/google/gemini-4-carbon": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/google/gemini-4-carbon:batch": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/nex-agi/nex-n2.6": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/thinkingmachines/inkling-2-small": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/anthropic/claude-fable-5.2": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/anthropic/claude-fable-5.2:batch": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/meta/muse-ember": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "openrouter/liquid/lfm-3-1.7b": {
     "contextWindow": 262144,
     "maxOutputTokens": 8192
@@ -12994,6 +16514,10 @@
   "openrouter/google/gemini-omni-1.2-flash": {
     "contextWindow": 131072,
     "maxOutputTokens": 32768
+  },
+  "openrouter/kt/midm-k-3.0-pro": {
+    "contextWindow": 261795,
+    "maxOutputTokens": 64000
   },
   "openrouter/google/gemini-omni-1.1-flash": {
     "contextWindow": 131072,
@@ -13007,8 +16531,8 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
-  "openrouter/stealth/crouton-alpha": {
-    "contextWindow": 1048576,
+  "openrouter/motif-technologies/motif-3": {
+    "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
   "openrouter/z-ai/glm-5.3-flashx-legal": {
@@ -13016,6 +16540,10 @@
     "maxOutputTokens": 64000
   },
   "openrouter/particle-ai/particle-1": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/particle-ai/particle-1:free": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -13039,6 +16567,10 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "openrouter/moonshotai/kimi-k3.1-pro:batch": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "openrouter/recursive/flint-v1.0:free": {
     "contextWindow": 262144,
     "maxOutputTokens": 64000
@@ -13056,10 +16588,6 @@
     "maxOutputTokens": 64000
   },
   "openrouter/elorian/glimpse": {
-    "contextWindow": 262144,
-    "maxOutputTokens": 64000
-  },
-  "openrouter/xingchen-agi/xing4.0-29b-a4b:free": {
     "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
@@ -13084,7 +16612,7 @@
     "maxOutputTokens": 64000
   },
   "openrouter/nvidia/nemotron-3.5-super-vl": {
-    "contextWindow": 1048576,
+    "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
   "openrouter/nvidia/nemotron-3.5-super-vl:free": {
@@ -13149,6 +16677,10 @@
   },
   "openrouter/inclusionai/ling-3.1-flash": {
     "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/unbiased/pareto-26.10-preview": {
+    "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
   "openrouter/openai/gpt-6.1-sol-pro": {
@@ -13359,6 +16891,10 @@
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
+  "openrouter/qwen/qwen3.8-max-0902:batch": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
   "openrouter/meta/muse-spark-1.3-contributor": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -13400,7 +16936,7 @@
     "maxOutputTokens": 64000
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "contextWindow": 1048576,
+    "contextWindow": 1048575,
     "maxOutputTokens": 64000
   },
   "openrouter/z-ai/glm-5.3-flash:batch": {
@@ -13452,11 +16988,7 @@
     "maxOutputTokens": 64000
   },
   "openrouter/qwen/qwen3.8-2.4t-a95b": {
-    "contextWindow": 1048576,
-    "maxOutputTokens": 64000
-  },
-  "openrouter/bytedance-seed/seed-2.0-code": {
-    "contextWindow": 262144,
+    "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -13470,14 +17002,6 @@
   "openrouter/x-ai/grok-4.6:batch": {
     "contextWindow": 500000,
     "maxOutputTokens": 64000
-  },
-  "openrouter/liquid/lfm-2.5-2.6b": {
-    "contextWindow": 128000,
-    "maxOutputTokens": 8192
-  },
-  "openrouter/liquid/lfm-2.5-2.6b:free": {
-    "contextWindow": 65536,
-    "maxOutputTokens": 8192
   },
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "contextWindow": 262144,
@@ -13497,7 +17021,7 @@
   },
   "openrouter/meta/muse-glimmer-30b": {
     "contextWindow": 131072,
-    "maxOutputTokens": 16384
+    "maxOutputTokens": 32768
   },
   "openrouter/meta/muse-glimmer-30b:batch": {
     "contextWindow": 131072,
@@ -13577,7 +17101,7 @@
   },
   "openrouter/moonshotai/kimi-k3:batch": {
     "contextWindow": 1048576,
-    "maxOutputTokens": 64000
+    "maxOutputTokens": 16384
   },
   "openrouter/meta/muse-spark-1.1": {
     "contextWindow": 1048576,
@@ -13708,8 +17232,8 @@
     "maxOutputTokens": 32768
   },
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b": {
-    "contextWindow": 202800,
-    "maxOutputTokens": 50700
+    "contextWindow": 262144,
+    "maxOutputTokens": 16384
   },
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {
     "contextWindow": 1000000,
@@ -13852,11 +17376,11 @@
     "maxOutputTokens": 64000
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "contextWindow": 1024000,
+    "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
   "openrouter/deepseek/deepseek-v4-flash": {
-    "contextWindow": 1048575,
+    "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
   "openrouter/tencent/hy3-preview": {
@@ -13892,8 +17416,8 @@
     "maxOutputTokens": 64000
   },
   "openrouter/z-ai/glm-5.1": {
-    "contextWindow": 202752,
-    "maxOutputTokens": 50688
+    "contextWindow": 204800,
+    "maxOutputTokens": 51200
   },
   "openrouter/google/gemma-4-26b-a4b-it": {
     "contextWindow": 262144,
@@ -14060,8 +17584,8 @@
     "maxOutputTokens": 64000
   },
   "openrouter/minimax/minimax-m2.5": {
-    "contextWindow": 65536,
-    "maxOutputTokens": 16384
+    "contextWindow": 196608,
+    "maxOutputTokens": 49152
   },
   "openrouter/z-ai/glm-5": {
     "contextWindow": 202752,
@@ -14079,12 +17603,8 @@
     "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
-  "openrouter/stepfun/step-3.5-flash": {
-    "contextWindow": 262144,
-    "maxOutputTokens": 64000
-  },
   "openrouter/moonshotai/kimi-k2.5": {
-    "contextWindow": 256000,
+    "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
   "openrouter/writer/palmyra-x5": {
@@ -14106,14 +17626,6 @@
   "openrouter/openai/gpt-5.2-codex": {
     "contextWindow": 400000,
     "maxOutputTokens": 64000
-  },
-  "openrouter/bytedance-seed/seed-1.6-flash": {
-    "contextWindow": 262144,
-    "maxOutputTokens": 32768
-  },
-  "openrouter/bytedance-seed/seed-1.6": {
-    "contextWindow": 262144,
-    "maxOutputTokens": 32768
   },
   "openrouter/z-ai/glm-4.7": {
     "contextWindow": 202752,
@@ -14263,10 +17775,6 @@
     "contextWindow": 32768,
     "maxOutputTokens": 8192
   },
-  "openrouter/qwen/qwen3-vl-30b-a3b-thinking": {
-    "contextWindow": 262144,
-    "maxOutputTokens": 64000
-  },
   "openrouter/qwen/qwen3-vl-30b-a3b-instruct": {
     "contextWindow": 262144,
     "maxOutputTokens": 16384
@@ -14317,7 +17825,7 @@
   },
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "contextWindow": 262144,
-    "maxOutputTokens": 16384
+    "maxOutputTokens": 64000
   },
   "openrouter/moonshotai/kimi-k2-0905": {
     "contextWindow": 262144,
@@ -14435,10 +17943,6 @@
     "contextWindow": 128000,
     "maxOutputTokens": 8192
   },
-  "openrouter/tencent/hunyuan-a13b-instruct": {
-    "contextWindow": 131072,
-    "maxOutputTokens": 32768
-  },
   "openrouter/morph/morph-v3-large": {
     "contextWindow": 262144,
     "maxOutputTokens": 64000
@@ -14459,10 +17963,6 @@
     "contextWindow": 128000,
     "maxOutputTokens": 16384
   },
-  "openrouter/minimax/minimax-m1": {
-    "contextWindow": 1000000,
-    "maxOutputTokens": 40000
-  },
   "openrouter/google/gemini-2.5-flash": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -14480,8 +17980,8 @@
     "maxOutputTokens": 64000
   },
   "openrouter/deepseek/deepseek-r1-0528": {
-    "contextWindow": 163840,
-    "maxOutputTokens": 32768
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "openrouter/mistralai/mistral-medium-3": {
     "contextWindow": 131072,
@@ -14573,7 +18073,7 @@
   },
   "openrouter/google/gemma-3-27b-it": {
     "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "maxOutputTokens": 16384
   },
   "openrouter/thedrummer/skyfall-36b-v2": {
     "contextWindow": 32768,
@@ -14624,16 +18124,16 @@
     "maxOutputTokens": 4096
   },
   "openrouter/deepseek/deepseek-chat": {
-    "contextWindow": 163840,
-    "maxOutputTokens": 16384
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
   },
   "openrouter/cohere/command-r7b-12-2024": {
     "contextWindow": 128000,
     "maxOutputTokens": 4000
   },
   "openrouter/meta-llama/llama-3.3-70b-instruct": {
-    "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "openrouter/amazon/nova-lite-v1": {
     "contextWindow": 300000,
@@ -14667,17 +18167,13 @@
     "contextWindow": 32768,
     "maxOutputTokens": 4096
   },
-  "openrouter/qwen/qwen-2.5-7b-instruct": {
-    "contextWindow": 32768,
-    "maxOutputTokens": 8192
-  },
   "openrouter/meta-llama/llama-3.2-1b-instruct": {
     "contextWindow": 60000,
     "maxOutputTokens": 15000
   },
   "openrouter/meta-llama/llama-3.2-3b-instruct": {
-    "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "contextWindow": 80000,
+    "maxOutputTokens": 20000
   },
   "openrouter/qwen/qwen-2.5-72b-instruct": {
     "contextWindow": 32768,

@@ -30,6 +30,7 @@ Read `design/` for the full picture. Key docs:
 | [evolution.md](design/evolution.md) | 6-stage self-evolution ladder, safety patterns |
 | [observation.md](design/observation.md) | Observer by turn — turn unit, per-turn state machine, failure modes, backfill, rollout |
 | [scheduling.md](design/scheduling.md) | Inngest, event-driven orchestration, job types, agent self-scheduling |
+| [orchestration-temporal.md](design/orchestration-temporal.md) | Plan for moving orchestration from Inngest to Temporal (decided, when engineering time allows) — engine evaluation, declarative flow layer, activity step model, turn state per iteration, migration slices |
 | [agents.md](design/agents.md) | Agentic loop, sub-agents, crash recovery |
 | [crash-recovery.md](design/crash-recovery.md) | Durability map of `handle-message`, what re-executes on retry, test contract |
 | [context-management.md](design/context-management.md) | Token counting, compaction pipeline, model registry |
@@ -50,6 +51,7 @@ Read `design/` for the full picture. Key docs:
 | [agent-resilience.md](design/agent-resilience.md) | Failure taxonomy, in-loop repair, degraded reply, stuck-loop detection |
 | [setup.md](design/setup.md) | Guided setup wizard UX contract — interactive flow, re-runnable behavior, non-interactive mode |
 | [infrastructure.md](design/infrastructure.md) | Runtime requirements, Docker Compose, secrets (encrypted DB, master key, HKDF, `_FILE` convention), deployment |
+| [liveness.md](design/liveness.md) | Failures that show as absence — `/health` checks and the `cogmo.check.status` gauge, the channel liveness contract and Telegram's receive sub-state on the polling supervisor, cron heartbeats, alert rules |
 | [data-model.md](design/data-model.md) | Table index — points to schemas in domain docs, deferred tables, design decisions |
 | [testing.md](design/testing.md) | Local dev, unit/integration/LLM tests, mocking, evaluation dataset |
 | [tooling.md](design/tooling.md) | Dev stack — runtime, build, ORM, testing, logging, linting, Kotlin-feel patterns |

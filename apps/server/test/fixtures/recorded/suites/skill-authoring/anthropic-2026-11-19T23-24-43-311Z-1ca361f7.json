@@ -8,35 +8,35 @@
         "hasToolResult": true
       },
       "response": {
-        "content": "Bitcoin is currently at $64,725 USD.",
+        "content": "Bitcoin is currently at **$64,725 USD**.",
         "usage": {
           "input_tokens": 2,
-          "cache_creation_input_tokens": 174,
-          "cache_read_input_tokens": 12795,
+          "cache_creation_input_tokens": 192,
+          "cache_read_input_tokens": 15036,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 174
+            "ephemeral_1h_input_tokens": 192
           },
-          "output_tokens": 20
+          "output_tokens": 22
         }
       },
       "recordedTimings": {
-        "ttftMs": 656,
+        "ttftMs": 1067,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          64,
-          20,
-          35,
+          49,
+          45,
           0,
+          2,
           0
         ],
-        "totalDurationMs": 775
+        "totalDurationMs": 1163
       },
       "metadata": {
-        "systemHash": "0a28e9d1",
-        "toolsHash": "d2ce31fb"
+        "systemHash": "20886bcb",
+        "toolsHash": "30bce4ef"
       }
     }
   ]

@@ -102,13 +102,71 @@ What reads it:
 
 A forwarded message never runs a bot command. It keeps its `bot_command` entity, so commands register on `bot.drop(matchFilter(":forward_origin"))`, grammY's filter for every update but a forward, and a forwarded `/cmd` reaches the agent as forwarded text. A forwarded message that arrives while a `/profile` or `/repo` dialog is open is dialog input like any other text.
 
+## Polling Supervision `[confirmed]`
+
+grammY's `bot.start()` runs a setup (`deleteWebhook`, alongside `getMe` on the first start), then the `getUpdates` loop. grammY retries every `getUpdates` error but a 401 or 409, and network errors, 5xx and 429 in its setup; `bot.start()` rejects on what it doesn't retry and resolves once `bot.stop()` ends the loop. `TelegramAdapter` supervises that promise and restarts polling after a 409.
+
+A 409 means something else holds the token. The Bot API fails an open long poll with 409 when a newer `getUpdates` on the same token supersedes it, refuses `getUpdates` while a webhook is set, and fails a pending `deleteWebhook` that a newer `setWebhook` supersedes. So the cause is another poller (a second cogmo, a dev run on the production token) or a webhook, never the adapter's own retries; nothing else in cogmo polls the token. A restart runs `deleteWebhook` again, which clears a webhook. Against another poller, each side's restart supersedes the other's poll, so both keep logging.
+
+The supervisor lives in the adapter's memory. Nothing persists and a new process starts at `idle`, so there is no durable id, `pgEnum` or table.
+
+```mermaid
+stateDiagram-v2
+  [*] --> idle
+  idle --> polling: setup() starts polling
+  polling --> backoff: 409
+  backoff --> polling: timer fires
+  polling --> failed: 401, other rejection, loop ends without stop()
+  idle --> stopped: stop()
+  polling --> stopped: stop()
+  backoff --> stopped: stop()
+  failed --> stopped: stop()
+```
+
+| State | Carries | Meaning |
+|-|-|-|
+| `idle` | — | Built; `setup()` has not started polling yet |
+| `polling` | the run, its start time, the 409 streak before it | A `bot.start()` is in flight: its setup, then the loop |
+| `backoff` | the timer | Waiting out a 409's backoff |
+| `failed` | `unauthorized`, `rejected` or `ended` | Polling is down until cogmo restarts. The process, web UI, crons and other adapters keep running |
+| `stopped` | the drain | `stop()` was called. Terminal |
+
+| From | Event | To | Effects |
+|-|-|-|-|
+| `idle` | `setup()` starts polling | `polling` | `bot.start()` |
+| `polling` | 409 | `backoff` | Error log with Telegram's description, the streak and the wait; arm the timer |
+| `backoff` | The timer fires | `polling` | `bot.start()`, in the timer's callback |
+| `polling` | 401 | `failed` (`unauthorized`) | Error log: the token is revoked or invalid |
+| `polling` | Any other rejection | `failed` (`rejected`) | Error log with the error |
+| `polling` | `bot.start()` resolves | `failed` (`ended`) | Error log: only `bot.stop()` ends grammY's loop, and only `stop()` calls it |
+| any but `stopped` | `stop()` | `stopped` | From `polling`: `bot.stop()`, await the run, then `bot.stop()`'s offset confirmation. From `backoff`: clear the timer. Then confirm the handled updates |
+| `stopped` | `stop()` | `stopped` | Return the first call's drain |
+
+`startPolling()` from any state but `idle` throws: `setup()` calls it once.
+
+A run's exit moves the state only while the state is still that run. Once `stop()` has moved it on, the exit `bot.stop()` causes (the run resolves, or rejects with grammY's `Aborted delay`) is silent, and any other exit logs a warning.
+
+**Backoff.** The `n`-th 409 in a row waits a random point in the upper half of `min(5 s × 2^(n−1), 5 min)`: 2.5–5 s first, then 5–10 s, up to 2.5–5 min. The first wait is short because the common causes clear at once: the restart's `deleteWebhook` removes a webhook, and a poller that has exited frees the token. The cap holds a poller that stays to one 409 per side every few minutes, enough to show in the logs without flooding them. A run that lasted 10 minutes resets the streak. Ten minutes is twice the cap, so two pollers taking turns never reset each other and both stay at the cap.
+
+| Failure | State left | Why it is safe, or the residual |
+|-|-|-|
+| 409 while polling | `backoff`, then `polling` | grammY keeps its offset across `bot.start()` calls, so a restart neither redelivers nor skips an update. The loop finishes a batch before its next `getUpdates`, so no handler is in flight at the 409 |
+| Another poller stays | `polling` and `backoff` in turn, at the cap | Each 409 logs at error. Residual: an update goes to whichever poller fetches it; one a poller is still handling isn't confirmed yet, so the other can fetch and handle it too. Once the other poller exits, the next scheduled restart comes up to 5 min later |
+| `stop()` during `backoff` | `stopped` | `stop()` clears the timer before its first `await`, so no run starts after it. grammY isn't polling, so there is no long poll to abort |
+| `stop()` during the first start's setup | `stopped` | Residual: grammY hands the first `getMe` no abort signal, so `bot.stop()` can't cut its retries short. `stop()` waits on them, bounded by shutdown's step, unless `bot.stop()` aborts a `deleteWebhook` whose immediate retry also fails: then the run ends and the retries outlive it |
+| `stop()` during a restart's setup | `stopped` | The timer's callback calls `bot.start()`, which marks grammY as polling before it returns, so `stop()` finds `polling` and `bot.stop()` aborts the setup. Residual: grammY retries an aborted `deleteWebhook` at once, and a retry that starts after `bot.stop()` has cleared its controller can't be aborted; `stop()` waits on it, bounded by shutdown's step |
+| 409 during `stop()` | `stopped` | grammY drops a `getUpdates` error once `bot.stop()` has run. A 409 that ended the run but settles after `stop()` began logs a warning and starts nothing. A 409 on an offset confirmation logs a warning; on the next start Telegram redelivers only the updates no successful confirmation covered |
+| 401 | `failed` | A revoked token stays revoked, so the adapter doesn't restart. Replace the channel's token and restart cogmo. Residual: on the first start, a 401 from `getMe` leaves grammY's concurrent `deleteWebhook` retrying while it meets retryable errors; it can outlive `stop()` and only deletes a webhook |
+| Unknown rejection | `failed` | A 4xx from setup (a 404 from a wrong `apiRoot`) or a bug, logged at error with the error; a restart would repeat it |
+| Process exit or crash | — | The next process starts at `idle`, and Telegram keeps the offset. Residual: Telegram redelivers every update not yet confirmed, handled ones included |
+
 ## Module Layout
 
 `src/transport/adapters/telegram/`. `index.ts`'s `setup()` builds the bot and wires the pieces below in order.
 
 | Module | Holds |
 |-|-|
-| `adapter.ts` | `TelegramAdapter`: delivery, stream handles, voice, and a `stop()` that confirms handled updates |
+| `adapter.ts` | `TelegramAdapter`: delivery, stream handles, voice, polling supervision, and a `stop()` that confirms handled updates |
 | `private-chat-gate.ts` | The first middleware, which drops an update from outside a private chat |
 | `sender-gate.ts` | The middleware ahead of every handler that drops an update the channel doesn't admit |
 | `command-routes.ts` | Command registration on the forward-dropping composer, `/start`, `/cancel`, the command menu |
@@ -140,3 +198,8 @@ Unit tests use grammY transformers to capture outgoing API calls — no network,
 - Handles `/start` (sends welcome, no emit)
 - Handles `/new` (calls `transport.closeSession()` + `transport.createConversation()`, no emit)
 - Sends typing indicator before emit
+- Restarts polling after a 409, waiting 2.5–5 s first and doubling to a 2.5–5 min cap, and starts the streak over after a 10-minute run
+- Stays down after a 401, an unknown rejection, or a loop that ends without `stop()`
+- Starts nothing after a `stop()` during a backoff or a restart's setup, and logs a warning for a 409 that settles after `stop()`
+- Settles a second `stop()` with the first one's drain
+- On grammY's own `Bot` over a fake Bot API: resumes past the handled update after a 409, calls nothing but the offset confirmation after a `stop()` during the backoff, and ends silently on a `stop()` during a restart's `deleteWebhook`, whether its retry succeeds or fails

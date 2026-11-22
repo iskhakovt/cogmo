@@ -108,7 +108,7 @@ The port narrows what a use case can reach and makes it testable with an in-memo
 
 A handler that plans at most one step inline (`coding-auto-register-skill`, `coding-cleanup-run-branch`, `model-catalog-refresh`, `skill-cron-fire`, `handle-message-reconcile`, `sandbox-reaper`) may call `step` directly. Multi-step handlers not yet on the port are tracked in `todo.md`: `idle-timer`, `recover-conversation`, `coding-task-reconcile`, `scheduled-task-fire`, `skill-venvs-reaper`, the orphan-branch sweep's cron, `boundary-waiter` and `boundary-janitor` call `step` directly, and the Observer (`agent/evolution/observer.ts`) plans through its own `run`-only harness bridged with a cast, because several of its step results carry rows with `Date` fields the JSON check rejects.
 
-A fully engine-neutral layer is not built. Replacing Inngest would mean re-deciding function configuration, failure handling and replay semantics, not swapping an adapter, and the alternatives were eliminated for reasons a wrapper doesn't change ([decisions.md](decisions.md) → Decision Table: Orchestration abstraction, and Eliminated Options: Temporal, DBOS Transact). An abstraction over every engine's model would cost each feature now for a migration nobody has planned.
+A fully engine-neutral layer is not built. Replacing Inngest would mean re-deciding function configuration, failure handling and replay semantics, not swapping an adapter, and a wrapper doesn't change that ([decisions.md](decisions.md) → Decision Table: Orchestration abstraction). An abstraction over every engine's model would cost each feature now; the decided move to Temporal re-decides those parts directly ([orchestration-temporal.md](orchestration-temporal.md)).
 
 ## Hindsight Deployment `[confirmed]`
 
