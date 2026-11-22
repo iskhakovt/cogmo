@@ -580,6 +580,7 @@ This section is where that review starts. It must settle:
 - **Cooldown ordering on exit.** If `report-turn-failure` plus `recover-conversation` survives, the next queued turn can be admitted before the cooldown commits, the pause ceiling included, and persistence clears the cooldown by conversation id alone (`agent/handle-message/persist-turn.ts:150`), so a probe can erase a newer one. The cooldown is armed before the lane releases, and a turn clears only the cooldown it probed.
 - **The pause clock:** wall-clock age, as here, or cumulative paused time.
 - **The cutover hold.** Whether slice 6 holds `inbound/ready` and `pipeline/stage.due` until Inngest is verified quiescent, which would exclude the overlap of an old and a new turn of one conversation rather than guard it.
+- **The four turn tables** (`turns`, `turn_iterations`, `turn_tool_results`, `turn_inputs`) as a data-model change, approved by the owner before any code.
 - **Per-process state in tool handlers** beyond the file-freshness map ([crash-recovery.md](crash-recovery.md) → Durable LLM iterations), which hasn't been audited.
 
 ## Inngest-specific contracts `[proposed]`
