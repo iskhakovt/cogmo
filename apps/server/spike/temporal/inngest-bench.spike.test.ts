@@ -84,8 +84,20 @@ beforeAll(async () => {
       });
     },
   );
+  // Sequential zero-length steps inside one run, for the per-step cost.
+  const steps = client.createFunction(
+    { id: "bench-steps", triggers: [{ event: "bench/steps" }] },
+    async ({ event, step }) => {
+      const id = String(event.data.id);
+      for (let i = 0; i < 11; i++) {
+        await step.run(`step-${i}`, async () => {
+          journal.push({ key: `${id}:step-${i}`, at: Date.now() });
+        });
+      }
+    },
+  );
   connection = await connect({
-    apps: [{ client, functions: [turn, router] }],
+    apps: [{ client, functions: [turn, router, steps] }],
     ...(process.env.INNGEST_GATEWAY_URL !== undefined && {
       gatewayUrl: process.env.INNGEST_GATEWAY_URL,
     }),
@@ -147,6 +159,15 @@ describe.skipIf(!enabled)("inngest bench", () => {
       debounced.push((mark(`turn-start:${c}`) ?? 0) - sent - 1_000);
     }
     results.debounceOverheadMs = stats(debounced);
+
+    const perStep: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      const id = randomUUID();
+      await client.send({ name: "bench/steps", data: { id } });
+      await until(() => mark(`${id}:step-10`) !== undefined, 30_000);
+      perStep.push(((mark(`${id}:step-10`) ?? 0) - (mark(`${id}:step-0`) ?? 0)) / 10);
+    }
+    results.perStepMs = stats(perStep);
 
     writeFileSync(
       process.env.BENCH_OUT ?? "/tmp/inngest-bench.json",

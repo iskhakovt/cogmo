@@ -188,6 +188,21 @@ describe.skipIf(!process.env.BENCH)("bench", () => {
     }
     results.debounceOverheadMs = stats(debounced);
 
+    // Sequential zero-length steps inside one run: first step → last step.
+    for (const local of [false, true]) {
+      const perStep: number[] = [];
+      for (let i = 0; i < 10; i++) {
+        const id = `steps-${randomUUID()}`;
+        await client.workflow.execute("stepsWorkflow", {
+          workflowId: id,
+          taskQueue: TASK_QUEUE,
+          args: [{ id, steps: 11, local }],
+        });
+        perStep.push(((markAt(id, "step-10") ?? 0) - (markAt(id, "step-0") ?? 0)) / 10);
+      }
+      results[local ? "perLocalActivityMs" : "perActivityMs"] = stats(perStep);
+    }
+
     writeFileSync(
       process.env.BENCH_OUT ?? "/tmp/temporal-bench.json",
       JSON.stringify(results, null, 2),

@@ -4,7 +4,13 @@
  * src/agent/scheduling/fire-handler.ts.
  */
 
-import { ApplicationFailure, log, proxyActivities, sleep } from "@temporalio/workflow";
+import {
+  ApplicationFailure,
+  log,
+  proxyActivities,
+  proxyLocalActivities,
+  sleep,
+} from "@temporalio/workflow";
 import type { DispatchScheduledFireResult } from "../../../src/agent/scheduling/dispatch-fire.js";
 import type { FlowActivities } from "../flow/activities.js";
 import type { FlowEventOf } from "../flow/types.js";
@@ -133,4 +139,18 @@ export async function idleTimerWorkflow(
       data: { conversationId: event.data.conversationId },
     },
   ]);
+}
+
+const local = proxyLocalActivities<TurnActivities>({ startToCloseTimeout: "30s" });
+
+/** Bench: `steps` sequential zero-length steps, as activities or local activities. */
+export async function stepsWorkflow(args: {
+  id: string;
+  steps: number;
+  local: boolean;
+}): Promise<void> {
+  const run = args.local ? local : turn;
+  for (let i = 0; i < args.steps; i++) {
+    await run.record({ conversationId: args.id, mark: `step-${i}` });
+  }
 }

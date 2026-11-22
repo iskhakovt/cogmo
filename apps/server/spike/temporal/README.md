@@ -120,14 +120,24 @@ numbers are pure plumbing:
 | Next queued turn on the same key | 170–200 ms | 145 ms |
 | Debounce overhead beyond its period | 800 ms (300 ms period) | 1,550 ms (1 s period) |
 
-- **Every Temporal workflow task waits about 50 ms** between being
-  scheduled and being started, on the dev server and on the real server
-  alike.
+Sequential zero-length steps inside one run, p50 / p95:
+
+| | ms per step |
+|-|-|
+| Inngest `step.run` (connect, checkpointing) | 2.6 / 10.5 |
+| Temporal activity | 15 / 32 |
+| Temporal local activity | 0.8 / 1.0 |
+
+- **Cross-workflow hops cost about 50 ms each.** A child workflow
+  starting, a child's completion reaching its parent, and a signal-driven
+  workflow task each wait about 50 ms between scheduled and started. That
+  is the gap in the hand-off and debounce rows above.
 - **Worker poller settings don't change it.** Tried: sticky cache off,
   poll ratio 1, autoscaling pollers.
-- **A turn of k steps therefore pays about k × 50 ms of orchestration.**
-  Inngest's checkpointing runs sequential steps in one request, so it is
-  likely cheaper per step. That wasn't measured here.
+- **Back-to-back activities in one run cost about 15 ms each, and local
+  activities under 1 ms.** A 15-step turn spends about 40 ms on Inngest,
+  about 225 ms on Temporal activities, or about 15 ms with its short reads
+  as local activities.
 
 ### Footprint
 
