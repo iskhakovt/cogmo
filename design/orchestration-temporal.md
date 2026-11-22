@@ -7,7 +7,8 @@ The plan for moving cogmo's orchestration from Inngest to Temporal.
 Decided by the owner, 2026-11-22 ([decisions.md](decisions.md) → Orchestration); the plan below stays `[proposed]`.
 
 - **Cogmo moves to Temporal when engineering time allows**, keeping function configuration declarative through a flow layer of about 450 lines ([The flow layer](#the-flow-layer-proposed)).
-- **The official SDK, `@temporalio/*`, is approved as a runtime dependency.** It is the only TypeScript SDK, and it ships the native bridge its worker needs. The four turn tables are decided in the turn's design review ([Entry criteria](#entry-criteria-for-the-turns-design-review)).
+- **The official SDK, `@temporalio/*`, is approved as a runtime dependency.** It is the only TypeScript SDK, and it ships the native bridge its worker needs.
+- **The data-model changes the plan needs are approved:** the four turn tables and the user row's unique index. The turn's design review settles their exact shape ([Entry criteria](#entry-criteria-for-the-turns-design-review)).
 - **Two tripwires make it sooner:**
   1. Inngest gates a feature cogmo uses behind its cloud or a paid plan: concurrency keys, debounce, connect, or system events.
   2. A blocking upstream bug that cogmo can't fix or work around itself.
@@ -580,7 +581,7 @@ This section is where that review starts. It must settle:
 - **Cooldown ordering on exit.** If `report-turn-failure` plus `recover-conversation` survives, the next queued turn can be admitted before the cooldown commits, the pause ceiling included, and persistence clears the cooldown by conversation id alone (`agent/handle-message/persist-turn.ts:150`), so a probe can erase a newer one. The cooldown is armed before the lane releases, and a turn clears only the cooldown it probed.
 - **The pause clock:** wall-clock age, as here, or cumulative paused time.
 - **The cutover hold.** Whether slice 6 holds `inbound/ready` and `pipeline/stage.due` until Inngest is verified quiescent, which would exclude the overlap of an old and a new turn of one conversation rather than guard it.
-- **The four turn tables** (`turns`, `turn_iterations`, `turn_tool_results`, `turn_inputs`) and the user row's partial unique index on `messages`, unless the `todo.md` entry for the unkeyed user row lands it first, as a data-model change the owner approves before any code.
+- **The exact shape of the four turn tables** (`turns`, `turn_iterations`, `turn_tool_results`, `turn_inputs`) and of the user row's partial unique index on `messages`, unless the `todo.md` entry for the unkeyed user row lands it first. The owner has approved the changes themselves.
 - **Per-process state in tool handlers** beyond the file-freshness map ([crash-recovery.md](crash-recovery.md) → Durable LLM iterations), which hasn't been audited.
 
 ## Inngest-specific contracts `[proposed]`
