@@ -8,6 +8,7 @@ allowBuilds:
   # Its install script only re-checks the platform binary its optional
   # dependency already ships.
   "@bufbuild/buf": false
+  "@swc/core": false
   cpu-features: false
   esbuild: false
   protobufjs: false
