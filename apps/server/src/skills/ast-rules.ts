@@ -337,7 +337,7 @@ export const ENTRYPOINT_RULE =
 /** The entrypoint's signature with pydantic models, `Ctx` from `cogmo_ctx`, which the Entrypoint gate accepts. */
 export const ENTRYPOINT_SIGNATURE = "async def run(inputs: Input, ctx: Ctx) -> Output";
 
-/** `skill.py`'s bounds (design/skills.md → Register-time gates → Size). */
+/** `skill.py`'s and `test_skill.py`'s bounds (design/skills.md → Register-time gates → Size). */
 export const SKILL_BODY_MAX_LINES = 1000;
 /** 1000 lines at the toolchain's 120-column `line-length`. */
 export const SKILL_BODY_MAX_CHARACTERS = 120_000;

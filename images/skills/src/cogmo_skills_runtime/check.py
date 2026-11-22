@@ -4,9 +4,10 @@ Reads one `check_request` on stdin: `skill.py`, the manifest's `dependencies` an
 holds them. Writes the body to `skill.py` in a fresh temporary directory, checks it with CPython's `compile`, ruff,
 `ruff format`, pyrefly, and the toolchain's Imports and suppression rules, and writes one `check_reply` line to stdout:
 every finding, positioned in 1-based lines and UTF-16 columns as the register-time gates count them, and every
-suppression the body carries, with the release version the image baked beside its toolchain; or `fatal` when a check
-could not run. The tools run by absolute path from the tools venv, which no task's `PATH` or `sys.path` holds, and
-nothing here runs the skill's code or its dependencies' (design/skills.md → Register-time CPython checks).
+suppression the body carries, with the release version the image baked beside its toolchain and `testRunner`, which
+tells the host the image runs a skill's tests; or `fatal` when a check could not run. The tools run by absolute path
+from the tools venv, which no task's `PATH` or `sys.path` holds, and nothing here runs the skill's code or its
+dependencies' (design/skills.md → Register-time CPython checks).
 """
 
 import ast
@@ -393,6 +394,7 @@ def main(stdin: TextIO, stdout: TextIO, load_toolchain: Callable[[], Toolchain])
             "findings": [f.frame() for f in bounded(checked.findings)],
             "suppressions": checked.suppressions,
             "toolchainVersion": toolchain.version,
+            "testRunner": True,
         }
     except CheckFailed as e:
         reply = {"type": "fatal", "error": str(e)}

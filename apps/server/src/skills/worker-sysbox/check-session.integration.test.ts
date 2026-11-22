@@ -63,7 +63,7 @@ function checks(depsCacheVolumeName: string | undefined) {
 }
 
 describe.skipIf(RUNTIME === undefined)("register's CPython checks in the skills image", () => {
-  it("passes a typed skill and names the image's toolchain release", async () => {
+  it("passes a typed skill and names the image's toolchain release and its test runner", async () => {
     const checked = await checks(undefined).check({
       body: CLEAN,
       dependencies: [],
@@ -75,6 +75,7 @@ describe.skipIf(RUNTIME === undefined)("register's CPython checks in the skills 
       findings: [],
       suppressions: [],
       toolchainVersion: "test",
+      testRunner: true,
     });
   }, 120_000);
 

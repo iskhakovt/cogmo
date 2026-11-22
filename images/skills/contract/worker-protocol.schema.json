@@ -565,6 +565,10 @@
             "toolchainVersion": {
               "type": "string",
               "minLength": 1
+            },
+            "testRunner": {
+              "type": "boolean",
+              "const": true
             }
           },
           "required": [
@@ -572,6 +576,120 @@
             "findings",
             "suppressions",
             "toolchainVersion"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fatal"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "skill_tests_request": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "object",
+          "properties": {
+            "SKILL.md": {
+              "type": "string"
+            },
+            "skill.py": {
+              "type": "string"
+            },
+            "test_skill.py": {
+              "type": "string"
+            },
+            "requirements.lock": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "SKILL.md",
+            "skill.py",
+            "test_skill.py"
+          ],
+          "additionalProperties": false
+        },
+        "lockfileHash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "files",
+        "lockfileHash"
+      ],
+      "additionalProperties": false
+    },
+    "skill_tests_reply": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "test_findings"
+            },
+            "findings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "line": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "line",
+                  "message"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "type",
+            "findings",
+            "count"
           ],
           "additionalProperties": false
         },

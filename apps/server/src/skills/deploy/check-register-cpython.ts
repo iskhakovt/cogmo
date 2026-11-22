@@ -27,8 +27,11 @@ export type RegisterCpythonRejection =
   /** A check could not run: pausing, since nothing is wrong with the tip. */
   | { kind: "registrar_unavailable"; cause: "sandbox"; detail: string };
 
-/** What register's CPython checks record on the deploy's classifier log. */
-type CpythonCheckRecord = Pick<ClassifierLog, "toolchain_version" | "suppressions">;
+/** What register's CPython checks record on the deploy's classifier log, and whether the image runs tests. */
+interface CpythonChecked {
+  record: Pick<ClassifierLog, "toolchain_version" | "suppressions">;
+  testRunner: boolean;
+}
 
 /**
  * Register's CPython checks, after its lockfile compile and before its schema
@@ -43,13 +46,13 @@ export async function checkRegisterCpython(
   checks: CpythonChecks | undefined,
   skill: CheckedSkill,
   opts: { releaseVersion: string; signal: AbortSignal | undefined },
-): Promise<Result<CpythonCheckRecord, RegisterCpythonRejection>> {
+): Promise<Result<CpythonChecked, RegisterCpythonRejection>> {
   if (checks === undefined) {
     log.warn(
       { skillName: skill.name },
       "no sandbox backend is configured: register skips the lockfile compile and the CPython checks",
     );
-    return ok({ toolchain_version: null, suppressions: [] });
+    return ok({ record: { toolchain_version: null, suppressions: [] }, testRunner: false });
   }
   const checked = await checks.check({
     body: skill.body,
@@ -72,7 +75,7 @@ export async function checkRegisterCpython(
         .exhaustive(),
     );
   }
-  const { findings, suppressions, toolchainVersion } = checked.value;
+  const { findings, suppressions, toolchainVersion, testRunner } = checked.value;
   if (toolchainVersion !== opts.releaseVersion) {
     log.warn(
       { skillName: skill.name, toolchainVersion, releaseVersion: opts.releaseVersion },
@@ -83,5 +86,8 @@ export async function checkRegisterCpython(
     const path = `${skillDir(skill.name)}${SKILL_BODY_FILE}`;
     return err({ kind: "lint_failed", findings: findings.map((f) => ({ ...f, path })) });
   }
-  return ok({ toolchain_version: toolchainVersion, suppressions: [...suppressions] });
+  return ok({
+    record: { toolchain_version: toolchainVersion, suppressions: [...suppressions] },
+    testRunner,
+  });
 }

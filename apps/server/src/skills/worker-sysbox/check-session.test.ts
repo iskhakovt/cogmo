@@ -20,6 +20,7 @@ const FINDINGS_REPLY = `${JSON.stringify({
   findings: [FINDING],
   suppressions: [SUPPRESSION],
   toolchainVersion: "2.17.0",
+  testRunner: true,
 })}\n`;
 /** The runtime interpreter, which `deps.test.ts` pins against the skills image. */
 const CHECK_RUNNER = [RUNTIME_PYTHON, "-I", "-m", "cogmo_skills_runtime.check"];
@@ -59,6 +60,7 @@ describe("makeSandboxCpythonChecks", () => {
       findings: [FINDING],
       suppressions: [SUPPRESSION],
       toolchainVersion: "2.17.0",
+      testRunner: true,
     });
     expect(h.specs).toHaveLength(1);
     const [spec] = h.specs;
@@ -80,6 +82,30 @@ describe("makeSandboxCpythonChecks", () => {
       },
     ]);
     expect(h.deleted).toBe(1);
+  });
+
+  it("reads a reply without testRunner, an image older than the test runner, as running no tests", async () => {
+    const reply = {
+      type: "check_findings",
+      findings: [],
+      suppressions: [],
+      toolchainVersion: "2.16.0",
+    };
+    const h = sessionHarness({}, { stdout: `${JSON.stringify(reply)}\n`, exitCode: 0 });
+
+    const checked = await checks(h, VOLUME).check({
+      body: BODY,
+      dependencies: [],
+      lockfile: null,
+      signal: undefined,
+    });
+
+    expect(checked._unsafeUnwrap()).toEqual({
+      findings: [],
+      suppressions: [],
+      toolchainVersion: "2.16.0",
+      testRunner: false,
+    });
   });
 
   it("checks with the backend's network where it creates no session without one", async () => {

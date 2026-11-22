@@ -111,13 +111,19 @@ async def run(inputs: Input, ctx: Ctx) -> Output:
 """
 
 
-def test_a_skill_that_passes_has_no_findings_and_names_the_toolchain(
+def test_a_skill_that_passes_has_no_findings_and_names_the_toolchain_and_the_test_runner(
     toolchain: Toolchain, protocol: ProtocolCheck
 ) -> None:
     reply = _check(_CLEAN, toolchain)
 
     protocol("check_reply", reply)
-    assert reply == {"type": "check_findings", "findings": [], "suppressions": [], "toolchainVersion": "9.9.9-test"}
+    assert reply == {
+        "type": "check_findings",
+        "findings": [],
+        "suppressions": [],
+        "toolchainVersion": "9.9.9-test",
+        "testRunner": True,
+    }
 
 
 def test_the_request_the_host_sends_is_a_check_request(protocol: ProtocolCheck) -> None:

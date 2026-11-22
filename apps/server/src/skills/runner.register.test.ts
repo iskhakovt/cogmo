@@ -18,11 +18,12 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { assertKind, assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import { type ExecScript, sessionHarness } from "../test/session-harness.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { offlineWasm } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
 import type { CpythonChecks } from "./cpython-checks.js";
-import { hashLockfileContents, type LockfileCompiler } from "./deps.js";
+import { hashLockfileContents, type LockfileCompiler, RUNTIME_PYTHON } from "./deps.js";
 import { migrateSkillsLayout } from "./migrate-layout.js";
 import { ensureSkillsMirror } from "./mirror-reconcile.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
@@ -3544,7 +3545,7 @@ async def run(inputs, ctx):
     const VERSION = "dev";
     /** The checks' answer: their findings and the toolchain release that ran them. */
     function passing(toolchainVersion: string) {
-      return ok({ findings: [], suppressions: [], toolchainVersion });
+      return ok({ findings: [], suppressions: [], toolchainVersion, testRunner: true });
     }
 
     function checksAnswering(answer: Awaited<ReturnType<CpythonChecks["check"]>>) {
@@ -3604,6 +3605,7 @@ async def run(inputs, ctx):
           ],
           suppressions: [],
           toolchainVersion: VERSION,
+          testRunner: true,
         }),
       );
 
@@ -3636,7 +3638,7 @@ async def run(inputs, ctx):
         { tool: "pyrefly" as const, code: "bad-return", line: 6 },
       ];
       const cpythonChecks = checksAnswering(
-        ok({ findings: [], suppressions, toolchainVersion: VERSION }),
+        ok({ findings: [], suppressions, toolchainVersion: VERSION, testRunner: true }),
       );
 
       const { result } = await registerEcho({ cpythonChecks });
@@ -3773,6 +3775,7 @@ async def run(inputs, ctx):
           findings: [{ id: "ruff", line: 1, column: 1, message: "E501 Line too long" }],
           suppressions: [],
           toolchainVersion: VERSION,
+          testRunner: true,
         }),
       );
       const offline = offlineWasm(repo.bare);
@@ -3870,6 +3873,237 @@ async def run(inputs, ctx):
     });
   });
 
+  describe("register-time tests", () => {
+    const CONTAINER = ECHO_MANIFEST.replace("tier: wasm", "tier: container");
+    const TESTS =
+      "from skill import run\n\n\nasync def test_echo():\n    assert await run({'x': 1}, None) == {'echo': 2}\n";
+    const TEST_RUNNER = [RUNTIME_PYTHON, "-I", "-m", "cogmo_skills_runtime.skill_tests"];
+
+    function replying(reply: object): ExecScript {
+      return { stdout: `${JSON.stringify(reply)}\n`, exitCode: 0 };
+    }
+
+    /** The check session's reply; an image older than the test runner writes no `testRunner`. */
+    function checked(testRunner: boolean): ExecScript {
+      return replying({
+        type: "check_findings",
+        findings: [],
+        suppressions: [],
+        toolchainVersion: "dev",
+        ...(testRunner && { testRunner }),
+      });
+    }
+
+    const IMPORTED = replying({ type: "schemas", inputs: null, outputs: null });
+
+    /** Push `skill/echo` with `manifest`, ECHO's body and `tests` as its test_skill.py. */
+    async function pushEcho(manifest: string, tests: string | null): Promise<string> {
+      if (tests !== null) await writeFile(skillFile(repo.work, "test_skill.py", "echo"), tests);
+      return pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest,
+        body: ECHO_BODY,
+      });
+    }
+
+    async function testsRecord(deployId: string) {
+      return (await tx((trx) => store.getDeployById(trx, deployId)))?.classifierLog.tests;
+    }
+
+    it("runs a container skill's tests last, in a session with no network, and records the count that passed", async () => {
+      const h = sessionHarness(
+        {},
+        checked(true),
+        IMPORTED,
+        replying({ type: "test_findings", findings: [], count: 2 }),
+      );
+      const runner = await makeRunner({ registerSandbox: h.sandbox });
+      await pushEcho(CONTAINER, TESTS);
+
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(result, "pending_approval");
+      expect(await testsRecord(result.deployId)).toEqual({ kind: "passed", count: 2 });
+      expect(h.specs.map((spec) => spec.network)).toEqual(["none", "none", "none"]);
+      const exec = expectDefined(h.execs[2], "the test session's exec");
+      expect(exec.cmd).toEqual(TEST_RUNNER);
+      expect(JSON.parse(exec.stdin)).toEqual({
+        files: { "SKILL.md": CONTAINER, "skill.py": ECHO_BODY, "test_skill.py": TESTS },
+        lockfileHash: null,
+      });
+      // Approve keeps the record register wrote, running no tests.
+      const approved = await runner.approveDeploy({ pendingId: result.deployId, origin: OWNER });
+      assertStatus(approved, "live");
+      expect(await testsRecord(approved.deployId)).toEqual({ kind: "passed", count: 2 });
+      expect(h.execs).toHaveLength(3);
+    });
+
+    it("refuses a tip whose tests fail, as the dry run does, and pauses on a suite that could not run", async () => {
+      const failing = replying({
+        type: "test_findings",
+        findings: [
+          { line: 4, message: "test_echo: AssertionError: assert {'echo': 1} == {'echo': 2}" },
+        ],
+        count: 1,
+      });
+      const fatal = replying({ type: "fatal", error: "pytest refused its command line" });
+      const h = sessionHarness(
+        {},
+        ...[failing, failing, fatal, fatal].flatMap((answer) => [checked(true), IMPORTED, answer]),
+      );
+      const runner = await makeRunner({ registerSandbox: h.sandbox });
+      const sha = await pushEcho(CONTAINER, TESTS);
+      const live = new AbortController().signal;
+      const finding =
+        "tests: skills/echo/test_skill.py:4: test_echo: AssertionError: assert {'echo': 1} == {'echo': 2}";
+      const pause =
+        "registrar_unavailable: sandbox: the suite could not run: pytest refused its command line; retry the register";
+
+      const refused = await runner.register({ branch: "skill/echo", origin: OWNER });
+      const dryRefused = await runner.checkRegister({ sha, signal: live });
+      const paused = await runner.register({ branch: "skill/echo", origin: OWNER });
+      const dryPaused = await runner.checkRegister({ sha, signal: live });
+
+      assertStatus(refused, "rejected");
+      expect(refused.errors).toEqual([finding]);
+      expect(dryRefused).toEqual({ kind: "refused", sha, findings: [finding] });
+      assertStatus(paused, "rejected");
+      expect(paused.errors).toEqual([pause]);
+      expect(dryPaused).toEqual({
+        kind: "unavailable",
+        sha,
+        cause: "registrar_unavailable",
+        detail: pause,
+      });
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    });
+
+    it.each([
+      {
+        name: "no sandbox backend",
+        sandbox: false,
+        manifest: CONTAINER,
+        tests: TESTS,
+        scripts: [],
+        reason: "no_sandbox",
+      },
+      {
+        name: "no test_skill.py",
+        sandbox: true,
+        manifest: CONTAINER,
+        tests: null,
+        scripts: [checked(true), IMPORTED],
+        reason: "no_test_file",
+      },
+      {
+        name: "a wasm-tier skill",
+        sandbox: true,
+        manifest: ECHO_MANIFEST,
+        tests: TESTS,
+        scripts: [checked(true)],
+        reason: "wasm_tier_held",
+      },
+      {
+        name: "a skills image older than the test runner",
+        sandbox: true,
+        manifest: CONTAINER,
+        tests: TESTS,
+        scripts: [checked(false), IMPORTED],
+        reason: "image_lacks_runner",
+      },
+    ])(
+      "records not_run with $name, starting no test session",
+      async ({ sandbox, manifest, tests, scripts, reason }) => {
+        const h = sessionHarness({}, ...scripts);
+        const runner = await makeRunner(sandbox ? { registerSandbox: h.sandbox } : {});
+        await pushEcho(manifest, tests);
+
+        const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+        assertStatus(result, manifest === CONTAINER ? "pending_approval" : "live");
+        expect(await testsRecord(result.deployId)).toEqual({ kind: "not_run", reason });
+        expect(h.execs.map((e) => e.cmd)).not.toContainEqual(TEST_RUNNER);
+      },
+    );
+
+    it("records not_run where the backend creates no session with no network", async () => {
+      const h = sessionHarness(
+        { noNetworkSessions: false, depsCacheSharing: "per-sandbox" },
+        checked(true),
+      );
+      const runner = await makeRunner({ registerSandbox: h.sandbox });
+      await pushEcho(CONTAINER, TESTS);
+
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(result, "pending_approval");
+      expect(await testsRecord(result.deployId)).toEqual({
+        kind: "not_run",
+        reason: "no_offline_session",
+      });
+      expect(h.specs).toHaveLength(1);
+    });
+
+    it("a repeat at main skips the tests, recording tip_is_main", async () => {
+      const h = sessionHarness({}, checked(true), checked(true));
+      const runner = await makeRunner({ registerSandbox: h.sandbox });
+      const sha = await pushEcho(ECHO_MANIFEST, TESTS);
+      const real = DrizzleSkillStore.prototype.executeRegister.bind(store);
+      const failing = vi
+        .spyOn(store, "executeRegister")
+        .mockImplementationOnce(async (trx, params) => {
+          await real(trx, params);
+          throw new Error("commit failed");
+        });
+      await expect(runner.register({ branch: "skill/echo", origin: OWNER })).rejects.toThrow(
+        "commit failed",
+      );
+      failing.mockRestore();
+      expect(await getMainSha(repo.bare)).toBe(sha);
+
+      const repeat = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(repeat, "live");
+      expect(await testsRecord(repeat.deployId)).toEqual({
+        kind: "not_run",
+        reason: "tip_is_main",
+      });
+    });
+
+    it("records not_run on a rollback, which runs no tests", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushEcho(ECHO_MANIFEST, TESTS);
+      assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY.replace("+ 1", "+ 2"),
+      });
+      assertStatus(await runner.register({ branch: "skill/echo", origin: OWNER }), "live");
+
+      const rolled = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+      assertStatus(rolled, "live");
+      expect(await testsRecord(rolled.deployId)).toEqual({ kind: "not_run", reason: "rollback" });
+    });
+
+    it("bounds test_skill.py's size as skill.py's, before any session", async () => {
+      const h = sessionHarness({});
+      const runner = await makeRunner({ registerSandbox: h.sandbox });
+      await pushEcho(ECHO_MANIFEST, "# pad\n".repeat(1001));
+
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "size: skills/echo/test_skill.py: 1001 lines, over the limit of 1000",
+      ]);
+      expect(h.specs).toEqual([]);
+    });
+  });
+
   describe("checkRegister: the register dry run", () => {
     const live = () => new AbortController().signal;
 
@@ -3919,6 +4153,7 @@ async def run(inputs, ctx):
           })),
           suppressions: [],
           toolchainVersion: "dev",
+          testRunner: true,
         }),
       );
       const runner = await makeRunner({ cpythonChecks });
@@ -3953,6 +4188,7 @@ async def run(inputs, ctx):
           ],
           suppressions: [],
           toolchainVersion: "dev",
+          testRunner: true,
         }),
       );
       const runner = await makeRunner({ cpythonChecks });
@@ -3982,6 +4218,7 @@ async def run(inputs, ctx):
           ],
           suppressions: [],
           toolchainVersion: "dev",
+          testRunner: true,
         }),
       );
       const runner = await makeRunner({ cpythonChecks });
@@ -4681,7 +4918,7 @@ tier: wasm
         // Checks that start no session, so the import is the first to reach the sandbox.
         const cpythonChecks = mock<CpythonChecks>();
         cpythonChecks.check.mockResolvedValue(
-          ok({ findings: [], suppressions: [], toolchainVersion: "dev" }),
+          ok({ findings: [], suppressions: [], toolchainVersion: "dev", testRunner: true }),
         );
         const runner = await makeRunner({ registerSandbox: sandbox, cpythonChecks });
         await pushWeather("skill/weather", CONTAINER_MANIFEST);
@@ -4978,6 +5215,7 @@ effects:
               declared_network: null,
               toolchain_version: null,
               suppressions: [],
+              tests: null,
             },
             applyFilesystem: async () => {
               throw new Error("simulated git update-ref failure");

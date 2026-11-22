@@ -804,6 +804,7 @@ inputs:
           declared_network: null,
           toolchain_version: null,
           suppressions: [],
+          tests: null,
         },
         schemas: { inputs: { type: "object", properties: {} }, outputs: null },
         resolvedAt: new Date(),

@@ -20,7 +20,12 @@ const MANIFEST: SkillManifest = {
   cost_per_call_usd: 0,
 };
 
-const SKILL = { name: "echo", manifest: MANIFEST, body: "async def run(inputs, ctx):\n    pass\n" };
+const SKILL = {
+  name: "echo",
+  manifest: MANIFEST,
+  body: "async def run(inputs, ctx):\n    pass\n",
+  testBody: null,
+};
 
 function classifierLog(validationErrors: string[]): ClassifierLog {
   return {
