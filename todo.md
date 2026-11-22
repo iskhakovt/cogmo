@@ -298,7 +298,7 @@ One PR per slice, in order; each later slice assumes the earlier ones.
 
 ### Observability & operations
 
-- [ ] `p1` Liveness registry, `/health`'s public `status` with `checks` for a valid web session, the required `liveness(): ChannelLiveness | null` on both adapter interfaces, and the Telegram receive sub-state ([design/liveness.md](design/liveness.md), Rollout step 2). Closes #801.
+- [ ] `p1` Liveness registry, `/health`'s public `status` with `checks` for a valid web session, the required `liveness(): ChannelLiveness | null` on both adapter interfaces, and the Telegram receive sub-state ([design/liveness.md](design/liveness.md), Rollout step 2). Closes #801, and the update-tracking middleware's numeric `update_id` guard also closes the NaN-offset entry.
 - [ ] `p1` Cron heartbeats on Inngest ([design/liveness.md](design/liveness.md) → Cron heartbeats, Rollout step 3). Closes #427.
 - [ ] `p2` Web UI status strip that reads `/health`'s `checks` ([design/liveness.md](design/liveness.md)).
 - [ ] `p2` Redact request-log headers by allowlist. The failure log redacts six names, so an operator-set provider header (an Azure `api-key`, a proxy key) is logged in plain text on every failed request, with the URL query intact; the body is the pino `redact` entry below. (deep review 2026-10-27, M19)

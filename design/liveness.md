@@ -9,7 +9,7 @@ Some of cogmo's work fails by not happening: a Telegram receive loop that has ex
 3. Polling state: the supervisor's `PollingState` gains a receive sub-state and its projection's fields ([Telegram receive loop](#telegram-receive-loop-proposed)).
 4. Cron storage: `src/liveness/` with `cron_heartbeats` and its boot baseline ([Cron heartbeats](#cron-heartbeats-proposed)), plus a `cogmo.cron.last_tick` gauge.
 5. Cron builder: `createCronFunction` with a final heartbeat step; `sandbox-reaper` and `model-catalog-refresh` leave design/architecture.md's single-step list; replayed log lines are accepted.
-6. Thresholds: 90 s stale, 5 min wedged, two 409s in a row; a cron overdue two periods plus 5 min after its reference, or its next tick plus 30 min for a period of a day or more.
+6. Thresholds: 90 s stale, 5 min wedged, two 409s in a row; a cron overdue 5 min past the second tick after its reference, or 30 min past the next tick for a period of a day or more.
 7. Sequencing: on Inngest now; [Under Temporal](#under-temporal-proposed) covers the move.
 
 ## Sources `[proposed]`
@@ -66,7 +66,7 @@ The public body, and the same with a session:
 | `AdapterSetupResult.liveness` | Splits the running adapter's lifecycle between `stop()` and a getter returned beside it. |
 | Beside the boot checks, where `hindsightCompat` fails | Boot checks run once and fail boot closed; these watch what stops after boot, which failing boot wouldn't fix. |
 | `/health/ready` | Readiness gates traffic, so an orchestrator would take the web UI out of service over a Telegram fault; cogmo has no load balancer to gate. |
-| A separate checks endpoint | The same body at a second URL; the restart risk is the status code, not the body. |
+| A separate checks endpoint | A second route and gate for what one cookie check on `/health` does; the restart risk is the status code, not the body. |
 | One projection alone | `/health` alone needs a JSON exporter for a metrics-based alerting stack; the gauge alone leaves operators without one nothing to probe; log rules alone miss a state reached without a transition (a stale poll, a cron that stops). |
 | A Prometheus scrape endpoint | A runtime dependency and a second export path beside OTLP, and the scraper needs a route to a port deploy.md publishes on loopback only; `absent_over_time` covers the missing `up`. |
 | Dead-man's-switch pings per cron | A ping URL and key per check in cogmo, an outbound call per fire, and crons only. |
@@ -275,7 +275,7 @@ Ticks come from croner in UTC, like Inngest's; a cron given Inngest's `jitter` n
 |-|-|-|-|
 | a | The update commits; the process dies before Inngest records the step | Updated | A retry records the same tick again. |
 | b | The write fails or hits its deadline | Unchanged | `write_failed`; the run completes. A single missed write, like a failed run, warns only for a cron of a day or more, once its cutoff (Check) passes, until the next tick. A write the deadline abandoned may still commit, which the monotone update makes harmless. |
-| c | The work throws | Unchanged | Warns once the entry passes its cutoff (Check): for a cron under a day, 5 minutes after the second unserved tick; for one of a day or more, by the owner's choice, 30 minutes after the scheduled time of one failed run, even with that run still in flight. |
+| c | The work throws | Unchanged | Warns once the entry passes its cutoff (Check): for a cron under a day, 5 minutes after the second unserved tick; for one of a day or more, 30 minutes after the scheduled time of one failed run, even with that run still in flight. |
 | d | Two runs at once | The later tick | `GREATEST` keeps it monotone; a `40001` is retried by the transactor. |
 | e | The final step runs long after the work | The run's own tick | The tick comes from the event, so a late write can't make a stopped cron look fresh. |
 | f | A run in flight across the deploy that adds the step | Recorded, or not at all | In connect mode `serve` drains in-flight requests, each one step: a run the old build completes records nothing, one missed tick, and one cut between steps records on the new build. HTTP serve mode doesn't await its requests (`main.ts`), so a cut step is retried where the function allows. |
