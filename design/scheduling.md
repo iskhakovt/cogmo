@@ -350,6 +350,6 @@ We use Connect + Checkpointing. No inbound ports needed.
 
 See `decisions.md` for the full eliminated options table. Key points:
 - **BullMQ:** No durable execution, no events, no HITL. Building durability on top is a known trap.
-- **Temporal:** Best durability and nothing gated, but the TS SDK runs workflows in a sandboxed V8, so all I/O moves into activities and the turn pipeline needs a redesign. The migration target if cogmo leaves Inngest ([orchestration-temporal.md](orchestration-temporal.md)).
+- **Temporal:** not eliminated. It is the decided replacement for Inngest, when engineering time allows ([orchestration-temporal.md](orchestration-temporal.md)).
 - **DBOS Transact:** Library approach (no extra service), MIT, PostgreSQL-only, with queues, a debouncer and cron. No event-triggered functions, and its Conductor recovery layer needs a paid key in production.
 - **Restate:** Clean API, light binary, but no cron/scheduling. Would need a separate scheduler.
