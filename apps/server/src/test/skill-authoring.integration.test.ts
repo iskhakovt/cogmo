@@ -120,6 +120,13 @@ const FIXTURE_PATH = `${FIXTURE_DIR}/${SCENARIO}.json`;
 const HISTORY_BUNDLE_PATH = "./test/fixtures/skill-authoring-history.bundle";
 /** Outside `refs/heads/`, so no fetch of a branch names it. */
 const RECORDED_TIP_REF = "refs/recorded/tip";
+/**
+ * The commit author cogmo writes in both modes (`commit-push.ts` composes it
+ * from the identity's `login` and `id`). A stand-in, so the recorded commits
+ * carry no account's name or noreply address; the PAT alone authenticates the
+ * pushes.
+ */
+const COMMIT_AUTHOR = { login: "test-user", id: "0" } as const;
 const IS_RECORD = process.env.RECORD === "1";
 const HAS_RECORDING_INPUTS =
   !!process.env.DAYTONA_API_KEY &&
@@ -191,8 +198,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       // pull leftover SKILL.md + skill.py from a previous successful run.
       remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
       remoteSlug = parseGitHubSlug(remoteUrl);
-      const { pat } = await readGhAuth();
-      await resetRemoteMain(remoteUrl, pat);
+      await resetRemoteMain(remoteUrl, await readGhPat());
     } else {
       const bare = await createBareRemoteFromHistory();
       remoteUrl = bare.url;
@@ -235,9 +241,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // Replay doesn't talk to real GitHub — file:// remote needs no PAT
     // and the octokit stub ignores the token. Record-mode surfaces gh
     // failures (missing OR unauthenticated) so the operator notices.
-    const ghAuth = RECORDABLE
-      ? await readGhAuth()
-      : { pat: "test-pat", login: "test-user", id: "0" };
+    const pat = RECORDABLE ? await readGhPat() : "test-pat";
     const signingKeypair = await generateSigningKeypair();
 
     // Init the bare skills repo + wire origin BEFORE `bootstrap()` so
@@ -247,18 +251,17 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       "COGMO_SKILLS_PATH not set by integration setup",
     );
     await bootstrapSkillsRepo({ path: skillsPath });
-    await setOriginAndFetch(skillsPath, remoteUrl, ghAuth.pat);
+    await setOriginAndFetch(skillsPath, remoteUrl, pat);
 
     await seedSecretsAndProvider({
       db,
       anthropicApiKey: RECORDABLE ? expectDefined(process.env.ANTHROPIC_API_KEY) : "test-key",
       llmockUrl: fileLlmockUrl(),
       identity: {
-        pat: ghAuth.pat,
+        pat,
         sshPrivateKey: signingKeypair.privateKey,
         sshPublicKey: signingKeypair.publicKey,
-        login: ghAuth.login,
-        id: ghAuth.id,
+        ...COMMIT_AUTHOR,
       },
     });
 
@@ -851,13 +854,11 @@ async function bakedSkillsImage(): Promise<Image> {
   }
 }
 
-async function readGhAuth(): Promise<{ pat: string; login: string; id: string }> {
-  const { stdout: tokenStdout } = await execFileP("gh", ["auth", "token"]);
-  const pat = tokenStdout.trim();
+async function readGhPat(): Promise<string> {
+  const { stdout } = await execFileP("gh", ["auth", "token"]);
+  const pat = stdout.trim();
   if (!pat) throw new Error("`gh auth token` returned empty — run `gh auth login` first");
-  const { stdout: userStdout } = await execFileP("gh", ["api", "user", "--jq", "{login,id}"]);
-  const user = JSON.parse(userStdout) as { login: string; id: number };
-  return { pat, login: user.login, id: String(user.id) };
+  return pat;
 }
 
 /**

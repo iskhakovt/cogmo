@@ -10,48 +10,41 @@
       "response": {
         "toolCalls": [
           {
-            "name": "memory_recall",
-            "arguments": "{\"query\": \"user identity name role preferences\"}",
-            "id": "toolu_016PL4cKGxsqrDkn71JTSzYo"
+            "name": "core_memory_read",
+            "arguments": "{}",
+            "id": "toolu_015k1PD8hPyfbuuoVJen9ABR"
           }
         ],
         "usage": {
           "input_tokens": 2,
-          "cache_creation_input_tokens": 11631,
+          "cache_creation_input_tokens": 13673,
           "cache_read_input_tokens": 0,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 11631
+            "ephemeral_1h_input_tokens": 13673
           },
-          "output_tokens": 179
+          "output_tokens": 192
         }
       },
       "recordedTimings": {
-        "ttftMs": 895,
+        "ttftMs": 1168,
         "interChunkDelaysMs": [
+          0,
+          2075,
+          0,
+          0,
           1,
-          1508,
           0,
           0,
-          0,
-          0,
-          0,
-          306,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
+          50,
+          1,
           0
         ],
-        "totalDurationMs": 2710
+        "totalDurationMs": 3295
       },
       "metadata": {
-        "systemHash": "f48b4a3b",
-        "toolsHash": "228fdbfa"
+        "systemHash": "115b955b",
+        "toolsHash": "67d3fbd0"
       }
     }
   ]

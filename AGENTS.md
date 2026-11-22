@@ -30,6 +30,7 @@ Read `design/` for the full picture. Key docs:
 | [evolution.md](design/evolution.md) | 6-stage self-evolution ladder, safety patterns |
 | [observation.md](design/observation.md) | Observer by turn — turn unit, per-turn state machine, failure modes, backfill, rollout |
 | [scheduling.md](design/scheduling.md) | Inngest, event-driven orchestration, job types, agent self-scheduling |
+| [orchestration-temporal.md](design/orchestration-temporal.md) | Plan for moving orchestration from Inngest to Temporal (decided, when engineering time allows) — engine evaluation, declarative flow layer, activity step model, turn state per iteration, migration slices |
 | [agents.md](design/agents.md) | Agentic loop, sub-agents, crash recovery |
 | [crash-recovery.md](design/crash-recovery.md) | Durability map of `handle-message`, what re-executes on retry, test contract |
 | [context-management.md](design/context-management.md) | Token counting, compaction pipeline, model registry |
