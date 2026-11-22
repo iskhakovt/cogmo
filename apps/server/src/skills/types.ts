@@ -289,6 +289,35 @@ export const SkillSuppressionSchema = z.object({
 export type SkillSuppression = z.infer<typeof SkillSuppressionSchema>;
 
 /**
+ * Why a deploy's tests did not run: register's reasons, in the order it
+ * decides them (design/skills.md → Register-time tests → Which registers run
+ * the suite), then a rollback's. `wasm_tier_held` stays once the hold lifts,
+ * so stored rows still parse.
+ */
+const SKILL_TESTS_NOT_RUN = [
+  "no_sandbox",
+  "no_test_file",
+  "tip_is_main",
+  "wasm_tier_held",
+  "no_offline_session",
+  "no_shared_venv",
+  "image_lacks_runner",
+  "rollback",
+] as const;
+export type SkillTestsNotRun = (typeof SKILL_TESTS_NOT_RUN)[number];
+
+/**
+ * Whether a deploy's tests ran: `passed` with the count of tests the run
+ * held, or `not_run` with its reason. A refused register writes no row, so
+ * no record holds a failure.
+ */
+const SkillTestsRecordSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("passed"), count: z.number().int().positive() }),
+  z.object({ kind: z.literal("not_run"), reason: z.enum(SKILL_TESTS_NOT_RUN) }),
+]);
+export type SkillTestsRecord = z.infer<typeof SkillTestsRecordSchema>;
+
+/**
  * What the classifier records on every deploy. Stored as JSONB on
  * `skill_deploys.classifier_log`; replayed in the audit UI and used by the
  * deploy-pipeline graduation logic. P3.1 stub-`register` writes a constant
@@ -332,6 +361,12 @@ export const ClassifierLogSchema = z.object({
    * on rollback rows, and on rows written before the checks recorded them.
    */
   suppressions: z.array(SkillSuppressionSchema).default([]),
+  /**
+   * Whether register ran the skill's tests (design/skills.md → Register-time
+   * tests → The record); a rollback records `not_run: rollback`. Null, not
+   * recorded, on rows written before the tests.
+   */
+  tests: SkillTestsRecordSchema.nullable().default(null),
 });
 export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
 

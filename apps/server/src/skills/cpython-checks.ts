@@ -11,6 +11,8 @@ export interface CpythonCheckOutcome {
   suppressions: readonly SkillSuppression[];
   /** The release version the skills image baked beside its toolchain. */
   toolchainVersion: string;
+  /** Whether the skills image runs a skill's tests; an older image's does not. */
+  testRunner: boolean;
 }
 
 /** Why register's CPython checks gave no outcome (design/skills.md → Register-time CPython checks). */

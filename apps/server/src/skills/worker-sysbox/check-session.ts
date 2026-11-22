@@ -143,8 +143,8 @@ async function runChecks(
   if (reply.isErr()) return err(unavailable(reply.error.message));
   return match(reply.value)
     .returnType<Result<CpythonCheckOutcome, CpythonCheckError>>()
-    .with({ type: "check_findings" }, ({ findings, suppressions, toolchainVersion }) =>
-      ok({ findings, suppressions, toolchainVersion }),
+    .with({ type: "check_findings" }, ({ findings, suppressions, toolchainVersion, testRunner }) =>
+      ok({ findings, suppressions, toolchainVersion, testRunner: testRunner === true }),
     )
     .with({ type: "fatal" }, ({ error }) => err(unavailable(`the checks could not run: ${error}`)))
     .exhaustive();

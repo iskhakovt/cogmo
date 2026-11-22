@@ -57,7 +57,10 @@ export async function gateGuidanceSignature(guidance: string): Promise<string[]>
     dependencies: [],
     cost_per_call_usd: 0,
   };
-  const gated = await runSkillGates({ name: "echo", manifest, body }, () => undefined);
+  const gated = await runSkillGates(
+    { name: "echo", manifest, body, testBody: null },
+    () => undefined,
+  );
   return gated.match(
     () => [],
     (findings) => findings.map(formatSkillFinding),

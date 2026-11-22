@@ -8,6 +8,7 @@ import {
   DYNAMIC_IMPORT_NAMES,
   SKILL_BODY_MAX_CHARACTERS,
   SKILL_BODY_MAX_LINES,
+  SKILL_FILE_MAX_BYTES,
 } from "./ast-rules.js";
 import { hostAllowed, parseHttpUrl } from "./http-destination.js";
 import type { CheckFinding } from "./protocol.js";
@@ -28,7 +29,7 @@ import {
 } from "./python-ast.js";
 import { withPythonTree } from "./python-parser.js";
 import { skillDir } from "./skill-files.js";
-import { SKILL_BODY_FILE } from "./skill-source.js";
+import { SKILL_BODY_FILE, SKILL_TEST_FILE } from "./skill-source.js";
 import type { SkillManifest } from "./types.js";
 import { lintWasmCompat } from "./worker-wasm/wasm-lint.js";
 
@@ -42,12 +43,13 @@ import { lintWasmCompat } from "./worker-wasm/wasm-lint.js";
 type SkillGateId = "size" | "syntax" | "entrypoint" | "dynamic_code" | "effects";
 
 /**
- * A gate's, `wasm-lint`'s or a CPython check's finding, terminal for the tip
- * (design/skills.md → Register-time CPython checks).
+ * A gate's, `wasm-lint`'s, a CPython check's or the tests' finding, terminal
+ * for the tip (design/skills.md → Register-time CPython checks, Register-time
+ * tests).
  */
 export interface SkillFinding {
-  id: SkillGateId | "wasm_lint" | CheckFinding["id"];
-  /** `skills/<name>/skill.py`. */
+  id: SkillGateId | "wasm_lint" | CheckFinding["id"] | "tests";
+  /** `skills/<name>/skill.py`, or `skills/<name>/test_skill.py`. */
   path: string;
   /** 1-based; null for a finding about the file. */
   line: number | null;
@@ -63,27 +65,33 @@ export function formatSkillFinding(finding: SkillFinding): string {
   return `${finding.id}: ${finding.path}${position}: ${finding.message}`;
 }
 
-/** The skill the gates read: its name, parsed frontmatter and `skill.py`. */
+/** The skill the gates read: its name, parsed frontmatter, `skill.py`, and `test_skill.py` or null. */
 interface GatedSkill {
   name: string;
   manifest: SkillManifest;
   body: string;
+  testBody: string | null;
 }
 
 /**
  * The gates' first three stages, each refusing with every finding it made:
- * Size, on the text; Syntax, the parse; then Entrypoint, Dynamic code,
- * Effects and `wasm-lint`. Errs with the first stage's findings that has any;
- * once all pass, hands the tree they read to `read`, the classifier at
- * register, and returns what it returns. Throws when the grammar cannot load,
- * or a walk or `read` throws.
+ * Size, on `skill.py`'s and `test_skill.py`'s text; Syntax, the parse; then
+ * Entrypoint, Dynamic code, Effects and `wasm-lint`, all over `skill.py`.
+ * Errs with the first stage's findings that has any; once all pass, hands
+ * the tree they read to `read`, the classifier at register, and returns what
+ * it returns. Throws when the grammar cannot load, or a walk or `read` throws.
  */
 export async function runSkillGates<T>(
   skill: GatedSkill,
   read: (tree: SkillTree) => T,
 ): Promise<Result<T, readonly SkillFinding[]>> {
   const path = `${skillDir(skill.name)}${SKILL_BODY_FILE}`;
-  const size = sizeFindings(path, skill.body);
+  const size = [
+    ...sizeFindings(path, skill.body),
+    ...(skill.testBody === null
+      ? []
+      : sizeFindings(`${skillDir(skill.name)}${SKILL_TEST_FILE}`, skill.testBody)),
+  ];
   if (size.length > 0) return err(size);
   return withPythonTree(skill.body, (root): Result<T, readonly SkillFinding[]> => {
     const syntax = syntaxFindings(path, root);
@@ -119,7 +127,7 @@ function byPosition(findings: readonly SkillFinding[]): SkillFinding[] {
 }
 
 /**
- * `skill.py` over its line or character bound. A character is a UTF-16 code
+ * A file over its line or character bound. A character is a UTF-16 code
  * unit, the string's `length`. Lines end at `\n`, so `\r\n` counts once and a
  * lone `\r` ends none; a last line without a newline counts.
  */
@@ -141,6 +149,18 @@ function sizeFindings(path: string, body: string): SkillFinding[] {
         ]
       : []),
   ];
+}
+
+/** The size finding for a file of `bytes`, or none where the size gate can read it. */
+export function unreadSizeFinding(path: string, bytes: number): SkillFinding | null {
+  return bytes > SKILL_FILE_MAX_BYTES
+    ? findingAt(
+        "size",
+        path,
+        null,
+        `${bytes} bytes, more characters than the limit of ${SKILL_BODY_MAX_CHARACTERS}`,
+      )
+    : null;
 }
 
 /** A null tree, or a tree holding an error, which the classifier could not read whole. */

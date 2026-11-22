@@ -7,6 +7,8 @@ import {
   CtxCallSchema,
   CtxResultSchema,
   SchemaImportReplySchema,
+  SkillTestsReplySchema,
+  SkillTestsRequestSchema,
   SupervisorReadySchema,
   TaskExitedSchema,
   TaskInvokeSchema,
@@ -59,6 +61,8 @@ export function renderContractSchema(): string {
     schema_import_reply: SchemaImportReplySchema,
     check_request: CheckRequestSchema,
     check_reply: CheckReplySchema,
+    skill_tests_request: SkillTestsRequestSchema,
+    skill_tests_reply: SkillTestsReplySchema,
   };
   const methods = R.entries(CTX_CONTRACT).flatMap(([method, { args, result }]) => [
     [`ctx.${method}.args`, schemaOf(args)] as const,

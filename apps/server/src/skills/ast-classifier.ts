@@ -65,7 +65,7 @@ import { withPythonTree } from "./python-parser.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
 import type { ClassifierLog, SkillEffect, SkillManifest } from "./types.js";
 
-export const AST_CLASSIFIER_VERSION = "ast-3";
+export const AST_CLASSIFIER_VERSION = "ast-4";
 
 interface DetectedHit {
   effect: SkillEffect;
@@ -538,6 +538,7 @@ function classify(
     capabilities: { ...capabilities },
     toolchain_version: null,
     suppressions: [],
+    tests: null,
   };
 }
 
@@ -575,5 +576,6 @@ function classifyFromDeclarationsOnly(
     capabilities: { ...capabilities },
     toolchain_version: null,
     suppressions: [],
+    tests: null,
   };
 }

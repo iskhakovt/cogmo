@@ -24,6 +24,7 @@ function classifierLog(overrides: Partial<ClassifierLog> = {}): ClassifierLog {
     declared_network: null,
     toolchain_version: null,
     suppressions: [],
+    tests: null,
     ...overrides,
   };
 }

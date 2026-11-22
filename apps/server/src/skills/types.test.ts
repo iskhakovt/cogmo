@@ -81,6 +81,7 @@ describe("ClassifierLogSchema", () => {
     declared_network: null,
     toolchain_version: null,
     suppressions: [],
+    tests: null,
   };
 
   it("round-trips a stub log", () => {
@@ -140,6 +141,38 @@ describe("ClassifierLogSchema", () => {
     { tool: "ruff", code: "S603", line: 0 },
   ])("rejects a suppression that is not one: %o", (suppression) => {
     expect(() => ClassifierLogSchema.parse({ ...STUB, suppressions: [suppression] })).toThrow();
+  });
+
+  // Every reason a stored row can hold, `wasm_tier_held` among them once the hold lifts.
+  it.each([
+    { kind: "passed", count: 3 },
+    ...[
+      "no_sandbox",
+      "no_test_file",
+      "tip_is_main",
+      "wasm_tier_held",
+      "no_offline_session",
+      "no_shared_venv",
+      "image_lacks_runner",
+      "rollback",
+    ].map((reason) => ({ kind: "not_run", reason })),
+  ])("round-trips the tests record %o", (tests) => {
+    const log = { ...STUB, tests };
+    expect(ClassifierLogSchema.parse(JSON.parse(JSON.stringify(log)))).toEqual(log);
+  });
+
+  it("reads a log written before the tests as not recording them", () => {
+    const { tests: _tests, ...legacy } = STUB;
+    expect(ClassifierLogSchema.parse(legacy).tests).toBeNull();
+  });
+
+  it.each([
+    { kind: "passed", count: 0 },
+    { kind: "passed", count: 1.5 },
+    { kind: "not_run", reason: "flaky" },
+    { kind: "failed", findings: [] },
+  ])("rejects a tests record that is not one: %o", (tests) => {
+    expect(() => ClassifierLogSchema.parse({ ...STUB, tests })).toThrow();
   });
 
   it("reads a row written under the tier1/tier2 names as the wasm/container names", () => {

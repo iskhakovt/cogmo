@@ -1,11 +1,13 @@
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { revParse } from "./git-ops.js";
 import { manifestErrorIssues, parseManifest } from "./manifest.js";
-import { readSkillFile, type SkillsRepo } from "./skill-files.js";
+import { readSkillFile, type SkillFile, type SkillsRepo } from "./skill-files.js";
 import type { SkillManifest } from "./types.js";
 
 export const SKILL_MANIFEST_FILE = "SKILL.md";
 export const SKILL_BODY_FILE = "skill.py";
+export const SKILL_TEST_FILE = "test_skill.py";
 
 /** A skill's manifest and Python body, as committed at one sha. */
 export interface SkillSource {
@@ -41,6 +43,25 @@ export async function readSkillSource(
     return err({ kind: "invalid_manifest", issues: manifestErrorIssues(parsed.error) });
   }
   return ok({ manifest: parsed.value.manifest, body: body.value });
+}
+
+/** One of skill `name`'s files at `sha`, or null where it has none there; `sha` must resolve. */
+export async function readOptionalSkillFile(
+  repo: SkillsRepo,
+  name: string,
+  sha: string,
+  file: SkillFile,
+): Promise<string | null> {
+  return (await readSkillFile(repo, name, sha, file)).match(
+    (text) => text,
+    (e) =>
+      match(e)
+        .with({ kind: "file_not_found" }, () => null)
+        .with({ kind: "ref_not_found" }, () => {
+          throw new Error(`${sha} does not resolve, though its skill was read there`);
+        })
+        .exhaustive(),
+  );
 }
 
 async function readFileAtSha(

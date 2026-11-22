@@ -6,6 +6,7 @@ import type { CpythonChecks } from "../cpython-checks.js";
 import type { LockfileCompiler, LockfileSnapshot } from "../deps.js";
 import type { ImportedSchemas, SchemaImportError } from "../schema-import.js";
 import type { SkillsRepo } from "../skill-files.js";
+import type { SkillTests } from "../skill-tests.js";
 import type { SkillSourceCache } from "../source-cache.js";
 import type { SkillRunIdentity, SkillStore } from "../store/index.js";
 import type { SkillManifest } from "../types.js";
@@ -42,6 +43,12 @@ export interface DeployDeps {
    * compares the checks' toolchain version against.
    */
   releaseVersion: string;
+  /**
+   * Register's run of a skill's tests, or undefined when no sandbox backend
+   * is configured: register then records `not_run: no_sandbox`
+   * (design/skills.md → Register-time tests).
+   */
+  skillTests: SkillTests | undefined;
   /**
    * The container tier's schema import at register, or undefined when the
    * backend creates no session with no network: every container skill then

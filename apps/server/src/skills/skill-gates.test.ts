@@ -3,7 +3,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Node } from "web-tree-sitter";
 import type { SkillTree } from "./python-ast.js";
 import { loadPythonParser } from "./python-parser.js";
-import { formatSkillFinding, runSkillGates, type SkillFinding } from "./skill-gates.js";
+import {
+  formatSkillFinding,
+  runSkillGates,
+  type SkillFinding,
+  unreadSizeFinding,
+} from "./skill-gates.js";
 import type { SkillManifest } from "./types.js";
 
 /** Whether `withPythonTree` hands its reader a null tree, as tree-sitter may. */
@@ -44,7 +49,10 @@ const WASM = manifestWith();
 
 /** The gates' findings, none when they pass. */
 async function gate(body: string, manifest: SkillManifest): Promise<readonly SkillFinding[]> {
-  const gated = await runSkillGates({ name: "echo", manifest, body }, () => undefined);
+  const gated = await runSkillGates(
+    { name: "echo", manifest, body, testBody: null },
+    () => undefined,
+  );
   return gated.match(
     () => [],
     (findings) => findings,
@@ -117,6 +125,40 @@ describe("size", () => {
       "size -:- 1002 lines, over the limit of 1000",
       `size -:- ${body.length} characters, over the limit of 120000`,
     ]);
+  });
+
+  /** The gates' findings over `skill.py` and `test_skill.py`, as register formats them. */
+  async function gateWithTests(body: string, testBody: string): Promise<string[]> {
+    const gated = await runSkillGates({ name: "echo", manifest: WASM, body, testBody }, () => []);
+    return gated.match(
+      () => [],
+      (found) => found.map(formatSkillFinding),
+    );
+  }
+
+  it("bounds test_skill.py as it bounds skill.py, in the same stage", async () => {
+    const tests = `# ${"x".repeat(150)}\n`.repeat(1001);
+
+    expect(await gateWithTests(`${RUN}${pad(999)}`, tests)).toEqual([
+      "size: skills/echo/skill.py: 1001 lines, over the limit of 1000",
+      "size: skills/echo/test_skill.py: 1001 lines, over the limit of 1000",
+      `size: skills/echo/test_skill.py: ${tests.length} characters, over the limit of 120000`,
+    ]);
+  });
+
+  it("refuses unread only a file whose bytes must hold more characters than the bound", () => {
+    expect(unreadSizeFinding("skills/echo/test_skill.py", 360_000)).toBeNull();
+    expect(unreadSizeFinding("skills/echo/test_skill.py", 360_001)).toEqual({
+      id: "size",
+      path: "skills/echo/test_skill.py",
+      line: null,
+      column: null,
+      message: "360001 bytes, more characters than the limit of 120000",
+    });
+  });
+
+  it("passes a test_skill.py within the bounds without parsing it", async () => {
+    expect(await gateWithTests(RUN, `def test_(:\n${pad(998)}`)).toEqual([]);
   });
 });
 
@@ -448,7 +490,7 @@ describe("the stage after the gates", () => {
   it("reads the tree the gates parsed, with its ctx calls", async () => {
     const body = 'async def run(inputs, ctx):\n    await ctx.files.read("a")\n';
     const read = vi.fn((tree: SkillTree) => tree.ctxCalls.map((c) => `${c.namespace}.${c.method}`));
-    const gated = await runSkillGates({ name: "echo", manifest: WASM, body }, read);
+    const gated = await runSkillGates({ name: "echo", manifest: WASM, body, testBody: null }, read);
     expect(gated._unsafeUnwrap()).toEqual(["files.read"]);
     expect(read).toHaveBeenCalledOnce();
   });
@@ -459,7 +501,7 @@ describe("the stage after the gates", () => {
     ["a third-stage finding", 'async def run(inputs, ctx):\n    eval("1")\n'],
   ])("does not run after %s", async (_label, body) => {
     const read = vi.fn();
-    const gated = await runSkillGates({ name: "echo", manifest: WASM, body }, read);
+    const gated = await runSkillGates({ name: "echo", manifest: WASM, body, testBody: null }, read);
     expect(gated.isErr()).toBe(true);
     expect(read).not.toHaveBeenCalled();
   });
@@ -467,9 +509,11 @@ describe("the stage after the gates", () => {
   it("does not run on a null tree", async () => {
     parser.nullTree = true;
     const read = vi.fn();
-    expect((await runSkillGates({ name: "echo", manifest: WASM, body: RUN }, read)).isErr()).toBe(
-      true,
-    );
+    expect(
+      (
+        await runSkillGates({ name: "echo", manifest: WASM, body: RUN, testBody: null }, read)
+      ).isErr(),
+    ).toBe(true);
     expect(read).not.toHaveBeenCalled();
   });
 });

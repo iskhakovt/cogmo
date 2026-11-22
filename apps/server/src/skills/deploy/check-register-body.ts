@@ -8,11 +8,13 @@ import type { ClassifierLog, SkillManifest } from "../types.js";
 
 const log = logger.child({ component: "skills.register" });
 
-/** The skill register's body checks read: its name, parsed frontmatter and `skill.py`. */
+/** The skill register's body checks read: its name, parsed frontmatter, `skill.py` and `test_skill.py`. */
 interface CheckedSkill {
   name: string;
   manifest: SkillManifest;
   body: string;
+  /** Null without one; the gates bound its size alone. */
+  testBody: string | null;
 }
 
 /** The checks, each throwing when its parse or a walk throws. */
@@ -43,8 +45,8 @@ export type RegisterBodyRejection =
   | { kind: "registrar_unavailable"; cause: "parser"; detail: string };
 
 /**
- * Register's step-4 checks of `skill.py`, before its transaction and its
- * sandbox sessions: the register-time gates' three stages, then the AST
+ * Register's step-4 checks of `skill.py`, and of `test_skill.py`'s size,
+ * before its transaction and its sandbox sessions: the register-time gates' three stages, then the AST
  * classifier on the tree the gates parsed, each rejecting with one kind. A
  * throw from either is the pausing `registrar_unavailable` (`parser`), logged
  * at error.

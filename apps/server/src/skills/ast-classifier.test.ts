@@ -952,7 +952,7 @@ describe("classifyWithAst — version", () => {
       "async def run(inputs, ctx):\n    pass\n",
       BUILD_CAPABILITIES,
     );
-    expect(log.classifier_version).toBe("ast-3");
+    expect(log.classifier_version).toBe("ast-4");
   });
 });
 
@@ -967,7 +967,7 @@ describe("classifyWithAstForRollback — a null tree", () => {
       BUILD_CAPABILITIES,
     );
     expect(log).toMatchObject({
-      classifier_version: "ast-3",
+      classifier_version: "ast-4",
       detected_effects: [],
       validation_errors: [],
       risk_tier: "notify",

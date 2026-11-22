@@ -64,6 +64,7 @@ import {
   type ContainerSchemaImporter,
   makeSandboxSchemaImporter,
 } from "./worker-sysbox/schema-import.js";
+import { makeSandboxSkillTests } from "./worker-sysbox/test-session.js";
 import {
   createWasmProbe,
   createWasmSchemaImporter,
@@ -122,7 +123,7 @@ export interface SkillRunner {
    *
    * `signal` is checked at the start and just before the deploy transaction,
    * and register's sandbox sessions (the lockfile compile, the install, the
-   * CPython checks, the schema import) honour it throughout. An abort seen by then
+   * CPython checks, the schema import, the tests) honour it throughout. An abort seen by then
    * stops the deploy: `register` rejects with the signal's reason, leaving
    * main and the branch as they were. It is not a wall-clock cap: work that
    * takes no signal (local git, the classifier, PyPI lookups) runs to its end
@@ -281,7 +282,7 @@ export interface SkillRunnerOptions {
   sandbox?: SandboxClient;
   /**
    * Where register's and approve's sessions run: the lockfile compile, the
-   * install, the CPython checks and the container schema import. `cogmo serve`
+   * install, the CPython checks, the container schema import and the tests. `cogmo serve`
    * passes its `sandbox`; `cogmo skills` passes its own client and no
    * `sandbox`, so a container-tier run stays off it. Undefined when no
    * backend is configured: register then skips the compile and the checks
@@ -464,6 +465,13 @@ export class SkillRunnerImpl implements SkillRunner {
             depsCacheVolumeName,
           })
         : undefined);
+    const skillTests = registerSandbox
+      ? makeSandboxSkillTests({
+          sandbox: registerSandbox,
+          image: containerImage,
+          depsCacheVolumeName,
+        })
+      : undefined;
     const containerSchemas: DeployDeps["containerSchemas"] =
       containerImporter === undefined
         ? undefined
@@ -491,6 +499,7 @@ export class SkillRunnerImpl implements SkillRunner {
       capabilities: BUILD_CAPABILITIES,
       cpythonChecks,
       releaseVersion: opts.releaseVersion,
+      skillTests,
       containerSchemas,
       wasm: { fetchImpl, probe, fillBuiltins, packageCacheDir, importSchemas },
       skillsRepo,

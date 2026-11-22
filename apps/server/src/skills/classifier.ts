@@ -112,5 +112,6 @@ export function classifyManifestStub(
     capabilities: { ...capabilities },
     toolchain_version: null,
     suppressions: [],
+    tests: null,
   };
 }

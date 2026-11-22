@@ -338,9 +338,11 @@ export type CheckFinding = z.infer<typeof CheckFindingSchema>;
 
 /**
  * The one reply of register's CPython checks: every check's findings, empty
- * for a body that passes, the suppressions the body carries, and the release
- * version the image baked beside its toolchain; `fatal` when a check could
- * not run (a tool's failure status, a skill venv that is missing).
+ * for a body that passes, the suppressions the body carries, the release
+ * version the image baked beside its toolchain, and `testRunner`, absent from
+ * an image older than `cogmo_skills_runtime.skill_tests`; `fatal` when a
+ * check could not run (a tool's failure status, a skill venv that is
+ * missing).
  */
 export const CheckReplySchema = z.discriminatedUnion("type", [
   z.object({
@@ -348,6 +350,49 @@ export const CheckReplySchema = z.discriminatedUnion("type", [
     findings: z.array(CheckFindingSchema),
     suppressions: z.array(SkillSuppressionSchema),
     toolchainVersion: z.string().min(1),
+    testRunner: z.literal(true).optional(),
+  }),
+  z.object({ type: z.literal("fatal"), error: z.string() }),
+]);
+
+/**
+ * The request `cogmo_skills_runtime.skill_tests` reads on stdin: the skill's
+ * files at the tip, as `.cogmo/verify`'s run sees them in `skills/<name>/`,
+ * and the hash of the lockfile whose venv holds its dependencies, null
+ * without (design/skills.md → Register-time tests).
+ */
+export const SkillTestsRequestSchema = z.object({
+  files: z.object({
+    "SKILL.md": z.string(),
+    "skill.py": z.string(),
+    "test_skill.py": z.string(),
+    "requirements.lock": z.string().optional(),
+  }),
+  lockfileHash: CheckRequestSchema.shape.lockfileHash,
+});
+export type SkillTestsRequest = z.infer<typeof SkillTestsRequestSchema>;
+
+/**
+ * One finding of a skill's tests in `test_skill.py`: a test's, its message
+ * leading with the test's name, at the test's 1-based line; or the run's,
+ * with no line.
+ */
+const TestFindingSchema = z.object({
+  line: z.number().int().positive().nullable(),
+  message: z.string().min(1),
+});
+export type TestFinding = z.infer<typeof TestFindingSchema>;
+
+/**
+ * The one reply of a skill's tests: the findings, none for a pass, and the
+ * count of tests pytest's report holds; `fatal` when the suite could not run
+ * (a skill venv that is missing, a usage error).
+ */
+export const SkillTestsReplySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("test_findings"),
+    findings: z.array(TestFindingSchema),
+    count: z.number().int().nonnegative(),
   }),
   z.object({ type: z.literal("fatal"), error: z.string() }),
 ]);

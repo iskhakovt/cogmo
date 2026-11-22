@@ -1,28 +1,47 @@
 import { err, ok, type Result } from "neverthrow";
+import * as R from "remeda";
 import { match, P } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
 import { classifyWithAst } from "../ast-classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
 import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
+import type { SkillTestsRequest } from "../protocol.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
 import type { ImportedSchemas } from "../schema-import.js";
-import type { SkillsRepo } from "../skill-files.js";
-import { formatSkillFinding, runSkillGates } from "../skill-gates.js";
-import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
+import { type SkillsRepo, skillDir, skillFileSizes } from "../skill-files.js";
+import {
+  formatSkillFinding,
+  runSkillGates,
+  type SkillFinding,
+  unreadSizeFinding,
+} from "../skill-gates.js";
+import {
+  readOptionalSkillFile,
+  readSkillSource,
+  SKILL_BODY_FILE,
+  SKILL_MANIFEST_FILE,
+  SKILL_TEST_FILE,
+} from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest, SkillSchemas } from "../types.js";
 import { describeWasmPackagesError, type SkillSchemaImportError } from "../worker-wasm/wasm.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { checkRegisterBody, type RegisterBodyRejection } from "./check-register-body.js";
 import { checkRegisterCpython, type RegisterCpythonRejection } from "./check-register-cpython.js";
+import { checkRegisterTests, type RegisterTestsRejection } from "./check-register-tests.js";
 import { type DeployDeps, requireRepo } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";
 import { describeLocateSkillRejection, locateSkill } from "./locate-skill.js";
 import { type LockfileCheckError, readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMain } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
-import { type RegisterPause, type RegisterResult, rejectedResult } from "./register-result.js";
+import {
+  cutDryRunText,
+  type RegisterPause,
+  type RegisterResult,
+  rejectedResult,
+} from "./register-result.js";
 import { registerSchemas } from "./schemas.js";
 
 const NON_FAST_FORWARD = "non_fast_forward: rebase branch onto main and retry";
@@ -189,7 +208,8 @@ function rejectionResult(sha: string, rejection: PrepareRejection): RegisterResu
  * Every check `register` makes of a sha before its transaction: the
  * fast-forward, the skill it changes, its manifest and body, the
  * register-time gates and the classifier, the lockfile and its runtime pins,
- * Pyodide compatibility, the CPython checks, and the schemas it puts live.
+ * Pyodide compatibility, the CPython checks, the schemas it puts live, and
+ * the skill's tests.
  * It writes only what the checks' sessions and caches write. Errs with why it
  * refuses the sha.
  */
@@ -216,6 +236,8 @@ export async function prepareRegister(
   }
   const name = located.value;
 
+  const unread = await unreadSizeFindings(repo, name, sha);
+  if (unread.length > 0) return err(refused(...unread.map(formatSkillFinding)));
   const source = await readSkillSource(repo, name, sha);
   if (source.isErr()) {
     return err(
@@ -240,12 +262,13 @@ export async function prepareRegister(
     );
   }
 
+  const testBody = await readOptionalSkillFile(repo, name, sha, SKILL_TEST_FILE);
   // The register-time gates, wasm-lint among them, then the classifier: no
   // body reaches the lockfile compile's sandbox session, or deploys, unless
   // the AST path read it (design/skills.md → Register-time gates).
   const checked = await checkRegisterBody(
     { runGates: runSkillGates, classify: classifyWithAst },
-    { name, manifest, body },
+    { name, manifest, body, testBody },
     deps.capabilities,
   );
   if (checked.isErr()) return err(bodyRejection(checked.error));
@@ -294,13 +317,61 @@ export async function prepareRegister(
     return err({ ...refused(...schemaErrors), name: manifest.name });
   }
 
+  const tests = await checkRegisterTests(
+    deps.skillTests,
+    {
+      name,
+      manifest,
+      lockfile,
+      files:
+        testBody === null ? null : await testFiles(repo, sha, { name, body, testBody, lockfile }),
+      atMain: sha === mainSha,
+    },
+    { testRunner: cpython.value.testRunner, signal },
+  );
+  if (tests.isErr()) return err(testsRejection(tests.error));
+
   return ok({
     manifest,
     body,
-    classifierLog: { ...classifierLog, ...cpython.value },
+    classifierLog: { ...classifierLog, ...cpython.value.record, tests: tests.value },
     lockfile,
     schemas: schemas.value,
   });
+}
+
+/**
+ * The Size gate's findings for `skill.py` and `test_skill.py` too large to
+ * read, from their blobs' sizes (design/skills.md → Register-time gates).
+ */
+async function unreadSizeFindings(
+  repo: SkillsRepo,
+  name: string,
+  sha: string,
+): Promise<readonly SkillFinding[]> {
+  const sizes = await skillFileSizes(repo, name, sha, [SKILL_BODY_FILE, SKILL_TEST_FILE]);
+  return R.filter(
+    [...sizes].map(([file, bytes]) => unreadSizeFinding(`${skillDir(name)}${file}`, bytes)),
+    R.isNonNullish,
+  );
+}
+
+/** The skill's files at `sha` its tests see, as `.cogmo/verify` sees them in `skills/<name>/`. */
+async function testFiles(
+  repo: SkillsRepo,
+  sha: string,
+  skill: { name: string; body: string; testBody: string; lockfile: LockfileSnapshot | null },
+): Promise<SkillTestsRequest["files"]> {
+  const manifest = await readOptionalSkillFile(repo, skill.name, sha, SKILL_MANIFEST_FILE);
+  if (manifest === null) {
+    throw new Error(`register: ${SKILL_MANIFEST_FILE} is gone at ${sha}, where register read it`);
+  }
+  return {
+    [SKILL_MANIFEST_FILE]: manifest,
+    [SKILL_BODY_FILE]: skill.body,
+    [SKILL_TEST_FILE]: skill.testBody,
+    ...(skill.lockfile !== null && { "requirements.lock": skill.lockfile.contents }),
+  };
 }
 
 /** A body-check rejection: one string per gate finding, or the parser's pause. */
@@ -327,6 +398,28 @@ function cpythonRejection(rejection: RegisterCpythonRejection): PrepareRejection
     .with({ kind: "lint_failed" }, ({ findings }) => refused(...findings.map(formatSkillFinding)))
     .with({ kind: "lockfile_invalid" }, ({ detail }) =>
       refused(`requirements_lock_uninstallable: ${detail}`),
+    )
+    .with({ kind: "registrar_unavailable" }, ({ cause, detail }) =>
+      paused(
+        "registrar_unavailable",
+        `registrar_unavailable: ${cause}: ${detail}; retry the register`,
+      ),
+    )
+    .exhaustive();
+}
+
+/**
+ * A test rejection: one string per finding, or the sandbox's pause. A test's
+ * message can quote any value it compared, so each is masked, and a secret the
+ * image's cut ran through is dropped.
+ */
+function testsRejection(rejection: RegisterTestsRejection): PrepareRejection {
+  return match(rejection)
+    .returnType<PrepareRejection>()
+    .with({ kind: "tests_failed" }, ({ findings }) =>
+      refused(
+        ...findings.map((f) => formatSkillFinding({ ...f, message: cutDryRunText(f.message) })),
+      ),
     )
     .with({ kind: "registrar_unavailable" }, ({ cause, detail }) =>
       paused(
