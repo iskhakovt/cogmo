@@ -5,9 +5,9 @@ import type { SkillSuppression } from "./types.js";
 
 /** What register's CPython checks found, and the release of the toolchain that ran them. */
 export interface CpythonCheckOutcome {
-  /** Empty for a body that passes. */
+  /** Empty for files that pass. */
   findings: readonly CheckFinding[];
-  /** The suppressions the body carries that the checks accept. */
+  /** The suppressions `skill.py` carries that the checks accept. */
   suppressions: readonly SkillSuppression[];
   /** The release version the skills image baked beside its toolchain. */
   toolchainVersion: string;
@@ -24,12 +24,15 @@ export type CpythonCheckError =
 
 /**
  * Register's CPython checks: CPython's compile, ruff, pyrefly and the import
- * check, in a session of the skills image, after an install session where
- * the shared venv volume carries a skill's dependencies to it.
+ * check, over `skill.py` and `test_skill.py`, in a session of the skills
+ * image, after an install session where the shared venv volume carries a
+ * skill's dependencies to it.
  */
 export interface CpythonChecks {
   check(params: {
     body: string;
+    /** `test_skill.py`; null without one. */
+    testBody: string | null;
     /** The manifest's `dependencies`, which the import check allows the modules of. */
     dependencies: readonly string[];
     /** The lockfile those dependencies install from; null without dependencies. */

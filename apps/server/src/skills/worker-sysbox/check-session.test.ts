@@ -51,6 +51,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: [],
       lockfile: null,
       signal: undefined,
@@ -78,10 +79,49 @@ describe("makeSandboxCpythonChecks", () => {
     expect(h.execs).toEqual([
       {
         cmd: CHECK_RUNNER,
-        stdin: JSON.stringify({ body: BODY, dependencies: [], lockfileHash: null }),
+        stdin: JSON.stringify({ body: BODY, testBody: null, dependencies: [], lockfileHash: null }),
       },
     ]);
     expect(h.deleted).toBe(1);
+  });
+
+  it("hands the runner test_skill.py, and keeps the file each finding names", async () => {
+    const tests = "from skill import run\n\n\ndef test_run():\n    assert run\n";
+    const inTests = { ...FINDING, file: "test_skill.py" };
+    const inBody = { ...FINDING, file: "skill.py" };
+    const reply = { type: "check_findings", findings: [inTests, inBody], suppressions: [] };
+    const h = sessionHarness(
+      {},
+      { stdout: `${JSON.stringify({ ...reply, toolchainVersion: "2.18.0" })}\n`, exitCode: 0 },
+    );
+
+    const checked = await checks(h, VOLUME).check({
+      body: BODY,
+      testBody: tests,
+      dependencies: [],
+      lockfile: null,
+      signal: undefined,
+    });
+
+    expect(checked._unsafeUnwrap().findings).toEqual([inTests, inBody]);
+    expect(h.execs[0]?.stdin).toBe(
+      JSON.stringify({ body: BODY, testBody: tests, dependencies: [], lockfileHash: null }),
+    );
+  });
+
+  it("reads a finding without a file, from an image older than the test file's checks, as naming none", async () => {
+    // FINDINGS_REPLY's finding names no file, as such an image writes it.
+    const h = sessionHarness({}, { stdout: FINDINGS_REPLY, exitCode: 0 });
+
+    const checked = await checks(h, VOLUME).check({
+      body: BODY,
+      testBody: "def test_run():\n    pass\n",
+      dependencies: [],
+      lockfile: null,
+      signal: undefined,
+    });
+
+    expect(checked._unsafeUnwrap().findings).toEqual([FINDING]);
   });
 
   it("reads a reply without testRunner, an image older than the test runner, as running no tests", async () => {
@@ -95,6 +135,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: [],
       lockfile: null,
       signal: undefined,
@@ -113,6 +154,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, undefined).check({
       body: BODY,
+      testBody: null,
       dependencies: [],
       lockfile: null,
       signal: undefined,
@@ -128,6 +170,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: ["idna==3.10"],
       lockfile: LOCKFILE,
       signal: undefined,
@@ -147,7 +190,12 @@ describe("makeSandboxCpythonChecks", () => {
     expect(h.execs.map((e) => e.cmd.slice(0, 2))).toEqual([POPULATE, CHECK_RUNNER.slice(0, 2)]);
     expect(h.execs[0]?.stdin).toBe(LOCKFILE.contents);
     expect(h.execs[1]?.stdin).toBe(
-      JSON.stringify({ body: BODY, dependencies: ["idna==3.10"], lockfileHash: LOCKFILE.hash }),
+      JSON.stringify({
+        body: BODY,
+        testBody: null,
+        dependencies: ["idna==3.10"],
+        lockfileHash: LOCKFILE.hash,
+      }),
     );
     expect(h.deleted).toBe(2);
   });
@@ -158,6 +206,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, undefined).check({
       body: BODY,
+      testBody: null,
       dependencies: ["idna==3.10"],
       lockfile: LOCKFILE,
       signal: undefined,
@@ -195,6 +244,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: ["idna==3.10"],
       lockfile: LOCKFILE,
       signal: undefined,
@@ -213,6 +263,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: ["idna==3.10"],
       lockfile: LOCKFILE,
       signal: undefined,
@@ -232,6 +283,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, undefined).check({
       body: BODY,
+      testBody: null,
       dependencies: ["idna==3.10"],
       lockfile: LOCKFILE,
       signal: undefined,
@@ -250,6 +302,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: ["idna==3.10"],
       lockfile: LOCKFILE,
       signal: undefined,
@@ -287,6 +340,7 @@ describe("makeSandboxCpythonChecks", () => {
 
       const checked = await checks(h, VOLUME).check({
         body: BODY,
+        testBody: null,
         dependencies: [],
         lockfile: null,
         signal: undefined,
@@ -303,6 +357,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: [],
       lockfile: null,
       signal: undefined,
@@ -321,6 +376,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const pending = checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: [],
       lockfile: null,
       signal: controller.signal,
@@ -341,6 +397,7 @@ describe("makeSandboxCpythonChecks", () => {
 
     const checked = await checks(h, VOLUME).check({
       body: BODY,
+      testBody: null,
       dependencies: ["idna==3.10"],
       lockfile: LOCKFILE,
       signal: AbortSignal.abort(new Error("register deadline")),

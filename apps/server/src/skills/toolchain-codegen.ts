@@ -49,6 +49,20 @@ const TOOL_PINS: Readonly<Record<string, string>> = {
 const MAX_SUPPRESSIONS = 100;
 
 /**
+ * What a skill imports besides the stdlib and its declared dependencies, and
+ * what `test_skill.py` also may: `.cogmo/imports.py`'s `RUNTIME_ROOTS` and
+ * `TEST_ROOTS`, which a unit test pins these to.
+ */
+const IMPORT_RUNTIME_ROOTS = ["pydantic", "pydantic_core", "cogmo_ctx"];
+const IMPORT_TEST_ROOTS = ["pytest", "pytest_asyncio", "skill"];
+
+/**
+ * Register's cap on a skill's suite: `cogmo_skills_runtime.skill_tests`'s
+ * `SUITE_TIMEOUT_S`, which a unit test pins this to.
+ */
+const SUITE_CAP_S = 60;
+
+/**
  * The verify stage's ruff rule set (design/skills.md → Verify stage, Types and
  * lint), with PGH004, which refuses a `noqa` that names no rule, and RUF100
  * and RUF102, which refuse one that suppresses nothing or names no rule ruff
@@ -201,6 +215,11 @@ function listOf(values: readonly unknown[]): string {
   return values.map((value) => code(String(value))).join(", ");
 }
 
+/** `values` in code, the last joined by "and". */
+function inWords(values: readonly string[]): string {
+  return `${listOf(values.slice(0, -1))} and ${listOf(values.slice(-1))}`;
+}
+
 /** A field's shape in words, from its JSON Schema. */
 function describeShape(name: string, schema: JsonSchema): string {
   const { type, items, properties } = schema;
@@ -258,7 +277,7 @@ function frontmatterFields(): string[] {
  * the check that must pass, the repo's `verify_command`.
  */
 export function renderToolchainClaudeMd(): string {
-  const owned = TOOLCHAIN_ENTRIES.map((entry) => code(entry === ".cogmo" ? ".cogmo/" : entry));
+  const owned = TOOLCHAIN_ENTRIES.map((entry) => (entry === ".cogmo" ? ".cogmo/" : entry));
   return [
     `<!-- ${GENERATED_BY} -->`,
     "",
@@ -277,7 +296,7 @@ export function renderToolchainClaudeMd(): string {
     "",
     "Nothing else goes in it, so no `__init__.py`: a skill directory is no package. `test_skill.py` imports the skill by its module name, `from skill import run`, with `Input` and `Output` when it has them (`from skill import Input, Output, run`), never relatively.",
     "",
-    `Cogmo owns ${owned.slice(0, -1).join(", ")} and ${owned.at(-1)}, and replaces them on each release. They are read-only: a branch that changes one is refused.`,
+    `Cogmo owns ${inWords(owned)}, and replaces them on each release. They are read-only: a branch that changes one is refused.`,
     "",
     "## skill.py",
     "",
@@ -309,6 +328,10 @@ export function renderToolchainClaudeMd(): string {
     "- No code built at run time: no `exec`, `eval`, `compile` or `__import__`, no `importlib.import_module`, and no `getattr` on an imported module by a computed name.",
     "- Each `ctx.memory` and `ctx.files` call's effect declared. A literal URL's host is in `network.allow`, and a literal secret name in `secrets`.",
     "",
+    "## test_skill.py",
+    "",
+    `Register checks \`test_skill.py\` as it checks \`skill.py\`: at most ${SKILL_BODY_MAX_LINES} lines and ${SKILL_BODY_MAX_CHARACTERS} characters, and the checks below. Besides what \`skill.py\` may import, the standard library, ${listOf(IMPORT_RUNTIME_ROOTS)} and the modules a declared dependency installs, it may import ${inWords(IMPORT_TEST_ROOTS)}. The frontmatter declares no test-only dependency, so a test mocks \`ctx\`. For a container-tier skill, register also runs the suite with no network and within ${SUITE_CAP_S} s: a test that reaches a real host, or a suite that runs longer, passes \`.cogmo/verify\` and is refused.`,
+    "",
     "## SKILL.md frontmatter",
     "",
     "`.cogmo/skill.schema.json` is its JSON Schema.",
@@ -335,7 +358,7 @@ export function renderToolchainClaudeMd(): string {
     "",
     "The layout is the formatter's: `uv run ruff format skills/<name>` writes it.",
     "",
-    `Fix a finding rather than suppress it. A suppression names its rule and covers one line: \`# noqa: <code>\` or \`# ruff: ignore[<code>]\` for ruff, \`# pyrefly: ignore[<error>]\` for pyrefly; pyrefly ignores \`# type: ignore\`. One that suppresses nothing, or names no rule the tool knows, is itself a finding. Register refuses a pragma that covers more (\`# ruff: noqa\`, \`# ruff: file-ignore\`, \`# ruff: disable\`, \`# pyrefly: ignore-errors\`), one that names no rule (\`# noqa\`, \`# pyrefly: ignore\`), the formatter's (\`# fmt: off\`, \`# fmt: on\`, \`# fmt: skip\`, \`# yapf: disable\`, \`# yapf: enable\`), and more than ${MAX_SUPPRESSIONS} in a file, and records each suppression on the deploy for review.`,
+    `Fix a finding rather than suppress it. A suppression names its rule and covers one line: \`# noqa: <code>\` or \`# ruff: ignore[<code>]\` for ruff, \`# pyrefly: ignore[<error>]\` for pyrefly; pyrefly ignores \`# type: ignore\`. One that suppresses nothing, or names no rule the tool knows, is itself a finding. Register refuses a pragma that covers more (\`# ruff: noqa\`, \`# ruff: file-ignore\`, \`# ruff: disable\`, \`# pyrefly: ignore-errors\`), one that names no rule (\`# noqa\`, \`# pyrefly: ignore\`), the formatter's (\`# fmt: off\`, \`# fmt: on\`, \`# fmt: skip\`, \`# yapf: disable\`, \`# yapf: enable\`), and more than ${MAX_SUPPRESSIONS} in a file, and records each suppression in \`skill.py\` on the deploy for review.`,
     "",
   ].join("\n");
 }

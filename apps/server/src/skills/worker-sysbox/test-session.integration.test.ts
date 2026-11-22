@@ -122,7 +122,7 @@ describe.skipIf(RUNTIME === undefined)("register's tests in the skills image", (
         sandbox: skillsImage.sandbox,
         image: SKILLS_TEST_IMAGE,
         depsCacheVolumeName,
-      }).check({ body, dependencies: ["idna==3.10"], lockfile, signal: undefined });
+      }).check({ body, testBody: null, dependencies: ["idna==3.10"], lockfile, signal: undefined });
       expect(checked._unsafeUnwrap().testRunner).toBe(true);
 
       const ran = await tests(depsCacheVolumeName).run({

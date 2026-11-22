@@ -89,8 +89,8 @@ def test_a_dependency_is_declared_by_its_pin_or_its_normalized_name(rule: Module
     # Register passes the manifest's pins; a bare name declares the distribution its normalized form names.
     installed = {"my-pkg-name": frozenset({"my_pkg"})}
 
-    assert rule.scan("import my_pkg\n", [dependency], installed) == []
-    assert rule.scan("import my_pkg\n", [], installed) == [
+    assert rule.scan("import my_pkg\n", "skill.py", [dependency], installed) == []
+    assert rule.scan("import my_pkg\n", "skill.py", [], installed) == [
         (
             1,
             1,
@@ -102,7 +102,7 @@ def test_a_dependency_is_declared_by_its_pin_or_its_normalized_name(rule: Module
 
 def test_a_refusal_after_non_ascii_text_is_at_its_code_point_column(rule: ModuleType) -> None:
     # `import` is the 11th code point; `ast` puts it at byte offset 14.
-    assert rule.scan('s = "é😀"; import yaml\n', [], {}) == [
+    assert rule.scan('s = "é😀"; import yaml\n', "skill.py", [], {}) == [
         (
             1,
             11,
@@ -114,4 +114,4 @@ def test_a_refusal_after_non_ascii_text_is_at_its_code_point_column(rule: Module
 
 def test_a_source_that_does_not_parse_raises(rule: ModuleType) -> None:
     with pytest.raises(SyntaxError):
-        rule.scan("import (\n", [], {})
+        rule.scan("import (\n", "skill.py", [], {})

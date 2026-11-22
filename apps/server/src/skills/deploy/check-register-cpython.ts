@@ -15,6 +15,7 @@ interface CheckedSkill {
   name: string;
   manifest: SkillManifest;
   body: string;
+  testBody: string | null;
   lockfile: LockfileSnapshot | null;
 }
 
@@ -34,13 +35,14 @@ interface CpythonChecked {
 }
 
 /**
- * Register's CPython checks, after its lockfile compile and before its schema
- * import. Resolves to what the classifier log records of them: the release
- * version of the toolchain that ran them and the suppressions they accepted,
- * or a null version and none where none ran: with no sandbox backend
- * configured, register skips them, logged at warn. A version other than the
- * server's `releaseVersion` is logged at warn; a check that cannot run at
- * error.
+ * Register's CPython checks over `skill.py` and any `test_skill.py`, after its
+ * lockfile compile and before its schema import, each finding at the file it
+ * names. Resolves to what the classifier log records of them: the release
+ * version of the toolchain that ran them and the suppressions they accepted in
+ * `skill.py`, or a null version and none where none ran: with no sandbox
+ * backend configured, register skips them, logged at warn. A version other
+ * than the server's `releaseVersion` is logged at warn; a check that cannot
+ * run at error.
  */
 export async function checkRegisterCpython(
   checks: CpythonChecks | undefined,
@@ -56,6 +58,7 @@ export async function checkRegisterCpython(
   }
   const checked = await checks.check({
     body: skill.body,
+    testBody: skill.testBody,
     dependencies: skill.manifest.dependencies,
     lockfile: skill.lockfile,
     signal: opts.signal,
@@ -83,8 +86,13 @@ export async function checkRegisterCpython(
     );
   }
   if (findings.length > 0) {
-    const path = `${skillDir(skill.name)}${SKILL_BODY_FILE}`;
-    return err({ kind: "lint_failed", findings: findings.map((f) => ({ ...f, path })) });
+    return err({
+      kind: "lint_failed",
+      findings: findings.map(({ file, ...finding }) => ({
+        ...finding,
+        path: `${skillDir(skill.name)}${file ?? SKILL_BODY_FILE}`,
+      })),
+    });
   }
   return ok({
     record: { toolchain_version: toolchainVersion, suppressions: [...suppressions] },

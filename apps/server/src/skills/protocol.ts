@@ -298,12 +298,14 @@ export type SchemaImportReply = z.infer<typeof SchemaImportReplySchema>;
 
 /**
  * Register's CPython checks' request, which `cogmo_skills_runtime.check`
- * reads on stdin: `skill.py`, the manifest's `dependencies` and the hash of
- * the lockfile whose venv holds them, null without dependencies
- * (design/skills.md → Register-time CPython checks).
+ * reads on stdin: `skill.py`, `test_skill.py` or null without one, the
+ * manifest's `dependencies` and the hash of the lockfile whose venv holds
+ * them, null without dependencies (design/skills.md → Register-time CPython
+ * checks, Register-time tests → The file's checks).
  */
 export const CheckRequestSchema = z.object({
   body: z.string(),
+  testBody: z.string().nullable(),
   dependencies: z.array(z.string().min(1)),
   lockfileHash: z
     .string()
@@ -323,13 +325,17 @@ const CPYTHON_CHECK_IDS = [
 ] as const;
 
 /**
- * One CPython check's finding in `skill.py`. Lines are 1-based; columns are
+ * One CPython check's finding in `file`, which an image older than the test
+ * file's checks leaves absent for `skill.py`. Lines are 1-based; columns are
  * 1-based UTF-16 code units, as the register-time gates count them. Both are
  * null for a finding about the file, and the column alone where the tool
  * names no column.
  */
 const CheckFindingSchema = z.object({
   id: z.enum(CPYTHON_CHECK_IDS),
+  // Literals, not `skill-source.ts`'s names: the wasm child bundles this
+  // module, and that module's imports break the bundle.
+  file: z.enum(["skill.py", "test_skill.py"]).optional(),
   line: z.number().int().positive().nullable(),
   column: z.number().int().positive().nullable(),
   message: z.string().min(1),
@@ -338,7 +344,7 @@ export type CheckFinding = z.infer<typeof CheckFindingSchema>;
 
 /**
  * The one reply of register's CPython checks: every check's findings, empty
- * for a body that passes, the suppressions the body carries, the release
+ * for files that pass, the suppressions `skill.py` carries, the release
  * version the image baked beside its toolchain, and `testRunner`, absent from
  * an image older than `cogmo_skills_runtime.skill_tests`; `fatal` when a
  * check could not run (a tool's failure status, a skill venv that is

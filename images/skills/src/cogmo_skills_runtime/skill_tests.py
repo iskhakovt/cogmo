@@ -23,13 +23,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TextIO
 
-from cogmo_skills_runtime.check import TOOLCHAIN_DIR, TOOLS_VENV, Finding, _site_packages, bounded
+from cogmo_skills_runtime.check import TEST_FILE, TOOLCHAIN_DIR, TOOLS_VENV, Finding, _site_packages, bounded
 from cogmo_skills_runtime.supervisor import _skill_venv_path
 
 # The suite's cap, past which the runner kills pytest's process group.
 SUITE_TIMEOUT_S = 60
-
-TEST_FILE = "test_skill.py"
 
 # The files a request carries: those `.cogmo/verify`'s run sees in `skills/<name>/`, the lockfile only with one.
 _REQUIRED_FILES = frozenset({"SKILL.md", "skill.py", TEST_FILE})
@@ -226,12 +224,12 @@ def _case_finding(case: ET.Element) -> Finding | None:
     reason = raised or (outcome.get("message") or "").partition("\n")[0] or outcome.tag
     classname = case.get("classname", "")
     if not classname:
-        return Finding("tests", None, None, f"collecting {TEST_FILE}: {reason}")
+        return Finding("tests", TEST_FILE, None, None, f"collecting {TEST_FILE}: {reason}")
     line = case.get("line", "")
     test = "::".join([*classname.split(".")[1:], case.get("name", "")])
     kind = "error: " if outcome.tag == "error" else ""
     number = int(line) + 1 if line.isdecimal() and len(line) <= _LINE_DIGITS else None
-    return Finding("tests", number, None, f"{test}: {kind}{reason}")
+    return Finding("tests", TEST_FILE, number, None, f"{test}: {kind}{reason}")
 
 
 def _definition(body: str, test: str) -> int | None:
@@ -261,9 +259,9 @@ def _at_cap(output: str, test_body: str, timeout_s: float) -> Finding:
     running = output.rpartition("\n")[2]
     cap = f"the suite reached its {timeout_s:g} s cap"
     if not (running.startswith(f"{TEST_FILE}::") and running.endswith(" ")):
-        return Finding("tests", None, None, cap)
+        return Finding("tests", TEST_FILE, None, None, cap)
     test = running.removeprefix(f"{TEST_FILE}::").rstrip()
-    return Finding("tests", _definition(test_body, test), None, f"{test}: still running when {cap}")
+    return Finding("tests", TEST_FILE, _definition(test_body, test), None, f"{test}: still running when {cap}")
 
 
 def _ended(status: int) -> str:
@@ -291,9 +289,9 @@ def judge(status: int, report: Sequence[ET.Element] | str, output: str) -> list[
         if status == _INTERRUPTED and collection:
             return collection
         if status == _NO_TESTS and not report:
-            return [Finding("tests", None, None, f"{TEST_FILE} holds no test")]
+            return [Finding("tests", TEST_FILE, None, None, f"{TEST_FILE} holds no test")]
     unread = f", {report}" if isinstance(report, str) else ""
-    return [Finding("tests", None, None, f"pytest {_ended(status)}{unread}: {_quoted(output)}")]
+    return [Finding("tests", TEST_FILE, None, None, f"pytest {_ended(status)}{unread}: {_quoted(output)}")]
 
 
 def run_suite(request: Request, suite: Suite) -> tuple[list[Finding], int]:

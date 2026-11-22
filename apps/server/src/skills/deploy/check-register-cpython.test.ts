@@ -19,7 +19,14 @@ const MANIFEST: SkillManifest = {
 };
 
 const LOCKFILE = { hash: "c".repeat(64), contents: "idna==3.10 --hash=sha256:00\n" };
-const SKILL = { name: "echo", manifest: MANIFEST, body: "import idna\n", lockfile: LOCKFILE };
+const TESTS = "from skill import run\n\n\ndef test_run():\n    assert run\n";
+const SKILL = {
+  name: "echo",
+  manifest: MANIFEST,
+  body: "import idna\n",
+  testBody: TESTS,
+  lockfile: LOCKFILE,
+};
 const OPTS = { releaseVersion: "2.17.0", signal: undefined };
 
 function checksAnswering(answer: Awaited<ReturnType<CpythonChecks["check"]>>) {
@@ -33,7 +40,7 @@ afterEach(() => {
 });
 
 describe("checkRegisterCpython", () => {
-  it("resolves to the toolchain version and the suppressions of checks that pass, handing them the skill and the signal", async () => {
+  it("resolves to the toolchain version and the suppressions of checks that pass, handing them the skill's files and the signal", async () => {
     const suppressions = [{ tool: "ruff" as const, code: "S603", line: 3 }];
     const checks = checksAnswering(
       ok({ findings: [], suppressions, toolchainVersion: "2.17.0", testRunner: true }),
@@ -48,6 +55,7 @@ describe("checkRegisterCpython", () => {
     });
     expect(checks.check).toHaveBeenCalledWith({
       body: "import idna\n",
+      testBody: TESTS,
       dependencies: ["idna==3.10"],
       lockfile: LOCKFILE,
       signal,
@@ -101,6 +109,38 @@ describe("checkRegisterCpython", () => {
           column: null,
           message: "null bytes",
         },
+      ],
+    });
+  });
+
+  it("refuses each finding at the file it names, and one naming none, from an older image, at skill.py", async () => {
+    const finding = {
+      id: "ruff" as const,
+      line: 1,
+      column: 8,
+      message: "F401 `os` imported but unused",
+    };
+    const checks = checksAnswering(
+      ok({
+        findings: [
+          { ...finding, file: "skill.py" },
+          { ...finding, file: "test_skill.py" },
+          finding,
+        ],
+        suppressions: [],
+        toolchainVersion: "2.17.0",
+        testRunner: true,
+      }),
+    );
+
+    const checked = await checkRegisterCpython(checks, SKILL, OPTS);
+
+    expect(checked._unsafeUnwrapErr()).toEqual({
+      kind: "lint_failed",
+      findings: [
+        { ...finding, path: "skills/echo/skill.py" },
+        { ...finding, path: "skills/echo/test_skill.py" },
+        { ...finding, path: "skills/echo/skill.py" },
       ],
     });
   });

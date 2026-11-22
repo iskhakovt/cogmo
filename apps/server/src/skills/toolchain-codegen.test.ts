@@ -191,6 +191,37 @@ describe("renderToolchainClaudeMd", () => {
     expect(rendered).toContain("One that suppresses nothing, or names no rule the tool knows");
   });
 
+  it("states test_skill.py's bound, imports and suite cap, from the rules register applies", () => {
+    const imports = readFileSync(
+      join(repoRoot(), "images/skills/toolchain/.cogmo/imports.py"),
+      "utf8",
+    );
+    const roots = (name: string) =>
+      [
+        ...(new RegExp(`^${name} = \\(([^)]*)\\)$`, "m").exec(imports)?.[1] ?? "").matchAll(
+          /"(\w+)"/g,
+        ),
+      ].map(([, root]) => `\`${root}\``);
+    const runner = readFileSync(
+      join(repoRoot(), "images/skills/src/cogmo_skills_runtime/skill_tests.py"),
+      "utf8",
+    );
+    const cap = /^SUITE_TIMEOUT_S = (\d+)$/m.exec(runner)?.[1];
+    const runtime = roots("RUNTIME_ROOTS");
+    const tests = roots("TEST_ROOTS");
+    expect(runtime).toHaveLength(3);
+    expect(tests).toHaveLength(3);
+    expect(cap).toBeDefined();
+
+    expect(rendered).toContain(
+      `## test_skill.py\n\nRegister checks \`test_skill.py\` as it checks \`skill.py\`: at most 1000 lines and 120000 characters, and the checks below. Besides what \`skill.py\` may import, the standard library, ${runtime.join(", ")} and the modules a declared dependency installs, it may import ${tests.slice(0, -1).join(", ")} and ${tests.at(-1)}. The frontmatter declares no test-only dependency, so a test mocks \`ctx\`. For a container-tier skill, register also runs the suite with no network and within ${cap} s: a test that reaches a real host, or a suite that runs longer, passes \`.cogmo/verify\` and is refused.\n`,
+    );
+  });
+
+  it("says only skill.py's suppressions are recorded on the deploy", () => {
+    expect(rendered).toContain("records each suppression in `skill.py` on the deploy for review.");
+  });
+
   it("states the formatter pragmas register refuses", () => {
     const pragmas = ["# fmt: off", "# fmt: on", "# fmt: skip", "# yapf: disable", "# yapf: enable"];
     expect(rendered).toContain(

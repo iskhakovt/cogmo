@@ -443,6 +443,12 @@
         "body": {
           "type": "string"
         },
+        "testBody": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "dependencies": {
           "type": "array",
           "items": {
@@ -464,6 +470,7 @@
       },
       "required": [
         "body",
+        "testBody",
         "dependencies",
         "lockfileHash"
       ],
@@ -492,6 +499,13 @@
                       "pyrefly",
                       "imports",
                       "suppression"
+                    ]
+                  },
+                  "file": {
+                    "type": "string",
+                    "enum": [
+                      "skill.py",
+                      "test_skill.py"
                     ]
                   },
                   "line": {

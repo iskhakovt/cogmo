@@ -298,7 +298,7 @@ export async function prepareRegister(
   // session populated (design/skills.md → Register-time CPython checks).
   const cpython = await checkRegisterCpython(
     deps.cpythonChecks,
-    { name, manifest, body, lockfile },
+    { name, manifest, body, testBody, lockfile },
     { releaseVersion: deps.releaseVersion, signal },
   );
   if (cpython.isErr()) return err(cpythonRejection(cpython.error));

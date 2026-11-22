@@ -62,10 +62,7 @@ def _site_packages(venvs: Path, lockfile_hash: str) -> Path:
     return venvs / f"{lockfile_hash}-py{_MINOR}" / "lib" / f"python{_MINOR}" / "site-packages"
 
 
-def _check(
-    body: str, toolchain: Toolchain, dependencies: list[str] | None = None, lockfile_hash: str | None = None
-) -> dict[str, object]:
-    request = {"body": body, "dependencies": dependencies or [], "lockfileHash": lockfile_hash}
+def _reply(request: Mapping[str, object], toolchain: Toolchain) -> dict[str, object]:
     stdout = io.StringIO()
     check.main(io.StringIO(json.dumps(request)), stdout, lambda: toolchain)
     lines = stdout.getvalue().splitlines()
@@ -73,11 +70,31 @@ def _check(
     return json.loads(lines[0])
 
 
+def _check(
+    body: str, toolchain: Toolchain, dependencies: list[str] | None = None, lockfile_hash: str | None = None
+) -> dict[str, object]:
+    return _reply(
+        {"body": body, "testBody": None, "dependencies": dependencies or [], "lockfileHash": lockfile_hash}, toolchain
+    )
+
+
+def _check_files(body: str, test_body: str, toolchain: Toolchain) -> dict[str, object]:
+    return _reply({"body": body, "testBody": test_body, "dependencies": [], "lockfileHash": None}, toolchain)
+
+
 def _findings(reply: Mapping[str, object]) -> list[tuple[str, int | None, int | None, str]]:
     assert reply["type"] == "check_findings", reply
     findings = reply["findings"]
     assert isinstance(findings, list)
     return [(f["id"], f["line"], f["column"], f["message"]) for f in findings]
+
+
+def _file_findings(reply: Mapping[str, object]) -> list[tuple[str | None, str, int | None, int | None, str]]:
+    """Each finding with the file it names first, None where it names none."""
+    assert reply["type"] == "check_findings", reply
+    findings = reply["findings"]
+    assert isinstance(findings, list)
+    return [(f.get("file"), f["id"], f["line"], f["column"], f["message"]) for f in findings]
 
 
 def _suppressions(reply: Mapping[str, object]) -> list[tuple[str, str, int]]:
@@ -111,6 +128,22 @@ async def run(inputs: Input, ctx: Ctx) -> Output:
 """
 
 
+_TESTS = """\
+from unittest.mock import AsyncMock
+
+import pytest
+
+from skill import Input, run
+
+
+@pytest.mark.parametrize("status", [200, 404])
+async def test_run(status: int) -> None:
+    ctx = AsyncMock()
+    ctx.http.get.return_value = {"status": status}
+    assert (await run(Input(url="https://example.com"), ctx)).status == status
+"""
+
+
 def test_a_skill_that_passes_has_no_findings_and_names_the_toolchain_and_the_test_runner(
     toolchain: Toolchain, protocol: ProtocolCheck
 ) -> None:
@@ -127,8 +160,10 @@ def test_a_skill_that_passes_has_no_findings_and_names_the_toolchain_and_the_tes
 
 
 def test_the_request_the_host_sends_is_a_check_request(protocol: ProtocolCheck) -> None:
-    protocol("check_request", {"body": _CLEAN, "dependencies": ["idna==3.10"], "lockfileHash": _HASH})
-    protocol("check_request", {"body": _CLEAN, "dependencies": [], "lockfileHash": None})
+    protocol(
+        "check_request", {"body": _CLEAN, "testBody": _TESTS, "dependencies": ["idna==3.10"], "lockfileHash": _HASH}
+    )
+    protocol("check_request", {"body": _CLEAN, "testBody": None, "dependencies": [], "lockfileHash": None})
 
 
 # --- syntax
@@ -514,7 +549,7 @@ def _replace_imports_rule(toolchain: Toolchain, scan: str) -> None:
         "import collections\n"
         "Refusal = collections.namedtuple('Refusal', 'line column message')\n"
         "def installed_modules(site_packages):\n    return {}\n"
-        f"def scan(source, dependencies, installed):\n{scan}"
+        f"def scan(source, file, dependencies, installed):\n{scan}"
     )
 
 
@@ -541,7 +576,7 @@ def test_an_imports_rule_that_cannot_read_the_body_is_fatal(toolchain: Toolchain
     reply = _check(_CLEAN, toolchain)
 
     assert reply["type"] == "fatal"
-    assert str(reply["error"]).startswith("the Imports rule could not read the body: RecursionError")
+    assert str(reply["error"]).startswith("the Imports rule could not read skill.py: RecursionError")
 
 
 # --- suppressions
@@ -744,7 +779,149 @@ def test_a_suppression_rule_that_cannot_read_the_body_is_fatal(toolchain: Toolch
     reply = _check(_CLEAN, toolchain)
 
     assert reply["type"] == "fatal"
-    assert str(reply["error"]).startswith("the suppression rule could not read the body: ")
+    assert str(reply["error"]).startswith("the suppression rule could not read skill.py: ")
+
+
+# --- test_skill.py
+
+
+def test_a_test_file_that_passes_imports_pytest_and_the_skill_and_asserts(
+    toolchain: Toolchain, protocol: ProtocolCheck
+) -> None:
+    reply = _check_files(_CLEAN, _TESTS, toolchain)
+
+    protocol("check_reply", reply)
+    assert reply["findings"] == []
+
+
+def test_pyrefly_resolves_the_skill_a_test_imports(toolchain: Toolchain) -> None:
+    # A type error only `skill`'s own `Input` can show.
+    reply = _check_files(_CLEAN, _TESTS.replace('url="https://example.com"', "url=1"), toolchain)
+
+    assert _file_findings(reply) == [
+        (
+            "test_skill.py",
+            "pyrefly",
+            12,
+            33,
+            "bad-argument-type Argument `Literal[1]` is not assignable to parameter `url` with type "
+            "`bytearray | bytes | str` in function `skill.Input.__init__`",
+        )
+    ]
+
+
+def test_each_finding_names_its_file(toolchain: Toolchain, protocol: ProtocolCheck) -> None:
+    body = _CLEAN.replace("import json\n", "import json\nimport os\n")
+    tests = 'import os\n\ns = "é😀";  x: int = "s"\n'
+
+    reply = _check_files(body, tests, toolchain)
+
+    protocol("check_reply", reply)
+    assert _file_findings(reply) == [
+        ("skill.py", "ruff", 2, 8, "F401 `os` imported but unused"),
+        ("test_skill.py", "ruff", 1, 8, "F401 `os` imported but unused"),
+        ("test_skill.py", "ruff", 3, 10, "E702 Multiple statements on one line (semicolon)"),
+        ("test_skill.py", "format", 3, 10, f"unformatted File would be reformatted: run {_FORMAT_FIX}"),
+        (
+            "test_skill.py",
+            "pyrefly",
+            3,
+            22,
+            "bad-assignment `Literal['s']` is not assignable to `int`",
+        ),
+    ]
+
+
+def test_a_test_file_may_import_pytest_and_the_skill_and_skill_py_may_not(toolchain: Toolchain) -> None:
+    body = _CLEAN.replace("import json\n", "import json\n\nimport pytest\n")
+    tests = _TESTS.replace("import pytest\n", "import pytest\nimport pytest_asyncio\nimport requests\n").replace(
+        "    ctx = AsyncMock()\n", "    ctx = AsyncMock(), pytest_asyncio, requests\n"
+    )
+
+    reply = _check_files(body, tests, toolchain)
+
+    allowed = "the standard library, pydantic, pydantic_core, cogmo_ctx"
+    assert [f for f in _file_findings(reply) if f[1] == "imports"] == [
+        ("skill.py", "imports", 3, 1, f"'pytest' is not {allowed} or a module a declared dependency installs"),
+        (
+            "test_skill.py",
+            "imports",
+            5,
+            1,
+            f"'requests' is not {allowed}, pytest, pytest_asyncio, skill or a module a declared dependency installs",
+        ),
+    ]
+
+
+def test_a_test_files_suppressions_are_enforced_and_only_skill_pys_recorded(toolchain: Toolchain) -> None:
+    body = _CLEAN.replace("import json\n", "import json\nimport os  # noqa: F401\n")
+    tests = _TESTS.replace("import pytest\n", "import pytest\nimport sys  # noqa: F401\n") + (
+        '\n\ndef f() -> int:\n    return "x"  # pyrefly: ignore\n'
+    )
+
+    reply = _check_files(body, tests, toolchain)
+
+    assert _file_findings(reply) == [
+        ("test_skill.py", "suppression", 17, 17, f"`# pyrefly: ignore` names no error; {_PYREFLY_PER_LINE}"),
+    ]
+    assert _suppressions(reply) == [("ruff", "F401", 2)]
+
+
+def test_the_suppression_bound_counts_each_file_apart(toolchain: Toolchain) -> None:
+    long = f'x = "{"a" * 120}"  # noqa: E501\n'
+
+    reply = _check_files("assert True  # noqa: S101\n" * 100, long * 101, toolchain)
+
+    assert _file_findings(reply) == [
+        ("test_skill.py", "suppression", 101, 129, "more than 100 suppressions; fix what they suppress instead"),
+    ]
+    assert _suppressions(reply) == [("ruff", "S101", line) for line in range(1, 101)]
+
+
+def test_a_syntax_error_in_either_file_stands_alone(toolchain: Toolchain) -> None:
+    body = _CLEAN.replace("import json\n", "import json\nimport os\n")
+
+    one = _check_files(body, "x = (1 2)\n", toolchain)
+    both = _check_files("y = (1 2)\n", "x = (1 2)\n", toolchain)
+
+    comma = "invalid syntax. Perhaps you forgot a comma?"
+    assert _file_findings(one) == [("test_skill.py", "syntax", 1, 6, comma)]
+    assert _file_findings(both) == [("skill.py", "syntax", 1, 6, comma), ("test_skill.py", "syntax", 1, 6, comma)]
+
+
+@pytest.mark.parametrize("test_body", [{"testBody": None}, {}])
+def test_without_a_test_file_only_skill_py_is_checked(toolchain: Toolchain, test_body: dict[str, None]) -> None:
+    # An older host sends no `testBody`.
+    reply = _reply({"body": "import os\n", "dependencies": [], "lockfileHash": None, **test_body}, toolchain)
+
+    assert reply["findings"] == [
+        {"id": "ruff", "file": "skill.py", "line": 1, "column": 8, "message": "F401 `os` imported but unused"}
+    ]
+
+
+@pytest.mark.parametrize("test_body", [1, ["test_skill.py"]])
+def test_a_test_body_that_is_not_text_is_fatal(toolchain: Toolchain, test_body: object) -> None:
+    reply = _reply({"body": _CLEAN, "testBody": test_body, "dependencies": [], "lockfileHash": None}, toolchain)
+
+    assert reply == {"type": "fatal", "error": "the request is not a check_request"}
+
+
+def test_the_findings_past_the_cap_are_counted_per_file_and_check(toolchain: Toolchain) -> None:
+    # Per file: ruff's 50 F821 and one E501 per line, the formatter's one, pyrefly's 50 unknown-name per line.
+    flood = ("x = (" + ", ".join(["a"] * 50) + ")\n") * 2
+
+    reply = _check_files(flood, flood, toolchain)
+
+    findings = _file_findings(reply)
+    assert {(file, check_id) for file, check_id, *_ in findings[:100]} == {("skill.py", "ruff")}
+    assert findings[100:] == [
+        ("skill.py", "ruff", None, None, "and 2 more ruff findings"),
+        ("test_skill.py", "ruff", None, None, "and 102 more ruff findings"),
+        ("skill.py", "format", None, None, "and 1 more format findings"),
+        ("test_skill.py", "format", None, None, "and 1 more format findings"),
+        ("skill.py", "pyrefly", None, None, "and 100 more pyrefly findings"),
+        ("test_skill.py", "pyrefly", None, None, "and 100 more pyrefly findings"),
+    ]
 
 
 # --- the reply

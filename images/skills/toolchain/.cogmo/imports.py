@@ -1,10 +1,11 @@
 """The imports a skill may carry, checked by Cogmo's register.
 
 An import is allowed when its first segment is in the standard library or is `pydantic`, `pydantic_core` or
-`cogmo_ctx`, which the runtime installs for every task, or when a declared dependency installs it. Which distributions
-install a module comes from the `RECORD` of each distribution in the lockfile's environment, read from that
-environment's own site-packages, never from an interpreter's path: a module only a transitive dependency installs is
-refused, since a skill declares what it imports. Nothing here imports or runs the skill's code or its dependencies'.
+`cogmo_ctx`, which the runtime installs for every task, or when a declared dependency installs it. In `test_skill.py`
+it may also be `pytest` or `pytest_asyncio`, the toolchain's test packages, or `skill`, the module under test. Which
+distributions install a module comes from the `RECORD` of each distribution in the lockfile's environment, read from
+that environment's own site-packages, never from an interpreter's path: a module only a transitive dependency installs
+is refused, since a skill declares what it imports. Nothing here imports or runs the skill's code or its dependencies'.
 
 Part of Cogmo's toolchain, which Cogmo replaces on each release.
 """
@@ -19,7 +20,11 @@ from pathlib import PurePosixPath
 from typing import NamedTuple
 
 # What a skill imports besides the stdlib and its own dependencies: the runtime the image installs for every task.
-RUNTIME_ROOTS = frozenset({"pydantic", "pydantic_core", "cogmo_ctx"})
+RUNTIME_ROOTS = ("pydantic", "pydantic_core", "cogmo_ctx")
+
+# What `test_skill.py` also imports: the toolchain's test packages, and the module under test.
+TEST_FILE = "test_skill.py"
+TEST_ROOTS = ("pytest", "pytest_asyncio", "skill")
 
 # Lines end where CPython, ruff and pyrefly all end them.
 _NEWLINE = re.compile(r"\r\n|\r|\n")
@@ -82,8 +87,9 @@ def _dependency_name(spec: str) -> str:
     return _normalized(matched.group(1) if matched else spec)
 
 
-def scan(source: str, dependencies: Sequence[str], installed: Mapping[str, frozenset[str]]) -> list[Refusal]:
-    """Every import in `source` the stdlib, the runtime and the modules a declared dependency installs do not cover.
+def scan(source: str, file: str, dependencies: Sequence[str], installed: Mapping[str, frozenset[str]]) -> list[Refusal]:
+    """Every import in `source`, the skill's `file`, that the stdlib, the runtime, the modules a declared dependency
+    installs and, in `test_skill.py`, the test roots do not cover.
 
     `dependencies` are the declared ones, as `name==version` pins or bare names; `installed` maps each distribution
     in the lockfile's environment to its modules (`installed_modules`). `import a.b` imports `a.b`. `from a.b import c`
@@ -93,7 +99,8 @@ def scan(source: str, dependencies: Sequence[str], installed: Mapping[str, froze
 
     Raises `SyntaxError`, `RecursionError` or `MemoryError` when `source` does not parse.
     """
-    tree = ast.parse(source, "skill.py")
+    tree = ast.parse(source, file)
+    roots = (*RUNTIME_ROOTS, *TEST_ROOTS) if file == TEST_FILE else RUNTIME_ROOTS
     lines = _NEWLINE.split(source)
     declared = frozenset(_dependency_name(spec) for spec in dependencies)
     installers: dict[str, set[str]] = {}
@@ -114,21 +121,20 @@ def scan(source: str, dependencies: Sequence[str], installed: Mapping[str, froze
             imported = [module if alias.name == "*" else f"{module}.{alias.name}" for alias in node.names]
         else:
             continue
-        messages = (_import_refusal(name, declared, installers) for name in imported)
+        messages = (_import_refusal(name, roots, declared, installers) for name in imported)
         refusals.extend(_at(node, lines, message) for message in dict.fromkeys(m for m in messages if m is not None))
     return sorted(refusals, key=lambda r: (r.line, r.column))
 
 
-def _import_refusal(name: str, declared: frozenset[str], installers: Mapping[str, set[str]]) -> str | None:
+def _import_refusal(
+    name: str, roots: Sequence[str], declared: frozenset[str], installers: Mapping[str, set[str]]
+) -> str | None:
     root = name.split(".")[0]
-    if root in sys.stdlib_module_names or root in RUNTIME_ROOTS:
+    if root in sys.stdlib_module_names or root in roots:
         return None
     installed = _installed_as(name, installers)
     if installed is None:
-        return (
-            f"'{root}' is not the standard library, pydantic, pydantic_core, cogmo_ctx or a module a declared "
-            "dependency installs"
-        )
+        return f"'{root}' is not the standard library, {', '.join(roots)} or a module a declared dependency installs"
     module, names = installed
     if names & declared:
         return None

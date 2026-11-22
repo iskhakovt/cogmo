@@ -3676,10 +3676,48 @@ async def run(inputs, ctx):
       assertStatus(result, "live");
       expect(cpythonChecks.check).toHaveBeenCalledWith({
         body: ECHO_BODY,
+        testBody: null,
         dependencies: ["httpx==0.27.0"],
         lockfile: { hash: hashLockfileContents(lockfile), contents: lockfile },
         signal: controller.signal,
       });
+    });
+
+    it("hands the checks test_skill.py, and names the file of each finding they make", async () => {
+      const tests = "import os\n\nfrom skill import run\n\n\ndef test_run():\n    assert run\n";
+      const unused = {
+        id: "ruff" as const,
+        line: 1,
+        column: 8,
+        message: "F401 `os` imported but unused",
+      };
+      const cpythonChecks = checksAnswering(
+        ok({
+          findings: [{ ...unused, file: "test_skill.py" }, unused],
+          suppressions: [],
+          toolchainVersion: VERSION,
+          testRunner: true,
+        }),
+      );
+      const runner = await makeRunner({ cpythonChecks });
+      await writeFile(skillFile(repo.work, "test_skill.py", "echo"), tests);
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "ruff: skills/echo/test_skill.py:1:8: F401 `os` imported but unused",
+        "ruff: skills/echo/skill.py:1:8: F401 `os` imported but unused",
+      ]);
+      expect(cpythonChecks.check).toHaveBeenCalledWith(
+        expect.objectContaining({ body: ECHO_BODY, testBody: tests }),
+      );
     });
 
     it("reads uv refusing the lockfile's content as a rejection of the lockfile", async () => {
