@@ -2,15 +2,15 @@
 
 Some of cogmo's work fails by not happening: a Telegram receive loop that has exited, a cron that no longer fires. Such a failure leaves at most one log line, and `/health` stays `pass`. This doc defines the checks that turn that absence into a signal, the registry they report to, and what an operator alerts on. It serves [#801](https://github.com/iskhakovt/cogmo/issues/801) (channel adapters) and [#427](https://github.com/iskhakovt/cogmo/issues/427) (crons).
 
-**Decisions for the owner.** Each is an architecture or data-model change:
+**Decisions** (the owner, 2026-11-22):
 
-1. `Adapter` and `StreamingAdapter` gain an optional `liveness?()`, and `startChannels` reports every channel row it read, skipped ones included ([Channel contract](#channel-contract-proposed)).
-2. `/health`'s body gains `checks`, and its top-level `status` can be `warn`, still at HTTP 200 ([Surface](#surface-proposed)).
-3. The polling supervisor's `PollingState` gains a receive sub-state and the fields its projection reads ([Telegram receive loop](#telegram-receive-loop-proposed)).
-4. A new `src/liveness/` module, and a `cron_heartbeats` table with a `cron_function` pgEnum, into which each `cogmo serve` boot inserts a baseline row per registered cron before `connect`; a failed baseline fails boot ([Cron heartbeats](#cron-heartbeats-proposed)).
-5. Every cron is built by `createCronFunction` and gains a final heartbeat step. `sandbox-reaper` and `model-catalog-refresh` leave design/architecture.md's single-step list, and log lines outside steps repeat once more, an accepted cost.
-6. The thresholds: 90 s stale, 5 min wedged, two 409s in a row, and two cron periods plus 5 min.
-7. Sequencing against the move to Temporal (design/orchestration-temporal.md): build the heartbeats on Inngest now, or after the crons' Temporal slice, leaving #427 open until then. Recommended: now, since the move has no date and the table, baseline, registry and rule carry over ([Under Temporal](#under-temporal-proposed)).
+1. Adapter contract: `liveness(): ChannelLiveness | null`, required on `Adapter` and `StreamingAdapter`; `startChannels` reports every row ([Channel contract](#channel-contract-proposed)).
+2. Surface: `/health`'s top-level `status` stays public, and `checks` appears only for a valid web session ([Surface](#surface-proposed)).
+3. Polling state: the supervisor's `PollingState` gains a receive sub-state and its projection's fields ([Telegram receive loop](#telegram-receive-loop-proposed)).
+4. Cron storage: `src/liveness/` with `cron_heartbeats` and its boot baseline ([Cron heartbeats](#cron-heartbeats-proposed)), plus a `cogmo.cron.last_tick` gauge.
+5. Cron builder: `createCronFunction` with a final heartbeat step; `sandbox-reaper` and `model-catalog-refresh` leave design/architecture.md's single-step list; replayed log lines are accepted.
+6. Thresholds: 90 s stale, 5 min wedged, two 409s in a row; a cron overdue two periods plus 5 min after its reference, or its next tick plus 30 min for a period of a day or more.
+7. Sequencing: on Inngest now; [Under Temporal](#under-temporal-proposed) covers the move.
 
 ## Sources `[proposed]`
 
@@ -27,13 +27,20 @@ Some of cogmo's work fails by not happening: a Telegram receive loop that has ex
 
 One in-process check registry, read three ways:
 
-1. **`checks` in `/health`**, after the IETF health+json draft ([draft-inadarei-api-health-check-06](https://datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06)): a key per component (`{componentName}:{measurementName}`), each an array of entries told apart by `componentId`. A check reports only `pass` or `warn`, always at HTTP 200: the draft defines `warn` as healthy with concerns and requires 2xx–3xx for it. Top-level `status` is `warn` when any check warns.
+1. **`/health`**, after the IETF health+json draft ([draft-inadarei-api-health-check-06](https://datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06)). Its top-level `status` is public: `warn` when any check warns, always at HTTP 200, the draft's code for healthy with concerns. Its `checks`, a key per component (`{componentName}:{measurementName}`) holding entries told apart by `componentId`, appear only for a valid web session: `/health` shares the web UI's port, so it is as reachable as the UI, and Spring Boot's actuator likewise hides health details by default, with `when-authorized` to show them to authenticated users. A request without the session cookie reads memory only; one with it resolves the session under a 2 s deadline, and any session that doesn't resolve gets the public body, still 200.
 2. **The `cogmo.check.status` gauge**, an OTel observable gauge, as a state set after [`hw.status`](https://opentelemetry.io/docs/specs/semconv/hardware/common/): exactly the attributes `check`, `component_id` and `status` (`pass` | `warn`), 1 for the entry's current status and 0 for the other. No unit, so a Prometheus translation adds no suffix.
 3. **One log line per verdict change**, of status or of reason: `liveness check warn` (with `check`, `componentId`, `reason`, `output` and a channel error's `detail`) and `liveness check pass`.
 
-The registry evaluates every check on a 15-second tick, the first when it is built; `/health` and the gauge render the last tick from memory, so a dependency blip can't slow or fail `/health`. A check that throws, a bug, reports `warn` (`check_error`) and logs at error.
+The registry evaluates every check on a 15-second tick, the first when it is built; `/health` and the gauge render the last tick from memory. A check that throws, a bug, reports `warn` (`check_error`) and logs at error. Probes alert on `status`; the gauge and the log lines name the failing check.
 
-**Only fixed text leaves the process.** `/health` is unauthenticated, so `output` is a public text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only, and the Telegram adapter redacts its configured token, raw and percent-encoded, from every line it writes that carries one: the verdict line's `detail`, the supervisor's lines, the command-menu warning and both offset-confirmation warnings. `componentId` is the channel's id: its UUIDv7 reveals only when the channel was created, and a stable id keeps per-channel series and alerts stable.
+**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only, and the Telegram adapter redacts its configured token, raw and percent-encoded, from every line it writes that carries one: the verdict line's `detail`, the supervisor's lines, the command-menu warning and both offset-confirmation warnings.
+
+The public body, and the same with a session:
+
+```json
+{ "status": "warn", "version": "2.17.0", "description": "cogmo",
+  "notes": ["node: v26.1.0", "startedAt: 2026-11-19T08:00:00.000Z"] }
+```
 
 ```json
 {
@@ -54,6 +61,9 @@ The registry evaluates every check on a 15-second tick, the first when it is bui
 | Alternative | Why not |
 |-|-|
 | `fail` with a 503 | Liveness probes act on the status code: a revoked token would restart-loop, and the supervisor already restarts on a 409 in-process. |
+| `checks` for every caller | `/health` is as reachable as the UI, and channel errors and cron names are the operator's. |
+| An optional `liveness?()` | Fails by omission: an adapter with a loop that forgets it reports nothing, and unlike a missing `sendVoice?`, nothing notices. |
+| `AdapterSetupResult.liveness` | Splits the running adapter's lifecycle between `stop()` and a getter returned beside it. |
 | Beside the boot checks, where `hindsightCompat` fails | Boot checks run once and fail boot closed; these watch what stops after boot, which failing boot wouldn't fix. |
 | `/health/ready` | Readiness gates traffic, so an orchestrator would take the web UI out of service over a Telegram fault; cogmo has no load balancer to gate. |
 | A separate checks endpoint | The same body at a second URL; the restart risk is the status code, not the body. |
@@ -65,7 +75,7 @@ The registry evaluates every check on a 15-second tick, the first when it is bui
 
 ## Channel contract `[proposed]`
 
-`Adapter` and `StreamingAdapter` each gain an optional `liveness?(): ChannelLiveness`, as both carry `sendVoice?`. An adapter with a receive loop implements it as a projection of its own state; direct and web leave it out. The alternative, `AdapterSetupResult.liveness`, keeps the instance interfaces but splits the running adapter's lifecycle between `stop()` and a getter returned beside it.
+`Adapter` and `StreamingAdapter` each require `liveness(): ChannelLiveness | null`, both because `AdapterSetupResult.adapter` is either and web is streaming-only; Telegram's one method satisfies both. An adapter with a receive loop returns a projection of its own state; `null` means no loop, and direct and web return it explicitly.
 
 ```ts
 /** A channel's receive loop, projected from its adapter's state. Times are monotonic ms. */
@@ -210,7 +220,7 @@ With `@grammyjs/runner` (`todo.md`), `handlingSince` becomes the oldest update i
 | f | A wrong `apiRoot` that answers like a Bot API | `failed` (`rejected`) | The setup's 404 `GrammyError` is rethrown; the supervisor logs a terminal line. |
 | f′ | A wrong `apiRoot` that doesn't resolve or serves HTML | `polling` / `starting` | grammY's setup retries the `HttpError` forever; `stale` at 90 s, with no log line a log-only alert could see. Residual. |
 | g | A second poller that stays | `polling` and `backoff` in turn | `flapping` until the run after the last 409 has lasted 10 minutes. |
-| g′ | A competitor that polls less often than every 10 minutes | `receiving`, a 409 and a 2.5–5 s backoff each time | The streak resets each time, so the check stays `pass`; each 409 logs at error. Residual: a rolling count would catch it, at the cost of a warning that outlives the competitor by its window. |
+| g′ | A competitor polling less often than every 10 minutes | `receiving`, with a short backoff per 409 | The streak resets each time, so the check stays `pass`; each 409 logs at error. Residual: a rolling count would catch it but outlive the competitor by its window. |
 | h | 401 | `failed` (`unauthorized`) | Warns until the token is replaced and cogmo restarts. |
 | i | A handler hangs | `polling`, `#handlingSince` ageing | `wedged` at 5 min, ahead of any other warning. Residual: the operator restarts. |
 | j | The loop stops unnoticed (a bug) | `polling`, progress ageing | `stale`: the time-derived verdict backs the machine. |
@@ -252,24 +262,29 @@ Owned by `liveness/store/` in the new `src/liveness/`, which also holds the regi
 
 **Replays.** The step adds one boundary per run, so a bare-body log line repeats once more, and one after the last step logs twice (`ticker fan-out`). `sandbox-reaper` runs `runReap` and its log in a `reap` step. About 6,200 updates a day, on an unindexed column.
 
-**Check.** An evaluation reads an entry `overdue` when now is more than 5 minutes past the second scheduled tick after its reference: `last_tick`, or `created_at` with none. Ticks come from croner in UTC, like Inngest's; a cron given Inngest's `jitter` needs the grace to cover it. A cron missing from a read, its row deleted out of band, reads `unrecorded`. Evaluations run every 15 s, so any stretch with no tick served longer than two periods, 5 minutes and 15 s warns, whatever stopped it: the Inngest server (#427), the worker's connection, or a cron failing every run. About 7 minutes for a per-minute ticker, two days for a daily cron, two weeks for the weekly sweep. A shorter stretch, or one missed run, passes unseen. A warning lasts until the next served tick.
+**Check.** An evaluation reads an entry `overdue` past a cutoff counted from its reference, `last_tick` or else `created_at`:
+
+- **A period under a day:** 5 minutes past the second tick after the reference, so one missed or failed run passes unseen; about 7 minutes for a per-minute ticker.
+- **A day or more** (the daily venv reaper, the weekly sweep): 30 minutes past the first tick after it, so one missed or failed run warns. The recorded tick lands when the run completes, and 30 minutes covers its queueing, its run time and a deploy across the tick.
+
+Ticks come from croner in UTC, like Inngest's; a cron given Inngest's `jitter` needs the grace to cover it. A cron missing from a read, its row deleted out of band, reads `unrecorded`. Evaluations run every 15 s, so a stretch with no tick served that outlasts its cutoff by 15 s always warns, whatever stopped it: the Inngest server (#427), the worker's connection, or a cron failing every run. A warning lasts until the next served tick.
 
 **Read path.** The registry reads every row on its tick, bounded like the write, with one read in flight. Evaluation never awaits it: each tick ages the cached rows and evaluates the channels while a read is outstanding, so neither surface freezes on a stale `pass`. A failed read keeps the cache and logs `liveness: reading cron heartbeats failed`, the first in a streak, then `recovered` on success.
 
 | # | Crash, race or deploy | Row left | Why it is safe, or the residual |
 |-|-|-|-|
 | a | The update commits; the process dies before Inngest records the step | Updated | A retry records the same tick again. |
-| b | The write fails or hits its deadline | Unchanged | `write_failed`; the run completes, and the next tick records. A write the deadline abandoned may still commit, which the monotone update makes harmless. |
-| c | The work throws every run | Unchanged | Overdue after two periods plus 5 minutes. |
+| b | The write fails or hits its deadline | Unchanged | `write_failed`; the run completes. Like a failed run, it warns only for a cron of a day or more, until the next tick. A write the deadline abandoned may still commit, which the monotone update makes harmless. |
+| c | The work throws | Unchanged | A cron under a day warns once two ticks go unserved; one of a day or more, by the owner's choice, 30 minutes after one failed run. |
 | d | Two runs at once | The later tick | `GREATEST` keeps it monotone; a `40001` is retried by the transactor. |
 | e | The final step runs long after the work | The run's own tick | The tick comes from the event, so a late write can't make a stopped cron look fresh. |
-| f | A run in flight across the deploy that adds the step | Recorded, or not at all | In connect mode `serve` drains in-flight requests, each one step; a run the old build completes records nothing, one missed tick, and a run cut between steps continues on the new build and records. HTTP serve mode doesn't await its requests (`main.ts`), so a cut step is retried where the function allows. |
-| f′ | A run resumed by a build with another step plan: a rollback without `cron-heartbeat`, or `skill-venvs-reaper`, whose `reap` step depends on current config | Unchanged | The request fails `step-not-found` and the run fails. Residual: one missed tick. |
+| f | A run in flight across the deploy that adds the step | Recorded, or not at all | In connect mode `serve` drains in-flight requests, each one step: a run the old build completes records nothing, one missed tick, and one cut between steps records on the new build. HTTP serve mode doesn't await its requests (`main.ts`), so a cut step is retried where the function allows. |
+| f′ | A run resumed by a build with another step plan: a rollback without `cron-heartbeat`, or `skill-venvs-reaper`, whose `reap` step depends on current config | Unchanged | The request fails `step-not-found` and the run fails. Residual: one missed tick, which warns for a cron of a day or more. |
 | f″ | `sandbox-reaper` across the deploy | Unchanged | Its old build has no step to replay; with `retries: 0` a cut-off run fails. A retry would reap again, harmlessly. |
 | g | The Inngest server down across ticks | Unchanged, or recorded late | Whether Inngest runs a missed tick is undocumented; the rule doesn't depend on it. Residual: a warning lasts until the next served tick, up to a period after recovery. |
 | h | A cron never fired since the deploy that added it | Baseline only | Timed from `created_at`, which every boot keeps. |
 | i | A cron removed from code | Stale row | Not checked. Its enum value stays: Postgres can't drop one in place. |
-| j | A conditional cron registered again (`sandbox-reaper` and the weekly sweep need a coding sandbox; the catalog refresh, a `MODEL_CATALOG_URL`) | Its old `last_tick` | Overdue at once if it was off for two periods, until its next tick: up to a week for the sweep. Residual: resetting the reference on registration would let a cron that never fires stay green across restarts. |
+| j | A conditional cron registered again (`sandbox-reaper` and the weekly sweep need a coding sandbox; the catalog refresh, a `MODEL_CATALOG_URL`) | Its old `last_tick` | Overdue at once if it was off past its cutoff, until its next tick: up to a week for the sweep. Residual: resetting the reference on registration would let a cron that never fires stay green across restarts. |
 | k | The row deleted out of band | No row | `unrecorded`; a write returns `no_row`. The next boot recreates it. |
 
 ## Under Temporal `[proposed]`
@@ -288,7 +303,7 @@ On the move in design/orchestration-temporal.md:
 
 | Signal | Alert when | Absence means |
 |-|-|-|
-| `cogmo.check.status` | An entry's `warn` series is 1 for 5 minutes | No `crons:heartbeat` series for the deployment's `job`: cogmo is down or its export path is broken. No `telegram:polling` series for an expected channel: its row is gone or its type unserved; the examples below don't alert on it. |
+| `cogmo.check.status` | An entry's `warn` series is 1 for 5 minutes | No `crons:heartbeat` series for the deployment's `job`: cogmo is down or its export broken. No `telegram:polling` series for an expected channel: its row is gone or its type unserved, which the examples don't cover. |
 | `/health` | `status` is not `pass` | The process is down or its event loop blocked |
 | The supervisor's log lines | The newest of the start line and the terminal lines is terminal | Nothing: a log rule can't tell a quiet process from a dead one |
 
@@ -299,7 +314,9 @@ cogmo_check_status{job="cogmo", status="warn"} == 1                             
 absent_over_time(cogmo_check_status{job="cogmo", check="crons:heartbeat", status="pass"}[10m])  # cogmo silent
 ```
 
-**`/health`:** any prober that reads the body, such as Gatus with `[BODY].status == pass`.
+`cogmo.cron.last_tick` gives each cron's last served tick, or its baseline before the first, in seconds since the epoch, with `component_id` as above; its unit `s` makes it `cogmo_cron_last_tick_seconds` after translation, so a backend can alert on `time() -` it without trusting cogmo's own evaluation.
+
+**`/health`:** any prober that reads the public `status`, such as Gatus with `[BODY].status == pass`.
 
 **Logs, before the gauge ships:**
 
@@ -315,7 +332,7 @@ The rule's window reaches back to the last successful start. The lines carry no 
 
 ## Web UI `[proposed]`
 
-The SPA reads `/health`, same-origin and open, and shows a status strip listing each warning's `output`. No oRPC procedure, no `Transport` change.
+The SPA reads `/health` with its session, so it gets `checks`, and shows a status strip listing each warning's `output`. No oRPC procedure, no `Transport` change.
 
 ## Telegram self-notification `[research]`
 
@@ -325,10 +342,11 @@ Messaging the owner when the loop warns works only for a 409 or a wedged handler
 
 0. Operator: a log rule on the supervisor's lines.
 1. Operator: an OTLP metrics pipeline in any collector in front of the metrics backend; confirm the gauge's name.
-2. cogmo, after the polling supervisor merges: `src/liveness/` with the registry, `/health` checks, gauge and verdict lines; `liveness?()`; `startChannels` reporting every row; the receive sub-state; the adapter's token redaction, and `%2Fbot` in `util/redact-secrets.ts`. Update deploy.md (Health check, Observability), design/web-ui.md's `/health` line, Polling Supervision, and AGENTS.md → Module Structure.
+2. cogmo: `src/liveness/` with the registry, the gauge and the verdict lines; `/health`'s public `status` and session-gated `checks`; the required `liveness()`, `null` from direct, web and the adapter test stubs; `startChannels` reporting every row; the receive sub-state; the adapter's token redaction, and `%2Fbot` in `util/redact-secrets.ts`. Update deploy.md (Health check, Observability), design/web-ui.md's `/health` line, Polling Supervision, and AGENTS.md → Module Structure.
 3. cogmo: `cron_heartbeats`, the baseline, `createCronFunction` for every cron and the check; `sandbox-reaper` and `model-catalog-refresh` onto `fromStepTools`. Update design/architecture.md → Orchestration Coupling (the Functions row and the single-step list), `refresh-function.ts`'s header, design/data-model.md and `.agents/rules/store-pattern.md`. Confirm in the integration tier that the dev server's cron events carry `scheduledAt`, and run `recordCronTick` on postgres-js.
 4. Operator: the gauge rules, retiring the log rule.
-5. The web UI strip.
+5. cogmo, once an operator's collector carries metrics: the `cogmo.cron.last_tick` gauge.
+6. The web UI strip.
 
 ## Testing `[proposed]`
 
@@ -336,8 +354,9 @@ Messaging the owner when the loop warns works only for a 409 or a wedged handler
 - The adapter: each sub-state transition, field write and projection row (a backoff after a slow poll isn't `stale`), events refused outside `polling`, `conflicts` clearing at `HEALTHY_RUN_MS`, a transformer that passes `prev`'s result or error through unchanged, and a malformed batch then a valid update through `stop()`, which credits and confirms only the valid one.
 - The outcome table, one case per row: each throw shape (system code, `invalid-json`, grammY's timeout, `AbortError`, unwrapped), no `ok`, `error_code` 302, `ok: true` with no `result`, a non-array one, and `[{}]` (`bad_reply`, no progress), `[]` (progress), and the `failed` (`rejected`) mapping; no `code` carries the URL.
 - Redaction: the token, raw and percent-encoded, bare or in a URL, masked in each adapter line that carries a Bot API error; `/health` shows no `detail`.
-- `/health` and the gauge: always 200, a throwing check, an `unsupported` row, exactly three attributes.
+- `/health`: always 200; `status` without `checks` with no session, an invalid one, or a lookup that fails or passes its deadline; `checks` with a valid one; a throwing check; an `unsupported` row.
+- The gauges: exactly three attributes on `cogmo.check.status`; `cogmo.cron.last_tick` at the baseline, then the served tick.
 - `cron_heartbeats`: a monotone `last_tick`, a baseline that keeps existing rows and returns all, `no_row`, and a write held on a row lock returning `write_failed` at its deadline, on PGlite and postgres-js.
-- The overdue rule: just inside and past the cutoff, from `last_tick` and from `created_at`, per-minute and weekly; `unrecorded`.
+- The overdue rule: just inside and past each cutoff, from `last_tick` and from `created_at`: the second tick plus 5 minutes per-minute and six-hourly, the next tick plus 30 minutes daily and weekly; one failed daily run warns; `unrecorded`.
 - The read path: first verdicts from the baseline, evaluation continuing while a read hangs, one warn per failed streak, one recovered line.
 - `createCronFunction`: the event's `scheduledAt` on every return path, nothing on a throw, the same tick from a late or retried step, `no_tick`, nothing on `model-catalog/refresh.requested`, one write under `@inngest/test` replay; and an invariant test that every cron-triggered function is one `CronHeartbeats` recorded.
