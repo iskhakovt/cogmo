@@ -60,11 +60,11 @@
 | DSPy | Prompt opt | Python-only, wrong language |
 | Ax | Prompt opt | 348 npm releases (API churn), bus factor |
 | BullMQ | Orchestration | No durable execution — crash mid-job = restart from scratch. No native event model, no HITL. Building durability on top is a known anti-pattern. |
-| Temporal | Orchestration | Best durability guarantees but TS SDK requires sandboxed V8 (no normal Node.js APIs in workflows). Self-hosting is heavy (2-4GB server). TS SDK release cadence slowed (meta-package stuck since Feb 2024). Overkill for single-user assistant. |
+| Temporal | Orchestration | MIT, nothing gated, best durability guarantees. Not chosen because the TS SDK runs workflows in a sandboxed V8 (no normal Node.js APIs), so all I/O moves into activities and the turn pipeline needs a redesign. At single-user scale the server idles at 66 MiB with Postgres as its only dependency, and the TS SDK ships monthly (1.26.0 on 2026-11-17). The migration target if cogmo leaves Inngest: [orchestration-temporal.md](orchestration-temporal.md). |
 | Trigger.dev | Orchestration | Self-hosting requires 4 cores + 8GB RAM minimum. Designed as managed platform; self-hosting explicitly "for evaluation only." |
-| DBOS Transact | Orchestration | Library approach (no extra service), MIT license, PostgreSQL-only. But smallest community (1.1K stars, 17K npm/week vs Inngest's 289K). No native event model. Viable fallback if Inngest doesn't work out. |
+| DBOS Transact | Orchestration | Library approach (no extra service), MIT license, PostgreSQL-only, with queues (concurrency, rate limit, priority, dedup), a debouncer and cron. But no event-triggered functions, and Conductor, its recovery and dashboard layer, is proprietary and needs a paid key in production. See [orchestration-temporal.md](orchestration-temporal.md) → Engine choice. |
 | Restate | Orchestration | Excellent performance (single Rust binary, <100ms p99) but no built-in cron/scheduling, BSL license, smaller community. Would need a separate scheduler. |
-| Hatchet | Orchestration | Pre-1.0 (v0.81), adds RabbitMQ dependency, rapidly changing API. |
+| Hatchet | Orchestration | MIT, v1, Postgres can be its only dependency. But its durable tasks may only sleep, wait for events or spawn children, so every LLM and tool call becomes a child task with a queue hop, and it has no debounce or event-based cancel. See [orchestration-temporal.md](orchestration-temporal.md) → Engine choice. |
 | Windmill | Orchestration | Platform, not a library — architecture mismatch. 3+GB baseline. |
 | Activepieces | Scheduling | 1.5GB baseline (revisit for MCP integrations) |
 | Mem0 | Memory | No MCP, limited memory types |
