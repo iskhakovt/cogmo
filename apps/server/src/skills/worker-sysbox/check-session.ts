@@ -38,7 +38,7 @@ export interface SandboxCpythonChecksOptions extends SkillsSessionHost {
  */
 export function makeSandboxCpythonChecks(opts: SandboxCpythonChecksOptions): CpythonChecks {
   return {
-    async check({ body, dependencies, lockfile, signal }) {
+    async check({ body, testBody, dependencies, lockfile, signal }) {
       const depsCacheVolume: DepsCacheVolumeSpec | undefined =
         lockfile !== null && opts.depsCacheVolumeName !== undefined
           ? { volumeName: opts.depsCacheVolumeName }
@@ -62,6 +62,7 @@ export function makeSandboxCpythonChecks(opts: SandboxCpythonChecksOptions): Cpy
       const populating = lockfile !== null && depsCacheVolume === undefined ? lockfile : null;
       const request: CheckRequest = {
         body,
+        testBody,
         dependencies: [...dependencies],
         lockfileHash: lockfile?.hash ?? null,
       };

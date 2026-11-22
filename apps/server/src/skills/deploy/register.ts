@@ -298,7 +298,7 @@ export async function prepareRegister(
   // session populated (design/skills.md → Register-time CPython checks).
   const cpython = await checkRegisterCpython(
     deps.cpythonChecks,
-    { name, manifest, body, lockfile },
+    { name, manifest, body, testBody, lockfile },
     { releaseVersion: deps.releaseVersion, signal },
   );
   if (cpython.isErr()) return err(cpythonRejection(cpython.error));
@@ -391,11 +391,19 @@ function bodyRejection(rejection: RegisterBodyRejection): PrepareRejection {
     .exhaustive();
 }
 
-/** A CPython-check rejection: one string per finding, or the sandbox's pause. */
+/**
+ * A CPython-check rejection: one string per finding, or the sandbox's pause.
+ * A tool's message can quote a literal from either file, so each is masked,
+ * and a secret the image's cut ran through is dropped.
+ */
 function cpythonRejection(rejection: RegisterCpythonRejection): PrepareRejection {
   return match(rejection)
     .returnType<PrepareRejection>()
-    .with({ kind: "lint_failed" }, ({ findings }) => refused(...findings.map(formatSkillFinding)))
+    .with({ kind: "lint_failed" }, ({ findings }) =>
+      refused(
+        ...findings.map((f) => formatSkillFinding({ ...f, message: cutDryRunText(f.message) })),
+      ),
+    )
     .with({ kind: "lockfile_invalid" }, ({ detail }) =>
       refused(`requirements_lock_uninstallable: ${detail}`),
     )

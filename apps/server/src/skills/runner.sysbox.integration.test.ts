@@ -632,6 +632,7 @@ async def run(inputs, ctx):
         depsCacheVolumeName,
       }).check({
         body: 'import idna\n\nHOST = idna.encode("b\u00fccher.example")\n',
+        testBody: null,
         dependencies: ["idna==3.10"],
         lockfile,
         signal: undefined,
