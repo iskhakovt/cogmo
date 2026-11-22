@@ -111,13 +111,13 @@ Semantics that differ from Inngest:
 
 ### Latency
 
-p50, from a worker on the same host. The work is zero-length, so the
+p50 across seven runs, from a worker on the same host. The work is zero-length, so the
 numbers are pure plumbing:
 
 | Path | Temporal 1.32.2 + Postgres 18 | Inngest 1.52.0 `start` + Postgres 18 + Redis |
 |-|-|-|
-| Emit → the turn's first step | 80–95 ms | 300 ms |
-| Next queued turn on the same key | 170–200 ms | 145 ms |
+| Emit → the turn's first step | 64–99 ms | 300 ms |
+| Next queued turn on the same key | 125–200 ms | 145 ms |
 | Debounce overhead beyond its period | 800 ms (300 ms period) | 1,550 ms (1 s period) |
 
 Sequential zero-length steps inside one run, p50 / p95:
