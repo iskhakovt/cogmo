@@ -192,7 +192,7 @@ Illegal: two open runs for one key and a job running twice. The server's workflo
 | A deploy with the lane open | `open` | [Versioning](#versioning) |
 | Two producers enqueue at once | Both `queued` | The server orders the signals. Order is arrival at the server. |
 | The same event delivered twice | One job | Dropped while queued, `duplicate` while running or after it closed. |
-| A backlog, or a storm of signals, while a long job runs | `open`, queue and history growing | Continue-as-new waits for the running job, so neither is bounded meanwhile. Residual, with the 1,000-job alert: roughly 4,000 jobs fit a 2 MB continue-as-new payload, past which the lane stalls loudly rather than drop work. |
+| A backlog, or a storm of signals, while a long job runs | `open`, queue and history growing | The lane continues-as-new only while its queue fits the payload limit (roughly 4,000 jobs in 2 MB), and otherwise keeps running in its current history. Alarms fire at 1,000 queued and when a continue-as-new is skipped. Residual: past the server's history limit the lane is terminated and its queue lost. What the server does with an over-limit continue-as-new input is `[research]`, pinned by a slice 1 test. |
 | An enqueue races the lane's completion or its continue-as-new | `open`, or a new run | The server refuses either command while a signal is buffered. Residual until the test in [Testing](#testing-proposed) pins it. |
 | The lane is terminated by an operator | The queue lost; the running child terminated with it; nothing reported | Operator action only. The lane's reporting path dies with it, so domain rows are the backstop: a turn's inbounds are re-batched by the next arrival, and the sweepers find the rest. |
 
@@ -209,6 +209,7 @@ stateDiagram-v2
   open --> open: continue-as-new, state carried
   open --> firing: period passed quietly, or the ceiling reached
   open --> cancelled: cancel, newer than the newest arrival
+  cancelled --> open: an arrival newer than the cancel
   firing --> open: newer arrivals during the hand-off
   firing --> [*]: none
   cancelled --> [*]
@@ -220,7 +221,9 @@ stateDiagram-v2
 | `open` | `open` | `arrive` whose order is strictly above the newest event's and the last fired order. Any other arrival, a duplicate included, is dropped and resets nothing. | The newest event; the quiet deadline, one period on. The ceiling, `timeoutMs` from the window's first arrival, doesn't move. |
 | `open` | `open`, new run | The server suggests continue-as-new | Continue-as-new carrying the newest event, the last fired order, the window's start time and the quiet deadline. A window with no ceiling (`timeoutMs` null, the default when `maxWaitMs` is 0, `agent/debounce.ts:76`) can stay open for as long as arrivals keep coming. |
 | `open` | `firing` | The quiet deadline or the ceiling passed | `startRun` activity with the newest event, which enqueues or starts the function's run; the last fired order |
-| `open` | `cancelled` | `cancel` whose order is strictly above the newest event's. A stale cancel is dropped. A cancel for a window that isn't running is a no-op. | Completion |
+| `open` | `cancelled` | `cancel` whose order is strictly above the newest event's. A stale cancel is dropped. A cancel for a window that isn't running is a no-op. | The cancel's order; completion command |
+| `cancelled` | `open` | An arrival above the cancel's order reached the window before its completion | The event as newest; a new start time and quiet deadline |
+| `cancelled` | completed | None did | — |
 | `firing` | `open` | An event above the fired order arrived during the hand-off | A new start time and quiet deadline |
 | `firing` | completed | None did; every signal handler finished. A cancel during the hand-off is dropped: the function's own re-check covers it. | — |
 
@@ -269,7 +272,7 @@ stateDiagram-v2
 | Trigger, laned function | `signalWithStart` on the lane id | `enqueue` signal carrying the job |
 | Trigger, other function | Start with `REJECT_DUPLICATE`; already-started is success | Workflow start |
 
-**A cancellable function re-checks before it acts.** Cancels and starts are separate, retried operations, so a start can land after the cancel meant for it. The function's last activity confirms its cancel condition from domain state and does nothing when it no longer holds: `idle-timer` confirms no inbound arrived after the reply it was armed for, and the gate and boundary waiters act through transitions guarded on the row still being parked.
+**A cancellable function decides from domain state when it fires.** Cancels and starts are separate, retried operations, and a UUIDv7 is allocated before its row commits, so an inbound can order below a reply it follows. The fire-time check is therefore the source of truth and the ordered cancel only an optimization. `idle-timer` emits when the conversation has no unanswered inbound and its newest reply is older than the idle timeout; the gate and boundary waiters act through transitions guarded on the row still being parked.
 
 A workflow emits through the `emit` activity, since a workflow can't start arbitrary workflows; an activity or an edge calls the dispatcher directly. `emit` retries transient errors without limit. A contract error, a missing field or a Zod failure, is non-retryable.
 
@@ -278,7 +281,8 @@ A workflow emits through the `emit` activity, since a workflow can't start arbit
 | Inside `emit`, part of the fan-out done | Some functions started | The activity retries the whole fan-out; each operation lands on the same ids. |
 | An edge dies between its commit and the emit, or mid-fan-out | The row committed, the event partly or not delivered | Residual, as today: the inbound edge sends outside any step (`transport/namespaces/sessions.ts:187`). The next arrival's turn batches the stranded inbound. [Open questions](#open-questions-and-residuals) names the fix. |
 | `emit` fails on a contract error | Nothing delivered | The workflow fails, and its lane reports it. The emits that end a turn follow its persisted reply, so the reply is stored and the Observer and idle timer miss one turn. |
-| A retried or delayed trigger lands after the cancel meant for its run | A stale run | The re-check makes it inert. |
+| A retried or delayed trigger lands after the cancel meant for its run, or a mis-ordered cancel is dropped | A stale run or window fires | The fire-time check suppresses it. |
+| A mis-ordered cancel discards a valid idle window | No window | Residual: one `conversation/idle` is missed until the next reply. |
 | A deploy that changes the function registry mid-retry | The retry fans out under the new registry | A function in both registries is deduped by id; one added between attempts runs once. |
 | Two emits of one event id | One run per function | Every id derives from the event. |
 | Redelivery after the namespace's retention period | A second run | Residual: a closed workflow blocks its id only while the server retains it, so retention is the idempotency window. Set it no shorter than the longest redelivery horizon; domain keys (`scheduled_tasks.idempotency_key`, `skill_runs.idempotency_key`) are unaffected. |
@@ -419,7 +423,6 @@ The system prompt snapshot, the turn context and the summary are rows already.
 | `workflow_id` | text, NOT NULL, unique | The key of every write below |
 | `conversation_id` | FK, NOT NULL | |
 | `status` | pgEnum `turn_status` | `open`, `paused`, `completed`, `superseded`, `failed` |
-| `user_message_id` | FK `messages.id`, nullable | Null until `recordUserMessage` runs |
 | `pause_reason` | pgEnum, nullable | `auth`, `billing`, `provider_unavailable`, `timed_out`. Set exactly in `paused` (CHECK). |
 | `superseded_reason` | pgEnum, nullable | `answered`, `rebatched`. Set exactly in `superseded` (CHECK). |
 | `failure_kind` | pgEnum, nullable | `bad_request`, `internal`, the four pause reasons, `cancelled`, `terminated`. Set exactly in `failed` (CHECK). |
@@ -432,7 +435,7 @@ stateDiagram-v2
   open --> completed: reply persisted
   open --> superseded: another reply owns the batch
   open --> failed: terminal kind, or reported by the lane
-  paused --> failed: 24 h paused in total, or reported by the lane
+  paused --> failed: 24 h after the turn started, or reported by the lane
   completed --> [*]
   superseded --> [*]
   failed --> [*]
@@ -440,16 +443,21 @@ stateDiagram-v2
 
 | From | To | By | Guard | Writes |
 |-|-|-|-|-|
-| — | `open` | `admitTurn`, when it admits | `INSERT … ON CONFLICT (workflow_id) DO UPDATE` with a no-op SET, returning the row | Row. A skipped admission writes none. |
-| `open` | `paused` | `pauseTurn` | `WHERE id = $1 AND status = 'open'` | `pause_reason`. On the turn's first pause the activity sends one notice through `notifyConversation`, the path `report-turn-failure` uses. |
+| — | `open` | `admitTurn`. It first looks the row up by `workflow_id` and returns `admitted` if it exists, so a retry doesn't re-run admission. | `INSERT … ON CONFLICT (workflow_id) DO UPDATE` with a no-op SET, returning the row | Row. A skipped admission writes none. |
+| `open` | `paused` | `pauseTurn` | `WHERE id = $1 AND status = 'open'` | `pause_reason`. On the turn's first pause, which the workflow's pause count tells it, the activity sends one notice through `notifyConversation`, the path `report-turn-failure` uses. |
 | `paused` | `open` | `resumeTurn`, after the workflow's timer | `WHERE id = $1 AND status = 'paused'` | — |
 | `open` | `completed` | `persistTurn`, in the transaction that inserts the reply | `WHERE id = $1 AND status = 'open'` | — |
 | `open` | `superseded` | `llmIteration` or `persistTurn`, in the transaction of the check | `WHERE id = $1 AND status = 'open'` | `superseded_reason`; the open iteration, if any, to `superseded` |
-| `open`, `paused` | `failed` | `failTurn`, run by the workflow on a terminal kind or at the pause ceiling; `report-turn-failure`, on the lane's `flow/function.failed`, whose job id is `workflow_id` | `WHERE workflow_id = $1 AND status IN ('open', 'paused')` | `failure_kind`; every `open` or `awaiting_tools` iteration to `failed` |
+| `open`, `paused` | `failed` | `failTurn`, run by the workflow on a terminal kind or at the pause ceiling; `report-turn-failure`, on the lane's `flow/function.failed`, whose job id is `workflow_id` | `WHERE workflow_id = $1 AND status IN ('open', 'paused')` | `failure_kind`; every `open` or `awaiting_tools` iteration to `failed`. `failTurn` writes and nothing else. |
 
 Illegal: any transition out of `completed`, `superseded` or `failed`.
 
-`report-turn-failure` maps the lane's report: `failed` to the failure's type, or `internal` when it has none; `timed_out`, `cancelled` and `terminated` to themselves; `lane_error` to `internal`.
+`report-turn-failure` maps the lane's report: `failed` to the failure's type, or `internal` when it has none or one this build doesn't know; `timed_out`, `cancelled` and `terminated` to themselves; `lane_error` to `internal`. It owns the failure notice and `conversation/errored`, which it sends unconditionally today (`agent/handle-message/report-turn-failure.ts:65`, `:76`), and branches on its transition's result:
+
+| Result | Does |
+|-|-|
+| `transitioned`, or `stale` with `failed` (`failTurn` got there first) | Emits `conversation/errored` and notifies the user |
+| `stale` with `completed` or `superseded` | Logs only: the turn ended, and what failed came after it |
 
 **Errors.** `llmIteration`'s use case returns `Result<IterationVerdict, IterationError>`, and the workflow branches on the kind once the activity is out of attempts:
 
@@ -460,7 +468,9 @@ Illegal: any transition out of `completed`, `superseded` or `failed`.
 | `auth`, `billing` | No | Pausing | `paused` |
 | `provider_unavailable` (network, 5xx, 408, 425, 429); `timed_out` (the activity's own timeout) | Yes | Pausing | `paused` |
 
-A paused turn keeps its conversation lane, sleeps on a workflow timer (1 minute, doubling to 1 hour), then resumes and runs the same iteration again. Later inbounds queue behind it, so no turn can start before the pause is recorded, which a cooldown set by a separate function allows. After 24 hours paused in total the turn fails with the pause's reason.
+A paused turn keeps its conversation lane, sleeps on a workflow timer (1 minute, doubling to 1 hour), then resumes and runs the same activity again. The ceiling is 24 hours from the workflow's start: the last sleep is clamped to it and it is checked before each resume, so downtime can't carry a reply past it; then the turn fails with the pause's reason. A pausing kind out of `transcribeVoice`, `prepareTurnContext` or `degradedReply` pauses the turn the same way.
+
+While a turn is paused, later inbounds and same-key pipeline stages queue behind it, so none starts before the pause is recorded, which a cooldown set by a separate function allows. The cost: they get no in-cooldown reply (`agent/handle-message/admit-turn.ts:157`), a newer inbound doesn't supersede the paused turn, and nothing lets an operator retry it at once or abandon it. These are [entry criteria](#entry-criteria-for-the-turns-design-review).
 
 ### Turn iteration `[proposed]`
 
@@ -526,12 +536,13 @@ Illegal: any transition out of `completed`, `degraded`, `superseded` or `failed`
 | An activity times out while its handler or stream is still running | As the retry leaves it | A timeout doesn't stop the work. Cancellation aborts the provider stream and the tool handler. Residual: a handler that ignores cancellation runs beside its retry, so an irreversible effect needs a downstream idempotency key. |
 | Between the result rows and `completeIteration` | `awaiting_tools` | The transition is guarded. A retry after a partial push can show a `tool_result` card twice, as today. |
 | `llmIteration` out of attempts, or failing non-retryably, with a pausing kind | Turn `paused`, iteration `open` | The lane is held, the user has one notice, and the same iteration runs again after the sleep. |
-| The same with a terminal kind, or 24 h paused | Turn `failed` with its kind, its open iterations `failed` | `failTurn` writes both in one transaction, then the workflow fails with the kind. |
+| The same with a terminal kind, or past the pause ceiling | Turn `failed` with its kind, its open iterations `failed` | `failTurn` writes both in one transaction, then the workflow fails with the kind. |
 | `pauseTurn` retried after its commit | `paused` | The transition is stale. Residual: the activity can't tell whether the notice went out and sends it again. |
 | The process dies while the turn is `paused` | `paused` | The timer is the server's; the turn resumes when a worker is back. |
-| The worker stays down mid-iteration | `open`, then `paused` | The activity's schedule-to-close timeout is `timed_out`, a pausing kind, so the pause ceiling bounds how late a reply can be. |
+| The worker stays down mid-iteration | `open`, then `paused` | The activity's schedule-to-close timeout is `timed_out`, a pausing kind, and the ceiling is measured from the turn's start, so it bounds how late a reply can be. |
 | The turn workflow is cancelled, terminated or times out | `failed` | `report-turn-failure` finds the turn by the report's job id and closes it and its iterations. If the lane was terminated too, nothing reports: the sweeper removes the rows once Temporal shows the workflow closed. |
-| A new turn of a batch whose earlier turn failed or was superseded | A new `turns` row and new iterations from 1; the batch's one user row | The earlier turn's rows aren't read. The superseded check and `persistTurn`'s conditions decide ownership as today. |
+| The workflow fails after its turn is `completed`: `deliverReply` out of attempts, or a contract error in the closing `emit` | `completed` | `report-turn-failure` logs and sends no error notice and no cooldown. Residual: a reply persisted but not delivered, or the Observer and idle timer missing the turn; the next turn's transcript holds the reply. |
+| A new turn of a batch whose earlier turn failed or was superseded | A new `turns` row and new iterations from 1; the batch's one user row | The earlier turn's rows aren't read. Tool idempotency keys derive from the batch's first inbound (`agent/handle-message/run-turn-loop.ts:105`, `agent/loop.ts:626`), so the new turn recovers the first's keyed tool effects instead of repeating them. The superseded check and `persistTurn`'s conditions decide ownership as today. |
 | Two turns of one batch at once | Two turns, one user row | The lane excludes it. If it happens anyway, the same checks decide, with their residuals in [crash-recovery.md](crash-recovery.md) → Late replies. |
 | The process dies after the final outcome commits, before `finishStream` | Iteration `completed`, the reply's tail not streamed | Residual: the recovered outcome isn't re-streamed, and `deliverReply`'s fallback reaches only batch targets and sessions whose stream failed at finish (`agent/handle-message/run-turn-loop.ts:153`). An [entry criterion](#entry-criteria-for-the-turns-design-review). |
 | Workflow-task failure or replay | Unchanged | The workflow does no I/O and holds no content: replay re-derives the loop position, the pause count and the paused time from history. |
@@ -547,7 +558,7 @@ Illegal: any transition out of `completed`, `degraded`, `superseded` or `failed`
 | `prepareTurnContext`, per attempt | One recall, the token counts, and one summarization unless the summary row exists |
 | `degradedReply`, per attempt | One synthesis |
 | One turn, unpaused | The iteration cap × 6, plus the other three rows × 3 |
-| One pause | One more `llmIteration` run per resume: at most 30 in 24 hours under the doubling sleep |
+| One paused turn | One more run of the paused activity per resume: at most 30 in 24 hours under the doubling sleep |
 
 A failed turn isn't retried. A sweeper deletes the `turn_iterations`, `turn_tool_results` and `turn_inputs` rows, then the `turns` row, of every turn whose status is terminal, or whose workflow Temporal reports closed or no longer knows, once the row is older than the namespace's retention.
 
@@ -561,6 +572,9 @@ This section is where that review starts. It must settle:
 - **Final-reply delivery** recoverable by session and reply id, so a reply whose stream died is delivered once.
 - **Which activities are local.** A local activity can rerun before its completion marker is durable, so only short idempotent reads qualify.
 - **The duplicate user rows** present before the unique index, and the index's exact predicate.
+- **What a paused turn blocks.** Whether the in-cooldown reply moves ahead of the lane, whether a newer inbound supersedes a paused turn, and an operator's retry-now and abandon.
+- **Cooldown ordering on exit.** If `report-turn-failure` plus `recover-conversation` survives, the next queued turn can be admitted before the cooldown commits, the pause ceiling included, and persistence clears the cooldown by conversation id alone (`agent/handle-message/persist-turn.ts:145`), so a probe can erase a newer one. The cooldown is armed before the lane releases, and a turn clears only the cooldown it probed.
+- **The pause clock:** wall-clock age, as here, or cumulative paused time.
 - **Per-process state in tool handlers** beyond the file-freshness map ([crash-recovery.md](crash-recovery.md) → Durable LLM iterations), which hasn't been audited.
 
 ## Inngest-specific contracts `[proposed]`
@@ -616,12 +630,12 @@ The spike's flow layer differs from this design in: unscoped lane keys, a lane s
 
 Both engines run side by side until the last slice.
 
-- **A function lives on one engine.** Functions sharing a concurrency key move together: the two engines' limits don't see each other.
+- **A function lives on one engine.** Functions sharing a concurrency key move together: the two engines' limits don't see each other. From deploy N a moved function's Inngest copy admits no new run.
 - **The engine that accepted an event owns its run.** Every emit goes through one publisher that requires an event id and delivers to each engine hosting something the event concerns: a function it triggers, a `cancelOn` it matches, or a `waitForEvent` it satisfies. Inside an Inngest function the publisher call sits in a step. Nothing forwards an event it received, and nothing compares timestamps.
 - **Each slice is two deploys.**
-  - *Deploy N* registers the function on Temporal, and its publisher routes every new emit for it there. The Inngest function stays registered with its old body and runs whatever Inngest still delivers: runs in flight, queued runs, open debounce windows, sleepers.
-  - *Deploy N+1* removes the Inngest function once the drain check passes: Inngest holds no run of the function id that is running, queued, inside a debounce window, or sleeping. If the self-hosted API can't report pending runs `[research]`, N+1 instead waits out the longest pending horizon: the longest debounce ceiling, the idle timeout, the longest waiter timeout.
-- **Ids don't dedupe across engines.** The one cross-engine duplicate is an emit whose first attempt reached Inngest under N-1 and whose retry under N reaches Temporal. Its unit's domain key catches it:
+  - *Deploy N* registers the function on Temporal, and its publisher routes every new emit for it there. The Inngest copy keeps its function id and body but takes no new triggers: its cron is removed and its event trigger gets an `if` that never matches, so neither Inngest's scheduler nor an event still sent to Inngest for another consumer starts a run of it. What Inngest already admitted finishes there: runs in flight, queued runs, open debounce windows, sleepers. That Inngest keeps those alive across the trigger change is `[research]`; if it doesn't, a function moves together with every Inngest consumer of its trigger event, and its copy is removed at N.
+  - *Deploy N+1* removes the copy on verified quiescence: Inngest reports no run of the function id that is running, queued, inside a debounce window, or sleeping. Whether the self-hosted API reports pending runs is `[research]`. Waiting out a horizon instead is allowed only where admission-to-completion is bounded: a cron, or a waiter with a timeout. A debounce with no ceiling or a long retrying run has no bound and needs the verified check.
+- **Ids don't dedupe across engines.** With no new admissions on the copy, the one cross-engine duplicate is an emit whose first attempt reached Inngest under N-1 and whose retry under N reaches Temporal. Its unit's domain key catches it:
 
   | Unit | Key |
   |-|-|
@@ -629,15 +643,18 @@ Both engines run side by side until the last slice.
   | Skill run, coding task, pipeline run | `idempotency_key` on the row |
   | Task, run and gate transitions; observations | Conditional UPDATEs |
   | Turn | Admission's staleness guard, the keyed user row, `persistTurn`'s conditions |
+  | `conversation/errored` | None. Residual: `recover-conversation` advances the cooldown on every invocation (`agent/recover-conversation.ts:42`), so a duplicate advances it twice. Slice 4 keys that write on the event's id. |
 
 | Failure | State left | Why it is safe, or the residual |
 |-|-|-|
 | A run in flight across N | An Inngest run | It finishes on Inngest, under the new build's copy of the old body. |
 | An event Inngest accepted before N, delivered after it | An Inngest run | The same: Inngest accepted it, so Inngest runs it. |
+| Inngest's scheduler reaches a moved cron function's tick after N | No Inngest run | The copy has no cron. Without that, a limit-1 singleton (`skills/mirror-reconcile.ts:161-162`, `scheduling/ticker.ts:91-92`) would run on both engines. |
+| An event still sent to Inngest for another consumer also names a moved function's trigger | No run of the copy | Its trigger never matches. `response/ready` still reaches Inngest for the stage runner's wait (`agent/pipeline/stage-runner.ts:221-225`) without arming a second idle timer, and `pipeline/gate.pending` moves with all its consumers in slice 4. |
 | An emit retried across N: Inngest got the first attempt, Temporal gets the retry | A run on each engine | The domain keys above. |
 | An Inngest debounce window open at N | Fires on Inngest; a Temporal window may fire for the same key | Each handler emits its `inbound/ready` to wherever the turn lives, and the second turn finds the inbounds answered. |
-| A waiter or idle timer sleeping on Inngest at N | Wakes on Inngest | Its cancel event still reaches Inngest through the publisher while the function is registered. New waiters start on Temporal. |
-| An old Inngest run and a new Temporal run of one key overlap during the drain | Both running | Guarded transitions decide. For turns it is excluded: slice 6 switches with no turn in flight. |
+| A waiter or idle timer sleeping on Inngest at N | Wakes on Inngest | Its cancel event still reaches Inngest through the publisher while the copy is registered. Every waiter and timer armed after N is on Temporal, since the copy admits none. |
+| An old Inngest run and a new Temporal run of one key overlap during the drain | Both running | Guarded transitions decide. For turns it is excluded: slice 6 verifies quiescence before Temporal admits one. |
 | The process dies between the publisher's deliveries to the two engines | One engine delivered | The publisher call is inside a step or an activity, which retries both. |
 | N+1 deploys with a run still pending | The run can't resume and fails, or never starts | Residual of a wrong drain check or too short a wait: `inngest/function.failed` and the domain reconcilers handle a failed run as a worker death; a sleeper that never wakes costs one idle fire or one gate reminder, and the gate's row stays parked for the operator. |
 | N is rolled back with Temporal runs open | Their workflow types are unregistered and their tasks stall; boot deletes the Schedules the old build doesn't declare | Roll forward. The stalled runs resume, and the Schedules are recreated, on the next build that registers them. |
@@ -646,11 +663,11 @@ Both engines run side by side until the last slice.
 |-|-|
 | 0 | A tripwire fires; this doc is reviewed against the Inngest version current then. |
 | 1 | `src/temporal/`: client, worker in boot, the flow layer with its tests, the publisher, the container factory, the drain check, deployment docs. A Temporal rule file in `.agents/rules/` with its AGENTS.md section and `CLAUDE.md` import, an amendment to state-machines.md for workflow-internal units ([Where state lives](#where-state-lives-proposed)), the testing.md amendment, and a Temporal section in the reviewer's checklist. No function moves. |
-| 2 | Class-A leaves: the crons, tickers, reapers and sweepers, `scheduled-task-fire`, `idle-timer`, the waiters and janitor, the coding leaf functions, the model-catalog refresh. One PR per group. |
+| 2 | Class-A leaves, one PR per group, each with the functions that share its trigger: the crons, tickers, reapers and sweepers; `scheduled-task-fire`; `idle-timer`; the boundary waiter and janitor with Telegram's boundary function (`transport/adapters/telegram/inngest-functions.ts:144`); the coding leaf functions with Telegram's deploy-outcome and failure-notice functions (`:75`, `:94`); the model-catalog refresh; `direct-inbound` (`transport/adapters/direct.ts:113`). |
 | 3 | The debounce router. The fallback state machine and its events are deleted. |
-| 4 | The Observer, `recover-conversation`, the skills cron fire, the pipeline gate resolver. |
-| 5 | The coding orchestrators: class-B rebuilds, cleanup as activities. |
-| 6 | `handle-message` and `pipeline-stage-runner` together, after the turn's design review, in a maintenance window. |
+| 4 | The Observer; `recover-conversation`, with its keyed cooldown write; the skills cron fire; the pipeline gate resolver and gate waiter with Telegram's gate function (`transport/adapters/telegram/inngest-functions.ts:119`), which share `pipeline/gate.pending`. |
+| 5 | The coding orchestrators with Telegram's coding-progress function (`transport/adapters/telegram/inngest-functions.ts:31`), which shares their `coding/task/start` trigger: class-B rebuilds, cleanup as activities. |
+| 6 | `handle-message` and `pipeline-stage-runner` together, after the turn's design review, in a maintenance window. No turn in flight includes pending work: no queued run of either function and no open debounce window. The copies' never-matching triggers fence off old admissions while that is verified. |
 | 7 | Inngest removed: `src/inngest/`, `@inngest/test`, the server and Redis from the deployment. `.agents/rules/inngest.md` is deleted with its `CLAUDE.md` import, and every reference to it rewritten: state-machines.md (its re-entry-guard and idempotency-key bullets), store-pattern.md (the keyed-insert shape), testing.md, the Inngest and `Durable` sections of AGENTS.md, section 4 of the reviewer's checklist; and crash-recovery.md, scheduling.md and architecture.md → Orchestration Coupling. |
 
 ## Measurements
