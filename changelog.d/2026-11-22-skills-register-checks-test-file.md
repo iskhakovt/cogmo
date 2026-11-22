@@ -5,6 +5,7 @@ Register's CPython checks now judge a skill's `test_skill.py` as well as its `sk
 - **pyrefly** resolves `from skill import run`.
 - **Suppressions:** the rule is enforced in each file, but only `skill.py`'s accepted suppressions are recorded on the deploy.
 - **Findings** name their file (`skills/<name>/test_skill.py:<line>: …`). An older skills image's findings read as `skill.py`'s.
+- **Masking:** register masks each CPython finding's message, from either file, and drops a secret the image's 400-code-point cut ran through.
 - **`CLAUDE.md`:** the skills repo's generated `CLAUDE.md` gains a `test_skill.py` section: its size bound, the imports it may use, and the 60 s no-network suite.
 
 Since the pre-submit runs register's checks, a lint, type or format finding in the test file now reaches the coding agent as a fix pass too.
