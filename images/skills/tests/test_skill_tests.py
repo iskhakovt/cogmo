@@ -8,10 +8,12 @@ an installer leaves them.
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
@@ -51,6 +53,15 @@ def _toolchain(tmp_path: Path) -> Path:
 @pytest.fixture
 def suite(tmp_path: Path) -> Suite:
     return Suite(os.fspath(_toolchain(tmp_path)), sysconfig.get_path("purelib"), 30)
+
+
+@pytest.fixture(autouse=True)
+def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Where the runner makes, and leaves, each run's fresh directory."""
+    root = tmp_path / "scratch"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", os.fspath(root))
+    return root
 
 
 @pytest.fixture
@@ -238,21 +249,50 @@ _UNCOLLECTED = (
     [
         (0, _cases(), "pytest exited 0: "),
         (0, _cases(_FAILED), "pytest exited 0: "),
-        (0, None, "pytest exited 0, writing no report that parses: "),
+        (0, "writing no report that parses", "pytest exited 0, writing no report that parses: "),
         (1, _cases(_PASSED), "pytest exited 1: "),
         (1, _cases(_UNCOLLECTED), "pytest exited 1: "),
         (2, _cases(_PASSED), "pytest exited 2: "),
         (2, _cases(_FAILED), "pytest exited 2: "),
         (5, _cases(_PASSED), "pytest exited 5: "),
-        (1, None, "pytest exited 1, writing no report that parses: "),
+        (1, "writing no report that parses", "pytest exited 1, writing no report that parses: "),
     ],
 )
 def test_a_report_at_odds_with_the_status_is_a_finding_about_the_run(
-    status: int, cases: list[ET.Element] | None, ended: str
+    status: int, cases: list[ET.Element] | str, ended: str
 ) -> None:
     [finding] = skill_tests.judge(status, cases, "the tail\nof the output\n")
 
     assert (finding.line, finding.message) == (None, f"{ended}the tail of the output")
+
+
+def test_a_line_that_is_not_a_decimal_number_is_no_line() -> None:
+    # `"²".isdigit()` holds, and `int("²")` raises.
+    failed = (
+        '<testcase classname="test_skill" name="test_a" line="²"><failure message="boom">E   boom</failure></testcase>'
+    )
+
+    [finding] = skill_tests.judge(1, _cases(failed), "")
+
+    assert (finding.line, finding.message) == (None, "test_a: boom")
+
+
+def test_a_report_over_the_bound_is_refused_unread(suite: Suite) -> None:
+    [(line, message)] = _findings(_run(suite, 'def test_a():\n    raise AssertionError("x" * 5_000_000)\n'))
+
+    assert line is None
+    assert re.fullmatch(
+        r"pytest exited 1, writing a report of \d+ bytes, over the 4194304 the runner reads: .*", message
+    )
+
+
+def test_a_quoted_tail_drops_the_run_its_cut_ran_through() -> None:
+    # The cut lands inside the URL's userinfo, past the `://` a mask recognises it by.
+    output = f"setup https://owner:{'hunter2' * 60}@example.com/data failed\n"
+
+    [finding] = skill_tests.judge(3, _cases(), output)
+
+    assert finding.message == "pytest exited 3: … failed"
 
 
 def test_a_suite_past_its_cap_names_the_running_test_and_its_process_group_dies(suite: Suite, tmp_path: Path) -> None:
@@ -283,6 +323,32 @@ class TestSlow:
     assert _findings(reply) == [(13, "TestSlow::test_hangs[1]: still running when the suite reached its 2 s cap")]
     assert reply["count"] == 0
     assert _gone(int(pid_file.read_text()))
+
+
+def test_what_a_passing_suite_leaves_running_in_its_group_dies(suite: Suite, tmp_path: Path) -> None:
+    pid_file = tmp_path / "straggler.pid"
+    reply = _run(
+        suite,
+        f"""\
+import subprocess
+import sys
+
+
+def test_leaves_a_child():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    open({os.fspath(pid_file)!r}, "w").write(str(child.pid))
+""",
+    )
+
+    assert reply == {"type": "test_findings", "findings": [], "count": 1}
+    assert _gone(int(pid_file.read_text()))
+
+
+def test_the_runner_leaves_its_directory_to_the_session(suite: Suite, scratch: Path) -> None:
+    _run(suite, "def test_a():\n    pass\n")
+
+    [base] = scratch.iterdir()
+    assert (base / "skill" / "test_skill.py").read_text() == "def test_a():\n    pass\n"
 
 
 def _gone(pid: int) -> bool:
@@ -437,7 +503,7 @@ def test_the_image_suite_is_the_tools_venvs_pytest_under_the_baked_toolchain() -
     )
 
 
-def test_the_module_runs_as_the_host_starts_it() -> None:
+def test_the_module_runs_as_the_host_starts_it(scratch: Path) -> None:
     # Outside the image there is no baked toolchain, so pytest refuses its configuration and the one line is `fatal`.
     result = subprocess.run(
         [sys.executable, "-I", "-m", "cogmo_skills_runtime.skill_tests"],
@@ -445,6 +511,7 @@ def test_the_module_runs_as_the_host_starts_it() -> None:
         capture_output=True,
         text=True,
         check=True,
+        env={**os.environ, "TMPDIR": os.fspath(scratch)},
     )
 
     [line] = result.stdout.splitlines()

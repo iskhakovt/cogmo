@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -40,6 +41,13 @@ _PASSED, _FAILED, _INTERRUPTED, _USAGE_ERROR, _NO_TESTS = 0, 1, 2, 4, 5
 # How much of pytest's output the runner reads back, and how much of it a finding about the run quotes.
 _OUTPUT_READ = 64 * 1024
 _OUTPUT_TAIL = 300
+
+# The largest JUnit report the runner parses. Well past a real suite's (a thousand failures of 4 KiB each), and few
+# enough elements that a report code under test pads with tiny ones parses in far less than a session's 512 MiB.
+_REPORT_MAX_BYTES = 4 * 1024 * 1024
+
+# How often the runner looks for pytest's exit.
+_POLL_S = 0.05
 
 # A traceback's exception line in a JUnit failure or error.
 _RAISED = re.compile(r"^E\s+(\S.*)$")
@@ -151,23 +159,33 @@ def _pytest(suite: Suite, directory: str, report: str, output: str, python_path:
             )
         except (OSError, subprocess.SubprocessError) as e:
             raise SuiteFailed(f"pytest did not start: {e}") from e
-        try:
-            return child.wait(timeout=suite.timeout_s)
-        except subprocess.TimeoutExpired:
-            return None
-        finally:
-            # The suite at the cap, and whatever it left running otherwise.
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
+        exited = _exited_by(child.pid, time.monotonic() + suite.timeout_s)
+        # The suite at the cap, and whatever it left running otherwise. pytest is not reaped yet, so its group's id
+        # cannot have passed to another process.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(child.pid, signal.SIGKILL)
+        status = child.wait()
+        return status if exited else None
 
 
-def _report(path: str) -> list[ET.Element] | None:
-    """The testcases of pytest's JUnit report, or None when it wrote none that parses."""
+def _exited_by(pid: int, deadline: float) -> bool:
+    """Whether child `pid` exited by `deadline`, leaving it unreaped."""
+    while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_POLL_S)
+    return True
+
+
+def _report(path: str) -> list[ET.Element] | str:
+    """The testcases of pytest's JUnit report, or why the runner reads none: none that parses, or one too large."""
     try:
+        size = os.path.getsize(path)
+        if size > _REPORT_MAX_BYTES:
+            return f"writing a report of {size} bytes, over the {_REPORT_MAX_BYTES} the runner reads"
         return list(ET.parse(path).getroot().iter("testcase"))
     except OSError, ET.ParseError:
-        return None
+        return "writing no report that parses"
 
 
 def _output_tail(path: str) -> str:
@@ -177,8 +195,13 @@ def _output_tail(path: str) -> str:
 
 
 def _quoted(output: str) -> str:
-    """The tail of pytest's output on one line."""
-    return " ".join(output.split())[-_OUTPUT_TAIL:]
+    """The tail of pytest's output on one line. A cut drops the run of text it ran through, which could be a secret
+    missing the start a mask recognises it by."""
+    text = " ".join(output.split())
+    if len(text) <= _OUTPUT_TAIL:
+        return text
+    rest = text[-_OUTPUT_TAIL:].partition(" ")[2]
+    return f"… {rest}" if rest else "…"
 
 
 def _case_finding(case: ET.Element) -> Finding | None:
@@ -194,7 +217,7 @@ def _case_finding(case: ET.Element) -> Finding | None:
     line = case.get("line", "")
     test = "::".join([*classname.split(".")[1:], case.get("name", "")])
     kind = "error: " if outcome.tag == "error" else ""
-    return Finding("tests", int(line) + 1 if line.isdigit() else None, None, f"{test}: {kind}{reason}")
+    return Finding("tests", int(line) + 1 if line.isdecimal() else None, None, f"{test}: {kind}{reason}")
 
 
 def _definition(body: str, test: str) -> int | None:
@@ -238,41 +261,46 @@ def _ended(status: int) -> str:
         return f"was killed by signal {-status}"
 
 
-def judge(status: int, cases: Sequence[ET.Element] | None, output: str) -> list[Finding]:
-    """The findings of a suite that ended with `status`: none for a pass. A usage error is the runner's, so fatal."""
+def judge(status: int, report: Sequence[ET.Element] | str, output: str) -> list[Finding]:
+    """The findings of a suite that ended with `status`, its report's testcases or why it has none: none for a pass.
+    A usage error is the runner's, so fatal."""
     if status == _USAGE_ERROR:
         raise SuiteFailed(f"pytest refused its command line or the toolchain's configuration: {_quoted(output)}")
-    if cases is not None:
+    if not isinstance(report, str):
         # The module's own testcase reports its collection; every other one is a test's.
-        tests = [f for case in cases if case.get("classname") and (f := _case_finding(case))]
-        collection = [f for case in cases if not case.get("classname") and (f := _case_finding(case))]
-        if status == _PASSED and cases and not tests and not collection:
+        tests = [f for case in report if case.get("classname") and (f := _case_finding(case))]
+        collection = [f for case in report if not case.get("classname") and (f := _case_finding(case))]
+        if status == _PASSED and report and not tests and not collection:
             return []
         if status == _FAILED and tests:
             return tests
         if status == _INTERRUPTED and collection:
             return collection
-        if status == _NO_TESTS and not cases:
+        if status == _NO_TESTS and not report:
             return [Finding("tests", None, None, f"{TEST_FILE} holds no test")]
-    report = "" if cases is not None else ", writing no report that parses"
-    return [Finding("tests", None, None, f"pytest {_ended(status)}{report}: {_quoted(output)}")]
+    unread = f", {report}" if isinstance(report, str) else ""
+    return [Finding("tests", None, None, f"pytest {_ended(status)}{unread}: {_quoted(output)}")]
 
 
 def run_suite(request: Request, suite: Suite) -> tuple[list[Finding], int]:
-    """The suite's findings over the request's files, and the count of tests its report holds."""
+    """The suite's findings over the request's files, and the count of tests its report holds.
+
+    The fresh directory is left behind: what code under test leaves in it could make removing it fail or outlast the
+    exec, and the session holding it is deleted after its one run.
+    """
     python_path = [*_skill_site_packages(request.lockfile_hash), suite.site_packages]
-    with tempfile.TemporaryDirectory(prefix="cogmo-tests-") as base:
-        directory = os.path.join(base, "skill")
-        os.mkdir(directory)
-        for name, text in request.files.items():
-            with open(os.path.join(directory, name), "w", encoding="utf-8", newline="") as f:
-                f.write(text)
-        report, output = os.path.join(base, "report.xml"), os.path.join(base, "output.log")
-        status = _pytest(suite, directory, report, output, python_path)
-        if status is None:
-            return [_at_cap(_output_tail(output), request.files[TEST_FILE], suite.timeout_s)], 0
-        cases = _report(report)
-        return judge(status, cases, _output_tail(output)), len(cases or [])
+    base = tempfile.mkdtemp(prefix="cogmo-tests-")
+    directory = os.path.join(base, "skill")
+    os.mkdir(directory)
+    for name, text in request.files.items():
+        with open(os.path.join(directory, name), "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+    report_path, output = os.path.join(base, "report.xml"), os.path.join(base, "output.log")
+    status = _pytest(suite, directory, report_path, output, python_path)
+    if status is None:
+        return [_at_cap(_output_tail(output), request.files[TEST_FILE], suite.timeout_s)], 0
+    report = _report(report_path)
+    return judge(status, report, _output_tail(output)), 0 if isinstance(report, str) else len(report)
 
 
 def main(stdin: TextIO, stdout: TextIO, load_suite: Callable[[], Suite]) -> None:

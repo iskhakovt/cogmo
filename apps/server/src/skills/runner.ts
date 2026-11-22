@@ -49,7 +49,6 @@ import { readOriginUrl } from "./repo.js";
 import type { SkillRunAs } from "./run-as.js";
 import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests.js";
 import { recordedSkillsRepo } from "./skill-files.js";
-import type { SkillTests } from "./skill-tests.js";
 import { SkillSourceCache } from "./source-cache.js";
 import type {
   SkillRow,
@@ -269,8 +268,6 @@ export interface SkillRunnerOptions {
   containerSchemaImporter?: ContainerSchemaImporter;
   /** Tests inject CPython checks that start no session; otherwise they run over `registerSandbox`. */
   cpythonChecks?: CpythonChecks;
-  /** Tests inject a test run that starts no session; otherwise it runs over `registerSandbox`. */
-  skillTests?: SkillTests;
   /**
    * The server's release version (`ReleaseToolchain.version`), which register
    * compares the CPython checks' toolchain version against.
@@ -468,15 +465,13 @@ export class SkillRunnerImpl implements SkillRunner {
             depsCacheVolumeName,
           })
         : undefined);
-    const skillTests =
-      opts.skillTests ??
-      (registerSandbox
-        ? makeSandboxSkillTests({
-            sandbox: registerSandbox,
-            image: containerImage,
-            depsCacheVolumeName,
-          })
-        : undefined);
+    const skillTests = registerSandbox
+      ? makeSandboxSkillTests({
+          sandbox: registerSandbox,
+          image: containerImage,
+          depsCacheVolumeName,
+        })
+      : undefined;
     const containerSchemas: DeployDeps["containerSchemas"] =
       containerImporter === undefined
         ? undefined

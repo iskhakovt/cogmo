@@ -3,7 +3,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Node } from "web-tree-sitter";
 import type { SkillTree } from "./python-ast.js";
 import { loadPythonParser } from "./python-parser.js";
-import { formatSkillFinding, runSkillGates, type SkillFinding } from "./skill-gates.js";
+import {
+  formatSkillFinding,
+  runSkillGates,
+  type SkillFinding,
+  unreadSizeFinding,
+} from "./skill-gates.js";
 import type { SkillManifest } from "./types.js";
 
 /** Whether `withPythonTree` hands its reader a null tree, as tree-sitter may. */
@@ -139,6 +144,17 @@ describe("size", () => {
       "size: skills/echo/test_skill.py: 1001 lines, over the limit of 1000",
       `size: skills/echo/test_skill.py: ${tests.length} characters, over the limit of 120000`,
     ]);
+  });
+
+  it("refuses unread only a file whose bytes must hold more characters than the bound", () => {
+    expect(unreadSizeFinding("skills/echo/test_skill.py", 360_000)).toBeNull();
+    expect(unreadSizeFinding("skills/echo/test_skill.py", 360_001)).toEqual({
+      id: "size",
+      path: "skills/echo/test_skill.py",
+      line: null,
+      column: null,
+      message: "360001 bytes, more characters than the limit of 120000",
+    });
   });
 
   it("passes a test_skill.py within the bounds without parsing it", async () => {

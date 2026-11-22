@@ -8,6 +8,7 @@ import {
   DYNAMIC_IMPORT_NAMES,
   SKILL_BODY_MAX_CHARACTERS,
   SKILL_BODY_MAX_LINES,
+  SKILL_FILE_MAX_BYTES,
 } from "./ast-rules.js";
 import { hostAllowed, parseHttpUrl } from "./http-destination.js";
 import type { CheckFinding } from "./protocol.js";
@@ -148,6 +149,18 @@ function sizeFindings(path: string, body: string): SkillFinding[] {
         ]
       : []),
   ];
+}
+
+/** The size finding for a file of `bytes`, or none where the size gate can read it. */
+export function unreadSizeFinding(path: string, bytes: number): SkillFinding | null {
+  return bytes > SKILL_FILE_MAX_BYTES
+    ? findingAt(
+        "size",
+        path,
+        null,
+        `${bytes} bytes, more characters than the limit of ${SKILL_BODY_MAX_CHARACTERS}`,
+      )
+    : null;
 }
 
 /** A null tree, or a tree holding an error, which the classifier could not read whole. */

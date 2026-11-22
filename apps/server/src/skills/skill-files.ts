@@ -95,6 +95,35 @@ export async function skillBlobsUnder(
   );
 }
 
+/** The size in bytes of each of `files` skill `name` has at `sha`, by file name. */
+export async function skillFileSizes(
+  repo: SkillsRepo,
+  name: string,
+  sha: string,
+  files: readonly SkillFile[],
+): Promise<ReadonlyMap<SkillFile, number>> {
+  const prefix = await skillPrefixAt(repo, name, sha);
+  const stdout = await runGitIn(repo.path, [
+    "ls-tree",
+    "-l",
+    "-z",
+    sha,
+    "--",
+    ...files.map((f) => `${prefix}${f}`),
+  ]);
+  return new Map(
+    stdout.split("\0").flatMap((record): [SkillFile, number][] => {
+      const tab = record.indexOf("\t");
+      if (tab < 0) return [];
+      const [, type, , size] = record.slice(0, tab).split(/\s+/);
+      const file = files.find((f) => `${prefix}${f}` === record.slice(tab + 1));
+      return type === "blob" && size !== undefined && file !== undefined
+        ? [[file, Number(size)]]
+        : [];
+    }),
+  );
+}
+
 /** `name`'s files at `sha`, read from where they sit there. */
 export async function skillBlobsAt(
   repo: SkillsRepo,

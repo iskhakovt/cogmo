@@ -1,4 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
+import * as R from "remeda";
 import { match, P } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
@@ -8,8 +9,13 @@ import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import type { SkillTestsRequest } from "../protocol.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
 import type { ImportedSchemas } from "../schema-import.js";
-import type { SkillsRepo } from "../skill-files.js";
-import { formatSkillFinding, runSkillGates } from "../skill-gates.js";
+import { type SkillsRepo, skillDir, skillFileSizes } from "../skill-files.js";
+import {
+  formatSkillFinding,
+  runSkillGates,
+  type SkillFinding,
+  unreadSizeFinding,
+} from "../skill-gates.js";
 import {
   readOptionalSkillFile,
   readSkillSource,
@@ -30,7 +36,12 @@ import { describeLocateSkillRejection, locateSkill } from "./locate-skill.js";
 import { type LockfileCheckError, readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMain } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
-import { type RegisterPause, type RegisterResult, rejectedResult } from "./register-result.js";
+import {
+  cutDryRunText,
+  type RegisterPause,
+  type RegisterResult,
+  rejectedResult,
+} from "./register-result.js";
 import { registerSchemas } from "./schemas.js";
 
 const NON_FAST_FORWARD = "non_fast_forward: rebase branch onto main and retry";
@@ -225,6 +236,8 @@ export async function prepareRegister(
   }
   const name = located.value;
 
+  const unread = await unreadSizeFindings(repo, name, sha);
+  if (unread.length > 0) return err(refused(...unread.map(formatSkillFinding)));
   const source = await readSkillSource(repo, name, sha);
   if (source.isErr()) {
     return err(
@@ -327,6 +340,22 @@ export async function prepareRegister(
   });
 }
 
+/**
+ * The Size gate's findings for `skill.py` and `test_skill.py` too large to
+ * read, from their blobs' sizes (design/skills.md → Register-time gates).
+ */
+async function unreadSizeFindings(
+  repo: SkillsRepo,
+  name: string,
+  sha: string,
+): Promise<readonly SkillFinding[]> {
+  const sizes = await skillFileSizes(repo, name, sha, [SKILL_BODY_FILE, SKILL_TEST_FILE]);
+  return R.filter(
+    [...sizes].map(([file, bytes]) => unreadSizeFinding(`${skillDir(name)}${file}`, bytes)),
+    R.isNonNullish,
+  );
+}
+
 /** The skill's files at `sha` its tests see, as `.cogmo/verify` sees them in `skills/<name>/`. */
 async function testFiles(
   repo: SkillsRepo,
@@ -379,11 +408,19 @@ function cpythonRejection(rejection: RegisterCpythonRejection): PrepareRejection
     .exhaustive();
 }
 
-/** A test rejection: one string per finding, or the sandbox's pause. */
+/**
+ * A test rejection: one string per finding, or the sandbox's pause. A test's
+ * message can quote any value it compared, so each is masked, and a secret the
+ * image's cut ran through is dropped.
+ */
 function testsRejection(rejection: RegisterTestsRejection): PrepareRejection {
   return match(rejection)
     .returnType<PrepareRejection>()
-    .with({ kind: "tests_failed" }, ({ findings }) => refused(...findings.map(formatSkillFinding)))
+    .with({ kind: "tests_failed" }, ({ findings }) =>
+      refused(
+        ...findings.map((f) => formatSkillFinding({ ...f, message: cutDryRunText(f.message) })),
+      ),
+    )
     .with({ kind: "registrar_unavailable" }, ({ cause, detail }) =>
       paused(
         "registrar_unavailable",

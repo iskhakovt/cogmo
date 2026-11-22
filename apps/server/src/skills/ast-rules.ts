@@ -341,6 +341,12 @@ export const ENTRYPOINT_SIGNATURE = "async def run(inputs: Input, ctx: Ctx) -> O
 export const SKILL_BODY_MAX_LINES = 1000;
 /** 1000 lines at the toolchain's 120-column `line-length`. */
 export const SKILL_BODY_MAX_CHARACTERS = 120_000;
+/**
+ * The bytes past which a file holds more characters than the bound whatever
+ * they are, since a UTF-16 code unit takes at most three UTF-8 bytes. Register
+ * refuses such a file unread, so no read outgrows git's output buffer.
+ */
+export const SKILL_FILE_MAX_BYTES = 3 * SKILL_BODY_MAX_CHARACTERS;
 
 /** The names that build code at run time, refused by the `dynamic_code` gate. */
 export const DYNAMIC_CODE_NAMES: ReadonlySet<string> = new Set([

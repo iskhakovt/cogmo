@@ -4102,6 +4102,54 @@ async def run(inputs, ctx):
       ]);
       expect(h.specs).toEqual([]);
     });
+
+    // Past git's 16 MiB output buffer, which a read of the file would overflow.
+    it.each([
+      { file: "test_skill.py", tests: "x = 1\n".repeat(3 * 1024 * 1024), body: ECHO_BODY },
+      { file: "skill.py", tests: null, body: "x = 1\n".repeat(3 * 1024 * 1024) },
+    ])("refuses a $file too large to read from its blob's size", async ({ file, tests, body }) => {
+      const runner = await makeRunner();
+      if (tests !== null) await writeFile(skillFile(repo.work, "test_skill.py", "echo"), tests);
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body,
+      });
+
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        `size: skills/echo/${file}: ${18 * 1024 * 1024} bytes, more characters than the limit of 120000`,
+      ]);
+    });
+
+    it("masks a secret a failing test quotes, and drops one the image's cut ran through", async () => {
+      const cut = `test_cut: AssertionError: https://owner:${"p".repeat(600)}`;
+      const failing = replying({
+        type: "test_findings",
+        findings: [
+          {
+            line: 4,
+            message: "test_echo: AssertionError: fetched https://owner:hunter2@example.com/data",
+          },
+          { line: 9, message: `${Array.from(cut).slice(0, 399).join("")}…` },
+        ],
+        count: 2,
+      });
+      const h = sessionHarness({}, checked(true), IMPORTED, failing);
+      const runner = await makeRunner({ registerSandbox: h.sandbox });
+      await pushEcho(CONTAINER, TESTS);
+
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual([
+        "tests: skills/echo/test_skill.py:4: test_echo: AssertionError: fetched https://REDACTED@example.com/data",
+        "tests: skills/echo/test_skill.py:9: test_cut: AssertionError: https…",
+      ]);
+    });
   });
 
   describe("checkRegister: the register dry run", () => {
