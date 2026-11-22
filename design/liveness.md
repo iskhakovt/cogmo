@@ -31,7 +31,7 @@ One in-process check registry, read three ways:
 2. **The `cogmo.check.status` gauge**, an OTel observable gauge, as a state set after [`hw.status`](https://opentelemetry.io/docs/specs/semconv/hardware/common/): exactly the attributes `check`, `component_id` and `status` (`pass` | `warn`), 1 for the entry's current status and 0 for the other. No unit, so a Prometheus translation adds no suffix.
 3. **One log line per verdict change**, of status or of reason: `liveness check warn` (with `check`, `componentId`, `reason`, `output` and a channel error's `detail`) and `liveness check pass`.
 
-The registry evaluates every check on a 15-second tick, the first when it is built, and `/health` and the gauge callback render the last tick. The handler reads memory only, so a dependency blip can't slow or fail `/health`. A check whose evaluation throws, a bug, reports `warn` (`check_error`) and logs at error.
+The registry evaluates every check on a 15-second tick, the first when it is built; `/health` and the gauge render the last tick from memory, so a dependency blip can't slow or fail `/health`. A check that throws, a bug, reports `warn` (`check_error`) and logs at error.
 
 **Only fixed text leaves the process.** `/health` is unauthenticated, so `output` is a public text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only, and the Telegram adapter redacts its configured token, raw and percent-encoded, from every line it writes that carries one: the verdict line's `detail`, the supervisor's lines, the command-menu warning and both offset-confirmation warnings. `componentId` is the channel's id: its UUIDv7 reveals only when the channel was created, and a stable id keeps per-channel series and alerts stable.
 
@@ -49,7 +49,7 @@ The registry evaluates every check on a 15-second tick, the first when it is bui
 }
 ```
 
-`observedValue` is the seconds since the component last made progress, or since a cron's last served tick; `time` is the registry tick that read it; `reason` is a user-defined key the draft allows.
+`observedValue` is the seconds since the last progress or served tick; `reason` is a user-defined key the draft allows.
 
 | Alternative | Why not |
 |-|-|
@@ -87,7 +87,7 @@ type RetryCause = "conflict" | "network" | "rate_limited" | "server_error" | "cl
 interface ChannelError { readonly code: string; readonly detail: string | null }
 ```
 
-One pure function, `channelCheck(liveness, now)`, turns a projection into a reading ([Verdict](#verdict-and-thresholds)), so a later channel with a loop reuses it. Ages are monotonic, so a wall-clock step can't fake staleness.
+A pure `channelCheck(liveness, now)` turns a projection into a reading ([Verdict](#verdict-and-thresholds)), reusable by a later channel with a loop. Ages are monotonic.
 
 `startChannels` returns each row it read: the started ones with their adapter and `channelId`, and the ones whose type this build has no adapter for, which it skips with a warning today; each skipped row gets a `channels:adapter` entry that always warns `unsupported`. A setup that throws fails boot (design/infrastructure.md → Boot-Time Blocking Policy), so no running process has a channel whose setup threw. `bootstrapRuntime` builds the registry from those rows and from the crons `createCronFunction` recorded, and returns it on `RuntimeDeps` for `/health` and the gauge. The tick timer is unref'd and cleared on shutdown.
 
@@ -113,12 +113,12 @@ Beside the state, the adapter keeps `#progressAt` (set at construction and on ea
 
 ### Signals
 
-Polling Supervision covers what grammY retries itself and how the supervisor handles each rejection of `bot.start()`. Two writers add what neither shows: a `getUpdates` error grammY retries, and a handler in progress. grammY long-polls with a 30 s `timeout` and handles each batch's updates one at a time.
+Two writers add what the supervisor can't see, a `getUpdates` error grammY retries and a handler in progress. grammY long-polls with a 30 s `timeout` and handles a batch's updates one at a time.
 
 | Writer | Sees | Writes |
 |-|-|-|
 | An API transformer (`bot.api.config.use`), installed before polling starts, filtering on `getUpdates` | Every `getUpdates` outcome | The current run's `receive`; `#progressAt` on a valid batch |
-| The update-tracking middleware, ahead of every handler | Each update's start and end | `#handlingSince` when handling begins; clears it and sets `#progressAt` in its `finally` |
+| The update-tracking middleware, ahead of every handler | Each update's start and end | `#handlingSince` when handling begins. Its `finally` clears it and, only for a numeric `update_id`, sets `#progressAt` and the handled id `stop()` confirms past, so a malformed update can't credit progress or store a `NaN` offset |
 
 The transformer returns `prev`'s result, or rethrows its error, unchanged, and its bookkeeping can't throw: grammY reads a transformer's throw as a failed request. grammY hands it the parsed reply before checking `ok`, and wraps a failure of the request, its reply or its client timeout in an `HttpError`; a throw while building the request propagates unwrapped.
 
@@ -132,7 +132,7 @@ The transformer returns `prev`'s result, or rethrows its error, unchanged, and i
 | An `HttpError` wrapping grammY's client timeout, recognised by its fixed message prefix | `retrying` | `network`, `timeout` |
 | Any other throw | `retrying` | `unknown`, `unknown` |
 
-Only a valid batch counts as progress: on `ok: true` with no `result` grammY polls again at once, and an element without `update_id` passes the private-chat gate and counts as handled, so either would otherwise read as a healthy poll. `detail` is Telegram's `description`, token redacted, for a returned error, and null otherwise; no error message reaches a `ChannelError`, since a `FetchError`'s names the request URL. The supervisor's transitions take their `ChannelError` the same way, a `failed` (`rejected`) on anything but a `GrammyError` or `HttpError` as `unknown`.
+Only a valid batch counts as progress: grammY polls again at once on `ok: true` with no `result`, and handles an element with no `update_id`, so either would read as a healthy poll. `detail` is Telegram's `description`, token redacted, or null; no error message reaches a `ChannelError`, since a `FetchError`'s names the request URL. The supervisor's transitions map their errors the same way, anything but a `GrammyError` or `HttpError` as `unknown`.
 
 ### States
 
@@ -191,7 +191,7 @@ The first matching row decides:
 | No update in hand, and `progressAt` at least `staleAfter` ago | warn | `stale` |
 | Otherwise | pass | — |
 
-- **Order:** terminal, then what needs an operator restart, then contention, then a transient retry, with `stale` as the catch-all. A higher row masks a lower one, but a reason change logs, so a `flapping` that gives way to `wedged` when a handler passes 5 minutes is seen.
+- **Order:** terminal, then what needs a restart, contention, a transient retry, and `stale` as the catch-all. A higher row masks a lower one, but a reason change logs, so `flapping` giving way to `wedged` is seen.
 - **`staleAfter` = 90 s**, three 30 s long polls: a healthy poll answers within one even with no update. It flags a half-open connection grammY would hold for 500 s, a setup stuck in grammY's retries, and a loop that stopped unnoticed.
 - **Flapping at the second 409 in a row**, on the supervisor's streak. A first 409 (a webhook, a poller that has gone) clears in a restart whose backoff is 2.5–5 s, so `retrying` covers only what grammY retries within a run. A poller that stays keeps both sides below the 10-minute run that resets the streak (Polling Supervision → Backoff), so the warning holds until the run after the last 409 has lasted 10 minutes.
 - **`wedgedAfter` = 5 min**, bounded by handlers: `/compact` and `/reflect` call the model inline, under the SDK's 10-minute timeout, while every other update waits.
@@ -248,9 +248,9 @@ Owned by `liveness/store/` in the new `src/liveness/`, which also holds the regi
 - `recordCronTick` runs `UPDATE … SET last_tick = GREATEST(last_tick, $tick::timestamptz)`, the tick passed as its ISO string, since a raw `sql` fragment skips the column's driver mapping. It runs with `SET LOCAL lock_timeout = '2s'` and `statement_timeout = '5s'` under a 10 s deadline that also covers acquiring a connection, so a ticker with concurrency 1 never queues behind a stuck write. It returns `Result<"recorded" | "no_row", WriteError>`.
 - The step never throws, since six of the nine crons run with `retries: 0`, which Inngest applies to each step. It returns `recorded`, `no_row`, `write_failed` (an error or the deadline) or `no_tick` (no `scheduledAt`), logging each of the last three at warn.
 
-**Baseline.** Once `bootstrapRuntime` has built the functions, it inserts a row per recorded cron through `ON CONFLICT (function_id) DO UPDATE` with a no-op SET, `RETURNING` every row, so an existing row keeps its `created_at` and tick. The order is fixed: the baseline, the registry seeded from its rows, then the web UI and connector server, then `connect` (`main.ts`). So no cron runs before its row exists, and every cron has a verdict before any request reads one. A failed baseline fails boot.
+**Baseline.** Once `bootstrapRuntime` has built the functions, it inserts a row per recorded cron through `ON CONFLICT (function_id) DO UPDATE` with a no-op SET, `RETURNING` every row, so an existing row keeps its `created_at` and tick. The order is fixed: the baseline, the registry seeded from its rows, then the web UI and connector server, then `connect` (`main.ts`). So no cron runs before its row exists, and every cron has a verdict before any request reads one. The baseline runs under the tick write's bounds, and an error or timeout fails boot, so a held row lock stalls boot for at most 10 s. Failing beats degrading: a database that can't take one write in 10 s fails the first request too, and boot fails closed on such a dependency (design/infrastructure.md → Boot-Time Blocking Policy).
 
-**Replays.** The step adds one boundary per run, so every bare-body log line repeats once more; a line after the last step logs twice on the runs that reach it (`ticker fan-out`, `boundary-janitor: cleaned up orphan holds`). `sandbox-reaper` runs `runReap` and its log in a `reap` step. About 5,800 updates a day, on an unindexed column.
+**Replays.** The step adds one boundary per run, so a bare-body log line repeats once more, and one after the last step logs twice (`ticker fan-out`). `sandbox-reaper` runs `runReap` and its log in a `reap` step. About 5,800 updates a day, on an unindexed column.
 
 **Check.** An evaluation reads an entry `overdue` when now is more than 5 minutes past the second scheduled tick after its reference: `last_tick`, or `created_at` with none. Ticks come from croner in UTC, like Inngest's; a cron given Inngest's `jitter` needs the grace to cover it. A cron missing from a read, its row deleted out of band, reads `unrecorded`. Evaluations run every 15 s, so any stretch with no tick served longer than two periods, 5 minutes and 15 s warns, whatever stopped it: the Inngest server (#427), the worker's connection, or a cron failing every run. About 7 minutes for a per-minute ticker, two days for a daily cron, two weeks for the weekly sweep. A shorter stretch, or one missed run, passes unseen. A warning lasts until the next served tick.
 
@@ -281,7 +281,7 @@ On the move in design/orchestration-temporal.md:
 | The table, baseline, registry and overdue rule | Unchanged: the key is the function id, which `defineFunction` keeps, and the tick is the Schedule's scheduled time, which the workflow id `cron:<functionId>:<scheduled time>` carries. |
 | `createCronFunction` and its final step | Rewritten: `defineFunction`'s `cron` records the cron on `CronHeartbeats`, and a final activity writes the tick with the same bounds and outcomes. |
 | The event-name gate | Rewritten: the model-catalog refresh's jobs carry their origin, so only the Schedule's job records a tick, never an operator refresh. |
-| A moved cron between deploys N and N+1 | The row and baseline stay. Its Schedule is paused while the Inngest copy drains, so a per-minute cron reads `overdue` after about 7 minutes: true, since no tick runs on either engine, which the plan treats as an outage bounded by N+1. Accepted. |
+| A moved cron between deploys N and N+1 | The row and baseline stay. Under the normal drain the Schedule is paused until N+1, so a per-minute cron reads `overdue` after about 7 minutes: true, since no tick runs on either engine, an outage the plan bounds by N+1. Accepted. Under the fallback the Schedule starts unpaused at N, and Temporal's ticks record without a gap. |
 | The architecture.md edits | Superseded by the flow layer's. |
 
 ## Alerting `[proposed]`
@@ -311,7 +311,7 @@ absent_over_time(cogmo_check_status{job="cogmo", check="crons:heartbeat", status
 | error | `telegram polling: failed; down until cogmo restarts` |
 | error | `telegram polling: ended without stop(); down until cogmo restarts` |
 
-The rule's window reaches back to the last successful start. The lines carry no channel id, so it is per process: one channel's start line hides another's terminal line. A boot stuck in setup logs neither (rows c, f′), and a conflict line repeats every 5–10 minutes per side while a second poller stays.
+The rule's window reaches back to the last successful start. The lines carry no channel id, so one channel's start line hides another's terminal line, and a boot stuck in setup logs neither (rows c, f′).
 
 ## Web UI `[proposed]`
 
@@ -319,7 +319,7 @@ The SPA reads `/health`, same-origin and open, and shows a status strip listing 
 
 ## Telegram self-notification `[research]`
 
-The adapter could message the owner when its loop warns, since sending works while receiving is down, but only for a 409 or a wedged handler, and it duplicates an alerting stack where one exists. Revisit with S11's owner channel (design/skills.md).
+Messaging the owner when the loop warns works only for a 409 or a wedged handler, since other faults take sending down too, and duplicates any alerting stack. Revisit with S11's owner channel (design/skills.md).
 
 ## Rollout `[proposed]`
 
@@ -333,7 +333,7 @@ The adapter could message the owner when its loop warns, since sending works whi
 ## Testing `[proposed]`
 
 - `channelCheck`: each row and threshold at its boundary, precedence, and a reason change logged under `warn`.
-- The adapter: each sub-state transition, field write and projection row (a backoff after a slow poll isn't `stale`), events refused outside `polling`, `conflicts` clearing at `HEALTHY_RUN_MS`, and a transformer that passes `prev`'s result or error through unchanged.
+- The adapter: each sub-state transition, field write and projection row (a backoff after a slow poll isn't `stale`), events refused outside `polling`, `conflicts` clearing at `HEALTHY_RUN_MS`, a transformer that passes `prev`'s result or error through unchanged, and a malformed batch then a valid update through `stop()`, which credits and confirms only the valid one.
 - The outcome table, one case per row: each throw shape (system code, `invalid-json`, grammY's timeout, `AbortError`, unwrapped), no `ok`, `error_code` 302, `ok: true` with no `result`, a non-array one, and `[{}]` (`bad_reply`, no progress), `[]` (progress), and the `failed` (`rejected`) mapping; no `code` carries the URL.
 - Redaction: the token, raw and percent-encoded, bare or in a URL, masked in each adapter line that carries a Bot API error; `/health` shows no `detail`.
 - `/health` and the gauge: always 200, a throwing check, an `unsupported` row, exactly three attributes.
