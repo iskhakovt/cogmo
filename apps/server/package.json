@@ -132,7 +132,7 @@
     "type-fest": "^5.10.0",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0",
-    "vitest-mock-extended": "6.0.0",
+    "vitest-mock-extended": "6.0.1",
     "ws": "^8.22.2"
   }
 }
