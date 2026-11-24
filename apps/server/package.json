@@ -41,8 +41,8 @@
   "dependencies": {
     "@ai-sdk/fal": "^3.0.81",
     "@ai-sdk/openai-compatible": "^3.0.90",
-    "@anthropic-ai/sdk": "^1.8.0",
-    "@aws-sdk/client-s3": "^3.1167.0",
+    "@anthropic-ai/sdk": "^1.9.0",
+    "@aws-sdk/client-s3": "^3.1170.0",
     "@bufbuild/protobuf": "^2.17.0",
     "@clack/prompts": "^1.9.0",
     "@cogmo/connector-proto": "workspace:*",
@@ -87,13 +87,13 @@
     "micro-key-producer": "^0.10.2",
     "mime-types": "^3.0.2",
     "neverthrow": "^8.2.0",
-    "openai": "^7.55.0",
+    "openai": "^7.57.0",
     "p-retry": "^9.0.0",
     "picomatch": "^4.0.7",
     "pino": "^10.4.0",
     "postgres": "^4.1.1",
     "pyodide": "^314.0.7",
-    "remeda": "^2.60.0",
+    "remeda": "^2.61.0",
     "semver": "^7.8.6",
     "sharp": "0.35.5",
     "sirv": "^3.0.2",
@@ -133,6 +133,6 @@
     "typescript": "^7.0.2",
     "vitest": "^5.1.0",
     "vitest-mock-extended": "6.0.0",
-    "ws": "^8.22.2"
+    "ws": "^8.23.0"
   }
 }
