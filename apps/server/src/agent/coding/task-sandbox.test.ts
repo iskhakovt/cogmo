@@ -166,6 +166,16 @@ describe("taskSessionSpec", () => {
 
     expect(spec.env).toEqual(AUTH_ENV);
   });
+
+  it("gives the coding session the Docker socket", () => {
+    const spec = specFor({
+      type: "host-path",
+      branch: "cogmo/abc12345",
+      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+    });
+
+    expect(spec.dockerSocket).toBe(true);
+  });
 });
 
 // --- checkoutFeatureBranchInSandbox -----------------------------------------

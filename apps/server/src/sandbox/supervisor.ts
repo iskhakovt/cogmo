@@ -67,11 +67,11 @@ interface CreateOptions {
   /** The current Cogmo instance id. Stamped into every container's `cogmo.instance` label. */
   instanceId: string;
   /**
-   * Optional socket proxy. When provided, every task container gets its own
-   * per-task Unix socket bind-mounted at `/var/run/docker.sock`; child
-   * container creation from inside the task (testcontainers, `docker
-   * compose`, buildx) flows through the proxy so labels + runtime + cgroup
-   * parent are injected automatically.
+   * Optional socket proxy. When provided, every session created with
+   * `dockerSocket` gets its own per-task Unix socket bind-mounted at
+   * `/var/run/docker.sock`; child container creation from inside the task
+   * (testcontainers, `docker compose`) flows through the proxy so labels +
+   * runtime + cgroup parent are injected automatically.
    */
   proxy?: CogmoSocketProxy;
   /**
@@ -226,12 +226,17 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // level is deferred.
     const cgroupParent = taskSliceName(spec.taskId);
 
+    // A session without `dockerSocket` gets no proxy scope. A failed create
+    // releases only the scope it registered: scopes are keyed by task id,
+    // which a salvage session shares with its coding task.
+    const proxy = spec.dockerSocket ? this.#proxy : undefined;
+
     // Pre-allocate the proxy socket so the task container can mount it at
     // `/var/run/docker.sock` from the moment it starts. Parent docker id
     // isn't known yet — register with a placeholder, then upsert below
     // after `createContainer` returns.
-    const proxySocketPath = this.#proxy
-      ? await this.#proxy.registerTask({
+    const proxySocketPath = proxy
+      ? await proxy.registerTask({
           taskId: spec.taskId,
           parentContainerRowId: "",
           parentDockerId: "",
@@ -326,7 +331,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         },
       });
     } catch (err) {
-      await this.#releaseProxyScope(spec.taskId);
+      await releaseProxyScope(proxy, spec.taskId);
       throw err;
     }
 
@@ -357,12 +362,12 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
           "removing the rowless container failed",
         );
       });
-      await this.#releaseProxyScope(spec.taskId);
+      await releaseProxyScope(proxy, spec.taskId);
       throw err;
     }
 
-    if (this.#proxy) {
-      await this.#proxy.registerTask({
+    if (proxy) {
+      await proxy.registerTask({
         taskId: spec.taskId,
         parentContainerRowId: containerRow.id,
         parentDockerId: container.id,
@@ -402,7 +407,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
           "reaping the unstarted container failed",
         );
       }
-      await this.#releaseProxyScope(spec.taskId);
+      await releaseProxyScope(proxy, spec.taskId);
       throw err;
     }
 
@@ -428,7 +433,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
               "removing the container of a finished row failed",
             ),
         );
-        await this.#releaseProxyScope(spec.taskId);
+        await releaseProxyScope(proxy, spec.taskId);
         throw new Error(`container ${container.id} was ${status} before it finished starting`);
       })
       .exhaustive();
@@ -550,14 +555,6 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
 
   #reapDeps(): ReapContainerDeps {
     return { docker: this.#docker, store: this.#store, runInTx: this.#runInTx };
-  }
-
-  /** Drop the per-task proxy scope on a failed `create`; a failure here is logged, not raised over the original error. */
-  async #releaseProxyScope(taskId: string): Promise<void> {
-    if (!this.#proxy) return;
-    await this.#proxy.unregisterTask(taskId).catch((err: unknown) => {
-      log.warn({ err, taskId }, "proxy unregisterTask failed during create rollback");
-    });
   }
 
   #wrapSession(state: LocalDockerSessionState): SandboxSession<LocalDockerSessionState> {
@@ -816,5 +813,19 @@ function sinkWritable(sink: ExecSink, stream: ExecStreamName): Writable {
       sink.output(stream, chunk);
       callback();
     },
+  });
+}
+
+/**
+ * Drop the proxy scope a failed `create` registered, if it registered one; a
+ * failure here is logged, not raised over the original error.
+ */
+async function releaseProxyScope(
+  proxy: CogmoSocketProxy | undefined,
+  taskId: string,
+): Promise<void> {
+  if (!proxy) return;
+  await proxy.unregisterTask(taskId).catch((err: unknown) => {
+    log.warn({ err, taskId }, "proxy unregisterTask failed during create rollback");
   });
 }

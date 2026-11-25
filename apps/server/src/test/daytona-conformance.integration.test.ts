@@ -216,6 +216,7 @@ function wrapperSpec(): {
   resourceLimits: typeof WRAPPER_RESOURCE_LIMITS;
   expiresAt: Date;
   network: "bridge";
+  dockerSocket: boolean;
 } {
   return {
     taskId: WRAPPER_TASK_ID,
@@ -226,6 +227,7 @@ function wrapperSpec(): {
     // baked value (5) on every run regardless of record vs replay.
     expiresAt: new Date(Date.now() + 5 * 60 * 1000),
     network: "bridge",
+    dockerSocket: false,
   };
 }
 

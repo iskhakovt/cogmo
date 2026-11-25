@@ -215,6 +215,8 @@ export function makeSandboxLockfileCompiler(
           expiresAt,
           // The compile resolves against the package index.
           network: "bridge",
+          // Build backends run here; no skills session reaches the daemon.
+          dockerSocket: false,
         });
       } catch (e) {
         return err({

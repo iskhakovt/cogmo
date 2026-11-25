@@ -222,6 +222,17 @@ describe("SysboxSkillWorker", () => {
     );
   });
 
+  it("creates the worker's session without a Docker socket", async () => {
+    const { sandbox } = buildFakeSandbox();
+    await SysboxSkillWorker.create({
+      workerId: "w-socket",
+      sandbox,
+      image: "python:3.14-slim",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    expect(sandbox.create).toHaveBeenCalledWith(expect.objectContaining({ dockerSocket: false }));
+  });
+
   it("passes depsCacheVolumeName through to sandbox.create as depsCacheVolume", async () => {
     const { sandbox } = buildFakeSandbox();
     await SysboxSkillWorker.create({

@@ -189,6 +189,8 @@ export function taskSessionSpec(args: {
     },
     // The coding CLI reaches its provider, the git remote and package indexes.
     network: "bridge",
+    // The repo under work may start containers (testcontainers, compose).
+    dockerSocket: true,
   };
 }
 

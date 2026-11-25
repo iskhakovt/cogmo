@@ -276,6 +276,8 @@ export class SysboxSkillWorker {
       // skill code reaches its hosts directly until it runs behind the egress
       // proxy (design/skills.md → Egress proxy).
       network: "bridge",
+      // Container-tier skill code never reaches the Docker daemon.
+      dockerSocket: false,
       ...(opts.depsCacheVolumeName !== undefined && {
         depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
       }),

@@ -145,6 +145,7 @@ for (const { sh, image, taskDigit } of SHELLS) {
         resourceLimits: RESOURCE_LIMITS,
         expiresAt: new Date(Date.now() + 60_000),
         network: "bridge",
+        dockerSocket: true,
       });
       try {
         await body(session);
@@ -224,6 +225,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
         resourceLimits: RESOURCE_LIMITS,
         expiresAt: new Date(Date.now() + 60_000),
         network,
+        dockerSocket: false,
       });
       try {
         const inspected = await docker.getContainer(handle.state.dockerId).inspect();
@@ -257,6 +259,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
     expect(handle.state.dockerId).toBeTruthy();
     expect(handle.state.containerRowId).toBeTruthy();
@@ -295,6 +298,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
 
     // The bind mount is visible from inside.
@@ -321,6 +325,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
 
     const exec = await handle.execStreaming(["sh", "-c", "echo to-out; echo to-err >&2; exit 7"]);
@@ -347,6 +352,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
     await sandbox.deleteByTaskId(taskId);
 
@@ -369,6 +375,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
     await sandbox.deleteByTaskId(taskId);
     await expect(sandbox.deleteByTaskId(taskId)).resolves.toBeUndefined();
@@ -390,6 +397,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
 
     const { sandbox: current, instanceId: currentId } = await bootSandbox();
@@ -415,6 +423,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
     // inspectContainer was removed from the public interface; verify
     // the underlying state by querying the Docker daemon directly.

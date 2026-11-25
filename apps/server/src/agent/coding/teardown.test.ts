@@ -278,10 +278,11 @@ describe("teardownWorktree", () => {
       worktree: { type: "host-path", hostPath: worktreePath },
       askpass: { hostDir: join(askpassBaseDir, taskId), containerDir: CONTAINER_ASKPASS_DIR },
     });
-    // No Claude token and no home volume in either.
+    // No Claude token, no home volume and no Docker socket in either.
     for (const spec of specs) {
       expect(spec.env).toBeUndefined();
       expect(spec.homeVolume).toBeUndefined();
+      expect(spec.dockerSocket).toBe(false);
     }
     // The WIP commit is unsigned: the signing key is not mounted.
     expect(askpassFiles[1]).toEqual(["helper", "pat"]);

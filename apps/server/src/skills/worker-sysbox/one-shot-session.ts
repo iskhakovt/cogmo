@@ -70,6 +70,9 @@ export async function withOneShotSession<T, E>(
       resourceLimits: spec.resourceLimits,
       expiresAt: new Date(Date.now() + spec.budgetMs + SESSION_EXPIRY_MARGIN_MS),
       network: spec.network,
+      // Register's sessions run the skill's code or its dependencies' build
+      // backends; none reaches the daemon.
+      dockerSocket: false,
       ...(spec.depsCacheVolume && { depsCacheVolume: spec.depsCacheVolume }),
     });
   } catch (e) {

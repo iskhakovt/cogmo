@@ -87,6 +87,7 @@ describe.skipIf(RUNTIME === undefined)("the skills image's uv", () => {
       resourceLimits: DEFAULT_DEPENDENCY_SESSION_LIMITS,
       expiresAt: new Date(Date.now() + 300_000),
       network: "none",
+      dockerSocket: false,
       env: { UV_DEFAULT_INDEX: index, UV_HTTP_RETRIES: "0" },
     });
     try {

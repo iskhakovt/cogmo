@@ -220,9 +220,8 @@ type ContainerRun<T> =
 
 /**
  * One salvage container: the tree at `/workspace`, `askpass` mounted when
- * given, no home volume, no Claude token. Reaped by task label afterwards,
- * whatever happened; the per-task proxy socket the backend binds into every
- * session it creates comes with it.
+ * given, no home volume, no Claude token, no Docker socket. Reaped by task
+ * label afterwards, whatever happened.
  */
 async function inSalvageContainer<T>(
   opts: TeardownWorktreeOpts,
@@ -239,6 +238,8 @@ async function inSalvageContainer<T>(
         worktree: { type: "host-path", hostPath: opts.worktreePath },
         // The push reaches the git remote.
         network: "bridge",
+        // Git runs the tree's filters here; nothing needs the daemon.
+        dockerSocket: false,
         ...(askpass && {
           askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
         }),

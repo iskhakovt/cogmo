@@ -114,6 +114,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
 
     const inspected = await docker.getContainer(handle.state.dockerId).inspect();
@@ -144,6 +145,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "none",
+      dockerSocket: false,
     });
 
     try {
@@ -186,6 +188,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
+      dockerSocket: true,
     });
 
     // Inside the container: `id -u` returns 0 (we run as root).

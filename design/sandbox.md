@@ -106,17 +106,15 @@ interface SessionSpec {
   /** Process env for the container (`CLAUDE_CODE_OAUTH_TOKEN`, …). Never host `process.env`. */
   env?: Record<string, string>;
   /**
-   * `[proposed]` Whether the session gets a Docker API proxy socket
-   * (Proxy Design → Which sessions get a socket). Required, so every
-   * caller states it.
+   * Whether the session gets a Docker API proxy socket (Proxy Design →
+   * Which sessions get a socket). Required, so every caller states it.
    */
   dockerSocket: boolean;
   /**
    * Required, so every caller states it. `"none"`: Local-Docker creates the
    * container with `NetworkMode: none`, so its only interface is loopback;
-   * it still mounts the proxy socket, through which it can create a child on
-   * the default bridge, until `dockerSocket: false` (Which sessions get a
-   * socket). Daytona refuses `"none"`: a Tier 1 or 2 organisation's network
+   * with `dockerSocket`, it can still create a child on the default bridge
+   * through the proxy socket. Daytona refuses `"none"`: a Tier 1 or 2 organisation's network
    * policy overrides a sandbox's `networkBlockAll`. `"bridge"` is the
    * backend's default network. `[proposed]` (skills S7) The create refuses an
    * `egressSocket` with `"bridge"`, and the skills session schema (a Zod
@@ -392,14 +390,14 @@ The proxy lives in `src/sandbox/proxy/` and runs inside `cogmo serve` `[confirme
 - `POST /containers/create` is denied for `HostConfig.Privileged`, `NetworkMode: "host"`, a host-path `Binds` or `Mounts` bind source, and eight `CapAdd` capabilities (`policy.ts:37-148`). A create that passes has its `Runtime`, `CgroupParent` and the five Cogmo labels overwritten and is forwarded.
 - Everything else is forwarded unchecked, under the raw `req.url` rather than the canonical path that was classified (`proxy/index.ts:270`, `:310`).
 - Exec start, attach, `logs`, `events` and `distribution` are raw-piped from the moment the request line has been replayed, without waiting for the daemon's `101`.
-- Every Local-Docker session gets a socket, skills container-tier workers included.
+- Only a session created with `dockerSocket: true` gets a socket: a coding task's (Which sessions get a socket, below).
 - A child gets no `containers` row, so the orphan pass kills it within a minute (Container state machine → Failure modes). That includes the children testcontainers or `docker compose` start.
 - The reaper's network and volume updates are unconditional (`reaper.ts:191`, `:213`).
 - `unregisterTask` drops the task's scope before closing its connections (`proxy/index.ts:143`). A request that arrives meanwhile on an open connection gets a 500.
 
 This is not an authorization boundary:
 
-- A task can inspect, exec into, archive, kill or list any container on the daemon. A sibling task's container binds include that task's proxy socket, worktree and askpass directory (`supervisor.ts:252-259`).
+- A task can inspect, exec into, archive, kill or list any container on the daemon. A sibling task's container binds include that task's proxy socket, worktree and askpass directory (`supervisor.ts:259-266`).
 - The create policy reads keys case-sensitively, so `hostconfig.privileged` passes. It strips a `CAP_` prefix case-sensitively before upper-casing (`policy.ts:139`), so `cap_sys_admin` becomes `CAP_SYS_ADMIN`, which is not in the deny set, and passes.
 - Several escapes pass the create policy entirely:
   - `VolumesFrom` copies another container's binds, a sibling task's proxy socket included.
@@ -525,7 +523,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 
 `TaskScope` carries `resourceLimits` and `ttlExpiresAt`. Depth stays at 1: a child gets no socket, since host-path binds and `VolumesFrom` are denied, so it cannot create containers of its own.
 
-**Which sessions get a socket.** `SessionSpec.dockerSocket: boolean` is required, so every caller states it. Coding delegation sets it to `true`. Skills container-tier sets it to `false`, so a container-tier skill's Python cannot reach the daemon. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
+**Which sessions get a socket** `[confirmed]`. `SessionSpec.dockerSocket: boolean` is required, so every caller states it. A coding task's session sets it to `true`. Every other session sets it to `false`: every skills session, so a skill's Python cannot reach the daemon, and coding teardown's salvage sessions, which run only git. Local-Docker registers a proxy scope and mounts the socket only for `true`, and a failed create releases only the scope it registered: scopes are keyed by task id, which a salvage session shares with its coding task. Daytona ignores the field. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
 
 **Residuals.**
 
@@ -549,7 +547,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
   - waits on logs, exec and HTTP;
   - `GET /networks/bridge` for the gateway, and `exposeHostPort`'s connect to `bridge`.
 - Ryuk needs a host-path bind of the socket, which is already denied, and optionally `Privileged`. Cogmo sets `TESTCONTAINERS_RYUK_DISABLED=true` in a coding session's env (`SessionSpec.env`), and the cascade does Ryuk's job.
-- The skills container-tier runner never opens the socket.
+- Skills sessions have no socket (`dockerSocket: false`).
 - No workflow relies on proxy-created children, which the orphan pass reaps (Enforced today).
 
 **Test plan.** Unit tests in `src/sandbox/proxy/` run on `proxy.test.ts`'s fake daemon socket. Each asserts the status, and for a rejection that nothing reached the daemon.
@@ -616,7 +614,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 **Slices.** The spec ships in this order, one PR per slice, tracked in `todo.md`. As each slice lands, its part of "Enforced today" is removed and its part of this section becomes `[confirmed]`. Every route a slice does not touch keeps today's behaviour until a later slice does.
 
 1. **Create and exec policy:** the create and exec policies, the create query policy, the `v1.44` version floor on the create and exec routes (the two bodies this slice parses against 1.44 semantics; slice 2 extends it to every route), Ryuk disabled in coding sessions, and the deny matrix. Until slice 5, named-volume mounts are denied outright, and `NetworkMode` and `EndpointsConfig` accept only `default`, `bridge` and `none`. The child cap needs rows, so it arrives with slice 3.
-2. **Ownership:** container and exec ownership, depth-0 lifecycle and `PUT /archive` denies, container list and event filtering, the canonical forwarded request with the version floor and the hop-by-hop strip, `SessionSpec.dockerSocket`, and default-deny for every path outside the route table. Image, network and volume routes stay forwarded as today until slice 5, except `DELETE /volumes/{name}` and network connect and disconnect. From this slice on, connect and disconnect are allowed only for an owned container on `bridge`, which testcontainers' port forwarder needs, and every other connect or disconnect is `denied`, as is `DELETE /volumes/{name}`. Unchecked, they would let a task delete another task's volume, attach a sibling's container to its network, or detach one from `bridge`. Children still have no rows, so a task owns only its depth-0 container in the meantime.
+2. **Ownership:** container and exec ownership, depth-0 lifecycle and `PUT /archive` denies, container list and event filtering, the canonical forwarded request with the version floor and the hop-by-hop strip, and default-deny for every path outside the route table. Image, network and volume routes stay forwarded as today until slice 5, except `DELETE /volumes/{name}` and network connect and disconnect. From this slice on, connect and disconnect are allowed only for an owned container on `bridge`, which testcontainers' port forwarder needs, and every other connect or disconnect is `denied`, as is `DELETE /volumes/{name}`. Unchecked, they would let a task delete another task's volume, attach a sibling's container to its network, or detach one from `bridge`. Children still have no rows, so a task owns only its depth-0 container in the meantime.
 3. **Child rows:** child rows, the child cap, the orphan pass's grace window, the teardown order, and `v=true` on every Cogmo container removal and on a task's child `DELETE`.
 4. **Upgraded streams.**
 5. **Images, networks and volumes:** the image query and registry-host rules, the network and volume policies with their caps, the Network and volume state machine and its migration, owned networks and volumes in the create policy, and the `bridge` inspect filter.
@@ -645,10 +643,10 @@ Networks and volumes have a TTL pass of their own, whose update is unconditional
 
 Task startup (`LocalDockerSandboxClient.create`):
 
-1. The proxy registers `${SANDBOX_PROXY_SOCKET_DIR}/T.sock` with a placeholder scope (the task container's docker id is not known yet) so the container can mount it at `/var/run/docker.sock` from its first instant.
-2. The daemon creates the task container: `HostConfig.Runtime`, labels, binds, cgroup parent. A failure releases the proxy registration.
-3. A `containers` row is inserted with the daemon's `docker_id`, `status = 'starting'`. A failure force-removes the container and releases the registration before the error propagates.
-4. The proxy scope is upserted with the row id and docker id, for ownership checks on `DELETE` etc.
+1. For a session created with `dockerSocket: true`, the proxy registers `${SANDBOX_PROXY_SOCKET_DIR}/T.sock` with a placeholder scope (the task container's docker id is not known yet) so the container can mount it at `/var/run/docker.sock` from its first instant.
+2. The daemon creates the task container: `HostConfig.Runtime`, labels, binds, cgroup parent. A failure releases the scope it registered, if any.
+3. A `containers` row is inserted with the daemon's `docker_id`, `status = 'starting'`. A failure force-removes the container and releases the scope it registered, if any, before the error propagates.
+4. A registered scope is upserted with the row id and docker id, for ownership checks on `DELETE` etc.
 5. The daemon starts the container and the row moves `starting → running`. A start failure reaps the container (`start_failed`).
 
 Task teardown (`deleteByTaskId`):
@@ -710,13 +708,13 @@ The transition is `SandboxStore.transitionContainerStatus(tx, { id, at } & Conta
 
 | Crash point or race | Row | Daemon | Why safe, or the residual |
 |-|-|-|-|
-| Daemon create succeeds, row insert fails | none | container | `create` force-removes it and releases the proxy scope. If the remove fails too, the orphan pass removes a labelled container with no row on its next tick (`[proposed]` once the grace window has passed) |
+| Daemon create succeeds, row insert fails | none | container | `create` force-removes it and releases the scope it registered, if any. If the remove fails too, the orphan pass removes a labelled container with no row on its next tick (`[proposed]` once the grace window has passed) |
 | Process dies between create and insert | none | container | Orphan pass: no row ⇒ orphan |
 | A reaper tick lists the daemon while a live `create` is between `createContainer` and the row insert | none, yet | killed by the orphan pass | This is a residual, under the same rule as the proxy child. The insert then succeeds, `start` 404s, and the start-failure reap marks the row `reaped` (its kill and remove 404s are tolerated), so the `create-container` step fails and retries. The window is one DB round trip against a once-a-minute tick. `[proposed]` The orphan pass's grace window closes it |
 | The `create-container` step retries after `create` threw | the failed attempt's, terminal or absent | removed by the failed attempt | The retry creates a new container and row for the same task; `tryResumeByTaskId` skips terminal rows. What a failed attempt could not remove follows its own row here (`start` throws; insert fails) |
 | Process dies between insert and `running` | `starting` | created or running | A crashed instance keeps `stopped_at` NULL, so the reaper's orphan pass counts it live and its rows are never orphans. The next boot's `reconcileCrashedInstances` reaps every container labelled with an open prior instance, then closes those instance rows, so the orphan pass retries anything reconcile could not kill. `tryResumeByTaskId` resumes only a daemon container that reports `running` |
 | `start` throws | `reaped` | removed | `start_failed`. Residual: if the kill + remove throws, the row stays `starting` over a stopped container, and the TTL pass reaps it at expiry |
-| `starting → running` is `stale` | `reaped` or `exited` | removed by `create` | A TTL pass (short TTL) or a cascade reaped the row mid-start, or the stale pass found it missing. `create` kills and removes the container it started — no pass looks at a terminal row again — releases the proxy scope and throws. Residual: if the daemon refuses that kill, the container stays on the daemon under a terminal row and a live instance label, which the TTL, stale and orphan passes all skip until the instance row closes |
+| `starting → running` is `stale` | `reaped` or `exited` | removed by `create` | A TTL pass (short TTL) or a cascade reaped the row mid-start, or the stale pass found it missing. `create` kills and removes the container it started — no pass looks at a terminal row again — releases the scope it registered, if any, and throws. Residual: if the daemon refuses that kill, the container stays on the daemon under a terminal row and a live instance label, which the TTL, stale and orphan passes all skip until the instance row closes |
 | A second live process shares the database | its rows | its containers | Invariant: one `cogmo serve` per database. Reconcile reaps every container labelled with an *open* instance other than its own and closes those rows, so a second live process — old and new serves overlapping on a deploy, or a `cogmo skills` command whose `bootstrapCliSandbox` row is open when a serve boots — loses its containers, and once its row is closed the orphan pass kills every container it creates on the next tick. The CLI runs no reconcile, so it never closes serve's row, and it closes its own on exit; a crashed CLI's row stays open, and its last session lingers until the next serve boot ([skills.md → Register-time CPython checks](skills.md#register-time-cpython-checks-confirmed-except-where-marked)). A liveness check by host and pid is the follow-up (`todo.md`) |
 | `deleteByTaskId` or a TTL pass reads a `starting` row, then `create` commits `starting → running` before the reap's transition | `reaped` | removed by the reap | The reap's guard is `status <> 'reaped'`, so it lands. Residual: `create` has already handed back a session over a removed container; the task's first exec fails with a 404 and the task fails rather than running on a removed container |
 | `deleteByTaskId` and a reaper pass race on one row | `reaped` once | removed once; the second kill/remove sees 304/409/404, which both tolerate | The second transition is `stale`, logged at debug. `exited_at` is the first writer's |
