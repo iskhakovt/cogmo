@@ -147,6 +147,7 @@ describe.skip("ClaudeCodeBackend against real Daytona + PTY backend", () => {
         },
         expiresAt: new Date(Date.now() + 10 * 60_000),
         network: "bridge",
+        dockerSocket: true,
         env: {
           ANTHROPIC_API_KEY: anthropicApiKey,
           // Pin the model so token cost stays predictable across runs

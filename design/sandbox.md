@@ -106,17 +106,15 @@ interface SessionSpec {
   /** Process env for the container (`CLAUDE_CODE_OAUTH_TOKEN`, …). Never host `process.env`. */
   env?: Record<string, string>;
   /**
-   * `[proposed]` Whether the session gets a Docker API proxy socket
-   * (Proxy Design → Which sessions get a socket). Required, so every
-   * caller states it.
+   * Whether the session gets a Docker API proxy socket (Proxy Design →
+   * Which sessions get a socket). Required, so every caller states it.
    */
   dockerSocket: boolean;
   /**
    * Required, so every caller states it. `"none"`: Local-Docker creates the
    * container with `NetworkMode: none`, so its only interface is loopback;
-   * it still mounts the proxy socket, through which it can create a child on
-   * the default bridge, until `dockerSocket: false` (Which sessions get a
-   * socket). Daytona refuses `"none"`: a Tier 1 or 2 organisation's network
+   * with `dockerSocket`, it can still create a child on the default bridge
+   * through the proxy socket. Daytona refuses `"none"`: a Tier 1 or 2 organisation's network
    * policy overrides a sandbox's `networkBlockAll`. `"bridge"` is the
    * backend's default network. `[proposed]` (skills S7) The create refuses an
    * `egressSocket` with `"bridge"`, and the skills session schema (a Zod
@@ -392,7 +390,7 @@ The proxy lives in `src/sandbox/proxy/` and runs inside `cogmo serve` `[confirme
 - `POST /containers/create` is denied for `HostConfig.Privileged`, `NetworkMode: "host"`, a host-path `Binds` or `Mounts` bind source, and eight `CapAdd` capabilities (`policy.ts:37-148`). A create that passes has its `Runtime`, `CgroupParent` and the five Cogmo labels overwritten and is forwarded.
 - Everything else is forwarded unchecked, under the raw `req.url` rather than the canonical path that was classified (`proxy/index.ts:270`, `:310`).
 - Exec start, attach, `logs`, `events` and `distribution` are raw-piped from the moment the request line has been replayed, without waiting for the daemon's `101`.
-- Every Local-Docker session gets a socket, skills container-tier workers included.
+- Only a session created with `dockerSocket: true` gets a socket: a coding task's (Which sessions get a socket, below).
 - A child gets no `containers` row, so the orphan pass kills it within a minute (Container state machine → Failure modes). That includes the children testcontainers or `docker compose` start.
 - The reaper's network and volume updates are unconditional (`reaper.ts:191`, `:213`).
 - `unregisterTask` drops the task's scope before closing its connections (`proxy/index.ts:143`). A request that arrives meanwhile on an open connection gets a 500.
@@ -525,7 +523,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 
 `TaskScope` carries `resourceLimits` and `ttlExpiresAt`. Depth stays at 1: a child gets no socket, since host-path binds and `VolumesFrom` are denied, so it cannot create containers of its own.
 
-**Which sessions get a socket.** `SessionSpec.dockerSocket: boolean` is required, so every caller states it. Coding delegation sets it to `true`. Skills container-tier sets it to `false`, so a container-tier skill's Python cannot reach the daemon. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
+**Which sessions get a socket** `[confirmed]`. `SessionSpec.dockerSocket: boolean` is required, so every caller states it. A coding task's session sets it to `true`. Every other session sets it to `false`: every skills session, so a skill's Python cannot reach the daemon, and coding teardown's salvage sessions, which run only git. Local-Docker registers a proxy scope and mounts the socket only for `true`, so a failed create without one releases no scope, which matters because a salvage session shares its coding task's id. Daytona ignores the field. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
 
 **Residuals.**
 
@@ -616,7 +614,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 **Slices.** The spec ships in this order, one PR per slice, tracked in `todo.md`. As each slice lands, its part of "Enforced today" is removed and its part of this section becomes `[confirmed]`. Every route a slice does not touch keeps today's behaviour until a later slice does.
 
 1. **Create and exec policy:** the create and exec policies, the create query policy, the `v1.44` version floor on the create and exec routes (the two bodies this slice parses against 1.44 semantics; slice 2 extends it to every route), Ryuk disabled in coding sessions, and the deny matrix. Until slice 5, named-volume mounts are denied outright, and `NetworkMode` and `EndpointsConfig` accept only `default`, `bridge` and `none`. The child cap needs rows, so it arrives with slice 3.
-2. **Ownership:** container and exec ownership, depth-0 lifecycle and `PUT /archive` denies, container list and event filtering, the canonical forwarded request with the version floor and the hop-by-hop strip, `SessionSpec.dockerSocket`, and default-deny for every path outside the route table. Image, network and volume routes stay forwarded as today until slice 5, except `DELETE /volumes/{name}` and network connect and disconnect. From this slice on, connect and disconnect are allowed only for an owned container on `bridge`, which testcontainers' port forwarder needs, and every other connect or disconnect is `denied`, as is `DELETE /volumes/{name}`. Unchecked, they would let a task delete another task's volume, attach a sibling's container to its network, or detach one from `bridge`. Children still have no rows, so a task owns only its depth-0 container in the meantime.
+2. **Ownership:** container and exec ownership, depth-0 lifecycle and `PUT /archive` denies, container list and event filtering, the canonical forwarded request with the version floor and the hop-by-hop strip, and default-deny for every path outside the route table. Image, network and volume routes stay forwarded as today until slice 5, except `DELETE /volumes/{name}` and network connect and disconnect. From this slice on, connect and disconnect are allowed only for an owned container on `bridge`, which testcontainers' port forwarder needs, and every other connect or disconnect is `denied`, as is `DELETE /volumes/{name}`. Unchecked, they would let a task delete another task's volume, attach a sibling's container to its network, or detach one from `bridge`. Children still have no rows, so a task owns only its depth-0 container in the meantime.
 3. **Child rows:** child rows, the child cap, the orphan pass's grace window, the teardown order, and `v=true` on every Cogmo container removal and on a task's child `DELETE`.
 4. **Upgraded streams.**
 5. **Images, networks and volumes:** the image query and registry-host rules, the network and volume policies with their caps, the Network and volume state machine and its migration, owned networks and volumes in the create policy, and the `bridge` inspect filter.

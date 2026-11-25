@@ -103,6 +103,7 @@ function makeSpec(overrides: Partial<SessionSpec> = {}): SessionSpec {
     resourceLimits: RESOURCE_LIMITS,
     expiresAt: new Date(Date.now() + 60_000),
     network: "bridge",
+    dockerSocket: true,
     ...overrides,
   };
 }

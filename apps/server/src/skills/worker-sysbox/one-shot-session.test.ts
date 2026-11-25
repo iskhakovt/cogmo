@@ -69,6 +69,7 @@ describe("withOneShotSession", () => {
     expect(spec).toMatchObject({
       image: "cogmo-skills:test",
       network: "none",
+      dockerSocket: false,
       depsCacheVolume: { volumeName: "cogmo-skills-venvs" },
       resourceLimits: SPEC.resourceLimits,
     });

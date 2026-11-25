@@ -130,6 +130,7 @@ describe("bootstrapCliSandbox", () => {
     resourceLimits: { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 },
     expiresAt: new Date(0),
     network: "none",
+    dockerSocket: false,
   };
 
   /** A process's signals: each listener `once` registers, and the codes `exit` was called with. */

@@ -134,6 +134,7 @@ export async function reapSkillVenvs(
       depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
       // The sweep only lists and removes directories on the volume.
       network: "none",
+      dockerSocket: false,
     });
   } catch (e) {
     return err({

@@ -125,11 +125,19 @@ export interface SessionSpec {
   /**
    * The session's network. Required, so every caller states it. `"none"`:
    * Local-Docker creates the container with `NetworkMode: none`, so its only
-   * interface is loopback; it still mounts the Docker API proxy socket,
-   * through which it can create a child container on the default bridge.
-   * Daytona refuses `"none"`. `"bridge"` is the backend's default network.
+   * interface is loopback; with `dockerSocket`, it can still create a child
+   * container on the default bridge through the proxy socket. Daytona
+   * refuses `"none"`. `"bridge"` is the backend's default network.
    */
   network: "bridge" | "none";
+  /**
+   * Whether the session reaches a Docker API. Required, so every caller
+   * states it. Local-Docker mounts the task's Docker API proxy socket at
+   * `/var/run/docker.sock` only when this is set and a proxy is configured;
+   * unset, it registers no proxy scope and mounts nothing. Daytona ignores
+   * it: the host daemon is never reachable from a Daytona sandbox.
+   */
+  dockerSocket: boolean;
 }
 
 /**

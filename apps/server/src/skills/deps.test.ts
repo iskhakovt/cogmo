@@ -270,6 +270,7 @@ describe("makeSandboxLockfileCompiler", () => {
     expect(h.createCalls[0]).toMatchObject({
       image: "cogmo-skills:test",
       network: "bridge",
+      dockerSocket: false,
       // Local-Docker names the session's cgroup slice after its task id, which must be a UUID.
       taskId: expect.stringMatching(
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,

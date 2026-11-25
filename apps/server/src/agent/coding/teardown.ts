@@ -239,6 +239,8 @@ async function inSalvageContainer<T>(
         worktree: { type: "host-path", hostPath: opts.worktreePath },
         // The push reaches the git remote.
         network: "bridge",
+        // Git runs the tree's filters here; nothing needs the daemon.
+        dockerSocket: false,
         ...(askpass && {
           askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
         }),

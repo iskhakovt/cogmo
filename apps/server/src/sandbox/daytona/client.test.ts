@@ -193,6 +193,7 @@ const BASE_SPEC: SessionSpec = {
   resourceLimits: { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 },
   expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1h from now
   network: "bridge",
+  dockerSocket: true,
 };
 
 async function makeClient(): Promise<DaytonaSandboxClient> {
