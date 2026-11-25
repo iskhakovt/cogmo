@@ -397,7 +397,7 @@ The proxy lives in `src/sandbox/proxy/` and runs inside `cogmo serve` `[confirme
 
 This is not an authorization boundary:
 
-- A task can inspect, exec into, archive, kill or list any container on the daemon. A sibling task's container binds include that task's proxy socket, worktree and askpass directory (`supervisor.ts:252-259`).
+- A task can inspect, exec into, archive, kill or list any container on the daemon. A sibling task's container binds include that task's proxy socket, worktree and askpass directory (`supervisor.ts:259-266`).
 - The create policy reads keys case-sensitively, so `hostconfig.privileged` passes. It strips a `CAP_` prefix case-sensitively before upper-casing (`policy.ts:139`), so `cap_sys_admin` becomes `CAP_SYS_ADMIN`, which is not in the deny set, and passes.
 - Several escapes pass the create policy entirely:
   - `VolumesFrom` copies another container's binds, a sibling task's proxy socket included.
@@ -523,7 +523,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 
 `TaskScope` carries `resourceLimits` and `ttlExpiresAt`. Depth stays at 1: a child gets no socket, since host-path binds and `VolumesFrom` are denied, so it cannot create containers of its own.
 
-**Which sessions get a socket** `[confirmed]`. `SessionSpec.dockerSocket: boolean` is required, so every caller states it. A coding task's session sets it to `true`. Every other session sets it to `false`: every skills session, so a skill's Python cannot reach the daemon, and coding teardown's salvage sessions, which run only git. Local-Docker registers a proxy scope and mounts the socket only for `true`, so a failed create without one releases no scope, which matters because a salvage session shares its coding task's id. Daytona ignores the field. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
+**Which sessions get a socket** `[confirmed]`. `SessionSpec.dockerSocket: boolean` is required, so every caller states it. A coding task's session sets it to `true`. Every other session sets it to `false`: every skills session, so a skill's Python cannot reach the daemon, and coding teardown's salvage sessions, which run only git. Local-Docker registers a proxy scope and mounts the socket only for `true`, and a failed create releases only the scope it registered: scopes are keyed by task id, which a salvage session shares with its coding task. Daytona ignores the field. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
 
 **Residuals.**
 
