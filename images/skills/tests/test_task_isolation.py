@@ -150,7 +150,8 @@ def _alive(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat") as f:
             stat = f.read()
-    except FileNotFoundError:
+    # ESRCH: reaped between the open and the read.
+    except FileNotFoundError, ProcessLookupError:
         return False
     return stat[stat.rindex(")") + 2] != "Z"
 

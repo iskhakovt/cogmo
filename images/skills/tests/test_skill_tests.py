@@ -420,7 +420,8 @@ def _gone(pid: int) -> bool:
     for _ in range(50):
         try:
             state = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0]
-        except FileNotFoundError:
+        # ESRCH: reaped between the open and the read.
+        except FileNotFoundError, ProcessLookupError:
             return True
         if state == "Z":
             return True
