@@ -67,11 +67,11 @@ interface CreateOptions {
   /** The current Cogmo instance id. Stamped into every container's `cogmo.instance` label. */
   instanceId: string;
   /**
-   * Optional socket proxy. When provided, every task container gets its own
-   * per-task Unix socket bind-mounted at `/var/run/docker.sock`; child
-   * container creation from inside the task (testcontainers, `docker
-   * compose`, buildx) flows through the proxy so labels + runtime + cgroup
-   * parent are injected automatically.
+   * Optional socket proxy. When provided, every session created with
+   * `dockerSocket` gets its own per-task Unix socket bind-mounted at
+   * `/var/run/docker.sock`; child container creation from inside the task
+   * (testcontainers, `docker compose`) flows through the proxy so labels +
+   * runtime + cgroup parent are injected automatically.
    */
   proxy?: CogmoSocketProxy;
   /**

@@ -133,9 +133,11 @@ export interface SessionSpec {
   /**
    * Whether the session reaches a Docker API. Required, so every caller
    * states it. Local-Docker mounts the task's Docker API proxy socket at
-   * `/var/run/docker.sock` only when this is set and a proxy is configured;
-   * unset, it registers no proxy scope and mounts nothing. Daytona ignores
-   * it: the host daemon is never reachable from a Daytona sandbox.
+   * `/var/run/docker.sock` only when this is `true` and a proxy is
+   * configured; with `false`, it registers no proxy scope and mounts nothing.
+   * Daytona ignores it: the host daemon is never reachable from a Daytona
+   * sandbox, and a container started inside one is the sandbox's own
+   * (`siblingContainers: "sandbox-internal"`).
    */
   dockerSocket: boolean;
 }

@@ -220,9 +220,8 @@ type ContainerRun<T> =
 
 /**
  * One salvage container: the tree at `/workspace`, `askpass` mounted when
- * given, no home volume, no Claude token. Reaped by task label afterwards,
- * whatever happened; the per-task proxy socket the backend binds into every
- * session it creates comes with it.
+ * given, no home volume, no Claude token, no Docker socket. Reaped by task
+ * label afterwards, whatever happened.
  */
 async function inSalvageContainer<T>(
   opts: TeardownWorktreeOpts,

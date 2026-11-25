@@ -518,40 +518,83 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
   });
 
-  it.each([
-    { failure: "the daemon refuses the create", failStart: false },
-    { failure: "the container does not start", failStart: true },
-  ])(
-    "a session without dockerSocket leaves the task's live proxy scope when $failure",
-    async ({ failStart }) => {
-      // The salvage session shares its coding task's id, whose scope the
-      // coding session registered.
+  /** The salvage create's failure, arranged on its own container. */
+  const SALVAGE_FAILURES: ReadonlyArray<{
+    failure: string;
+    /** `unknown`: no `cogmo_instances` row, so `insertContainer` fails on the FK. */
+    instance: "live" | "unknown";
+    arrange: (docker: ReturnType<typeof mock<DockerFacade>>, salvage: DockerContainer) => void;
+  }> = [
+    {
+      failure: "the daemon refuses the create",
+      instance: "live",
+      arrange: (docker) => docker.createContainer.mockRejectedValueOnce(new Error("refused")),
+    },
+    {
+      failure: "the row insert fails",
+      instance: "unknown",
+      arrange: (docker, salvage) => docker.createContainer.mockResolvedValueOnce(salvage),
+    },
+    {
+      failure: "the container does not start",
+      instance: "live",
+      arrange: (docker, salvage) => {
+        docker.createContainer.mockResolvedValueOnce(salvage);
+        vi.mocked(salvage.start).mockRejectedValue(new Error("boom"));
+      },
+    },
+    {
+      failure: "its row is finished mid-start",
+      instance: "live",
+      arrange: (docker, salvage) => {
+        docker.createContainer.mockResolvedValueOnce(salvage);
+        vi.mocked(salvage.start).mockImplementation(async () => {
+          await db.execute(
+            sql`UPDATE containers SET status = 'reaped', reaped_reason = 'ttl_expired', exited_at = now() WHERE docker_id = 'docker-salvage'`,
+          );
+        });
+      },
+    },
+  ];
+
+  it.each(SALVAGE_FAILURES)(
+    "a failed create without dockerSocket leaves the scope of a coding session under the same id when $failure",
+    async ({ instance, arrange }) => {
+      // The salvage session shares its coding task's id.
+      const taskId = "019d0000-0000-7000-8000-000000000e02";
       const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
-      const { docker } = fakeDocker({ dockerId: `docker-salvage-${failStart}`, failStart });
-      if (!failStart) docker.createContainer.mockRejectedValue(new Error("daemon refused"));
+      const { docker } = fakeDocker({ dockerId: "docker-coding" });
       const { proxy, registers, unregisters } = fakeProxy();
-      const sandbox = await LocalDockerSandboxClient.create({
-        docker,
-        store,
-        runInTx: tx,
-        runtime: "runc",
-        instanceId: inst.id,
-        proxy,
-      });
+      const clientOn = (instanceId: string) =>
+        LocalDockerSandboxClient.create({
+          docker,
+          store,
+          runInTx: tx,
+          runtime: "runc",
+          instanceId,
+          proxy,
+        });
+      const spec = {
+        taskId,
+        worktree: { type: "host-path", hostPath: "/tmp/wt" },
+        image: "alpine",
+        resourceLimits: RESOURCE_LIMITS,
+        expiresAt: new Date(Date.now() + 60_000),
+        network: "bridge",
+      } as const;
+      await (await clientOn(inst.id)).create({ ...spec, dockerSocket: true });
+      expect(registers).toHaveLength(2);
 
-      await expect(
-        sandbox.create({
-          taskId: "019d0000-0000-7000-8000-000000000e02",
-          worktree: { type: "host-path", hostPath: "/tmp/wt" },
-          image: "alpine",
-          resourceLimits: RESOURCE_LIMITS,
-          expiresAt: new Date(Date.now() + 60_000),
-          network: "bridge",
-          dockerSocket: false,
-        }),
-      ).rejects.toThrow(failStart ? "boom" : "daemon refused");
+      const salvage = mock<DockerContainer>();
+      Object.defineProperty(salvage, "id", { value: "docker-salvage", configurable: true });
+      arrange(docker, salvage);
+      const salvageClient = await clientOn(
+        instance === "live" ? inst.id : "019d0000-0000-7000-8000-000000000bad",
+      );
 
-      expect(registers).toEqual([]);
+      await expect(salvageClient.create({ ...spec, dockerSocket: false })).rejects.toThrow();
+
+      expect(registers).toHaveLength(2);
       expect(unregisters).toEqual([]);
     },
   );
