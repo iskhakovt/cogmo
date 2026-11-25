@@ -10,7 +10,7 @@ No second server. The health server (`src/health.ts`, today raw `node:http` on `
 
 ```
 ONE Node process (Inngest connect + agent loop + UI server) on :9090
-  GET  /health                         liveness (unchanged)
+  GET  /health                         liveness status; its checks for a valid session (liveness.md → Surface)
   POST /api/session                    exchange the derived login token for a session cookie
   DELETE /api/session                  log out (delete the session row)
   ALL  /rpc/*                          oRPC handler over the Transport namespaces
@@ -41,7 +41,7 @@ Every management screen drives the existing identity-checked `Transport` namespa
 
 ## Auth and bind
 
-Single-user, lock-the-internet-out — not multi-tenant SaaS auth. The gate is an **ordered strategy chain**, fail-closed: a request with neither a verified upstream identity nor a valid session cookie is rejected, never allowed through (load-bearing under the default all-interfaces bind — an unconfigured "allow" path would be the whole ballgame). The only unauthenticated routes are `GET /health`, the static SPA shell/assets, and `POST /api/session`.
+Single-user, lock-the-internet-out — not multi-tenant SaaS auth. The gate is an **ordered strategy chain**, fail-closed: a request with neither a verified upstream identity nor a valid session cookie is rejected, never allowed through (load-bearing under the default all-interfaces bind — an unconfigured "allow" path would be the whole ballgame). The only unauthenticated routes are `GET /health`, the static SPA shell/assets, and `POST /api/session`; `/health` adds its `checks` only when the session cookie resolves ([liveness.md → Surface](liveness.md#surface-confirmed)).
 
 - **Bind.** `WEB_HOST`/`WEB_PORT` are configurable; the web server replaces the health server on `:9090`. Default `WEB_HOST=0.0.0.0` (container convention — required for published ports and orchestrator probes); the security boundary is the publish/proxy layer — `-p 127.0.0.1:9090:9090` (host-loopback only), or no published port plus a `cloudflared` / `tailscale` sidecar reaching the container by service name. App auth is defense-in-depth on top, never the only control. A bare-metal/systemd run with no proxy sets `WEB_HOST=127.0.0.1`.
 - **Session — server-side, opaque token.** `POST /api/session` exchanges the login token for an **`httpOnly`, `SameSite=Strict`, `__Host-`-prefixed cookie** carrying a 32-byte CSPRNG opaque token; only its SHA-256 hash lands in `web_sessions`. The cookie carries no claims — the gate hashes it and looks the row up per request, so logout (`DELETE /api/session`) and "log out everywhere" are a row delete and active sessions are listable. Stateless JWT is deliberately avoided: for a first-party app the OWASP guidance, revocation, and `alg`-confusion pitfalls all favor a server-side session.

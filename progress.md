@@ -19,6 +19,7 @@
 - [x] CI pipeline — typecheck, lint, unit tests, integration tests, Docker-based e2e, Codecov coverage, JUnit test reports
 - [x] Slim Hindsight image for tests — llmock fixture replay, no Ollama dependency
 - [x] Basic health check endpoint (HTTP) — `GET /health` with IETF `application/health+json` body, bound to `0.0.0.0:9090`, liveness-only
+- [x] Liveness checks ([design/liveness.md](design/liveness.md), Rollout step 2) — the check registry, `/health`'s `warn` status with `checks` for a valid web session, the `cogmo.check.status` gauge, verdict log lines, and the Telegram receive loop's sub-state
 
 ## Phase 1: MVP — Conversation + Memory
 

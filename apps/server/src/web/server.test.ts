@@ -5,21 +5,46 @@ import { RPCLink } from "@orpc/client/fetch";
 import type { RouterClient } from "@orpc/server";
 import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import type { Database, Transactor } from "../db/index.js";
+import type { CheckResult, LivenessReadings } from "../liveness/registry.js";
 import { logger } from "../logger.js";
 import { expectDefined, resolvesWithin } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import type { CloseSessionOutcome } from "../transport/store/index.js";
+import { sessionCookieName } from "./auth/cookies.js";
 import type { webRouter } from "./rpc/router.js";
 import { createWebServer, startWebServer, type WebServer } from "./server.js";
 import { hashSessionToken } from "./session/token.js";
-import { DrizzleWebSessionStore } from "./store/index.js";
+import { DrizzleWebSessionStore, type WebSessionStore } from "./store/index.js";
 import { webSessions } from "./store/schema.js";
 
 const VALID_TOKEN = "secret-token";
+
+const T0 = new Date("2026-11-19T09:00:15.000Z");
+
+/** The registry's last tick, as a test sets it. */
+let checkResults: ReadonlyArray<CheckResult> = [];
+const liveness: LivenessReadings = {
+  status: () => (checkResults.some(({ reading }) => reading.status === "warn") ? "warn" : "pass"),
+  results: () => checkResults,
+};
+
+const WARNING: CheckResult = {
+  check: "telegram:polling",
+  componentId: "channel-1",
+  reading: {
+    status: "warn",
+    reason: "failed",
+    output: "failed: the platform refused the channel's credentials (401)",
+    observedValue: 412,
+    detail: "Unauthorized",
+  },
+  time: T0,
+};
 
 let db: Database;
 let tx: Transactor;
@@ -37,6 +62,7 @@ beforeAll(async () => {
     webTransport: mockTransportDeep({ models: { list: async () => ["gpt", "claude"] } }),
     webSessionStore: new DrizzleWebSessionStore(),
     webStreamRegistry: new WebStreamRegistry(),
+    liveness,
     runInTx: tx,
     verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
     ownerUserId,
@@ -52,6 +78,7 @@ beforeAll(async () => {
 afterEach(async () => {
   // Only sessions — keep the owner user the server's deps are bound to.
   await db.delete(webSessions);
+  checkResults = [];
 });
 
 afterAll(async () => {
@@ -108,6 +135,147 @@ describe("web server", () => {
         expect.stringMatching(/^node: /),
         expect.stringMatching(/^startedAt: /),
       ]),
+    });
+  });
+
+  describe("GET /health", () => {
+    const PASSING: CheckResult = {
+      check: "crons:heartbeat",
+      componentId: "scheduled-task-ticker",
+      reading: { status: "pass", observedValue: 23 },
+      time: T0,
+    };
+
+    it("answers the public status without checks, uncached, when a check warns", async () => {
+      checkResults = [WARNING];
+
+      const res = await fetch(`${base}/health`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const body = await res.json();
+      expect(body).toMatchObject({ status: "warn" });
+      expect(body).not.toHaveProperty("checks");
+    });
+
+    it("answers pass with no checks registered", async () => {
+      const res = await fetch(`${base}/health`, { headers: { cookie: await login() } });
+
+      expect(await res.json()).toMatchObject({ status: "pass", checks: {} });
+    });
+
+    it("adds the checks for a valid session, grouped by check, with no detail", async () => {
+      checkResults = [WARNING, PASSING];
+
+      const res = await fetch(`${base}/health`, { headers: { cookie: await login() } });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const body = await res.json();
+      expect(body).toMatchObject({ status: "warn" });
+      expect(body).toHaveProperty("checks", {
+        "telegram:polling": [
+          {
+            componentId: "channel-1",
+            componentType: "component",
+            status: "warn",
+            reason: "failed",
+            observedValue: 412,
+            observedUnit: "s",
+            time: "2026-11-19T09:00:15.000Z",
+            output: "failed: the platform refused the channel's credentials (401)",
+          },
+        ],
+        "crons:heartbeat": [
+          {
+            componentId: "scheduled-task-ticker",
+            componentType: "component",
+            status: "pass",
+            observedValue: 23,
+            observedUnit: "s",
+            time: "2026-11-19T09:00:15.000Z",
+          },
+        ],
+      });
+      expect(JSON.stringify(body)).not.toContain("Unauthorized");
+    });
+
+    it("answers the public body for a cookie that names no session", async () => {
+      checkResults = [WARNING];
+
+      const res = await fetch(`${base}/health`, {
+        headers: { cookie: `${sessionCookieName(true)}=not-a-session` },
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).not.toHaveProperty("checks");
+    });
+
+    describe("with a session lookup that doesn't resolve", () => {
+      let lookupServer: Server;
+      let lookupBase: string;
+      const findValidByTokenHash = vi.fn<WebSessionStore["findValidByTokenHash"]>();
+
+      beforeAll(async () => {
+        const webSessionStore = mock<WebSessionStore>({ findValidByTokenHash });
+        // A lookup that never settles would hold a PGlite transaction open for the rest of the file.
+        const fakeRunInTx: Transactor = (cb) => cb({ __mockTx: true } as never);
+        ({ server: lookupServer } = createWebServer({
+          webTransport: null,
+          webSessionStore,
+          webStreamRegistry: new WebStreamRegistry(),
+          liveness,
+          runInTx: fakeRunInTx,
+          verifyLoginToken: () => false,
+          ownerUserId,
+          sessionTtlDays: 30,
+          cookieSecure: true,
+          staticRoot: "/nonexistent-cogmo-dist",
+          webDevAllowOrigin: null,
+        }));
+        await new Promise<void>((resolve) => lookupServer.listen(0, "127.0.0.1", resolve));
+        lookupBase = `http://127.0.0.1:${(lookupServer.address() as AddressInfo).port}`;
+      });
+
+      afterAll(async () => {
+        await new Promise<void>((resolve) => lookupServer.close(() => resolve()));
+      });
+
+      it("answers the public body when the lookup rejects", async () => {
+        findValidByTokenHash.mockRejectedValueOnce(new Error("database down"));
+        const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+        try {
+          const res = await fetch(`${lookupBase}/health`, {
+            headers: { cookie: `${sessionCookieName(true)}=some-token` },
+          });
+
+          expect(res.status).toBe(200);
+          expect(await res.json()).not.toHaveProperty("checks");
+          expect(warn).toHaveBeenCalledWith(
+            { err: expect.any(Error) },
+            expect.stringContaining("session lookup failed"),
+          );
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it("answers the public body when the lookup passes its deadline", async () => {
+        findValidByTokenHash.mockReturnValueOnce(new Promise(() => {}));
+        const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+        try {
+          const started = performance.now();
+          const res = await fetch(`${lookupBase}/health`, {
+            headers: { cookie: `${sessionCookieName(true)}=some-token` },
+          });
+
+          expect(res.status).toBe(200);
+          expect(await res.json()).not.toHaveProperty("checks");
+          expect(performance.now() - started).toBeGreaterThanOrEqual(1_900);
+        } finally {
+          warn.mockRestore();
+        }
+      });
     });
   });
 
@@ -194,6 +362,7 @@ describe("web server", () => {
         webTransport: null,
         webSessionStore: new DrizzleWebSessionStore(),
         webStreamRegistry: new WebStreamRegistry(),
+        liveness,
         runInTx: tx,
         verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
         ownerUserId,
@@ -259,6 +428,7 @@ describe("web server", () => {
           webTransport: null,
           webSessionStore: new DrizzleWebSessionStore(),
           webStreamRegistry: new WebStreamRegistry(),
+          liveness,
           runInTx: tx,
           verifyLoginToken: () => false,
           ownerUserId,
@@ -300,6 +470,7 @@ describe("web chat routes", () => {
       webTransport: transport,
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: chatRegistry,
+      liveness,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,
@@ -578,6 +749,7 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
       webTransport: mockTransportDeep(),
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: new WebStreamRegistry(),
+      liveness,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,
@@ -647,6 +819,7 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
       webTransport: mockTransportDeep(),
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: new WebStreamRegistry(),
+      liveness,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,

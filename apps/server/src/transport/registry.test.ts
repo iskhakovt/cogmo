@@ -1,10 +1,57 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../db/index.js";
-import { mockSecretsStore } from "../test/factories.js";
-import { resolveCredentialSecrets } from "./registry.js";
+import { inboundArrived } from "../inngest/events.js";
+import { logger } from "../logger.js";
+import {
+  mockAgentStore,
+  mockAttachmentStore,
+  mockInngest,
+  mockSecretsStore,
+  mockTransportStore,
+} from "../test/factories.js";
+import { resolveCredentialSecrets, startChannels } from "./registry.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+
+describe("startChannels", () => {
+  it("reports a row whose type this build has no adapter for, and starts nothing for it", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      const transportStore = mockTransportStore({
+        getAllChannels: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "dc-1", type: "discord", credentials: {}, identityMode: "fixed" },
+          ]),
+      });
+
+      const result = await startChannels({
+        defaultUserId: "user-1",
+        defaultProfileId: "profile-1",
+        runInTx: fakeRunInTx,
+        transportStore,
+        agentStore: mockAgentStore(),
+        inngest: mockInngest(),
+        inboundArrived,
+        attachments: mockAttachmentStore(),
+        idleTimeoutMs: 60_000,
+        boundary: { promptTimeoutMs: 60_000, minUserTurns: 1 },
+        secretsStore: mockSecretsStore(),
+      });
+
+      expect(result.unsupported).toEqual([{ channelType: "discord", channelId: "dc-1" }]);
+      expect(result.adapters).toEqual([]);
+      expect(result.adapterMap.size).toBe(0);
+      expect(warn).toHaveBeenCalledWith(
+        { type: "discord", channelId: "dc-1" },
+        "unknown channel type",
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
 
 describe("resolveCredentialSecrets", () => {
   it("resolves SecretName fields to their plaintext values", async () => {

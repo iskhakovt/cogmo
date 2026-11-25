@@ -662,6 +662,7 @@ export function mockAdapter(overrides?: Partial<Adapter>): Adapter {
   return {
     deliver: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
+    liveness: () => null,
     ...overrides,
   };
 }
@@ -968,6 +969,7 @@ export function mockStreamHandle(overrides?: Partial<StreamHandle>): StreamHandl
 export function mockStreamingAdapter(overrides?: Partial<StreamingAdapter>): StreamingAdapter {
   return {
     stop: vi.fn().mockResolvedValue(undefined),
+    liveness: () => null,
     openStream: vi.fn().mockResolvedValue(mockStreamHandle()),
     ...overrides,
   };

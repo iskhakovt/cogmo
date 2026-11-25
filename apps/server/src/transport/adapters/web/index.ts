@@ -144,6 +144,11 @@ class WebUiAdapter implements StreamingAdapter {
     this.#active.clear();
     this.#finished.clear();
   }
+
+  /** No receive loop: tabs reach the web server, which answers `/health` itself. */
+  liveness(): null {
+    return null;
+  }
 }
 
 /**

@@ -4,12 +4,59 @@ import type { StreamEvent } from "../llm/types.js";
 import type { OutboundVoice, RenderedMessage } from "./adapter-module.js";
 import type { Transport } from "./transport.js";
 
+/** Why a receive loop is retrying: a 409 backoff (`conflict`), or an outcome the platform client retries itself. */
+export type RetryCause =
+  | "conflict"
+  | "network"
+  | "rate_limited"
+  | "server_error"
+  | "client_error"
+  | "bad_reply"
+  | "unknown";
+
+/** `code` is normalized and is all `/health` shows; `detail` is the platform's text, token redacted, for logs. */
+export interface ChannelError {
+  readonly code: string;
+  readonly detail: string | null;
+}
+
+/** Where a channel's receive loop is. Times are monotonic ms (`performance.now()`). */
+export type LoopState =
+  | { readonly kind: "starting" }
+  | { readonly kind: "receiving" }
+  | {
+      readonly kind: "retrying";
+      readonly since: number;
+      readonly cause: RetryCause;
+      readonly error: ChannelError;
+    }
+  | {
+      readonly kind: "failed";
+      readonly reason: "unauthorized" | "rejected" | "ended";
+      readonly error: ChannelError | null;
+    }
+  | { readonly kind: "stopped" };
+
+/** A channel's receive loop, projected from its adapter's state (design/liveness.md → Channel contract). */
+export interface ChannelLiveness {
+  readonly state: LoopState;
+  /** The later of the last valid update batch or finished update, and the current run's start or backoff. */
+  readonly progressAt: number;
+  /** When handling the update in hand began; null with none in hand. */
+  readonly handlingSince: number | null;
+  /** Conflict restarts in a row; zero once a run resets the streak. */
+  readonly conflicts: number;
+  readonly thresholds: { readonly staleAfterMs: number; readonly wedgedAfterMs: number };
+}
+
 /**
  * Running adapter instance — handles platform-specific delivery.
  * Batch-only: receives the complete message after persist.
  */
 export interface Adapter {
   stop(): Promise<void>;
+  /** The receive loop's projection; `null` for an adapter with no loop of its own. */
+  liveness(): ChannelLiveness | null;
   deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void>;
   /**
    * Optional voice delivery — adapters that support voice messages
@@ -26,6 +73,8 @@ export interface Adapter {
  */
 export interface StreamingAdapter {
   stop(): Promise<void>;
+  /** Same contract as `Adapter.liveness`. */
+  liveness(): ChannelLiveness | null;
   openStream(platformAddress: string, runId: string, opts?: StreamOpts): Promise<StreamHandle>;
   /** Same shape as Adapter.sendVoice — optional capability flag. */
   sendVoice?(platformAddress: string, audio: OutboundVoice): Promise<void>;

@@ -9,6 +9,8 @@ export interface ServeResources {
   /** Ends every connector session and closes the connector server; `null` when none runs. */
   connectors: { close(): Promise<void> } | null;
   adapters: ReadonlyArray<{ channelType: string; adapter: { stop(): Promise<void> } }>;
+  /** Clears the liveness registry's tick. */
+  liveness: { stop(): void };
   /** Stops the sweep of coding progress streams. */
   codingStreams: { close(): void };
   mcpRegistry: { stop(): Promise<void> };
@@ -40,7 +42,7 @@ export type StepOutcome =
 /**
  * Tear down `cogmo serve`: the web server first, so no request reaches a
  * stopped dependency, then the connector server, the channel adapters
- * concurrently, the coding streams' sweep, MCP, the skills pool, the sandbox,
+ * concurrently, the liveness tick, the coding streams' sweep, MCP, the skills pool, the sandbox,
  * and the instance row.
  * Each step is bounded, and one that overruns or throws doesn't stop the
  * next. The instance row stays open when the skills pool or sandbox step
@@ -51,8 +53,17 @@ export async function shutdownServe(
   resources: ServeResources,
   bounds: ShutdownBounds,
 ): Promise<ReadonlyArray<StepOutcome>> {
-  const { web, connectors, adapters, codingStreams, mcpRegistry, skills, sandbox, closeInstance } =
-    resources;
+  const {
+    web,
+    connectors,
+    adapters,
+    liveness,
+    codingStreams,
+    mcpRegistry,
+    skills,
+    sandbox,
+    closeInstance,
+  } = resources;
   const { webDrainMs, stepMs } = bounds;
   const webOutcome = await bounded("web server", webDrainMs + stepMs, () => web.close(webDrainMs));
   const connectorOutcomes = connectors
@@ -63,6 +74,7 @@ export async function shutdownServe(
       bounded(`${channelType} adapter`, stepMs, () => adapter.stop()),
     ),
   );
+  const livenessOutcome = await bounded("liveness", stepMs, async () => liveness.stop());
   const streamsOutcome = await bounded("coding streams", stepMs, async () => codingStreams.close());
   const mcpOutcome = await bounded("mcp", stepMs, () => mcpRegistry.stop());
   const skillsOutcome = await bounded("skills pool", stepMs, () => skills.shutdown());
@@ -87,6 +99,7 @@ export async function shutdownServe(
     webOutcome,
     ...connectorOutcomes,
     ...adapterOutcomes,
+    livenessOutcome,
     streamsOutcome,
     mcpOutcome,
     skillsOutcome,
@@ -99,7 +112,7 @@ export async function shutdownServe(
 export function serveResources(
   boot: Pick<CoreDeps, "runInTx" | "sandboxStore"> &
     Pick<SandboxDeps, "sandbox" | "sandboxInstanceId"> &
-    Pick<RuntimeDeps, "adapters" | "codingStreams" | "mcpRegistry"> &
+    Pick<RuntimeDeps, "adapters" | "liveness" | "codingStreams" | "mcpRegistry"> &
     SkillRunnerHandle,
   web: ServeResources["web"],
   connectors: ServeResources["connectors"],
@@ -109,6 +122,7 @@ export function serveResources(
     web,
     connectors,
     adapters: boot.adapters,
+    liveness: boot.liveness,
     codingStreams: boot.codingStreams,
     mcpRegistry: boot.mcpRegistry,
     skills: boot.skillRunner,

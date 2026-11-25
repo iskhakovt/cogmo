@@ -19,6 +19,7 @@ import type { DrizzleAgentStore } from "../agent/store/index.js";
 import type { DrizzleConnectorStore } from "../connector/store/index.js";
 import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Database, Transactor } from "../db/index.js";
+import type { Liveness } from "../liveness/registry.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { LlmProviderResolver } from "../llm/resolver.js";
 import type { McpRegistryImpl } from "../mcp/registry.js";
@@ -251,6 +252,8 @@ export interface RuntimeDeps {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   functions: any[];
   adapters: Awaited<ReturnType<typeof startChannels>>["adapters"];
+  /** Every check, read by `/health` and the gauge; `cogmo serve` stops its tick on shutdown. */
+  liveness: Liveness;
   mcpRegistry: McpRegistryImpl;
   /**
    * Web-scoped Transport for the UI server's oRPC layer. `null` is

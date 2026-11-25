@@ -9,12 +9,13 @@ import type { CoreDeps, RuntimeDeps } from "./stages.js";
 
 export function startWebUi(
   boot: Pick<CoreDeps, "runInTx" | "webSessionStore" | "webLoginToken" | "user"> &
-    Pick<RuntimeDeps, "webTransport" | "webStreamRegistry">,
+    Pick<RuntimeDeps, "webTransport" | "webStreamRegistry" | "liveness">,
 ): Promise<WebServer> {
   return startWebServer({
     webTransport: boot.webTransport,
     webSessionStore: boot.webSessionStore,
     webStreamRegistry: boot.webStreamRegistry,
+    liveness: boot.liveness,
     runInTx: boot.runInTx,
     verifyLoginToken: (candidate) => verifyWebLoginToken(candidate, boot.webLoginToken),
     ownerUserId: boot.user.id,

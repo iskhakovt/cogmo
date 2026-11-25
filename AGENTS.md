@@ -109,6 +109,7 @@ Other tracking docs:
 | `src/skills/` | Skill library — git-backed repo, dispatcher, Pyodide and sysbox workers, `ctx` handler, cron, `skills` store | Domain logic — user skills and their runtime |
 | `src/sandbox/` | Container sandbox — supervisor, Docker API proxy, Daytona backend, reaper, lineage store | Domain logic — isolated execution for coding and skills |
 | `src/voice/` | TTS/STT providers, voice-mode resolution | Domain logic — voice input and output |
+| `src/liveness/` | Check registry and its tick, `channelCheck` over an adapter's `liveness()`, the `cogmo.check.status` gauge and verdict log lines | Domain logic — work that fails by not happening, as a signal (design/liveness.md); imports only the `ChannelLiveness` contract from `transport/` |
 | `src/secrets/` | Encrypted secrets store (AES-256-GCM, HKDF), GitHub/SSH credential helpers | Domain logic — credentials at rest |
 | `src/setup/` | `cogmo setup` wizard, non-interactive setup, seed, reset | Transport edge — operator setup over the domain use cases |
 | `src/boot/` | Staged `cogmo serve` bootstrap (core → sandbox → skills → runtime) and shutdown | Composition root — wires implementations to interfaces; no domain logic |

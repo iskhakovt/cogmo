@@ -80,16 +80,25 @@ export interface RegistryDeps {
   webStream?: WebStreamRegistry;
 }
 
-/** A started channel's adapter and the channel type it serves. */
+/** A started channel's adapter, its row and the channel type it serves. */
 export interface ChannelAdapter {
   channelType: string;
+  channelId: string;
   adapter: Adapter | StreamingAdapter;
+}
+
+/** A channel row whose type this build has no adapter for. */
+export interface UnsupportedChannel {
+  channelType: string;
+  channelId: string;
 }
 
 export interface RegistryResult {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   functions: any[];
   adapters: ChannelAdapter[];
+  /** Rows skipped with a warning; each gets a liveness entry that always warns. */
+  unsupported: UnsupportedChannel[];
   adapterMap: Map<string, AdapterEntry>;
 }
 
@@ -98,13 +107,15 @@ export interface RegistryResult {
  *
  * Table-driven — matches channel.type to registered adapter modules.
  * Each adapter provides an Adapter instance + optional Inngest functions.
- * Returns an adapterMap for the DeliveryRouter.
+ * Reports every row it read, started or unsupported, and an adapterMap for
+ * the DeliveryRouter.
  */
 export async function startChannels(deps: RegistryDeps): Promise<RegistryResult> {
   const { transportStore, agentStore } = deps;
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
   const adapters: ChannelAdapter[] = [];
+  const unsupported: UnsupportedChannel[] = [];
   const adapterMap = new Map<string, AdapterEntry>();
 
   const channels = await deps.runInTx((tx) => transportStore.getAllChannels(tx));
@@ -113,6 +124,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
     const mod = adaptersByType.get(channel.type);
     if (!mod) {
       logger.warn({ type: channel.type, channelId: channel.id }, "unknown channel type");
+      unsupported.push({ channelType: channel.type, channelId: channel.id });
       continue;
     }
 
@@ -172,7 +184,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.webStream && { webStream: deps.webStream }),
     });
 
-    adapters.push({ channelType: channel.type, adapter: result.adapter });
+    adapters.push({ channelType: channel.type, channelId: channel.id, adapter: result.adapter });
     adapterMap.set(channel.id, {
       adapter: result.adapter,
       renderOutput: mod.renderOutput,
@@ -181,7 +193,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
   }
 
   logger.info({ count: channels.length }, "channel adapters started");
-  return { functions, adapters, adapterMap };
+  return { functions, adapters, unsupported, adapterMap };
 }
 
 /**

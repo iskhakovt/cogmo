@@ -4,8 +4,8 @@ Some of cogmo's work fails by not happening: a Telegram receive loop that has ex
 
 **Decisions** (the owner, 2026-11-22):
 
-1. Adapter contract: `liveness(): ChannelLiveness | null`, required on `Adapter` and `StreamingAdapter`; `startChannels` reports every row ([Channel contract](#channel-contract-proposed)).
-2. Surface: `/health`'s top-level `status` stays public, and `checks` appears only for a valid web session ([Surface](#surface-proposed)).
+1. Adapter contract: `liveness(): ChannelLiveness | null`, required on `Adapter` and `StreamingAdapter`; `startChannels` reports every row ([Channel contract](#channel-contract-confirmed)).
+2. Surface: `/health`'s top-level `status` stays public, and `checks` appears only for a valid web session ([Surface](#surface-confirmed)).
 3. Polling state: the supervisor's `PollingState` gains a receive sub-state and its projection's fields ([Telegram receive loop](#telegram-receive-loop-proposed)).
 4. Cron storage: `src/liveness/` with `cron_heartbeats` and its boot baseline ([Cron heartbeats](#cron-heartbeats-proposed)), plus a `cogmo.cron.last_tick` gauge.
 5. Cron builder: `createCronFunction` with a final heartbeat step; `sandbox-reaper` and `model-catalog-refresh` leave design/architecture.md's single-step list; replayed log lines are accepted.
@@ -23,7 +23,7 @@ Some of cogmo's work fails by not happening: a Telegram receive loop that has ex
 | Connector server | No: an inbound gRPC server; a connector that never dials in surfaces as `unavailable` at dispatch | none |
 | MCP pool, skills warm pool | Fail per call; pool spawn failures are a `todo.md` entry | none |
 
-## Surface `[proposed]`
+## Surface `[confirmed]`
 
 One in-process check registry, read three ways:
 
@@ -49,7 +49,7 @@ The public body, and the same with a session:
   "checks": {
     "telegram:polling": [{ "componentId": "0194…", "componentType": "component", "status": "warn",
       "reason": "failed", "observedValue": 412, "observedUnit": "s", "time": "2026-11-19T09:00:15.000Z",
-      "output": "failed: the Bot API refused the bot token (401)" }],
+      "output": "failed: the platform refused the channel's credentials (401)" }],
     "crons:heartbeat": [{ "componentId": "scheduled-task-ticker", "componentType": "component",
       "status": "pass", "observedValue": 23, "observedUnit": "s", "time": "2026-11-19T09:00:15.000Z" }]
   }
@@ -73,7 +73,7 @@ The public body, and the same with a session:
 | Inngest's run history | No documented self-hosted API returns a function's last run, and it would read the system whose failure #427 was. |
 | Persisting channel state | [Not persisted](#not-persisted). |
 
-## Channel contract `[proposed]`
+## Channel contract `[confirmed]`
 
 `Adapter` and `StreamingAdapter` each require `liveness(): ChannelLiveness | null`, both because `AdapterSetupResult.adapter` is either and web is streaming-only; Telegram's one method satisfies both. An adapter with a receive loop returns a projection of its own state; `null` means no loop, and direct and web return it explicitly.
 
