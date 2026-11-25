@@ -547,7 +547,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
   - waits on logs, exec and HTTP;
   - `GET /networks/bridge` for the gateway, and `exposeHostPort`'s connect to `bridge`.
 - Ryuk needs a host-path bind of the socket, which is already denied, and optionally `Privileged`. Cogmo sets `TESTCONTAINERS_RYUK_DISABLED=true` in a coding session's env (`SessionSpec.env`), and the cascade does Ryuk's job.
-- The skills container-tier runner never opens the socket.
+- Skills sessions have no socket (`dockerSocket: false`).
 - No workflow relies on proxy-created children, which the orphan pass reaps (Enforced today).
 
 **Test plan.** Unit tests in `src/sandbox/proxy/` run on `proxy.test.ts`'s fake daemon socket. Each asserts the status, and for a rejection that nothing reached the daemon.
@@ -643,10 +643,10 @@ Networks and volumes have a TTL pass of their own, whose update is unconditional
 
 Task startup (`LocalDockerSandboxClient.create`):
 
-1. The proxy registers `${SANDBOX_PROXY_SOCKET_DIR}/T.sock` with a placeholder scope (the task container's docker id is not known yet) so the container can mount it at `/var/run/docker.sock` from its first instant.
-2. The daemon creates the task container: `HostConfig.Runtime`, labels, binds, cgroup parent. A failure releases the proxy registration.
-3. A `containers` row is inserted with the daemon's `docker_id`, `status = 'starting'`. A failure force-removes the container and releases the registration before the error propagates.
-4. The proxy scope is upserted with the row id and docker id, for ownership checks on `DELETE` etc.
+1. For a session created with `dockerSocket: true`, the proxy registers `${SANDBOX_PROXY_SOCKET_DIR}/T.sock` with a placeholder scope (the task container's docker id is not known yet) so the container can mount it at `/var/run/docker.sock` from its first instant.
+2. The daemon creates the task container: `HostConfig.Runtime`, labels, binds, cgroup parent. A failure releases the scope it registered, if any.
+3. A `containers` row is inserted with the daemon's `docker_id`, `status = 'starting'`. A failure force-removes the container and releases the scope it registered, if any, before the error propagates.
+4. A registered scope is upserted with the row id and docker id, for ownership checks on `DELETE` etc.
 5. The daemon starts the container and the row moves `starting → running`. A start failure reaps the container (`start_failed`).
 
 Task teardown (`deleteByTaskId`):
@@ -708,13 +708,13 @@ The transition is `SandboxStore.transitionContainerStatus(tx, { id, at } & Conta
 
 | Crash point or race | Row | Daemon | Why safe, or the residual |
 |-|-|-|-|
-| Daemon create succeeds, row insert fails | none | container | `create` force-removes it and releases the proxy scope. If the remove fails too, the orphan pass removes a labelled container with no row on its next tick (`[proposed]` once the grace window has passed) |
+| Daemon create succeeds, row insert fails | none | container | `create` force-removes it and releases the scope it registered, if any. If the remove fails too, the orphan pass removes a labelled container with no row on its next tick (`[proposed]` once the grace window has passed) |
 | Process dies between create and insert | none | container | Orphan pass: no row ⇒ orphan |
 | A reaper tick lists the daemon while a live `create` is between `createContainer` and the row insert | none, yet | killed by the orphan pass | This is a residual, under the same rule as the proxy child. The insert then succeeds, `start` 404s, and the start-failure reap marks the row `reaped` (its kill and remove 404s are tolerated), so the `create-container` step fails and retries. The window is one DB round trip against a once-a-minute tick. `[proposed]` The orphan pass's grace window closes it |
 | The `create-container` step retries after `create` threw | the failed attempt's, terminal or absent | removed by the failed attempt | The retry creates a new container and row for the same task; `tryResumeByTaskId` skips terminal rows. What a failed attempt could not remove follows its own row here (`start` throws; insert fails) |
 | Process dies between insert and `running` | `starting` | created or running | A crashed instance keeps `stopped_at` NULL, so the reaper's orphan pass counts it live and its rows are never orphans. The next boot's `reconcileCrashedInstances` reaps every container labelled with an open prior instance, then closes those instance rows, so the orphan pass retries anything reconcile could not kill. `tryResumeByTaskId` resumes only a daemon container that reports `running` |
 | `start` throws | `reaped` | removed | `start_failed`. Residual: if the kill + remove throws, the row stays `starting` over a stopped container, and the TTL pass reaps it at expiry |
-| `starting → running` is `stale` | `reaped` or `exited` | removed by `create` | A TTL pass (short TTL) or a cascade reaped the row mid-start, or the stale pass found it missing. `create` kills and removes the container it started — no pass looks at a terminal row again — releases the proxy scope and throws. Residual: if the daemon refuses that kill, the container stays on the daemon under a terminal row and a live instance label, which the TTL, stale and orphan passes all skip until the instance row closes |
+| `starting → running` is `stale` | `reaped` or `exited` | removed by `create` | A TTL pass (short TTL) or a cascade reaped the row mid-start, or the stale pass found it missing. `create` kills and removes the container it started — no pass looks at a terminal row again — releases the scope it registered, if any, and throws. Residual: if the daemon refuses that kill, the container stays on the daemon under a terminal row and a live instance label, which the TTL, stale and orphan passes all skip until the instance row closes |
 | A second live process shares the database | its rows | its containers | Invariant: one `cogmo serve` per database. Reconcile reaps every container labelled with an *open* instance other than its own and closes those rows, so a second live process — old and new serves overlapping on a deploy, or a `cogmo skills` command whose `bootstrapCliSandbox` row is open when a serve boots — loses its containers, and once its row is closed the orphan pass kills every container it creates on the next tick. The CLI runs no reconcile, so it never closes serve's row, and it closes its own on exit; a crashed CLI's row stays open, and its last session lingers until the next serve boot ([skills.md → Register-time CPython checks](skills.md#register-time-cpython-checks-confirmed-except-where-marked)). A liveness check by host and pid is the follow-up (`todo.md`) |
 | `deleteByTaskId` or a TTL pass reads a `starting` row, then `create` commits `starting → running` before the reap's transition | `reaped` | removed by the reap | The reap's guard is `status <> 'reaped'`, so it lands. Residual: `create` has already handed back a session over a removed container; the task's first exec fails with a 404 and the task fails rather than running on a removed container |
 | `deleteByTaskId` and a reaper pass race on one row | `reaped` once | removed once; the second kill/remove sees 304/409/404, which both tolerate | The second transition is `stale`, logged at debug. `exited_at` is the first writer's |
