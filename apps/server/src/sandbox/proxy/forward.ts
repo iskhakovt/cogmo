@@ -288,11 +288,17 @@ function relayBuffered(
           );
           res.end(body);
         },
-        (rejection) => respondRejection(res, rejection),
+        (rejection) => {
+          // A daemon connection that failed mid-reply has been answered
+          // already, by the forward's error listener, or has no one to answer.
+          if (res.headersSent || res.destroyed) return;
+          respondRejection(res, rejection);
+        },
       );
   });
   relayed.catch((cause: unknown) => {
-    log.error({ err: cause }, "relaying a buffered daemon reply failed");
+    const aborted = cause instanceof Error && isAbortError(cause);
+    if (!aborted) log.error({ err: cause }, "relaying a buffered daemon reply failed");
     res.destroy();
   });
 }

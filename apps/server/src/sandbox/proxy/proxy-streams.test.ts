@@ -553,14 +553,15 @@ describe("the checks on an upgrade", () => {
   });
 
   it("answers 403 to an upgrade on an unlisted route, contacting the daemon not at all", async () => {
+    const path = "/containers/cogmo-task-own/update";
     log.info.mockClear();
 
-    const reply = await h.rawExchange(upgradeRequest("GET", "/swarm"));
+    const reply = await h.rawExchange(upgradeRequest("POST", path));
 
     expect(reply).toMatch(/^HTTP\/1\.1 403 /);
     expect(log.info).toHaveBeenCalledWith(
       expect.objectContaining({
-        path: "/swarm",
+        path,
         rejection: expect.objectContaining({ kind: "denied" }),
       }),
       "proxy request rejected",
@@ -688,6 +689,39 @@ describe("a switched upgrade", () => {
     client.socket.write(upgradeStart(id, BODY));
 
     await expectReleasedAfter(client, /^HTTP\/1\.1 101 [\s\S]*\r\n\r\nfinal-output\n$/);
+  });
+
+  it("drops the hop-by-hop headers and those Connection names from the preamble, keeping Upgrade", async () => {
+    const id = await createExec();
+
+    await h.upgradeExchange(
+      [
+        `POST /exec/${id}/start HTTP/1.1`,
+        "Host: docker",
+        "Connection: Upgrade, X-Hop-Secret",
+        "Upgrade: tcp",
+        "X-Hop-Secret: 1",
+        "Keep-Alive: timeout=5",
+        "Proxy-Connection: keep-alive",
+        "TE: trailers",
+        "Trailer: X-Sum",
+        "X-Kept: 1",
+        "Content-Length: 0",
+        "",
+        "",
+      ].join("\r\n"),
+    );
+
+    const start = expectDefined(
+      h.daemon.requests().find((r) => r.url === `/exec/${id}/start`),
+      "the upgrade",
+    );
+    expect(start.headers).toEqual({
+      host: "docker",
+      upgrade: "tcp",
+      "x-kept": "1",
+      connection: "Upgrade, close",
+    });
   });
 
   it("forwards a header octet outside ASCII as itself", async () => {
@@ -923,6 +957,26 @@ describe("streams and relays", () => {
 
     expect(reply).toMatch(/^HTTP\/1\.1 400 /);
     expect(h.received()).toEqual([]);
+  });
+
+  it("answers a teardown during a container list read whole once, logging no error", async () => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.startsWith("/containers/json")) return API(req, res, raw);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('[{"Id":');
+    });
+    log.error.mockClear();
+    const client = await halfOpenClient();
+    client.socket.write("GET /containers/json HTTP/1.1\r\nHost: docker\r\n\r\n");
+    await vi.waitFor(() => expect(reached("/containers/json")).toHaveLength(1));
+    await settle(100);
+
+    await resolvesWithin(h.proxy.unregisterTask(TASK_ID), SETTLE_MS, "the teardown to finish");
+    await settle(100);
+
+    expect(log.error).not.toHaveBeenCalled();
+    expect(client.received().match(/HTTP\/1\.1 \d{3} /g) ?? []).not.toHaveLength(2);
+    client.socket.destroy();
   });
 
   it("answers 502 to a forwarded stream whose daemon connection fails", async () => {

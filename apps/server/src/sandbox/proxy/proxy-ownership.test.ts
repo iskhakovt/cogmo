@@ -17,6 +17,7 @@ import {
   SALVAGE_ROW,
   SIBLING,
   SIBLING_SCOPE,
+  TASK_ID,
   TASK_ROWS,
   UNKNOWN_ID,
   upgradeRequest,
@@ -231,8 +232,8 @@ describe("container ownership", () => {
 
     h.expectRejected(r, 500, []);
     expect(log.error).toHaveBeenCalledWith(
-      expect.objectContaining({ path: "/containers/cogmo-task-own/json" }),
-      "proxy checks failed",
+      expect.objectContaining({ taskId: TASK_ID, path: "/containers/cogmo-task-own/json" }),
+      "proxy request failed",
     );
   });
 
@@ -480,8 +481,8 @@ describe("upgraded streams", () => {
     expect(reply).toMatch(/^HTTP\/1\.1 500 /);
     expect(h.received()).toEqual([]);
     expect(log.error).toHaveBeenCalledWith(
-      expect.objectContaining({ path: "/containers/cogmo-task-own/attach" }),
-      "proxy upgrade checks failed",
+      expect.objectContaining({ taskId: TASK_ID, path: "/containers/cogmo-task-own/attach" }),
+      "proxy upgrade failed",
     );
   });
 

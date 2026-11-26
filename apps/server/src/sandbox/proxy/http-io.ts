@@ -214,7 +214,9 @@ function withoutHopByHop(h: http.IncomingHttpHeaders): Record<string, string | s
 
 /**
  * An HTTP/1.1 request preamble (request line, headers, empty line) under
- * `path`, for an upgrade the proxy raw-pipes, followed by `body`.
+ * `path`, for an upgrade the proxy raw-pipes, followed by `body`. Its
+ * headers are a normal forward's, without the hop-by-hop ones or those the
+ * client's `Connection` names, and with `Upgrade` kept.
  *
  * `Connection: Upgrade, close` asks the daemon to close the connection once
  * it has answered a request it does not upgrade: a detached exec start (200)
@@ -229,13 +231,10 @@ export function buildUpgradePreamble(
   path: string,
   body: Buffer,
 ): Buffer {
-  const kept = R.omit(cloneHeaders(req.headers), [
-    "connection",
-    "content-length",
-    "transfer-encoding",
-  ]);
+  const kept = R.omit(withoutHopByHop(req.headers), ["content-length"]);
   const headers = Object.entries({
     ...kept,
+    ...(req.headers.upgrade !== undefined && { upgrade: req.headers.upgrade }),
     connection: "Upgrade, close",
     ...(body.length > 0 && { "content-length": String(body.length) }),
   }).flatMap(([name, value]) =>

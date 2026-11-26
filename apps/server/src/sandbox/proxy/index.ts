@@ -362,7 +362,10 @@ export class CogmoSocketProxy {
       .catch((cause: unknown) => {
         // The task's abort can surface anywhere in the checks: teardown, not a fault.
         if (!signal.aborted) {
-          log.error({ err: cause, taskId: scope.taskId, path: pathOf(req) }, "proxy checks failed");
+          log.error(
+            { err: cause, taskId: scope.taskId, path: pathOf(req) },
+            "proxy request failed",
+          );
         }
         respondInternalError(res, `Cogmo proxy: ${describeError(cause)}`);
       });
@@ -449,7 +452,10 @@ export class CogmoSocketProxy {
           )
           .catch((cause: unknown) => {
             if (!upstream.signal.aborted) {
-              log.error({ err: cause, path: pathOf(req) }, "proxy upgrade checks failed");
+              log.error(
+                { err: cause, taskId: scope.taskId, path: pathOf(req) },
+                "proxy upgrade failed",
+              );
             }
             writeRawStatusAndDestroy(clientSocket, 500, `Cogmo proxy: ${describeError(cause)}`);
           });
