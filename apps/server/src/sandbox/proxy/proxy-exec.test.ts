@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
+import { DOCKER_CLI_EXEC_REQUEST } from "../../test/docker-cli-exec-request.js";
 import {
   dockerApi,
   type FakeDockerDaemon,
@@ -91,6 +92,7 @@ describe("exec policy", () => {
       AttachStderr: true,
       DetachKeys: "ctrl-p,ctrl-q",
       ConsoleSize: [24, 80],
+      Detach: true,
     };
     const r = await exec(body, "/containers/abc/exec");
 
@@ -102,7 +104,6 @@ describe("exec policy", () => {
   it.each([
     ["Privileged", true, false],
     ["FutureField", "x", ""],
-    ["Detach", true, false],
   ])("denies %s when non-zero and drops it when zero", async (field, nonZero, zero) => {
     const denied = await exec({ Cmd: ["id"], [field]: nonZero }, "/containers/abc/exec");
     await expectRejected(denied, 403);
@@ -111,6 +112,60 @@ describe("exec policy", () => {
     const passed = await exec({ Cmd: ["id"], [field]: zero }, "/containers/abc/exec");
     expect(passed.status, passed.body).toBe(201);
     expect(forwardedBody()).toEqual({ Cmd: ["id"] });
+  });
+
+  it("passes the recorded Docker CLI exec create, its zero Privileged dropped", async () => {
+    const req = DOCKER_CLI_EXEC_REQUEST;
+    const r = await requestOverSocket(socket, {
+      method: req.method,
+      path: req.path,
+      body: req.body,
+      headers: { ...req.headers },
+    });
+
+    expect(r.status, r.body).toBe(201);
+    expect(expectDefined(daemon.requests()[0], "exec").url).toBe("/v1.51/containers/c1/exec");
+    expect(forwardedBody()).toEqual({
+      User: "",
+      Tty: false,
+      AttachStdin: false,
+      AttachStderr: true,
+      AttachStdout: true,
+      DetachKeys: "",
+      Env: null,
+      WorkingDir: "",
+      Cmd: ["id"],
+    });
+  });
+
+  it("rejects an integer outside the safe range", async () => {
+    const r = await execRaw(
+      '{"Cmd":["id"],"ConsoleSize":[24,9007199254740993]}',
+      "/containers/abc/exec",
+    );
+
+    await expectRejected(r, 400);
+  });
+
+  it("names a refused SYSBOX_ variable without its value", async () => {
+    const r = await exec({ Cmd: ["id"], Env: ["SYSBOX_FOO=s3cret-value"] }, "/containers/abc/exec");
+
+    await expectRejected(r, 403);
+    expect(message(r)).toContain("SYSBOX_FOO");
+    expect(r.body).not.toContain("s3cret-value");
+  });
+
+  it("logs a rejected request's path without its query", async () => {
+    log.info.mockClear();
+    const r = await exec(
+      { Cmd: ["id"], Privileged: true },
+      "/containers/abc/exec?Env=TOKEN%3Ds3cret",
+    );
+
+    await expectRejected(r, 403);
+    const logged = JSON.stringify(log.info.mock.calls);
+    expect(logged).toContain('"path":"/containers/abc/exec"');
+    expect(logged).not.toContain("s3cret");
   });
 
   it.each([

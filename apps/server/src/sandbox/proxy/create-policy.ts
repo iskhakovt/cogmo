@@ -107,8 +107,9 @@ async function checkPlatform(
 }
 
 /**
- * Read on every create that publishes a port, not cached: a daemon restart
- * with another `bip` moves the gateway while this process runs.
+ * Asked on every create that publishes a port. A rootful daemon's gateway is
+ * read each time, not cached: a daemon restart with another `bip` moves it
+ * while this process runs.
  */
 async function publishAddressFor(
   body: CreateBody,

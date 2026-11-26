@@ -175,21 +175,22 @@ function getJson(
         chunks.push(chunk);
       });
       res.on("error", fail);
-      res.on("end", () => resolve(parseReply(res.statusCode ?? 0, Buffer.concat(chunks))));
+      res.on("end", () => resolve(ok(parseReply(res.statusCode ?? 0, Buffer.concat(chunks)))));
     });
     req.on("error", fail);
     req.end();
   });
 }
 
-function parseReply(status: number, raw: Buffer): Result<DaemonReply, LookupFailure> {
+/**
+ * The status with the body parsed, or `null` for a body that is not JSON: a
+ * 404 still means the image is missing, and each lookup's schema refuses a
+ * `null` it needed.
+ */
+function parseReply(status: number, raw: Buffer): DaemonReply {
   try {
-    return ok({ status, body: JSON.parse(raw.toString("utf8")) });
-  } catch (cause) {
-    return err(
-      unavailable(
-        `the daemon answered ${status} with a body that is not JSON: ${describeError(cause)}`,
-      ),
-    );
+    return { status, body: JSON.parse(raw.toString("utf8")) };
+  } catch {
+    return { status, body: null };
   }
 }

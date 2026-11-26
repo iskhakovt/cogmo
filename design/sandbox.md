@@ -387,12 +387,12 @@ The proxy lives in `src/sandbox/proxy/` and runs inside `cogmo serve` `[confirme
 #### Enforced today `[confirmed]`
 
 - `/swarm`, `/plugins`, `/nodes`, `/build`, `/session` and `/auth` are denied (403). The match runs after the path is percent-decoded and its dot-segments resolved.
-- Every route but `POST /containers/create` and `POST /containers/{id}/exec` is forwarded unchecked, under the raw `req.url` rather than the canonical path that was classified (`proxy/index.ts:310`). An exec create's rebuilt body goes to the raw `req.url` too (`proxy/index.ts:259`).
+- Every route but `POST /containers/create` and `POST /containers/{id}/exec` is forwarded unchecked, under the raw `req.url` rather than the canonical path that was classified (`proxy/index.ts:326`). An exec create's rebuilt body goes to the raw `req.url` too (`proxy/index.ts:269`).
 - Exec start, attach, `logs`, `events` and `distribution` are raw-piped from the moment the request line has been replayed, without waiting for the daemon's `101`. An upgrade on any other route gets 400 (`malformed`), whatever its `Upgrade` value.
 - Only a session created with `dockerSocket: true` gets a socket: a coding task's (Which sessions get a socket, below).
 - A child gets no `containers` row, so the orphan pass kills it within a minute (Container state machine → Failure modes). That includes the children testcontainers or `docker compose` start.
 - The reaper's network and volume updates are unconditional (`reaper.ts:191`, `:213`).
-- `unregisterTask` drops the task's scope before closing its connections (`proxy/index.ts:172`). A request that arrives meanwhile on an open connection gets a 500.
+- `unregisterTask` drops the task's scope before closing its connections (`proxy/index.ts:181`). A request that arrives meanwhile on an open connection gets a 500.
 
 This is not an authorization boundary:
 
@@ -430,10 +430,10 @@ Exec ids are kept in memory per task: the proxy records the id from each 201 to 
 |-|-|-|
 | `not_found` | 404, in the daemon's wording for the object type (`No such container: <ref>`) | The ref is unknown, unowned or `reaped`, or a create names an image the daemon does not have (`No such image`). A ref to a sibling's or Cogmo's object gets the same answer as a missing one. Names still leak existence elsewhere (Residuals) |
 | `denied` | 403, naming the route, query key or field | The route class, a query key, a body field or a cap is not allowed |
-| `malformed` | 400 | The body is not a JSON object, ends before its `Content-Length`, or fails its schema, a key holds a non-ASCII character or is `__proto__`, `constructor` or `prototype`, two keys differ only in case, or the daemon answers the image inspect 400 for a reference it cannot parse |
+| `malformed` | 400 | The body is not a JSON object, ends before its `Content-Length`, or fails its schema, a key holds a non-ASCII character or is `__proto__`, `constructor` or `prototype`, two keys differ only in case, or the daemon answers the image inspect 400 for a reference it cannot parse. An upgrade on a route that is not a stream route is `malformed` too |
 | `too_large` | 413 | A body to be rewritten is over 1 MiB |
-| `unavailable` | 503 | The store read or the daemon resolve failed, a daemon lookup the create policy needs (image inspect, `GET /version`, the `bridge` gateway) failed, the scope has no depth-0 row yet, the scope is gone because the task is being torn down, or a volume 201 is labelled with this task but another instance (Network and volume state machine). The client may retry |
-| `daemon_failed` | 502 | The daemon connection failed, or its create response could not be read |
+| `unavailable` | 503 | The store read or the daemon resolve failed, a daemon lookup the create policy needs (image inspect, `GET /version`, `GET /info`, the `bridge` gateway) failed, the scope has no depth-0 row yet, the scope is gone because the task is being torn down, or a volume 201 is labelled with this task but another instance (Network and volume state machine). The client may retry |
+| `daemon_failed` | 502 | The daemon connection failed before a response. `[proposed]` (slice 3) Or its create response, read for the child's `Id`, could not be read |
 | `record_failed` | 500 | The daemon created an object and inserting its row failed. The proxy tried to remove the object, except a volume (Network and volume policy). An object the proxy could not remove is left to the orphan pass |
 
 **Route table.** `[proposed]` Paths are matched after the version prefix is stripped and the path canonicalised. The first matching row wins, and a path no row matches is `denied`. Default-deny also covers routes the daemon adds later.
@@ -456,7 +456,7 @@ Exec ids are kept in memory per task: the proxy records the id from each 201 to 
 
 **Create policy.** `[confirmed]`, except owned networks and volumes `[proposed]` (slice 5). The proxy builds a new body rather than patching the one it received (`create-policy.ts`, with the allowlist as Zod schemas in `body-schemas.ts`):
 
-1. The body is parsed, and every object that holds struct fields is checked against the key rules under `malformed`. Data-keyed maps are exempt, since their keys are data, except that a `__proto__` key is `malformed` there too: no plain object can hold it as data. The daemon decodes with Go's `encoding/json`, which matches field names case-insensitively, Unicode folding included (`ſ` matches `s`). Rejecting non-ASCII keys and keys that differ only in case leaves no key that could reach a field the proxy did not read.
+1. The body is parsed, and every object the proxy reads struct fields from is checked against the key rules under `malformed`. A zero-valued object outside the allowlist is dropped whole, unread, so it never reaches the daemon. Data-keyed maps are exempt, since their keys are data, except that a `__proto__` key is `malformed` there too: no plain object can hold it as data. The daemon decodes with Go's `encoding/json`, which matches field names case-insensitively, Unicode folding included (`ſ` matches `s`). Rejecting non-ASCII keys and keys that differ only in case leaves no key that could reach a field the proxy did not read.
 2. Every struct field is read by its case-folded name and parsed through its own Zod schema. A number must be a JSON number, so `Memory: "1e12"` is `malformed`.
 3. A struct field that is not on the allowlist is dropped if its value is zero, and `denied`, by name, otherwise. Zero means `null`, `false`, `0`, `""`, an empty list, or a struct whose fields are all zero. The exceptions are `MaskedPaths` and `ReadonlyPaths`: there the daemon reads `[]` as "clear the runtime's defaults", which unmasks every masked path and makes every read-only one writable (`--security-opt systempaths=unconfined`), so an empty one is `denied`. The Docker CLI sends every `HostConfig` field, mostly as zeros, and `Devices` and the five `Blkio*` device lists as `[]`. Unknown fields count too, so a field from a newer API version stays closed until it is listed. That covers the legacy fields the daemon reads from a second decode of the body below API 1.52 (`MacAddress`, `HostConfig.Capabilities`): the rebuilt body never carries them.
 4. An allowlisted field is kept exactly as sent, zero or not. Data-keyed maps keep every entry, empty values included: `ExposedPorts: {"5432/tcp": {}}`, `Volumes: {"/data": {}}`, `Tmpfs: {"/tmp": ""}`, and labels with empty values. An empty `Entrypoint: [""]`, which clears the image's entrypoint, is kept as well. The map-valued fields are `Labels`, `ExposedPorts`, `Volumes`, `HostConfig.Tmpfs`, `HostConfig.PortBindings` and `NetworkingConfig.EndpointsConfig`.
@@ -470,7 +470,7 @@ Exec ids are kept in memory per task: the proxy records the id from each 201 to 
 | `Env` | Allowed, except an entry whose name starts with `SYSBOX_` (in any case), which is `denied`: sysbox reads per-container configuration from those. Image `ENV` merges into the same OCI env, so the create is also `denied` if the inspected image's `Config.Env` has a `SYSBOX_` key |
 | `Labels` | Allowed. Keys that start with `cogmo.`, in any case, are dropped and the Cogmo labels injected |
 | `HostConfig.Memory`, `PidsLimit` | `null` or `0` is absent and set from the task's `ResourceLimits`. A negative value is `denied`, since the API reads it as unlimited (`PidsLimit: -1`), and so is a value above the task's limit |
-| CPU: `HostConfig.NanoCpus`, or `CpuQuota` with `CpuPeriod` | One quantity in either form. With neither form present (`null` or `0`), `NanoCpus` is injected from the task's limit. With both forms, the request is `denied`, because the daemon refuses the pair. A negative `CpuQuota` (unlimited) is `denied`, and so is a negative `NanoCpus` or `CpuPeriod`. CPUs are `NanoCpus / 1e9`, or `CpuQuota / CpuPeriod` with the daemon's default period of 100000 when `CpuPeriod` is absent, compared exactly, and above the task's limit they are `denied`. A `CpuPeriod` without `CpuQuota` is dropped |
+| CPU: `HostConfig.NanoCpus`, or `CpuQuota` with `CpuPeriod` | One quantity in either form. With neither form present (`null` or `0`), `NanoCpus` is injected from the task's limit. With both forms, the request is `denied`, because the daemon refuses the pair. A negative `CpuQuota` (unlimited) is `denied`, and so is a negative `NanoCpus` or `CpuPeriod`, a lone one included. CPUs are `NanoCpus / 1e9`, or `CpuQuota / CpuPeriod` with the daemon's default period of 100000 when `CpuPeriod` is absent, compared exactly, and above the task's limit they are `denied`. A `CpuPeriod` without `CpuQuota` is dropped |
 | `HostConfig.MemoryReservation`, `MemorySwappiness`, `CpuShares`, `CpusetCpus`, `CpusetMems` | allowed |
 | `HostConfig.ShmSize` | at most the effective `Memory` |
 | `HostConfig.MemorySwap` | `null` or `0` (the CLI's default) is set to the effective `Memory`. Any other value must equal it, so `MemorySwap: -1` (unlimited swap) is `denied` |
@@ -490,7 +490,7 @@ Exec ids are kept in memory per task: the proxy records the id from each 201 to 
 | `HostConfig.Runtime`, `CgroupParent` | overwritten from the scope |
 | Every other field, including `Privileged`, `VolumesFrom`, `VolumeDriver`, `Devices`, `DeviceRequests`, `DeviceCgroupRules`, `PidMode`, `UTSMode`, `UsernsMode`, `Cgroup`, `Sysctls`, `MaskedPaths`, `ReadonlyPaths`, `Links`, `PublishAllPorts`, `OomKillDisable`, `LogConfig`, `StorageOpt`, `Annotations`, `MacAddress` and the `Blkio*`, `CpuRealtime*` and `KernelMemory*` families | `denied` when non-zero |
 
-**Exec policy.** `[confirmed]` The body of `POST /containers/{id}/exec` is rebuilt the same way (`exec-policy.ts`). Allowed: `Cmd` (required, non-empty), `Env` (with the `SYSBOX_` rule), `WorkingDir`, `User`, `Tty`, `AttachStdin`, `AttachStdout`, `AttachStderr`, `DetachKeys` and `ConsoleSize`. `Privileged`, or any other field with a non-zero value, is `denied`.
+**Exec policy.** `[confirmed]` The body of `POST /containers/{id}/exec` is rebuilt the same way (`exec-policy.ts`). Allowed: `Cmd` (required, non-empty), `Env` (with the `SYSBOX_` rule), `WorkingDir`, `User`, `Tty`, `AttachStdin`, `AttachStdout`, `AttachStderr`, `DetachKeys`, `ConsoleSize` and `Detach`, which the daemon reads only from the start body but CLIs before 29 also send on the create. `Privileged`, or any other field with a non-zero value, is `denied`.
 
 **Network and volume policy.** `[proposed]` Both bodies are rebuilt the same way as a create body. `CheckDuplicate`, which the daemon has ignored since API 1.44, is dropped.
 
@@ -566,8 +566,9 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
   - `ExposedPorts`, `Volumes`, `Tmpfs`, empty-valued labels and `Entrypoint: [""]` reach the daemon unchanged;
   - a body `name` is dropped and the query `name` forwarded;
   - on create, a query key other than `name` and `platform` is dropped; `[proposed]` on `/images/create` `fromSrc` is denied (slice 5);
-  - a recorded testcontainers-node create request (`testcontainers-create-request.ts`), its duplicated query included, passes changed only by the injections, the dropped query keys and body `name`, `Image` rewritten to the inspected id and `PortBindings` bound to the gateway;
-  - a recorded Docker CLI 29.9.3 create request (`docker-cli-create-request.ts`) passes the same way, its zero-valued and empty-list fields outside the allowlist dropped;
+  - a recorded testcontainers-node create request (`src/test/testcontainers-create-request.ts`), its duplicated query included, passes changed only by the injections, the dropped query keys and body `name`, `Image` rewritten to the inspected id and `PortBindings` bound to the gateway;
+  - a recorded Docker CLI 29.9.3 create request (`src/test/docker-cli-create-request.ts`) passes the same way, its zero-valued and empty-list fields outside the allowlist dropped;
+  - a recorded Docker CLI 29.9.3 exec create (`src/test/docker-cli-exec-request.ts`) passes, its zero `Privileged` dropped;
   - an image the daemon does not have gets `not_found` without a forward, and a failed lookup gets `unavailable`;
   - host platform forms (`Linux/x86_64` and `linux` on amd64, `linux/arm64/v8` on arm64) and an empty `platform=` are forwarded, and a non-host platform or variant is denied.
 - Routes:

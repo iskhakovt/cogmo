@@ -6,10 +6,11 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import type {
   AskpassSpec,
+  SandboxCapabilities,
   SandboxClient,
   SandboxSession,
   SandboxSessionState,
@@ -153,8 +154,8 @@ export function taskImage(repo: CodingRepoRow, devbaseImage: string): string {
  * `create-container` step body: `expiresAt` is stamped from the clock, and
  * the PAT inside the worktree spec must never reach a step's return value.
  * Its env adds `COGMO_VERIFY_BASE` when the assignment has a base, and
- * disables testcontainers' Ryuk; every exec in the session inherits both, as
- * it does the Claude token.
+ * disables testcontainers' Ryuk on a `host-proxy` backend; every exec in the
+ * session inherits both, as it does the Claude token.
  */
 export function taskSessionSpec(args: {
   sandbox: Pick<SandboxClient, "capabilities">;
@@ -195,7 +196,7 @@ export function taskSessionSpec(args: {
       ...(args.assignment.baseSha !== undefined && {
         [VERIFY_BASE_ENV]: args.assignment.baseSha,
       }),
-      ...(args.sandbox.capabilities.siblingContainers === "host-proxy" && RYUK_DISABLED_ENV),
+      ...ryukEnv(args.sandbox.capabilities.siblingContainers),
     },
     // The coding CLI reaches its provider, the git remote and package indexes.
     network: "bridge",
@@ -278,4 +279,11 @@ export async function checkoutFeatureBranchInSandbox(
   if (exitCode !== 0) {
     throw new Error(`git checkout -B ${branch} failed inside sandbox (exit ${exitCode})`);
   }
+}
+
+function ryukEnv(siblings: SandboxCapabilities["siblingContainers"]): Record<string, string> {
+  return match(siblings)
+    .with("host-proxy", () => ({ ...RYUK_DISABLED_ENV }))
+    .with(P.union("sandbox-internal", "unsupported"), () => ({}))
+    .exhaustive();
 }

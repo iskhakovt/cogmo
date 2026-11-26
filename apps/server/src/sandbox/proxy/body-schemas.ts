@@ -159,4 +159,6 @@ export const ExecBodySchema = z.strictObject({
   AttachStderr: Bool,
   DetachKeys: Str,
   ConsoleSize,
+  /** Read only from the start body; CLIs before 29 also send it on the create. */
+  Detach: Bool,
 });

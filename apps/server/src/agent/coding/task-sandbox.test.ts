@@ -124,7 +124,7 @@ describe("taskSessionSpec", () => {
 
   function specFor(
     assignment: WorktreeAssignment,
-    siblingContainers: SandboxCapabilities["siblingContainers"] = "host-proxy",
+    siblingContainers: SandboxCapabilities["siblingContainers"],
   ) {
     const capabilities: SandboxCapabilities = {
       siblingContainers,
@@ -150,12 +150,15 @@ describe("taskSessionSpec", () => {
   }
 
   it("gives the session the branch's base as COGMO_VERIFY_BASE beside the auth env", () => {
-    const spec = specFor({
-      type: "host-path",
-      branch: "cogmo/abc12345",
-      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
-      baseSha: BASE_SHA,
-    });
+    const spec = specFor(
+      {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+        baseSha: BASE_SHA,
+      },
+      "host-proxy",
+    );
 
     expect(spec.env).toEqual({
       ...AUTH_ENV,
@@ -165,11 +168,14 @@ describe("taskSessionSpec", () => {
   });
 
   it("sets no COGMO_VERIFY_BASE for an assignment saved before the base was recorded", () => {
-    const spec = specFor({
-      type: "host-path",
-      branch: "cogmo/abc12345",
-      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
-    });
+    const spec = specFor(
+      {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+      },
+      "host-proxy",
+    );
 
     expect(spec.env).toEqual({ ...AUTH_ENV, TESTCONTAINERS_RYUK_DISABLED: "true" });
   });
@@ -188,11 +194,14 @@ describe("taskSessionSpec", () => {
   });
 
   it("gives the coding session the Docker socket", () => {
-    const spec = specFor({
-      type: "host-path",
-      branch: "cogmo/abc12345",
-      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
-    });
+    const spec = specFor(
+      {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+      },
+      "host-proxy",
+    );
 
     expect(spec.dockerSocket).toBe(true);
   });

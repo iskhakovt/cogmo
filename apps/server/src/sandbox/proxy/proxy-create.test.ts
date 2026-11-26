@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
+import { DOCKER_CLI_CREATE_REQUEST } from "../../test/docker-cli-create-request.js";
 import {
   dockerApi,
   type FakeDaemonRequest,
@@ -15,9 +16,8 @@ import {
   type SocketResponse,
   startFakeDockerDaemon,
 } from "../../test/fake-docker-daemon.js";
-import { DOCKER_CLI_CREATE_REQUEST } from "./docker-cli-create-request.js";
+import { TESTCONTAINERS_CREATE_REQUEST } from "../../test/testcontainers-create-request.js";
 import { CogmoSocketProxy } from "./index.js";
-import { TESTCONTAINERS_CREATE_REQUEST } from "./testcontainers-create-request.js";
 import type { TaskScope } from "./types.js";
 
 const GIB = 1024 ** 3;
@@ -452,6 +452,22 @@ describe("create policy: capabilities", () => {
     expect(message(r)).toContain("SYS_NICE");
   });
 
+  it("allows Docker's defaults and IPC_LOCK under runc", async () => {
+    const runc = await proxy.registerTask({
+      ...SCOPE,
+      taskId: "019d0000-0000-7000-8000-0000000000c7",
+      runtime: "runc",
+    });
+    const r = await requestOverSocket(runc, {
+      method: "POST",
+      path: "/containers/create",
+      body: JSON.stringify({ Image: "alpine", HostConfig: { CapAdd: ["CHOWN", "cap_ipc_lock"] } }),
+    });
+
+    expect(r.status, r.body).toBe(201);
+    expect(forwarded().HostConfig.CapAdd).toEqual(["CHOWN", "cap_ipc_lock"]);
+  });
+
   it("forwards the scope's runtime, runc included", async () => {
     const runc = await proxy.registerTask({
       ...SCOPE,
@@ -517,14 +533,14 @@ describe("create policy: resources", () => {
   });
 
   it.each([
-    ["Memory", null],
-    ["PidsLimit", null],
-    ["NanoCpus", null],
-  ])("%s at null is injected", async (field, value) => {
-    const r = await create({ Image: "alpine", HostConfig: { [field]: value } }, "");
+    ["Memory", GIB],
+    ["PidsLimit", 256],
+    ["NanoCpus", 2_000_000_000],
+  ])("%s at null is injected as %d", async (field, injected) => {
+    const r = await create({ Image: "alpine", HostConfig: { [field]: null } }, "");
 
     expect(r.status, r.body).toBe(201);
-    expect(forwarded().HostConfig[field]).toBeGreaterThan(0);
+    expect(forwarded().HostConfig[field]).toBe(injected);
   });
 
   it.each([
@@ -617,6 +633,44 @@ describe("create policy: resources", () => {
 
     await expectRejected(r, 403);
     expect(message(r)).toContain("CpuPeriod");
+  });
+
+  it.each([
+    ["alone", { CpuPeriod: -1 }],
+    ["beside NanoCpus", { CpuPeriod: -1, NanoCpus: 1_000_000_000 }],
+  ])("denies a negative CpuPeriod %s", async (_label, host) => {
+    const r = await create({ Image: "alpine", HostConfig: host }, "");
+
+    await expectRejected(r, 403);
+    expect(message(r)).toContain("CpuPeriod");
+  });
+
+  it.each([
+    [50_000, 201],
+    [50_001, 403],
+  ])("compares CpuQuota %d against a half-CPU task exactly", async (quota, status) => {
+    const half = await proxy.registerTask({
+      ...SCOPE,
+      taskId: "019d0000-0000-7000-8000-0000000000c6",
+      resourceLimits: { ...SCOPE.resourceLimits, cpus: 0.5 },
+    });
+    const r = await requestOverSocket(half, {
+      method: "POST",
+      path: "/containers/create",
+      body: JSON.stringify({
+        Image: "alpine",
+        HostConfig: { CpuQuota: quota, CpuPeriod: 0, MemorySwap: null },
+      }),
+    });
+
+    expect(r.status, r.body).toBe(status);
+    if (status === 201) {
+      const host = forwarded().HostConfig;
+      expect(host.CpuQuota).toBe(quota);
+      expect(host).not.toHaveProperty("CpuPeriod");
+      expect(host).not.toHaveProperty("NanoCpus");
+      expect(host.MemorySwap).toBe(GIB);
+    }
   });
 
   it("denies NanoCpus with CpuQuota", async () => {
@@ -987,6 +1041,16 @@ describe("create policy: the query", () => {
     expect(forwarded()).not.toHaveProperty("name");
   });
 
+  it("forwards a non-canonical create path canonicalised, without empty or unread query keys", async () => {
+    const r = await createRaw(
+      JSON.stringify({ Image: "alpine" }),
+      "/v1.44//containers/./create?name=&platform=&ignored=1",
+    );
+
+    expect(r.status, r.body).toBe(201);
+    expect(expectDefined(creates()[0], "create").url).toBe("/v1.44/containers/create");
+  });
+
   it("drops every query key but name and platform", async () => {
     const r = await create(
       { Image: "alpine", platform: "linux/arm64" },
@@ -1256,6 +1320,42 @@ describe("create policy: daemon lookups", () => {
     );
 
     expect(r.status, r.body).toBe(503);
+    expect(creates()).toEqual([]);
+  });
+
+  it.each([
+    [false, 2],
+    [true, 0],
+  ])(
+    "reads GET /info once, rootless %s, with %d bridge reads over two publishing creates",
+    async (rootless, bridgeReads) => {
+      daemon.setResponder(
+        dockerApi({ images: IMAGES, arch: "amd64", bridgeGateway: GATEWAY, rootless }),
+      );
+      const publishing = {
+        Image: "alpine",
+        HostConfig: { PortBindings: { "80/tcp": [{ HostPort: "0" }] } },
+      };
+
+      expect((await create(publishing, "")).status).toBe(201);
+      expect((await create(publishing, "")).status).toBe(201);
+
+      expect(daemon.requests().filter(isInfo)).toHaveLength(1);
+      expect(daemon.requests().filter(isBridge)).toHaveLength(bridgeReads);
+    },
+  );
+
+  it("answers a plain-text 404 from the image inspect as not_found", async () => {
+    daemon.setResponder((req, res, raw) => {
+      if (!isInspect(req)) return AMD64_API(req, res, raw);
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("page not found");
+    });
+
+    const r = await create({ Image: "missing:latest" }, "");
+
+    expect(r.status, r.body).toBe(404);
+    expect(message(r)).toContain("No such image: missing:latest");
     expect(creates()).toEqual([]);
   });
 

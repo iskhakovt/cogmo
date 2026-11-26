@@ -66,10 +66,12 @@ function cpuQuantity(host: ResourceRequest, cpus: number): Result<CpuFields, Pro
   const limit = BigInt(Math.round(cpus * NANOS_PER_CPU));
   const nano = present(host.NanoCpus);
   const quota = present(host.CpuQuota);
+  const period = present(host.CpuPeriod);
+  if (period !== undefined && period < 0) return err(denied(`HostConfig.CpuPeriod ${period}`));
   if (nano !== undefined && quota !== undefined) {
     return err(denied("HostConfig.NanoCpus together with HostConfig.CpuQuota"));
   }
-  if (quota !== undefined) return quotaWithin(quota, present(host.CpuPeriod), limit);
+  if (quota !== undefined) return quotaWithin(quota, period, limit);
   if (nano === undefined) return ok({ NanoCpus: Number(limit) });
   if (nano < 0) return err(denied(`HostConfig.NanoCpus ${nano}`));
   if (BigInt(nano) > limit) {
@@ -85,7 +87,6 @@ function quotaWithin(
   limit: bigint,
 ): Result<CpuFields, ProxyRejection> {
   if (quota < 0) return err(denied(`HostConfig.CpuQuota ${quota} (unlimited)`));
-  if (period !== undefined && period < 0) return err(denied(`HostConfig.CpuPeriod ${period}`));
   const effective = BigInt(period ?? DEFAULT_CPU_PERIOD);
   if (BigInt(quota) * BigInt(NANOS_PER_CPU) > limit * effective) {
     return err(
