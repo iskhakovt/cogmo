@@ -38,7 +38,7 @@ interface InsertChildContainerDeps {
  * row moves to `exited` once the container is gone, the removal retried if
  * the daemon refused it, so the row holds no place under the child cap.
  * Any other throw, a column's schema refusing the row among them, is a bug
- * and is rethrown.
+ * and is rethrown, its container's removal under way all the same.
  */
 export async function insertChildContainer(
   deps: InsertChildContainerDeps,
@@ -63,12 +63,13 @@ export async function insertChildContainer(
       },
     )
     .with({ kind: "failed" }, async ({ cause }) => {
+      // The daemon holds a container no row records, whatever failed.
+      inBackground(child, removeRowless(deps.docker, child.dockerId));
       if (!isStoreFailure(cause)) throw cause;
       log.error(
         { err: cause, dockerId: child.dockerId },
         "child container row insert failed, removing",
       );
-      inBackground(child, removeRowless(deps.docker, child.dockerId));
       return err<ContainerRow, ChildRecordFailed>({ kind: "record_failed" });
     })
     .with({ kind: "cut_off" }, async () => {
@@ -84,7 +85,11 @@ type InsertOutcome =
   | { kind: "failed"; cause: unknown }
   | { kind: "cut_off" };
 
-/** The insert's outcome, or the cut-off's, whichever comes first; the abort listener goes with the race. */
+/**
+ * The insert's outcome, or the cut-off's, whichever comes first; the abort
+ * listener goes with the race. `cutOff` has not aborted yet: the caller
+ * answers a create already cut off without inserting.
+ */
 async function raceCutOff(
   inserting: Promise<ContainerRow>,
   cutOff: AbortSignal,
@@ -93,7 +98,6 @@ async function raceCutOff(
     (row): InsertOutcome => ({ kind: "inserted", row }),
     (cause: unknown): InsertOutcome => ({ kind: "failed", cause }),
   );
-  if (cutOff.aborted) return { kind: "cut_off" };
   let onAbort = () => {};
   const passed = new Promise<InsertOutcome>((resolve) => {
     onAbort = () => resolve({ kind: "cut_off" });

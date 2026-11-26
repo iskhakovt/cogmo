@@ -171,17 +171,17 @@ describe("insertChildContainer", () => {
     await vi.waitFor(() => expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }));
   });
 
-  it("rethrows a failure that is not the store's, such as a column's schema refusing the row", async () => {
+  it("rethrows a failure that is not the store's, such as a column's schema refusing the row, and still removes the container", async () => {
     const { docker, container } = stubDocker();
     const child = { ...(await childOf()), resourceLimits: { cpus: -1, memory_bytes: 1, pids: 1 } };
 
     await expect(
       insertChildContainer({ store, runInTx: tx, docker }, child, NO_CUT_OFF),
     ).rejects.toThrow(/cpus/);
-    expect(container.remove).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }));
   });
 
-  it("rethrows a Node programmer error that carries a code but is not the store's", async () => {
+  it("rethrows a Node programmer error that carries a code but is not the store's, and still removes the container", async () => {
     const { docker, container } = stubDocker();
     const child = await childOf();
     const misuse: Transactor = () =>
@@ -194,7 +194,7 @@ describe("insertChildContainer", () => {
     await expect(
       insertChildContainer({ store, runInTx: misuse, docker }, child, NO_CUT_OFF),
     ).rejects.toThrow("must be of type string");
-    expect(container.remove).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }));
   });
 
   it.each([
@@ -232,7 +232,7 @@ describe("insertChildContainer", () => {
   );
 
   it.each(["EPERM", "EBADF", "EXDEV"])(
-    "rethrows a %s, an errno code shaped like a SQLSTATE but not the store's",
+    "rethrows a %s, an errno code shaped like a SQLSTATE but not the store's, and still removes the container",
     async (code) => {
       const { docker, container } = stubDocker();
       const child = await childOf();
@@ -242,7 +242,9 @@ describe("insertChildContainer", () => {
       await expect(
         insertChildContainer({ store, runInTx: misuse, docker }, child, NO_CUT_OFF),
       ).rejects.toThrow(code);
-      expect(container.remove).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }),
+      );
     },
   );
 
@@ -585,22 +587,6 @@ describe("insertChildContainer", () => {
       expect(
         await tx((trx) => store.getContainerByDockerId(trx, "child-container")),
       ).toBeUndefined();
-    });
-
-    it("is cut_off at once for a cut-off already aborted", async () => {
-      const { docker } = stubDocker();
-      const child = await childOf();
-      const cutOff = new AbortController();
-      cutOff.abort(new Error("the create's deadline passed"));
-      const never: Transactor = () => new Promise(() => {});
-
-      const inserted = await insertChildContainer(
-        { store, runInTx: never, docker },
-        child,
-        cutOff.signal,
-      );
-
-      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "cut_off" });
     });
   });
 });

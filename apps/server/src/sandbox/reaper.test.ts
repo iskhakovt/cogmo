@@ -4,7 +4,6 @@ import { match } from "ts-pattern";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { markChildExited } from "./mark-child-exited.js";
 import { runReap } from "./reaper.js";
 import { type ContainerTransition, DrizzleSandboxStore } from "./store/index.js";
 import type { ContainerLabels, ResourceLimits } from "./types.js";
@@ -527,23 +526,12 @@ describe("runReap — a row another path already finished", () => {
     });
     const { docker } = fakeDocker({
       containers: [{ Id: "c-late", Created: LONG_AGO, Labels: labels() }],
-      // The cut-off rollback's late-row write commits while the TTL pass kills.
+      // The cut-off rollback's late-row write, `starting → exited`, commits
+      // while the TTL pass kills.
       onKill: async () => {
-        const exited = await markChildExited(
-          { store, runInTx: tx },
-          {
-            child: {
-              id: cogmoId,
-              dockerId: "c-late",
-              parentId: null,
-              depth: 1,
-              status: "starting",
-            },
-            cause: "cut_off_create",
-            at: new Date(EARLIER),
-          },
+        await db.execute(
+          sql`UPDATE containers SET status = 'exited', exited_at = ${EARLIER}::timestamptz WHERE id = ${cogmoId} AND status = 'starting'`,
         );
-        expect(exited.isOk()).toBe(true);
       },
     });
 

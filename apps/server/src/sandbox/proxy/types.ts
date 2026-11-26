@@ -123,6 +123,9 @@ export type ChildStartOutcome = { kind: "started" } | { kind: "reaped" };
  */
 export type ChildExitCause = "removed_by_task" | "missing_from_daemon" | "cut_off_create";
 
+/** Why a child's container is gone once the daemon has answered the task's `DELETE` of it. */
+export type ChildRemovalCause = Extract<ChildExitCause, "removed_by_task" | "missing_from_daemon">;
+
 /**
  * The store writes that follow the daemon's answers to a task's child
  * requests (design/sandbox.md → Container state machine). Built at boot over
@@ -142,7 +145,7 @@ export interface ChildContainers {
    * `→ exited` once a task's `DELETE` of the child is answered: removed at
    * its request, or already gone from the daemon.
    */
-  removed(child: TaskContainerRow, cause: ChildExitCause): ResultAsync<void, StoreFailed>;
+  removed(child: TaskContainerRow, cause: ChildRemovalCause): ResultAsync<void, StoreFailed>;
   /**
    * The live children the daemon still has. One it no longer has (a
    * `docker run --rm` child removes itself, with no `DELETE` through the

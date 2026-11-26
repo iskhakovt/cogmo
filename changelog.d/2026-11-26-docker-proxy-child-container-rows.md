@@ -6,6 +6,7 @@ Containers a coding task creates through the Docker API proxy are recorded as it
   - A proxy `start` or `restart` moves the row to `running` (a 304 for an already-running child counts too). If a reap finished the row first, the container is killed and the start answered 404. A `docker run --rm` child that exits and removes itself before the row write still gets its start's 204.
   - A `DELETE` moves the row to `exited` and is forwarded with `v=true`. A true `link` is refused; the `link=False` docker-py and testcontainers-python send is read as the daemon reads it.
   - `start` takes no body, `{}` or `null`, and is forwarded with none; whitespace alone is refused.
+  - A `start`, `restart`, `stop` or `kill` forwards only its documented query keys, so a `start`'s `checkpoint` and `checkpoint-dir` never reach the daemon.
   - The row is written even if the client hangs up before the daemon's answer.
   - A 17th live child is refused, counting creates still in flight. Before refusing, the proxy checks the task's children against the daemon, so ones removed by `AutoRemove` (`docker run --rm`) stop counting.
 - **Cleanup.**

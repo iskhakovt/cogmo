@@ -18,8 +18,8 @@ import { denied, type ProxyRejection, unavailable } from "./rejection.js";
 import { onlyKeys, withQuery } from "./request-path.js";
 import type { ContainerTarget } from "./router.js";
 import type {
-  ChildExitCause,
   ChildRecord,
+  ChildRemovalCause,
   DaemonLookups,
   TaskAnchor,
   TaskContainerRow,
@@ -39,7 +39,7 @@ const RESTARTED_STATUS = 204;
 const START_KEYS: ReadonlySet<string> = new Set(["detachKeys"]);
 const RESTART_KEYS: ReadonlySet<string> = new Set(["t", "signal"]);
 /** The daemon's answers to a removal that leave no container: removed, or already gone. */
-const REMOVAL_CAUSES: ReadonlyMap<number, ChildExitCause> = new Map([
+const REMOVAL_CAUSES: ReadonlyMap<number, ChildRemovalCause> = new Map([
   [204, "removed_by_task"],
   [404, "missing_from_daemon"],
 ]);
@@ -68,7 +68,7 @@ export interface ChildContext extends OwnershipLookups, ChildCapContext {
    */
   childStarted(child: TaskContainerRow, ref: string): Promise<Result<void, ProxyRejection>>;
   /** Follow in its row a child's container gone through its `DELETE`. */
-  childRemoved(child: TaskContainerRow, cause: ChildExitCause): Promise<void>;
+  childRemoved(child: TaskContainerRow, cause: ChildRemovalCause): Promise<void>;
 }
 
 /**
