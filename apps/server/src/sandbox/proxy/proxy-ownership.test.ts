@@ -21,6 +21,7 @@ import {
   TASK_ROWS,
   UNKNOWN_ID,
   upgradeRequest,
+  upgradeRequestWith,
   useProxyHarness,
 } from "../../test/proxy-harness.js";
 import {
@@ -480,16 +481,19 @@ describe("exec ownership", () => {
 
 describe("upgraded streams", () => {
   it.each([
-    ["an attach", "POST", "/attach?stream=1"],
-    ["a websocket attach", "GET", "/attach/ws?stream=1"],
-  ])("answers 404 to %s on a container the task does not own", async (_label, method, suffix) => {
-    const reply = await h.rawExchange(
-      upgradeRequest(method, `/containers/${SIBLING.name}${suffix}`),
-    );
+    ["an attach", "POST", "/attach?stream=1", "tcp"],
+    ["a websocket attach", "GET", "/attach/ws?stream=1", "websocket"],
+  ])(
+    "answers 404 to %s on a container the task does not own",
+    async (_label, method, suffix, protocol) => {
+      const reply = await h.rawExchange(
+        upgradeRequestWith(method, `/containers/${SIBLING.name}${suffix}`, protocol),
+      );
 
-    expect(reply).toMatch(/^HTTP\/1\.1 404 /);
-    expect(h.received()).toEqual([resolveOf(SIBLING.name)]);
-  });
+      expect(reply).toMatch(/^HTTP\/1\.1 404 /);
+      expect(h.received()).toEqual([resolveOf(SIBLING.name)]);
+    },
+  );
 
   it("forwards a websocket handshake on an owned attach under the full id", async () => {
     const reply = await h.upgradeExchange(
@@ -565,19 +569,22 @@ describe("upgraded streams", () => {
   });
 
   it.each([
-    ["an attach", "POST", "/attach?stream=1&stdout=1"],
-    ["a websocket attach", "GET", "/attach/ws?stream=1"],
-  ])("replays %s to an owned container under the full id", async (_label, method, suffix) => {
-    const reply = await h.upgradeExchange(
-      upgradeRequest(method, `/containers/cogmo-task-own${suffix}`),
-    );
+    ["an attach", "POST", "/attach?stream=1&stdout=1", "tcp"],
+    ["a websocket attach", "GET", "/attach/ws?stream=1", "websocket"],
+  ])(
+    "replays %s to an owned container under the full id",
+    async (_label, method, suffix, protocol) => {
+      const reply = await h.upgradeExchange(
+        upgradeRequestWith(method, `/containers/cogmo-task-own${suffix}`, protocol),
+      );
 
-    expect(reply).toMatch(/^HTTP\/1\.1 101 /);
-    expect(h.received()).toEqual([
-      resolveOf("cogmo-task-own"),
-      `${method} /containers/${OWN.id}${suffix}`,
-    ]);
-  });
+      expect(reply).toMatch(/^HTTP\/1\.1 101 /);
+      expect(h.received()).toEqual([
+        resolveOf("cogmo-task-own"),
+        `${method} /containers/${OWN.id}${suffix}`,
+      ]);
+    },
+  );
 });
 
 describe("a body the proxy cannot parse", () => {

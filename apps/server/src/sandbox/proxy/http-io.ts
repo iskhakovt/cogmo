@@ -1,7 +1,7 @@
 /**
- * HTTP plumbing for the socket proxy's edge: reading a bounded body,
- * answering a `ProxyRejection`, the headers of a forwarded request, and
- * replaying a request preamble.
+ * HTTP plumbing for the socket proxy's edge: the request limits, reading a
+ * bounded body, answering a `ProxyRejection`, the headers of a forwarded
+ * request or upgrade, and writing a raw response.
  */
 
 import * as http from "node:http";
@@ -10,6 +10,33 @@ import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
 import { describeError } from "../../util/describe-error.js";
 import { malformed, type ProxyRejection, rejectionMessage, rejectionStatus } from "./rejection.js";
+
+/**
+ * Hard cap on a body the proxy buffers: a container create, an exec create
+ * or a network connect or disconnect, which it rebuilds, and an upgrade's,
+ * which it forwards with the upgrade. Docker's daemon doesn't enforce a
+ * small limit either, but without this cap a hostile caller could ask the
+ * proxy to allocate gigabytes. 1 MiB is far above any real container spec —
+ * published images don't exceed a few KB of JSON.
+ */
+export const MAX_BUFFERED_BODY_BYTES = 1 * 1024 * 1024;
+
+/**
+ * The headers the server takes per request; a real Docker client sends
+ * about ten. Node's parser fails a request past the count
+ * (`HPE_HEADER_OVERFLOW`, from `TrackHeaderPair` in `node_http_parser.cc`),
+ * which `clientError` answers 431. A request with exactly the count is
+ * refused 431 too (`atHeaderLimit`), before any daemon connection: Node's
+ * JS side cuts a longer header list short (`parserOnHeadersComplete`), so
+ * whichever side enforces the count, a forward never frames its body by a
+ * header view Node cut short.
+ */
+export const MAX_HEADERS = 100;
+
+/** Whether the request carries as many headers as the server collects (`MAX_HEADERS`). */
+export function atHeaderLimit(req: http.IncomingMessage): boolean {
+  return req.rawHeaders.length / 2 >= MAX_HEADERS;
+}
 
 export function respondJson(res: http.ServerResponse, status: number, body: object): void {
   const payload = Buffer.from(`${JSON.stringify(body)}\n`, "utf8");
@@ -34,16 +61,47 @@ export function writeRawRejectionAndDestroy(socket: Duplex, rejection: ProxyReje
 }
 
 export function writeRawStatusAndDestroy(socket: Duplex, status: number, message: string): void {
-  const body = `${JSON.stringify({ message })}\n`;
-  const reply =
-    `HTTP/1.1 ${status} ${http.STATUS_CODES[status] ?? ""}\r\n` +
-    `Content-Type: application/json\r\n` +
-    `Content-Length: ${Buffer.byteLength(body)}\r\n` +
-    `Connection: close\r\n` +
-    `\r\n${body}`;
-  // A half-open connection stays open while the client keeps its side open,
-  // so the socket is released once the answer is flushed.
+  const body = Buffer.from(`${JSON.stringify({ message })}\n`, "utf8");
+  writeRawAndDestroy(
+    socket,
+    Buffer.concat([
+      rawResponseHead(status, http.STATUS_CODES[status] ?? "", [
+        "Content-Type: application/json",
+        `Content-Length: ${body.length}`,
+        "Connection: close",
+      ]),
+      body,
+    ]),
+  );
+}
+
+/**
+ * Write a whole raw answer and close the socket. A half-open connection
+ * stays open while the client keeps its side open, so the socket is
+ * released once the answer is flushed.
+ */
+export function writeRawAndDestroy(socket: Duplex, reply: Buffer): void {
   socket.end(reply, () => socket.destroy());
+}
+
+/**
+ * An HTTP/1.1 response head: the status line, `lines` (each `name: value`)
+ * and the empty line. Node holds each header octet as one latin1
+ * character; latin1 writes them back as they came.
+ */
+export function rawResponseHead(
+  status: number,
+  message: string,
+  lines: ReadonlyArray<string>,
+): Buffer {
+  return Buffer.from([`HTTP/1.1 ${status} ${message}`, ...lines, "", ""].join("\r\n"), "latin1");
+}
+
+/** A header record as `name: value` lines, one per value. */
+export function headerLines(headers: Readonly<Record<string, string | string[]>>): string[] {
+  return Object.entries(headers).flatMap(([name, value]) =>
+    (Array.isArray(value) ? value : [value]).map((v) => `${name}: ${v}`),
+  );
 }
 
 /**
@@ -213,36 +271,29 @@ function withoutHopByHop(h: http.IncomingHttpHeaders): Record<string, string | s
 }
 
 /**
- * An HTTP/1.1 request preamble (request line, headers, empty line) under
- * `path`, for an upgrade the proxy raw-pipes, followed by `body`. Its
- * headers are a normal forward's, without the hop-by-hop ones or those the
- * client's `Connection` names, and with `Upgrade` kept.
+ * The headers of an upgrade the proxy forwards with `body`: a normal
+ * forward's, without the hop-by-hop ones or those the client's `Connection`
+ * names, with `Upgrade` kept and `Connection: Upgrade, close`. Node writes
+ * each value back octet for octet, as latin1.
  *
- * `Connection: Upgrade, close` asks the daemon to close the connection once
- * it has answered a request it does not upgrade: a detached exec start (200)
- * or a body it refuses (400). Otherwise it would keep the connection and
- * parse the client's following bytes, already piped, as requests nobody
- * checked. A `101` hands the connection over before `close` applies. The
- * body is framed by its length: Node parses an upgrade's body into the
- * request, so it is forwarded from there, however the client framed it.
+ * `close` asks the daemon to close the connection once it has answered a
+ * request it does not upgrade: a detached exec start (200) or a body it
+ * refuses (400); a `101` hands the connection over before `close` applies.
+ * The body is the one Node parsed into the request, framed by its length,
+ * and an empty one by Node: `Content-Length: 0` on a `POST`, nothing on a
+ * `GET`.
  */
-export function buildUpgradePreamble(
+export function upgradeRequestHeaders(
   req: http.IncomingMessage,
-  path: string,
   body: Buffer,
-): Buffer {
+): Record<string, string | string[]> {
   const kept = R.omit(withoutHopByHop(req.headers), ["content-length"]);
-  const headers = Object.entries({
+  return {
     ...kept,
     ...(req.headers.upgrade !== undefined && { upgrade: req.headers.upgrade }),
     connection: "Upgrade, close",
     ...(body.length > 0 && { "content-length": String(body.length) }),
-  }).flatMap(([name, value]) =>
-    (Array.isArray(value) ? value : [value]).map((v) => `${name}: ${v}`),
-  );
-  const lines = [`${req.method} ${path} HTTP/${req.httpVersion}`, ...headers, "", ""];
-  // Node holds each header octet as one latin1 character; latin1 writes them back as they came.
-  return Buffer.concat([Buffer.from(lines.join("\r\n"), "latin1"), body]);
+  };
 }
 
 /**

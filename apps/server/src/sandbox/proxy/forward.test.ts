@@ -3,7 +3,6 @@ import type * as http from "node:http";
 import type * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
@@ -11,7 +10,7 @@ import {
   respondJson,
   startFakeDockerDaemon,
 } from "../../test/fake-docker-daemon.js";
-import { forward, pipeUpgrade } from "./forward.js";
+import { forward } from "./forward.js";
 
 const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
 vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
@@ -65,24 +64,5 @@ describe("forward: a reply read whole", () => {
       expect.objectContaining({ err: expect.any(Error) }),
       "relaying a buffered daemon reply failed",
     );
-  });
-});
-
-describe("pipeUpgrade", () => {
-  it("opens no daemon connection for a client connection already destroyed", async () => {
-    const req = mock<http.IncomingMessage>({ method: "POST", httpVersion: "1.1" });
-    req.headers = { host: "docker" };
-    const client = new PassThrough();
-    client.destroy();
-
-    pipeUpgrade(
-      req,
-      client,
-      { path: `/exec/${EXEC_ID}/start`, body: Buffer.alloc(0), head: Buffer.alloc(0) },
-      { socketPath: daemon.socketPath, signal: new AbortController().signal },
-    );
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    expect(daemon.connections()).toBe(0);
   });
 });

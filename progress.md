@@ -184,7 +184,7 @@ Cogmo delegates heavy coding tasks (and evolution-driven code changes) to `claud
 ### P2 — breadth + hardening
 
 - [ ] Codex backend — second `CodingBackend` impl behind same interface
-- [ ] Proxy authorization boundary — the create and exec allowlist, container and exec ownership, and child container rows are built (slices 1–3); the rest of upgraded streams, image/network/volume policies (slices 4–5) and a registry allowlist remain
+- [ ] Proxy authorization boundary — the create and exec allowlist, container and exec ownership, child container rows and upgraded streams are built (slices 1–4); image/network/volume policies (slice 5) and a registry allowlist remain
 - [ ] Devcontainer parsing — honour `.devcontainer/devcontainer.json` via devcontainer CLI
 - [ ] Vault socket for credentials — disk-based `.git-credentials` replaced with per-task Unix socket helper
 - [ ] GitHub App migration — installation tokens with ~1h expiry
