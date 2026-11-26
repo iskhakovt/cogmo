@@ -122,9 +122,12 @@ describe("taskSessionSpec", () => {
   const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
   const AUTH_ENV = { CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" };
 
-  function specFor(assignment: WorktreeAssignment) {
+  function specFor(
+    assignment: WorktreeAssignment,
+    siblingContainers: SandboxCapabilities["siblingContainers"],
+  ) {
     const capabilities: SandboxCapabilities = {
-      siblingContainers: "host-proxy",
+      siblingContainers,
       hostBindMount: true,
       customImage: true,
       volumes: "docker",
@@ -147,32 +150,58 @@ describe("taskSessionSpec", () => {
   }
 
   it("gives the session the branch's base as COGMO_VERIFY_BASE beside the auth env", () => {
-    const spec = specFor({
-      type: "host-path",
-      branch: "cogmo/abc12345",
-      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
-      baseSha: BASE_SHA,
-    });
+    const spec = specFor(
+      {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+        baseSha: BASE_SHA,
+      },
+      "host-proxy",
+    );
 
-    expect(spec.env).toEqual({ ...AUTH_ENV, COGMO_VERIFY_BASE: BASE_SHA });
+    expect(spec.env).toEqual({
+      ...AUTH_ENV,
+      COGMO_VERIFY_BASE: BASE_SHA,
+      TESTCONTAINERS_RYUK_DISABLED: "true",
+    });
   });
 
   it("sets no COGMO_VERIFY_BASE for an assignment saved before the base was recorded", () => {
-    const spec = specFor({
-      type: "host-path",
-      branch: "cogmo/abc12345",
-      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
-    });
+    const spec = specFor(
+      {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+      },
+      "host-proxy",
+    );
+
+    expect(spec.env).toEqual({ ...AUTH_ENV, TESTCONTAINERS_RYUK_DISABLED: "true" });
+  });
+
+  it("leaves testcontainers' Ryuk on where sibling containers are the sandbox's own", () => {
+    const spec = specFor(
+      {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+      },
+      "sandbox-internal",
+    );
 
     expect(spec.env).toEqual(AUTH_ENV);
   });
 
   it("gives the coding session the Docker socket", () => {
-    const spec = specFor({
-      type: "host-path",
-      branch: "cogmo/abc12345",
-      worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
-    });
+    const spec = specFor(
+      {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+      },
+      "host-proxy",
+    );
 
     expect(spec.dockerSocket).toBe(true);
   });

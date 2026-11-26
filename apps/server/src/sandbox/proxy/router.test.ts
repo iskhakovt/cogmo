@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { assertKind } from "../../test/assertions.js";
+import { rejectionStatus } from "./rejection.js";
 import { classify } from "./router.js";
 
 describe("router.classify", () => {
@@ -14,9 +16,8 @@ describe("router.classify", () => {
       ["/v1.43/nodes/abc", "DELETE"],
     ])("denies %s (%s)", (path, method) => {
       const r = classify(method, path);
-      expect(r.kind).toBe("deny");
-      if (r.kind !== "deny") return;
-      expect(r.status).toBe(403);
+      assertKind(r, "reject");
+      expect(rejectionStatus(r.rejection)).toBe(403);
     });
 
     it("does NOT deny things that merely substring-contain swarm/plugins/nodes", () => {
@@ -30,40 +31,79 @@ describe("router.classify", () => {
     it("denies percent-encoded slash variants (%2F)", () => {
       // Docker decodes these on its end, so the proxy has to canonicalise
       // before the deny check or the encoded variant slips past.
-      expect(classify("GET", "/v1.43/swarm%2Finit").kind).toBe("deny");
-      expect(classify("GET", "%2Fswarm").kind).toBe("deny");
-      expect(classify("POST", "/v1.43/plugins%2Ffoo%2Fenable").kind).toBe("deny");
+      expect(classify("GET", "/v1.43/swarm%2Finit").kind).toBe("reject");
+      expect(classify("GET", "%2Fswarm").kind).toBe("reject");
+      expect(classify("POST", "/v1.43/plugins%2Ffoo%2Fenable").kind).toBe("reject");
     });
 
     it("denies path-traversal variants", () => {
-      expect(classify("GET", "/swarm/./inspect").kind).toBe("deny");
-      expect(classify("GET", "/foo/../swarm/init").kind).toBe("deny");
-      expect(classify("GET", "//swarm/init").kind).toBe("deny");
+      expect(classify("GET", "/swarm/./inspect").kind).toBe("reject");
+      expect(classify("GET", "/foo/../swarm/init").kind).toBe("reject");
+      expect(classify("GET", "//swarm/init").kind).toBe("reject");
     });
 
     it("denies backslash variants (windows-style separators)", () => {
-      expect(classify("GET", "\\swarm\\init").kind).toBe("deny");
+      expect(classify("GET", "\\swarm\\init").kind).toBe("reject");
     });
   });
 
-  describe("policy: container_create", () => {
-    it.each(["/containers/create", "/v1.43/containers/create", "/v1.999/containers/create"])(
-      "policy on POST %s",
-      (path) => {
-        const r = classify("POST", path);
-        expect(r.kind).toBe("policy");
-        if (r.kind !== "policy") return;
-        expect(r.subject).toBe("container_create");
-      },
-    );
+  describe("container_create", () => {
+    it.each([
+      ["/containers/create", ""],
+      ["/v1.44/containers/create", "/v1.44"],
+      ["/v1.52/containers/create", "/v1.52"],
+      ["/v1.999/containers/create", "/v1.999"],
+      ["/v2/containers/create", "/v2"],
+      ["/v1.44//containers/./create", "/v1.44"],
+    ])("POST %s keeps the version prefix %j", (path, versionPrefix) => {
+      expect(classify("POST", path)).toEqual({ kind: "container_create", versionPrefix });
+    });
 
     it("query string doesn't affect classification", () => {
-      const r = classify("POST", "/containers/create?name=foo");
-      expect(r.kind).toBe("policy");
+      expect(classify("POST", "/containers/create?name=foo").kind).toBe("container_create");
     });
 
     it("GET /containers/create is forward (no such Docker endpoint, but our classifier doesn't 404)", () => {
       expect(classify("GET", "/containers/create").kind).toBe("forward");
+    });
+  });
+
+  describe("exec_create", () => {
+    it.each([
+      "/containers/abc/exec",
+      "/v1.44/containers/abc/exec",
+      "/containers/abc%2Fexec",
+      "/containers/parent/alias/exec",
+    ])("POST %s", (path) => {
+      expect(classify("POST", path).kind).toBe("exec_create");
+    });
+
+    it("GET /containers/abc/exec is forward", () => {
+      expect(classify("GET", "/containers/abc/exec").kind).toBe("forward");
+    });
+  });
+
+  describe("API version floor on the create and exec routes", () => {
+    it.each([
+      ["POST", "/v1.43/containers/create"],
+      ["POST", "/v1.4/containers/create"],
+      ["POST", "/v1/containers/create"],
+      ["POST", "/v1.43.9/containers/create"],
+      ["POST", "/v0.99/containers/abc/exec"],
+      ["POST", "/v1.43/containers/abc/exec"],
+      ["POST", "/v1.99999999999999999999/containers/create"],
+    ])("denies %s %s", (method, path) => {
+      const r = classify(method, path);
+      assertKind(r, "reject");
+      expect(rejectionStatus(r.rejection)).toBe(403);
+    });
+
+    it.each([
+      ["GET", "/v1.24/containers/json"],
+      ["POST", "/v1.24/containers/abc/start"],
+      ["POST", "/v1.24/exec/abc/start"],
+    ])("leaves %s %s to its route", (method, path) => {
+      expect(classify(method, path).kind).not.toBe("reject");
     });
   });
 
@@ -90,7 +130,7 @@ describe("router.classify", () => {
       ["POST", "/v1.43/auth"],
     ])("denies %s %s (image production / registry auth — see DENY_PREFIXES)", (method, path) => {
       const r = classify(method, path);
-      expect(r.kind).toBe("deny");
+      expect(r.kind).toBe("reject");
     });
   });
 

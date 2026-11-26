@@ -605,6 +605,7 @@ describe("runCodingVerify", () => {
     const createCall = (deps.sandbox.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     expect(createCall?.env).toEqual({
       CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-code-oauth-token",
+      TESTCONTAINERS_RYUK_DISABLED: "true",
     });
   });
 
@@ -645,6 +646,7 @@ describe("runCodingVerify", () => {
     expect(createCall?.env).toEqual({
       CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-code-oauth-token",
       COGMO_VERIFY_BASE: baseSha,
+      TESTCONTAINERS_RYUK_DISABLED: "true",
     });
   });
 

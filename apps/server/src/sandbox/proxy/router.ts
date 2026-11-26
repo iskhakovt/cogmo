@@ -1,15 +1,17 @@
 /**
  * Endpoint classification for the Docker socket proxy.
  *
- * Pure module — given a method + path, decides what to do. Three outcomes:
+ * Pure module — given a method + path, decides what to do:
  *
- * - **deny** — wholesale block. Returns 403 to the caller.
- * - **policy** — buffer the request body and run policy mutation. Currently
- *   `POST /containers/create` only.
+ * - **reject** — a `ProxyRejection` the edge answers without contacting the
+ *   daemon: a denied endpoint family, or a create or exec create under an
+ *   API version below `MIN_API_VERSION`.
+ * - **container_create** / **exec_create** — buffer the body and run it
+ *   through its policy (`create-policy.ts`, `exec-policy.ts`).
  * - **hijack** — the endpoint upgrades to a raw bidirectional stream
- *   (`/exec/{id}/start`, `/containers/{id}/attach`, `/events`, `/build`,
- *   `/session`, log follow). Caller pipes the upgraded sockets in both
- *   directions and stays out of the way.
+ *   (`/exec/{id}/start`, `/containers/{id}/attach`, `/events`, log follow).
+ *   Caller pipes the upgraded sockets in both directions and stays out of
+ *   the way.
  * - **forward** — plain HTTP/1.1 round-trip to the upstream daemon socket,
  *   no body inspection.
  *
@@ -17,11 +19,29 @@
  *   buildkite/sockguard, CpuID/dockerd-ci-proxy, Tecnativa/docker-socket-proxy.
  */
 
+import { denied, type ProxyRejection } from "./rejection.js";
+
 export type RouteOutcome =
-  | { kind: "deny"; status: number; reason: string }
-  | { kind: "policy"; subject: "container_create" }
+  | { kind: "reject"; rejection: ProxyRejection }
+  /** `versionPrefix` is `""` or the request's `/v<version>`, forwarded as is. */
+  | { kind: "container_create"; versionPrefix: string }
+  | { kind: "exec_create" }
   | { kind: "hijack" }
   | { kind: "forward" };
+
+/**
+ * The create and exec policies read their bodies with API 1.44 semantics,
+ * so an older version prefix on those two routes is denied. A request with
+ * no prefix gets the daemon's own version, which Cogmo requires to be 1.44
+ * or later (design/sandbox.md → Proxy Design).
+ */
+const MIN_API_VERSION = "1.44";
+
+/**
+ * The daemon routes `/containers/{name:.*}/exec`, so a name may span
+ * segments: a legacy link names a container `/parent/alias`.
+ */
+const EXEC_CREATE_RE = /^\/containers\/.+\/exec$/;
 
 const EXEC_START_RE = /^\/(?:v[\d.]+\/)?exec\/[^/]+\/start(\?|$)/;
 
@@ -62,8 +82,8 @@ const DENY_PREFIXES: readonly string[] = [
 
 /**
  * Classify a request. Strips the optional `/v1.NN/` API-version prefix before
- * matching so callers can use either prefixed (`/v1.43/containers/create`) or
- * unprefixed (`/containers/create`) paths interchangeably. Canonicalises
+ * matching so callers can use either prefixed (`/v1.47/containers/json`) or
+ * unprefixed (`/containers/json`) paths interchangeably. Canonicalises
  * percent-encoded characters and collapses redundant slashes/dot-segments
  * before any prefix match — otherwise `/v1.43/swarm%2Finit` or `/swarm/./x`
  * would slip past the deny check on raw-string compares.
@@ -72,15 +92,20 @@ export function classify(method: string, rawPath: string): RouteOutcome {
   const path = canonicalisePath(stripQuery(rawPath));
   const upper = method.toUpperCase();
 
-  for (const prefix of DENY_PREFIXES) {
-    if (matchesPrefix(path, prefix)) {
-      return { kind: "deny", status: 403, reason: `${prefix}/* is blocked by Cogmo proxy` };
-    }
+  const deniedPrefix = DENY_PREFIXES.find((prefix) => matchesPrefix(path, prefix));
+  if (deniedPrefix !== undefined) {
+    return { kind: "reject", rejection: denied(`${deniedPrefix}/*`) };
   }
 
-  // POST /containers/create — body inspection + label/runtime/cgroup injection.
-  if (upper === "POST" && pathMatches(path, "/containers/create")) {
-    return { kind: "policy", subject: "container_create" };
+  const { version, route } = splitVersion(path);
+  if (upper === "POST" && route === "/containers/create") {
+    return atLeastFloor(version, {
+      kind: "container_create",
+      versionPrefix: version === null ? "" : `/v${version}`,
+    });
+  }
+  if (upper === "POST" && EXEC_CREATE_RE.test(route)) {
+    return atLeastFloor(version, { kind: "exec_create" });
   }
 
   // Hijacked: `/exec/{id}/start` upgrades to raw bytes once Docker accepts.
@@ -104,14 +129,44 @@ export function classify(method: string, rawPath: string): RouteOutcome {
     return { kind: "hijack" };
   }
 
-  // Pass-through everything else: `/_ping`, `/version`, `/info`,
-  // `/containers/json`, `/containers/{id}/json`, `/images/*`,
-  // `/networks/*` (with policy on `POST /networks/create` etc.
-  // layered in later sub-PRs), `/volumes/*`, `/system/df`, …
-  // The other /containers/{id}/<action> calls flow through too — slice
-  // 3 doesn't authz them yet (the per-task socket itself is the
-  // boundary; the docker-id ownership map lands in a follow-up).
+  // Everything else is forwarded: `/_ping`, `/version`, `/info`, container
+  // reads and actions, `/images/*`, `/networks/*`, `/volumes/*`, … Ownership
+  // and the default-deny route table are design/sandbox.md → Slices, item 2.
   return { kind: "forward" };
+}
+
+function atLeastFloor(version: string | null, outcome: RouteOutcome): RouteOutcome {
+  if (version === null || compareVersions(version, MIN_API_VERSION) >= 0) return outcome;
+  return {
+    kind: "reject",
+    rejection: denied(`API version v${version} (the minimum is v${MIN_API_VERSION})`),
+  };
+}
+
+function splitVersion(path: string): { version: string | null; route: string } {
+  const m = /^\/v([\d.]+)(\/.*)?$/.exec(path);
+  return m?.[1] === undefined
+    ? { version: null, route: path }
+    : { version: m[1], route: m[2] ?? "/" };
+}
+
+/**
+ * The daemon's `versions.compare`: dot-separated parts compared as
+ * integers, a missing or unreadable part counting as 0.
+ */
+function compareVersions(a: string, b: string): number {
+  const left = a.split(".").map(versionPart);
+  const right = b.split(".").map(versionPart);
+  const length = Math.max(left.length, right.length);
+  const diff = Array.from({ length }, (_, i) => (left[i] ?? 0) - (right[i] ?? 0)).find(
+    (d) => d !== 0,
+  );
+  return Math.sign(diff ?? 0);
+}
+
+function versionPart(part: string): number {
+  const n = Number(part);
+  return /^\d+$/.test(part) && Number.isSafeInteger(n) ? n : 0;
 }
 
 function stripQuery(rawPath: string): string {
@@ -162,9 +217,4 @@ function matchesPrefix(path: string, prefix: string): boolean {
   // Strip optional API version prefix.
   const stripped = path.replace(/^\/v[\d.]+/, "");
   return stripped === prefix || stripped.startsWith(`${prefix}/`);
-}
-
-function pathMatches(path: string, target: string): boolean {
-  const stripped = path.replace(/^\/v[\d.]+/, "");
-  return stripped === target;
 }
