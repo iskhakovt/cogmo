@@ -52,31 +52,30 @@ Consequences:
 Measured on the 150 PRs merged between 2026-10-21 and 2026-11-26, and on `main`'s last 100 commits:
 
 - **Volume.** 4.2 PRs merge a day, 27% of them Dependabot's.
-- **Runs per merged head.** 1.05 for agent PRs, 2.24 for Dependabot's. Dependabot adds `dependencies` and an ecosystem label to every PR, and `labels: []` doesn't stop it.
+- **Runs per merged head.** 1.05 for agent PRs, 2.24 for Dependabot's: Dependabot adds `dependencies` and an ecosystem label to every PR.
 - **Latency.** The gate takes a median 8.7 min and 12.3 min at p90, from run start to `Required Checks`.
   - Unit Tests is the critical path: median 8.4 min, p90 11.7.
   - Integration takes 3.5 min, web 0.8, and typecheck + lint + knip 0.7.
-- **Concurrency.** A code PR starts 13 CI jobs (14 with E2E), plus CodeQL's 3, Dependency Review's 1 and, on matching paths, Sysbox's 1. That is up to 19 against the account's 20 concurrent jobs on the Free plan, shared by parallel agent PRs.
+- **Concurrency.** A code PR's CI run is 13 jobs (14 with E2E). CodeQL adds 3, Dependency Review 1 and, on matching paths, Sysbox 1. They all draw on the account's 20 concurrent jobs on the Free plan, along with overlapping label runs and parallel agent PRs.
 - **E2E on request.** 6 merged PRs in 36 days.
 - **Flakes.** 2 of the 31 heads with several runs had runs that disagreed on identical code (#669 E2E, #779 Unit Tests). #823 and #826 (2026-11-24) did the same, and reruns hid it.
 - **`main`.** One failed push run in 100 commits (#748, Unit Tests).
-- **Hardening.** `permissions: {}` with per-job grants and SHA-pinned actions. No workflow linter and no Actions lockfile.
 
 ## Best practice `[research]`
 
 Researched November 2026; sources under References.
 
 - **Shape.** Well-run TypeScript monorepos keep one CI workflow: a change-detection job, path filtering inside the workflow, and an aggregator job as the one required check. Vitest, Vite and Astro all do this. Security linting and publishing live in workflows of their own. Biome runs about 28 workflows split by area, which works for an organization with a merge queue.
-- **Path filters.** A workflow skipped by `on.paths` leaves its required check pending and blocks the merge, so required workflows filter inside the workflow. A job skipped by `if:` reports success, so the aggregator has to list its allowed skips.
+- **Path filters.** A workflow skipped by `on.paths` leaves its required check pending and blocks the merge, so required workflows filter inside the workflow, and the aggregator lists the skips it allows.
 - **Merge queue.** Available only to organization-owned public repos, or to organization repos on Enterprise Cloud. Under a queue, checks report on `merge_group` as well as `pull_request`, and the queue is where expensive suites usually run.
 - **Several runs on one commit.** No official tie-break rule exists. A GitHub Support reply quoted in community discussion #77942 says status checks "look up the status of the latest run". GitHub also advises unique job names across workflows.
-- **On-demand jobs.** A `labeled` trigger starts a full new run for every label, Dependabot's included. A rerun through the API stays in the same run, re-runs dependent jobs (the aggregator among them), keeps the original actor's privileges, and is limited to 50 reruns within 30 days. ChatOps (`issue_comment`) runs on the default branch with a write token and needs its SHA pinned, or it is open to time-of-check/time-of-use attacks.
+- **On-demand jobs.** A `labeled` trigger starts a full new run for every label, Dependabot's included. A rerun through the API stays in the same run, re-runs dependent jobs (the aggregator among them), keeps the original actor's privileges, and is limited to 50 reruns of a run, within 30 days of it. ChatOps (`issue_comment`) runs on the default branch with a write token and needs its SHA pinned, or it is open to time-of-check/time-of-use attacks.
 - **Shared setup.** A composite action, which Vitest uses, removes duplicated setup without changing check names. A reusable workflow reports as `<caller> / <job>`.
 - **Speed.**
   - Vitest shards by file (`--shard`, the `blob` reporter, `--merge-reports`), which pays when test time dwarfs the roughly one minute of setup per job.
   - The Free plan runs 20 concurrent jobs per account (Pro: 40), and jobs beyond that queue.
   - The Actions cache is 10 GB per repo, so caches should be written from `main`.
-  - "Affected only" runs follow the import graph, which misses fixtures, migrations, Dockerfiles and Python.
+  - "Affected only" runs follow the import graph, which misses cassettes, migrations, Dockerfiles and Python.
 - **Flakes.** GitHub has no flake tracking. Codecov Test Analytics reads JUnit and flags tests that both fail and pass. Auto-retrying jobs is widely treated as hiding bugs.
 - **Hardening.**
   - zizmor audits workflows for template injection, excessive permissions, and credentials persisted by `actions/checkout`.
@@ -88,37 +87,39 @@ Researched November 2026; sources under References.
 Keep the shape: one `ci.yml`, path filtering inside it, one aggregator. It is the established layout, and on a user-owned repo with no merge queue it is the one that meets R1–R3. Change what misses a requirement:
 
 1. **Labels start no CI run; E2E is requested by rerun (R3, R4, R6).**
-   - **Triggers.** `ci.yml` runs on `opened`, `synchronize`, `reopened` and push to `main`. Its concurrency group keeps a group of its own for `reopened` only.
-   - **Live labels.** `changes` reads the PR's labels from the API, and fails when the read fails (R2). E2E's condition and the label-removal step both read that output, not the event payload, which a rerun keeps.
-   - **`e2e-request.yml`** runs on `labeled`; for the `e2e` label it:
-     - targets the newest `pull_request` CI run, by run ID, for the PR's current head SHA. If there is none, or the head has moved on, it does nothing, because the new push's run reads the label itself;
-     - waits for that run to finish, and never cancels it, since a cancel is asynchronous and races the rerun. If that run already ran E2E, it stops;
+   - **Triggers.** `ci.yml` runs on `opened`, `synchronize`, `reopened` and push to `main`.
+   - **Concurrency.** The concurrency group stays per ref. A `reopened` run and a rerun attempt (`github.run_attempt > 1`) each get a group of their own, so a rerun for an older head can't cancel the run for a newer one.
+   - **Live reads.** A rerun keeps its event payload, so CI reads nothing from it that can change on the same commit.
+     - `changes` reads the PR's labels from the API and fails when the read fails (R2).
+     - PR Title reads the title from the API, as Schema ⇒ design doc reads the body.
+   - **Label removal.** After a passing E2E, the label is removed only if the run's head SHA is still the PR's head, so an older attempt can't consume a request meant for a newer head.
+   - **`e2e-request.yml`** runs on `labeled`, one handler at a time per PR (a per-PR concurrency group, queued). For the `e2e` label it:
+     - waits for the newest `pull_request` CI run (by run ID) for the PR's head SHA to finish. It never cancels it, since a cancel is asynchronous and races the rerun;
+     - then reads the head again. It does nothing if the head moved or a newer push cancelled the run, because the new push's run reads the label itself;
+     - stops if the run's newest attempt ran E2E;
      - reruns every job if the run passed. If it failed, it reruns nothing and fails, so the failure gets investigated, not rerun away (R10).
    - **Other labels,** Dependabot's included, run that workflow's skipped job and nothing in CI.
-   - **Residuals.**
-     - A failed request (an API error, the 50-rerun limit, a fork PR's read-only token) shows red but can't block the merge, so the PR can merge without the E2E it asked for. The owner sees the red request.
-     - A rerun keeps the original actor's token, so on a Dependabot PR the label-removal step can't write, and it is skipped there.
+   - **Residual.** A failed request (an API error, the per-run rerun limit, a fork PR's read-only token) shows red but can't block the merge, so the PR can merge without the E2E it asked for. The owner sees the red request.
 2. **Shared setup.** `.github/actions/setup` (pnpm, Node, `pnpm install --frozen-lockfile`) replaces the steps CI's six Node jobs, `sysbox-e2e.yml` and `dependency-audit.yml` repeat.
 3. **Sharded unit tests (R11).**
    - **Shards.** Unit Tests runs as three shards with the `blob` reporter, covering both unit projects. Each shard is in the aggregator's `needs:`, so a failed shard fails the gate.
-   - **Merge job.** A merge job (`if: always()`) merges the blobs into one JUnit report and, on `main`, one coverage report. It fails when a shard's blob is missing.
-   - **Job budget.** The three hadolint matrix jobs fold into one, so the shards and their merge job add one job net: 14 for a code PR.
-   - **Related todo.** The unit-tier speedup entry in `todo.md` (Pyodide bootstrap) cuts the work itself; sharding spreads it.
+   - **Merge job.** A merge job (`if: always() && needs.changes.outputs.code == 'true'`) merges this attempt's blobs (artifact names carry `github.run_attempt`) into one JUnit report and, on `main`, one coverage report. It fails when a shard's blob is missing. The merge job is in the aggregator's `needs:`, and it and the shards are allowed skips, so a doc-only PR still passes.
+   - **Job budget.** The three hadolint matrix jobs fold into one, so the shards and their merge job add one job net: 14 per run for a code PR that doesn't touch `.github/`.
 4. **Workflow linting (R9).** A `workflows` job, gated on `.github/**` changes, runs actionlint and zizmor. Checkouts zizmor flags set `persist-credentials: false`. `actions.lock` follows once `gh actions-lock` reaches 1.0.
 5. **Flake visibility (R10).** Every unit and integration JUnit report goes to Codecov Test Analytics, failed attempts included. A flagged test gets a todo entry and a root cause; nothing retries.
 6. **Sysbox E2E in the gate (open).**
-   - It becomes a CI job behind a `changes` output computed from today's paths, with `ci.yml` in place of its own workflow file, on PRs and on `main` alike. It is listed in `allowed-skips`.
-   - Manual runs move to a dispatch-only workflow, because CI takes no dispatch (Gate semantics).
+   - `sysbox-e2e.yml` becomes a reusable workflow (`workflow_call`, plus `workflow_dispatch` for manual runs, since CI takes none). CI calls it behind a `changes` output computed from today's paths, with `ci.yml` in place of its own workflow file, on PRs and on `main` alike.
+   - The calling job is in the aggregator's `needs:` and an allowed skip.
 7. **Dependabot.** The `labels: []` entries go.
 
 ## Not adopted `[proposed]`
 
 - **Merge queue.** It needs an organization-owned repo. Moving cogmo to an organization changes the GHCR image path and the deploy pins. At 4.2 merges a day, with `main` green on 99 of 100 commits, the push run on `main` and the release gate cover post-merge breakage.
-- **Separate required workflows.** Each needs its own required check, and a path-filtered workflow leaves its check pending.
-- **CI as reusable workflows.** No other workflow shares CI's jobs. Publish already is one, called by Release.
-- **Retries,** of jobs or tests. They hide flakes (R10).
-- **ChatOps `/e2e`.** It runs on the default branch with a write token. A label plus a rerun does the same without the time-of-check/time-of-use risk.
-- **Affected-only runs.** The import graph misses cassettes, migrations, Dockerfiles and Python.
+- **Separate required workflows.** See Best practice → Path filters.
+- **CI split into reusable workflows.** Only Sysbox (layout item 6) has a second caller. Publish already is a reusable workflow, called by Release.
+- **Retries,** of jobs or tests (R10, Best practice → Flakes).
+- **ChatOps `/e2e`.** See Best practice → On-demand jobs; a label plus a rerun avoids the risk.
+- **Affected-only runs.** See Best practice → Speed.
 - **Dependabot auto-merge.** Every merge needs the owner's approval.
 
 ## Rollout `[proposed]`
@@ -131,7 +132,9 @@ One PR per slice, each verified on its own runs:
      - a throwaway label starts no CI run and leaves the PR mergeable;
      - `e2e` reruns CI with E2E and gates the merge;
      - `e2e` added mid-run waits, then reruns;
-     - `e2e` on a failed run reruns nothing.
+     - `e2e` on a failed run reruns nothing;
+     - a push while the request waits leaves it doing nothing.
+   - Also confirm on a Dependabot PR that the rerun's label removal can write, since a rerun keeps the original actor's token.
 2. **Composite setup** (2). A pure refactor; check names don't change.
 3. **Unit shards** (3). Measure gate latency over a week of PRs against R11.
 4. **Workflow linting** (4), after fixing what zizmor reports on today's workflows.
