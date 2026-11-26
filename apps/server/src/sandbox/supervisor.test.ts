@@ -304,7 +304,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       network: "bridge",
-      dockerSocket: true,
+      dockerSocket: false,
       depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
     });
     const withVolume = expectDefined(calls.create[0], "first create call");
@@ -558,7 +558,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
   ];
 
   it.each(SALVAGE_FAILURES)(
-    "a failed create without dockerSocket leaves the scope of a coding session under the same id when $failure",
+    "a failed create without dockerSocket releases no scope, even one registered under its task id, when $failure",
     async ({ instance, arrange }) => {
       // The salvage session shares its coding task's id.
       const taskId = "019d0000-0000-7000-8000-000000000e02";

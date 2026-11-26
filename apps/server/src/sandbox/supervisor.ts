@@ -226,9 +226,9 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // level is deferred.
     const cgroupParent = taskSliceName(spec.taskId);
 
-    // A session without `dockerSocket` gets no proxy scope, and so no rollback
-    // of one: the salvage session shares its coding task's id, whose scope a
-    // failed salvage create must leave alone.
+    // A session without `dockerSocket` gets no proxy scope. A failed create
+    // releases only the scope it registered: scopes are keyed by task id,
+    // which a salvage session shares with its coding task.
     const proxy = spec.dockerSocket ? this.#proxy : undefined;
 
     // Pre-allocate the proxy socket so the task container can mount it at

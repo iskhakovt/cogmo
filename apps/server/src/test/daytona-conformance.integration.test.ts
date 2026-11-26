@@ -227,7 +227,7 @@ function wrapperSpec(): {
     // baked value (5) on every run regardless of record vs replay.
     expiresAt: new Date(Date.now() + 5 * 60 * 1000),
     network: "bridge",
-    dockerSocket: true,
+    dockerSocket: false,
   };
 }
 
