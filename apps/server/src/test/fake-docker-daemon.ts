@@ -49,6 +49,8 @@ export interface FakeDockerDaemon {
    * ends, without waiting for the client to end its side.
    */
   finishUpgrades(output: string): void;
+  /** From now on, a switched upgrade writes `output` in the same write as its `101`. */
+  leadUpgrades(output: string): void;
   setResponder(responder: FakeDaemonResponder): void;
   close(): Promise<void>;
 }
@@ -58,9 +60,10 @@ export interface FakeUpgrade {
   /** `101`, a refusal (200 or 400), or no answer yet (`holdUpgrades`). */
   answer: "switched" | "refused" | "held";
   /**
-   * What the client sent after the request's body, as latin1, one character
-   * per octet: while the answer was held, and after a switch; after a
-   * refusal, only what came before it.
+   * Every byte that reached the upgrade's connection after the request's
+   * body, as latin1, one character per octet, until the connection closed:
+   * while the answer was held, after a switch, and after a refusal, whether
+   * or not it was parsed as a request.
    */
   received: string;
   closed: boolean;
@@ -80,6 +83,7 @@ export async function startFakeDockerDaemon(
   const held: Array<() => void> = [];
   let ignoringClose = false;
   let finalOutput: string | null = null;
+  let leadOutput = "";
   let current = responder;
   const server = http.createServer((raw, res) => {
     started.push(`${raw.method} ${raw.url}`);
@@ -101,14 +105,14 @@ export async function startFakeDockerDaemon(
   });
   // An upgrade is answered as the daemon answers exec start: `101` (with the
   // `Sec-WebSocket-Accept` a WebSocket handshake needs, for one), then a
-  // stream that records what the client sends and, once the client ends its
-  // side, writes `late-output` and ends; or, for a detached start or a body
-  // that is not JSON, a plain 200 or 400 and no switch. After a refusal the
-  // connection is kept open and parsed as HTTP again, unless the request's
-  // `Connection` holds `close`, as Go's server does (`ignoreConnectionClose`
-  // keeps it). A held upgrade gets no answer until `releaseUpgrades`, and its
-  // connection stays open, recording what the client sends, until the client
-  // ends its side, when the daemon closes it.
+  // stream that, once the client ends its side, writes `late-output` and
+  // ends; or, for a detached start or a body that is not JSON, a plain 200 or
+  // 400 and no switch. After a refusal the connection is kept open and parsed
+  // as HTTP again, unless the request's `Connection` holds `close`, as Go's
+  // server does (`ignoreConnectionClose` keeps it). A held upgrade gets no
+  // answer until `releaseUpgrades`, and its connection stays open until the
+  // client ends its side, when the daemon closes it. Every byte the
+  // connection receives after the body is recorded, whatever the answer.
   server.on("upgrade", (raw: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     started.push(`${raw.method} ${raw.url}`);
     readUpgradeBody(raw, head)
@@ -126,15 +130,19 @@ export async function startFakeDockerDaemon(
         socket.once("close", () => {
           upgrade.closed = true;
         });
-        const record = (chunk: Buffer) => {
-          upgrade.received += chunk.toString("latin1");
-        };
+        // What arrives before a refusal is recorded once, though it is
+        // unshifted for the parser after it.
+        let replayed = 0;
+        socket.on("data", (chunk: Buffer) => {
+          const fresh = chunk.subarray(Math.min(replayed, chunk.length));
+          replayed -= chunk.length - fresh.length;
+          upgrade.received += fresh.toString("latin1");
+        });
         const answer = (unread: Buffer) =>
           match(upgradeAnswer(body))
             .with({ kind: "switched" }, () => {
               upgrade.answer = "switched";
-              socket.on("data", record);
-              socket.write(switchingResponse(raw.headers));
+              socket.write(`${switchingResponse(raw.headers)}${leadOutput}`);
               if (finalOutput !== null) {
                 socket.end(finalOutput);
                 return;
@@ -158,6 +166,7 @@ export async function startFakeDockerDaemon(
                 socket.end();
                 return;
               }
+              replayed = unread.length;
               if (unread.length > 0) socket.unshift(unread);
               server.emit("connection", socket);
             })
@@ -167,15 +176,12 @@ export async function startFakeDockerDaemon(
           return;
         }
         const whileHeld: Buffer[] = [rest];
-        const recordHeld = (chunk: Buffer) => {
-          whileHeld.push(chunk);
-          record(chunk);
-        };
+        const keepHeld = (chunk: Buffer) => whileHeld.push(chunk);
         const endHeld = () => socket.end();
-        socket.on("data", recordHeld);
+        socket.on("data", keepHeld);
         socket.once("end", endHeld);
         held.push(() => {
-          socket.off("data", recordHeld);
+          socket.off("data", keepHeld);
           socket.off("end", endHeld);
           answer(Buffer.concat(whileHeld));
         });
@@ -204,6 +210,9 @@ export async function startFakeDockerDaemon(
     },
     finishUpgrades: (output) => {
       finalOutput = output;
+    },
+    leadUpgrades: (output) => {
+      leadOutput = output;
     },
     setResponder: (next) => {
       current = next;

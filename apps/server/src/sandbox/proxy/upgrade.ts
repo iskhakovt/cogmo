@@ -176,7 +176,10 @@ function forwardChecked(
     )
     .then((checked) =>
       checked.match(
-        (upgrade) => forwardUpgrade(req, clientSocket, upgrade, upstream),
+        (upgrade) =>
+          forwardUpgrade(req, clientSocket, upgrade, upstream, (rejection) =>
+            rejectUpgrade(req, clientSocket, scope.taskId, rejection),
+          ),
         (rejection) => rejectUpgrade(req, clientSocket, scope.taskId, rejection),
       ),
     )

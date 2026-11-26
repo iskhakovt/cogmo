@@ -3,8 +3,7 @@
  * pointing `DOCKER_HOST` at a Unix-socket server that logged each
  * connection and forwarded it to a Docker 29.9.3 daemon: the exec start of
  * `docker exec -it c1 sh -c '…'` and the attach of `docker attach c1`. Both
- * name `Upgrade: tcp` and frame their body by `Content-Length`; `docker exec
- * -i` sends the same start with `"Tty":false` (28 bytes). The daemon
+ * name `Upgrade: tcp` and frame their body by `Content-Length`. The daemon
  * answered each with `101 UPGRADED`.
  */
 

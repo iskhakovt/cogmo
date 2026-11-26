@@ -5,8 +5,9 @@
  * every byte the client sends after the body is held until Node's client
  * has parsed the daemon's answer. A `101` opens a raw pipe both ways. Any
  * other answer is read whole and relayed, and both connections end, so no
- * byte the client sent after the body reaches the daemon, whether or not
- * the daemon honours `close`.
+ * byte the client sent after the body reaches a daemon that did not switch.
+ * A framed refusal is relayed whether or not the daemon honours `close`;
+ * an unframed one ends only at the daemon's close.
  */
 
 import * as http from "node:http";
@@ -23,9 +24,8 @@ import {
   rebuiltResponseHeaders,
   upgradeRequestHeaders,
   writeRawAndDestroy,
-  writeRawRejectionAndDestroy,
 } from "./http-io.js";
-import { daemonFailed } from "./rejection.js";
+import { daemonFailed, type ProxyRejection } from "./rejection.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
 
@@ -39,11 +39,17 @@ export interface UpgradeForward {
   head: Buffer;
 }
 
+/**
+ * Forward a checked upgrade. `reject` answers and logs a rejection the
+ * forward itself comes to, a 502, which goes only to a client still there
+ * on a task not being torn down.
+ */
 export function forwardUpgrade(
   req: http.IncomingMessage,
   clientSocket: Duplex,
   upgrade: UpgradeForward,
   upstream: Upstream,
+  reject: (rejection: ProxyRejection) => void,
 ): void {
   // The checks are async: a connection the task's teardown destroyed
   // meanwhile gets no daemon connection. One the client has only ended is
@@ -60,6 +66,12 @@ export function forwardUpgrade(
   });
   // Once Node has parsed the daemon's answer, its relay owns the client.
   let answered = false;
+  const answerable = (rejection: ProxyRejection) => {
+    if (!clientSocket.destroyed && !upstream.signal.aborted) reject(rejection);
+  };
+  // The proxy's own close of the request, for a client that is gone: not an
+  // upstream failure, and there is no one left to answer.
+  const clientGone = new Error("the client is gone");
   outgoing.on("upgrade", (reply, daemon, daemonHead) => {
     answered = true;
     openStream(
@@ -71,20 +83,20 @@ export function forwardUpgrade(
   });
   outgoing.on("response", (reply) => {
     answered = true;
-    relayRefusal(clientSocket, outgoing, reply);
+    relayRefusal(clientSocket, outgoing, reply, answerable);
   });
   // Until then nothing has reached the client, which gets a 502 for a
   // failed dial, a reset, a clean close or an answer that is not HTTP.
   outgoing.on("error", (cause) => {
+    if (cause === clientGone) return;
     warnUpstream(req, cause);
     if (answered) return;
-    writeRawRejectionAndDestroy(
-      clientSocket,
-      daemonFailed(`Cogmo proxy upstream error: ${cause.message}`),
-    );
+    answerable(daemonFailed(`Cogmo proxy upstream error: ${cause.message}`));
   });
-  // A client that is gone before the daemon has answered closes the request with it.
-  clientSocket.once("close", () => outgoing.destroy());
+  // A client connection that closes before the daemon has answered, by a
+  // reset or the proxy's own destroy, closes the request with it. One that
+  // only ended its side is half-open, and still gets the answer.
+  clientSocket.once("close", () => outgoing.destroy(clientGone));
   outgoing.end(upgrade.body);
 }
 
@@ -140,18 +152,18 @@ function openStream(
  * The daemon answered without switching: its answer, read whole, goes to
  * the client framed by its length with `Connection: close`, and both
  * connections end. A daemon that kept its connection open would otherwise
- * parse the client's next bytes as a request nobody checked.
+ * parse the client's next bytes as a request nobody checked. An answer
+ * with no framing is read to the daemon's close, so from a daemon that
+ * ignores `close` it waits until the task's teardown.
  */
 function relayRefusal(
   clientSocket: Duplex,
   outgoing: http.ClientRequest,
   reply: http.IncomingMessage,
+  reject: (rejection: ProxyRejection) => void,
 ): void {
   readReply(reply)
-    .match(
-      (body) => writeRawAndDestroy(clientSocket, refusalAnswer(reply, body)),
-      (rejection) => writeRawRejectionAndDestroy(clientSocket, rejection),
-    )
+    .match((body) => writeRawAndDestroy(clientSocket, refusalAnswer(reply, body)), reject)
     // The daemon connection ends once its answer is read, whether or not it would close of itself.
     .then(() => outgoing.destroy())
     .catch((cause: unknown) => {
@@ -161,11 +173,17 @@ function relayRefusal(
     });
 }
 
-/** The daemon's answer without its hop-by-hop headers, framed by its length. */
+/**
+ * The daemon's answer without its hop-by-hop headers, framed by its length.
+ * A 204 or a 304 has no body and carries no `Content-Length` (RFC 9110
+ * §8.6): a 304's would state the length of the `200` it stands for.
+ */
 function refusalAnswer(reply: http.IncomingMessage, body: Buffer): Buffer {
-  const headers = { ...rebuiltResponseHeaders(reply.headers, body.length), connection: "close" };
+  const status = reply.statusCode ?? 502;
+  const length = status === 204 || status === 304 ? null : body.length;
+  const headers = { ...rebuiltResponseHeaders(reply.headers, length), connection: "close" };
   return Buffer.concat([
-    rawResponseHead(reply.statusCode ?? 502, reply.statusMessage ?? "", headerLines(headers)),
+    rawResponseHead(status, reply.statusMessage ?? "", headerLines(headers)),
     body,
   ]);
 }

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import type * as http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Duplex, PassThrough } from "node:stream";
+import { Duplex, PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
@@ -45,6 +45,23 @@ function upstream(): { socketPath: string; signal: AbortSignal } {
   return { socketPath: daemon.socketPath, signal: new AbortController().signal };
 }
 
+/** A client connection that sends nothing, stays open, and keeps what the proxy writes to it. */
+function openClient(): { socket: Duplex; written: () => string } {
+  let written = "";
+  const socket = new Duplex({
+    read() {},
+    write(chunk: Buffer, _encoding, callback) {
+      written += chunk.toString("latin1");
+      callback();
+    },
+  });
+  // As `handleUpgrade` listens on a real one.
+  socket.on("error", () => {});
+  return { socket, written: () => written };
+}
+
+const EMPTY = { path: START, body: Buffer.alloc(0), head: Buffer.from("held") };
+
 describe("forwardUpgrade", () => {
   it("opens no daemon connection for a client connection already destroyed", async () => {
     const client = new PassThrough();
@@ -55,21 +72,18 @@ describe("forwardUpgrade", () => {
       client,
       { path: START, body: Buffer.alloc(0), head: Buffer.alloc(0) },
       upstream(),
+      vi.fn(),
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(daemon.connections()).toBe(0);
   });
 
-  it("closes the daemon connection of a client gone while the daemon holds its answer", async () => {
+  it("closes the daemon connection of a client gone while the daemon holds its answer, unlogged and unanswered", async () => {
     daemon.holdUpgrades();
     const client = new PassThrough();
-    forwardUpgrade(
-      startRequest(),
-      client,
-      { path: START, body: Buffer.alloc(0), head: Buffer.from("held") },
-      upstream(),
-    );
+    const reject = vi.fn();
+    forwardUpgrade(startRequest(), client, EMPTY, upstream(), reject);
     await vi.waitFor(() => expect(daemon.upgrades()).toHaveLength(1));
 
     client.destroy();
@@ -77,6 +91,48 @@ describe("forwardUpgrade", () => {
     await vi.waitFor(() =>
       expect(daemon.upgrades()).toMatchObject([{ answer: "held", received: "", closed: true }]),
     );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(reject).not.toHaveBeenCalled();
+  });
+
+  it("closes the daemon request when the task's signal aborts while the daemon holds its answer", async () => {
+    daemon.holdUpgrades();
+    const task = new AbortController();
+    const client = openClient();
+    forwardUpgrade(
+      startRequest(),
+      client.socket,
+      EMPTY,
+      { socketPath: daemon.socketPath, signal: task.signal },
+      vi.fn(),
+    );
+    await vi.waitFor(() => expect(daemon.upgrades()).toHaveLength(1));
+
+    task.abort();
+
+    await vi.waitFor(() =>
+      expect(daemon.upgrades()).toMatchObject([{ answer: "held", received: "", closed: true }]),
+    );
+    expect(client.socket.destroyed).toBe(false);
+  });
+
+  it("closes the daemon connection when the task's signal aborts after the switch", async () => {
+    const task = new AbortController();
+    const client = openClient();
+    forwardUpgrade(
+      startRequest(),
+      client.socket,
+      EMPTY,
+      { socketPath: daemon.socketPath, signal: task.signal },
+      vi.fn(),
+    );
+    await vi.waitFor(() => expect(client.written()).toMatch(/^HTTP\/1\.1 101 /));
+    expect(daemon.upgrades()).toMatchObject([{ answer: "switched", closed: false }]);
+
+    task.abort();
+
+    await vi.waitFor(() => expect(daemon.upgrades()).toMatchObject([{ closed: true }]));
   });
 
   it("logs and closes both connections when relaying a refusal throws", async () => {
@@ -90,6 +146,7 @@ describe("forwardUpgrade", () => {
       client,
       { path: START, body: Buffer.from('{"Detach":true}'), head: Buffer.alloc(0) },
       upstream(),
+      vi.fn(),
     );
 
     await vi.waitFor(() =>
