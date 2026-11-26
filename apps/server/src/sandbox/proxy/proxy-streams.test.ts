@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import * as net from "node:net";
 import { ResultAsync } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined, resolvesWithin } from "../../test/assertions.js";
+import { dockerCliAttach, dockerCliExecStart } from "../../test/docker-cli-upgrade-requests.js";
 import { respondJson } from "../../test/fake-docker-daemon.js";
 import {
   API,
@@ -11,6 +13,7 @@ import {
   TASK_ID,
   TASK_ROWS,
   upgradeRequest,
+  upgradeRequestWith,
   useProxyHarness,
 } from "../../test/proxy-harness.js";
 
@@ -136,6 +139,7 @@ describe("a request pipelined after a streaming one", () => {
     );
     await vi.waitFor(() => expect(client.received()).toContain("first"));
     const logsSoFar = client.received();
+    log.info.mockClear();
 
     client.socket.write(upgradeStart(id, '{"Detach":false,"Tty":false}'));
     await settle(200);
@@ -143,12 +147,69 @@ describe("a request pipelined after a streaming one", () => {
     expect(client.received()).not.toContain("HTTP/1.1 101");
     expect(client.received()).toBe(logsSoFar);
     expect(reached(`/exec/${id}/start`)).toEqual([]);
+    expect(log.info).toHaveBeenCalledWith(
+      {
+        taskId: TASK_ID,
+        path: `/exec/${id}/start`,
+        rejection: expect.objectContaining({ kind: "malformed" }),
+      },
+      "proxy request rejected",
+    );
     await resolvesWithin(
       Promise.race([client.ended, client.closed]),
       SETTLE_MS,
       "the connection to close",
     );
     release.resolve();
+  });
+
+  it("closes the connection on an upgrade behind a held logs stream while the socket retires, writing nothing into it", async () => {
+    const release = Promise.withResolvers<void>();
+    h.daemon.setResponder((req, res, raw) => {
+      if (req.url.startsWith(`/containers/${OWN.id}/logs`)) {
+        res.writeHead(200, { "content-type": "application/vnd.docker.multiplexed-stream" });
+        res.write("first");
+        release.promise.then(() => res.end("last"));
+        return;
+      }
+      if (req.url === "/containers/create") {
+        release.promise.then(() => API(req, res, raw));
+        return;
+      }
+      API(req, res, raw);
+    });
+    const client = await halfOpenClient();
+    client.socket.write(
+      "GET /containers/cogmo-task-own/logs?follow=1&stdout=1 HTTP/1.1\r\nHost: docker\r\n\r\n",
+    );
+    await vi.waitFor(() => expect(client.received()).toContain("first"));
+    const logsSoFar = client.received();
+    // An admitted create the daemon has not answered keeps the socket retiring.
+    const created = h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+    await vi.waitFor(() => expect(reached("POST /containers/create")).toHaveLength(1));
+    const torn = h.proxy.unregisterTask(TASK_ID);
+    await settle(50);
+    log.info.mockClear();
+
+    client.socket.write(upgradeRequest("POST", "/containers/cogmo-task-own/attach?stream=1"));
+
+    await resolvesWithin(
+      Promise.race([client.ended, client.closed]),
+      SETTLE_MS,
+      "the connection to close",
+    );
+    expect(client.received()).toBe(logsSoFar);
+    expect(log.info).toHaveBeenCalledWith(
+      {
+        taskId: TASK_ID,
+        path: "/containers/cogmo-task-own/attach",
+        rejection: expect.objectContaining({ kind: "malformed" }),
+      },
+      "proxy request rejected",
+    );
+    release.resolve();
+    await resolvesWithin(created, SETTLE_MS, "the create to be answered");
+    await resolvesWithin(torn, SETTLE_MS, "the teardown to finish");
   });
 
   it("is answered in order, after a held logs stream, and classified on its own", async () => {
@@ -464,6 +525,7 @@ describe("the checks on an upgrade", () => {
     const id = await createExec();
     const before = h.daemon.started();
     const client = await rawClient();
+    log.info.mockClear();
     // The headers alone: a client that expects 100 Continue holds its body back.
     client.socket.write(
       `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
@@ -472,14 +534,41 @@ describe("the checks on an upgrade", () => {
 
     await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 417 /));
     expect(h.daemon.started()).toEqual(before);
+    expect(log.info).toHaveBeenCalledWith(
+      {
+        taskId: TASK_ID,
+        path: `/exec/${id}/start`,
+        rejection: expect.objectContaining({ kind: "expectation_failed" }),
+      },
+      "proxy request rejected",
+    );
     client.socket.destroy();
   });
+
+  it.each([
+    ["400 to a chunked body", "Transfer-Encoding: chunked", "0\r\n\r\n", 400],
+    ["417 to Expect", "Expect: 100-continue\r\nContent-Length: 0", "", 417],
+  ])(
+    "answers %s on an unlisted route before classifying it, with no lookup",
+    async (_label, framing, body, status) => {
+      const client = await halfOpenClient();
+
+      client.socket.write(
+        "POST /containers/cogmo-task-own/update HTTP/1.1\r\nHost: docker\r\n" +
+          `Connection: Upgrade\r\nUpgrade: tcp\r\n${framing}\r\n\r\n${body}`,
+      );
+
+      await expectReleasedAfter(client, rawAnswer(status));
+      expect(h.daemon.started()).toEqual([]);
+      expect(h.rows.forTask).not.toHaveBeenCalled();
+    },
+  );
 
   it("answers 413 to an upgrade body over 1 MiB, reaching nothing", async () => {
     const id = await createExec();
     const before = h.daemon.started();
-
     const client = await rawClient();
+    log.info.mockClear();
 
     client.socket.write(
       upgradeWith(id, "", JSON.stringify({ Detach: false, pad: "x".repeat(2 * 1024 * 1024) })),
@@ -490,6 +579,14 @@ describe("the checks on an upgrade", () => {
       timeout: SETTLE_MS,
     });
     expect(h.daemon.started()).toEqual(before);
+    expect(log.info).toHaveBeenCalledWith(
+      {
+        taskId: TASK_ID,
+        path: `/exec/${id}/start`,
+        rejection: expect.objectContaining({ kind: "too_large" }),
+      },
+      "proxy request rejected",
+    );
     client.socket.destroy();
   });
 
@@ -518,6 +615,7 @@ describe("the checks on an upgrade", () => {
         "proxy request rejected",
       ),
     );
+    expect(client.received()).toBe("");
     expect(h.daemon.started()).toEqual(before);
   });
 
@@ -549,6 +647,7 @@ describe("the checks on an upgrade", () => {
         "proxy request rejected",
       ),
     );
+    expect(client.received()).toBe("");
     expect(reached("/attach")).toEqual([]);
   });
 
@@ -572,14 +671,23 @@ describe("the checks on an upgrade", () => {
   it("sends a refused upgrade's body once, and the bytes after it no further", async () => {
     const id = await createExec();
     const before = h.daemon.requests().length;
+    h.daemon.holdUpgrades();
     const client = await rawClient();
     const closed = new Promise<void>((resolve) => client.socket.once("close", () => resolve()));
     const body = '{"Detach":true}';
-
     client.socket.write(`${upgradeWith(id, "", body)}OPAQUE-MARKER-BYTES`);
+    await vi.waitFor(() => expect(h.daemon.upgrades()).toHaveLength(1));
+    await settle(100);
+    expect(h.daemon.upgrades()).toMatchObject([{ answer: "held", received: "" }]);
+
+    h.daemon.releaseUpgrades();
 
     await resolvesWithin(closed, SETTLE_MS, "the connection to close");
     expect(client.received()).toMatch(/^HTTP\/1\.1 200 /);
+    await vi.waitFor(() =>
+      expect(h.daemon.upgrades()).toMatchObject([{ answer: "refused", closed: true }]),
+    );
+    expect(h.daemon.upgrades()).toMatchObject([{ received: "" }]);
     const sent = h.daemon.requests().slice(before);
     expect(sent.map((r) => `${r.method} ${r.url}`)).toEqual([`POST /exec/${id}/start`]);
     const start = expectDefined(sent[0], "the upgrade");
@@ -603,6 +711,422 @@ describe("the checks on an upgrade", () => {
       }),
       "proxy request rejected",
     );
+  });
+});
+
+describe("the protocol an upgrade names", () => {
+  const ATTACH = "/containers/cogmo-task-own/attach?stream=1";
+  const ATTACH_WS = "/containers/cogmo-task-own/attach/ws?stream=1";
+
+  it.each(["websocket", "h2c", "tcp, websocket", "tcp/1"])(
+    "answers 403 to an exec start that asks for %j, reaching nothing",
+    async (protocol) => {
+      const id = await createExec();
+      const before = h.daemon.started();
+      log.info.mockClear();
+
+      const reply = await h.upgradeExchange(
+        upgradeRequestWith("POST", `/exec/${id}/start`, protocol),
+      );
+
+      expect(reply).toMatch(/^HTTP\/1\.1 403 /);
+      expect(reply).toContain("an upgrade of POST /exec/{id}/start to anything but tcp");
+      expect(h.daemon.started()).toEqual(before);
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: `/exec/${id}/start`,
+          rejection: expect.objectContaining({ kind: "denied" }),
+        }),
+        "proxy request rejected",
+      );
+    },
+  );
+
+  it.each([
+    ["an attach", "websocket", "POST", ATTACH, "POST /containers/{id}/attach to anything but tcp"],
+    [
+      "a websocket attach",
+      "tcp",
+      "GET",
+      ATTACH_WS,
+      "GET /containers/{id}/attach/ws to anything but websocket",
+    ],
+  ])(
+    "answers 403 to %s that asks for %s, before any lookup",
+    async (_label, protocol, method, path, refused) => {
+      const reply = await h.upgradeExchange(upgradeRequestWith(method, path, protocol));
+
+      expect(reply).toMatch(/^HTTP\/1\.1 403 /);
+      expect(reply).toContain(refused);
+      expect(h.daemon.started()).toEqual([]);
+      expect(h.rows.forTask).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["an attach", "POST", ATTACH, "TCP"],
+    ["a websocket attach", "GET", ATTACH_WS, "WebSocket"],
+  ])("forwards %s that names its protocol as %s", async (_label, method, path, protocol) => {
+    const reply = await h.upgradeExchange(upgradeRequestWith(method, path, protocol));
+
+    expect(reply).toMatch(/^HTTP\/1\.1 101 /);
+    expect(h.daemon.upgrades()).toMatchObject([{ answer: "switched" }]);
+  });
+
+  it("forwards the Docker CLI 29.9.3's recorded exec start and attach", async () => {
+    const id = await createExec();
+
+    const started = await h.upgradeExchange(dockerCliExecStart(id));
+    const attached = await h.upgradeExchange(dockerCliAttach("cogmo-task-own"));
+
+    expect(started).toMatch(/^HTTP\/1\.1 101 /);
+    expect(started).toContain("\r\nContent-Type: application/vnd.docker.raw-stream\r\n");
+    expect(attached).toMatch(/^HTTP\/1\.1 101 /);
+    expect(attached).toContain("\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n");
+    expect(h.daemon.upgrades()).toMatchObject([
+      { url: `/v1.56/exec/${id}/start`, answer: "switched" },
+      {
+        url: `/v1.56/containers/${OWN.id}/attach?stderr=1&stdin=1&stdout=1&stream=1`,
+        answer: "switched",
+      },
+    ]);
+  });
+
+  it("answers 403, not 404, to an exec start the socket did not create that asks for websocket", async () => {
+    const reply = await h.upgradeExchange(
+      upgradeRequestWith("POST", `/exec/${"e".repeat(64)}/start`, "websocket"),
+    );
+
+    expect(reply).toMatch(/^HTTP\/1\.1 403 /);
+    expect(h.daemon.started()).toEqual([]);
+  });
+
+  it("forwards an exec start that names tcp in another case", async () => {
+    const id = await createExec();
+
+    const reply = await h.upgradeExchange(upgradeRequestWith("POST", `/exec/${id}/start`, "TCP"));
+
+    expect(reply).toMatch(/^HTTP\/1\.1 101 /);
+  });
+});
+
+describe("a chunked upgrade body", () => {
+  const BODY = '{"Detach":false,"Tty":false}';
+  const CHUNKED = `${BODY.length.toString(16)}\r\n${BODY}\r\n0\r\n\r\n`;
+
+  it.each([
+    ["an exec start", "POST", async () => `/exec/${await createExec()}/start`],
+    ["an attach", "POST", async () => "/containers/cogmo-task-own/attach?stream=1"],
+  ])("answers 400 to %s, reaching nothing", async (_label, method, target) => {
+    const path = await target();
+    const before = h.daemon.started();
+    const client = await halfOpenClient();
+    log.info.mockClear();
+
+    client.socket.write(
+      `${method} ${path} HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
+        `Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n${CHUNKED}`,
+    );
+
+    await expectReleasedAfter(client, rawAnswer(400));
+    expect(client.received()).toContain("an upgrade's body must be framed by its Content-Length");
+    expect(h.daemon.started()).toEqual(before);
+    expect(log.info).toHaveBeenCalledWith(
+      {
+        taskId: TASK_ID,
+        path: path.split("?")[0],
+        rejection: expect.objectContaining({ kind: "malformed" }),
+      },
+      "proxy request rejected",
+    );
+  });
+});
+
+describe("the bytes after an upgrade's body", () => {
+  const BODY = '{"Detach":false,"Tty":false}';
+
+  it("reach the daemon only once it has answered 101", async () => {
+    const id = await createExec();
+    h.daemon.holdUpgrades();
+    const client = await halfOpenClient();
+    client.socket.write(`${upgradeStart(id, BODY)}EARLY`);
+    await vi.waitFor(() => expect(h.daemon.upgrades()).toHaveLength(1));
+    client.socket.write("LATER");
+    await settle(200);
+    expect(h.daemon.upgrades()).toMatchObject([{ answer: "held", received: "" }]);
+
+    h.daemon.releaseUpgrades();
+
+    await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 101 /));
+    client.socket.end();
+    await resolvesWithin(client.closed, SETTLE_MS, "the stream to end");
+    expect(h.daemon.upgrades()).toMatchObject([{ answer: "switched", received: "EARLYLATER" }]);
+    expect(client.received()).toMatch(/\r\n\r\nlate-output\n$/);
+  });
+
+  it.each([
+    ["a detached start", '{"Detach":true}', 200],
+    ["a start whose body the daemon rejects", '{"Detach":', 400],
+  ])(
+    "never reach a daemon that ignores close after %s, and both connections end",
+    async (_label, body, status) => {
+      const id = await createExec();
+      h.daemon.ignoreConnectionClose();
+      const client = await halfOpenClient();
+
+      client.socket.write(`${upgradeStart(id, body)}${PRIVILEGED_CREATE}`);
+
+      await expectReleasedAfter(
+        client,
+        new RegExp(`^HTTP/1\\.1 ${status} [\\s\\S]*\\r\\n\\r\\n\\{.*\\}$`),
+      );
+      await vi.waitFor(() =>
+        expect(h.daemon.upgrades()).toMatchObject([{ answer: "refused", closed: true }]),
+      );
+      expect(reached("/containers/create")).toEqual([]);
+    },
+  );
+
+  it("sent while the daemon holds its answer never reach it after a refusal, close ignored", async () => {
+    const id = await createExec();
+    h.daemon.ignoreConnectionClose();
+    h.daemon.holdUpgrades();
+    const client = await halfOpenClient();
+    client.socket.write(upgradeStart(id, '{"Detach":true}'));
+    await vi.waitFor(() => expect(h.daemon.upgrades()).toHaveLength(1));
+    client.socket.write(PRIVILEGED_CREATE);
+    await settle(200);
+    expect(h.daemon.upgrades()).toMatchObject([{ answer: "held", received: "" }]);
+
+    h.daemon.releaseUpgrades();
+
+    await expectReleasedAfter(client, /^HTTP\/1\.1 200 OK\r\n[\s\S]*\r\n\r\n\{\}$/);
+    await vi.waitFor(() =>
+      expect(h.daemon.upgrades()).toMatchObject([{ answer: "refused", closed: true }]),
+    );
+    expect(h.daemon.upgrades()).toMatchObject([{ received: "" }]);
+    expect(reached("/containers/create")).toEqual([]);
+  });
+
+  it("are dropped with the daemon request, unlogged, when the client resets while they are held", async () => {
+    const id = await createExec();
+    h.daemon.holdUpgrades();
+    // A paused client reads nothing, so closing it with the ping's answer
+    // unread resets the proxy's side of the connection.
+    const client = net.createConnection({ path: h.socket });
+    client.on("error", () => {});
+    client.pause();
+    await new Promise<void>((resolve) => client.once("connect", () => resolve()));
+    client.write("GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n");
+    await vi.waitFor(() => expect(reached("/_ping")).toHaveLength(1));
+    await settle(100);
+    client.write(`${upgradeStart(id, BODY)}HELD`);
+    await vi.waitFor(() => expect(h.daemon.upgrades()).toHaveLength(1));
+    log.warn.mockClear();
+    log.info.mockClear();
+
+    client.destroy();
+
+    await vi.waitFor(() =>
+      expect(h.daemon.upgrades()).toMatchObject([{ answer: "held", received: "", closed: true }]),
+    );
+    await settle(100);
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.info).not.toHaveBeenCalled();
+  });
+
+  it("are not ended by a client that ends its side while they are held, which still gets the answer", async () => {
+    const id = await createExec();
+    h.daemon.holdUpgrades();
+    const client = await halfOpenClient();
+    client.socket.write(`${upgradeStart(id, BODY)}HELD`);
+    await vi.waitFor(() => expect(h.daemon.upgrades()).toHaveLength(1));
+
+    client.socket.end();
+    await settle(200);
+    expect(h.daemon.upgrades()).toMatchObject([{ answer: "held", received: "", closed: false }]);
+    h.daemon.releaseUpgrades();
+
+    await resolvesWithin(client.closed, SETTLE_MS, "the stream to end");
+    expect(client.received()).toMatch(/^HTTP\/1\.1 101 [\s\S]*\r\n\r\nlate-output\n$/);
+    expect(h.daemon.upgrades()).toMatchObject([{ answer: "switched", received: "HELD" }]);
+  });
+});
+
+describe("a daemon refusal the proxy relays", () => {
+  /** Replace the fake daemon with one that answers every upgrade `answer` and ends. */
+  async function answeringWith(answer: Buffer | string): Promise<() => Promise<void>> {
+    await h.daemon.close();
+    const server = net.createServer((socket) => {
+      socket.on("error", () => {});
+      socket.once("data", () => socket.end(answer));
+    });
+    await new Promise<void>((resolve) => server.listen(h.daemon.socketPath, resolve));
+    return () => new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  it("is framed by its length and closes, without the daemon's hop-by-hop headers", async () => {
+    const id = await createExec();
+    const close = await answeringWith(
+      "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nConnection: close\r\n" +
+        'Transfer-Encoding: chunked\r\n\r\n10\r\n{"message":"gone\r\n2\r\n"}\r\n0\r\n\r\n',
+    );
+    try {
+      const reply = await resolvesWithin(
+        h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`)),
+        SETTLE_MS,
+        "the proxy to answer",
+      );
+
+      expect(reply).toBe(
+        "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: 18\r\n" +
+          "connection: close\r\n\r\n" +
+          '{"message":"gone"}',
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("holds a refusal with no framing until the daemon closes, then relays it", async () => {
+    const id = await createExec();
+    await h.daemon.close();
+    const daemonSide = Promise.withResolvers<net.Socket>();
+    const server = net.createServer((socket) => {
+      socket.on("error", () => {});
+      socket.once("data", () => {
+        socket.write("HTTP/1.1 400 Bad Request\r\n\r\nnot websocket protocol");
+        daemonSide.resolve(socket);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(h.daemon.socketPath, resolve));
+    try {
+      const client = await rawClient();
+      client.socket.write(upgradeRequest("POST", `/exec/${id}/start`));
+      const daemon = await resolvesWithin(daemonSide.promise, SETTLE_MS, "the daemon to answer");
+      await settle(200);
+      expect(client.received()).toBe("");
+
+      daemon.end();
+
+      await vi.waitFor(() =>
+        expect(client.received()).toBe(
+          "HTTP/1.1 400 Bad Request\r\ncontent-length: 22\r\nconnection: close\r\n\r\n" +
+            "not websocket protocol",
+        ),
+      );
+      client.socket.destroy();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("relays a refusal with no framing, read to the daemon's close", async () => {
+    const id = await createExec();
+    const close = await answeringWith("HTTP/1.1 400 Bad Request\r\n\r\nnot websocket protocol");
+    try {
+      const reply = await resolvesWithin(
+        h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`)),
+        SETTLE_MS,
+        "the proxy to answer",
+      );
+
+      expect(reply).toBe(
+        "HTTP/1.1 400 Bad Request\r\ncontent-length: 22\r\nconnection: close\r\n\r\n" +
+          "not websocket protocol",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it.each([
+    ["204 No Content", ""],
+    ["304 Not Modified", "Content-Length: 42\r\n"],
+  ])("relays a %s with no content-length", async (status, framing) => {
+    const id = await createExec();
+    const close = await answeringWith(`HTTP/1.1 ${status}\r\nApi-Version: 1.56\r\n${framing}\r\n`);
+    try {
+      const reply = await resolvesWithin(
+        h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`)),
+        SETTLE_MS,
+        "the proxy to answer",
+      );
+
+      expect(reply).toBe(`HTTP/1.1 ${status}\r\napi-version: 1.56\r\nconnection: close\r\n\r\n`);
+    } finally {
+      await close();
+    }
+  });
+
+  it("relays a refusal of exactly 16 MiB, its body unchanged", async () => {
+    const id = await createExec();
+    const size = 16 * 1024 * 1024;
+    // Printable ASCII that varies along the body, so the answer read as text is the same bytes.
+    const body = Buffer.alloc(size);
+    for (let i = 0; i < size; i += 1) body[i] = 33 + ((i * 7 + (i >> 10)) % 94);
+    const close = await answeringWith(
+      Buffer.concat([
+        Buffer.from(`HTTP/1.1 404 Not Found\r\nContent-Length: ${size}\r\n\r\n`),
+        body,
+      ]),
+    );
+    try {
+      const reply = await resolvesWithin(
+        h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`)),
+        SETTLE_MS,
+        "the proxy to answer",
+      );
+
+      const head = `HTTP/1.1 404 Not Found\r\ncontent-length: ${size}\r\nconnection: close\r\n\r\n`;
+      expect(reply.slice(0, head.length)).toBe(head);
+      const relayed = Buffer.from(reply.slice(head.length), "utf8");
+      expect(relayed.length).toBe(size);
+      expect(createHash("sha256").update(relayed).digest("hex")).toBe(
+        createHash("sha256").update(body).digest("hex"),
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it.each([
+    [
+      "whose body ends early",
+      'HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"message":',
+    ],
+    [
+      "one byte past 16 MiB",
+      Buffer.concat([
+        Buffer.from(`HTTP/1.1 404 Not Found\r\nContent-Length: ${16 * 1024 * 1024 + 1}\r\n\r\n`),
+        Buffer.alloc(16 * 1024 * 1024 + 1, "x"),
+      ]),
+    ],
+    ["that is not HTTP", "garbage\r\n\r\n"],
+    ["whose head the daemon cuts short", "HTTP/1.1 404 Not Found\r\nContent-Ty"],
+  ])("answers 502 in place of a refusal %s, logging it", async (_label, answer) => {
+    const id = await createExec();
+    const close = await answeringWith(answer);
+    log.info.mockClear();
+    try {
+      const reply = await resolvesWithin(
+        h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`)),
+        SETTLE_MS,
+        "the proxy to answer",
+      );
+
+      expect(reply).toMatch(rawAnswer(502));
+      expect(log.info).toHaveBeenCalledWith(
+        {
+          taskId: TASK_ID,
+          path: `/exec/${id}/start`,
+          rejection: expect.objectContaining({ kind: "daemon_failed" }),
+        },
+        "proxy request rejected",
+      );
+    } finally {
+      await close();
+    }
   });
 });
 
@@ -681,6 +1205,18 @@ describe("a switched upgrade", () => {
     ]);
   });
 
+  it("relays the stream bytes the daemon sends with its 101, then the rest, in order", async () => {
+    const id = await createExec();
+    h.daemon.leadUpgrades("LEAD-BYTES");
+
+    const reply = await h.upgradeExchange(upgradeStart(id, BODY));
+
+    expect(reply).toBe(
+      "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n" +
+        "Connection: Upgrade\r\nUpgrade: tcp\r\n\r\nLEAD-BYTESlate-output\n",
+    );
+  });
+
   it("delivers a stream the daemon ends first, then releases a client still writing", async () => {
     const id = await createExec();
     h.daemon.finishUpgrades("final-output\n");
@@ -691,7 +1227,7 @@ describe("a switched upgrade", () => {
     await expectReleasedAfter(client, /^HTTP\/1\.1 101 [\s\S]*\r\n\r\nfinal-output\n$/);
   });
 
-  it("drops the hop-by-hop headers and those Connection names from the preamble, keeping Upgrade", async () => {
+  it("drops the hop-by-hop headers and those Connection names from the forwarded upgrade, keeping Upgrade", async () => {
     const id = await createExec();
 
     await h.upgradeExchange(
@@ -716,11 +1252,13 @@ describe("a switched upgrade", () => {
       h.daemon.requests().find((r) => r.url === `/exec/${id}/start`),
       "the upgrade",
     );
+    // Node frames the empty body of a POST.
     expect(start.headers).toEqual({
       host: "docker",
       upgrade: "tcp",
       "x-kept": "1",
       connection: "Upgrade, close",
+      "content-length": "0",
     });
   });
 
@@ -852,7 +1390,8 @@ describe("a task socket torn down under an upgrade", () => {
     [
       "after the daemon's 101",
       false,
-      "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+      "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n" +
+        "Connection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
     ],
   ])(
     "closes both connections of a live upgrade %s, appending nothing",
@@ -952,10 +1491,11 @@ describe("streams and relays", () => {
   it.each([
     ["GET", "/containers/cogmo-task-own/logs"],
     ["GET", "/distribution/alpine/json"],
-  ])("answers 400 to an upgrade on %s %s, which is not a stream route", async (method, path) => {
+  ])("answers 403 to an upgrade on %s %s, which is not a stream route", async (method, path) => {
     const reply = await h.rawExchange(upgradeRequest(method, path));
 
-    expect(reply).toMatch(/^HTTP\/1\.1 400 /);
+    expect(reply).toMatch(/^HTTP\/1\.1 403 /);
+    expect(reply).toContain("upgrading a request other than exec start or attach");
     expect(h.received()).toEqual([]);
   });
 
@@ -1001,16 +1541,25 @@ describe("streams and relays", () => {
     expect(r.status, r.body).toBe(502);
   });
 
-  it("answers 502 to an upgrade whose daemon connection fails", async () => {
+  it("answers 502 to an upgrade whose daemon connection fails, logging it", async () => {
     const id = await createExec();
     await h.daemon.close();
+    log.info.mockClear();
 
     const reply = await h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`));
 
     expect(reply).toMatch(/^HTTP\/1\.1 502 /);
+    expect(log.info).toHaveBeenCalledWith(
+      {
+        taskId: TASK_ID,
+        path: `/exec/${id}/start`,
+        rejection: expect.objectContaining({ kind: "daemon_failed" }),
+      },
+      "proxy request rejected",
+    );
   });
 
-  it("answers 502 to an upgrade whose daemon connection closes cleanly before its first byte", async () => {
+  it("answers 502 to an upgrade whose daemon connection closes cleanly before its response head, logging it", async () => {
     const id = await createExec();
     await h.daemon.close();
     // Reads what it is sent, so its end is a clean one rather than a reset.
@@ -1019,6 +1568,7 @@ describe("streams and relays", () => {
       socket.once("data", () => socket.end());
     });
     await new Promise<void>((resolve) => closer.listen(h.daemon.socketPath, resolve));
+    log.info.mockClear();
     try {
       const reply = await resolvesWithin(
         h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`)),
@@ -1027,13 +1577,21 @@ describe("streams and relays", () => {
       );
 
       expect(reply).toMatch(/^HTTP\/1\.1 502 /);
-      expect(reply).toContain("the daemon closed the connection before answering");
+      expect(reply).toContain("Cogmo proxy upstream error: socket hang up");
+      expect(log.info).toHaveBeenCalledWith(
+        {
+          taskId: TASK_ID,
+          path: `/exec/${id}/start`,
+          rejection: expect.objectContaining({ kind: "daemon_failed" }),
+        },
+        "proxy request rejected",
+      );
     } finally {
       await new Promise<void>((resolve) => closer.close(() => resolve()));
     }
   });
 
-  it("answers 502 to an upgrade the daemon resets before its first byte", async () => {
+  it("answers 502 to an upgrade the daemon resets before its response head, logging it", async () => {
     const id = await createExec();
     await h.daemon.close();
     // A paused socket reads nothing, so closing it with the request unread resets the proxy's side.
@@ -1041,6 +1599,7 @@ describe("streams and relays", () => {
       setTimeout(() => socket.destroy(), 50);
     });
     await new Promise<void>((resolve) => resetter.listen(h.daemon.socketPath, resolve));
+    log.info.mockClear();
     try {
       const reply = await resolvesWithin(
         h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`)),
@@ -1049,6 +1608,14 @@ describe("streams and relays", () => {
       );
 
       expect(reply).toMatch(/^HTTP\/1\.1 502 /);
+      expect(log.info).toHaveBeenCalledWith(
+        {
+          taskId: TASK_ID,
+          path: `/exec/${id}/start`,
+          rejection: expect.objectContaining({ kind: "daemon_failed" }),
+        },
+        "proxy request rejected",
+      );
     } finally {
       await new Promise<void>((resolve) => resetter.close(() => resolve()));
     }

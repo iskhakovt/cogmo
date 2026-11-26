@@ -7,22 +7,18 @@
  * A normal forward goes through `http.request` without the hop-by-hop
  * headers, and its response streams back: whole, filtered to the task's
  * objects, read for the exec id it creates, or held until a child's row
- * has followed it. Every request but an
- * upgrade is a normal forward, so the client connection stays under Node's
- * parser and a request pipelined after one is classified on its own. An
- * upgrade is raw-piped: its request line, headers and body are sent under
- * the canonical path with `Connection: Upgrade, close`, then both sockets
- * are piped.
+ * has followed it. Every request but an upgrade is a normal forward, so
+ * the client connection stays under Node's parser and a request pipelined
+ * after one is classified on its own; an upgrade goes through
+ * `upgrade-forward.ts`.
  */
 
 import * as http from "node:http";
-import * as net from "node:net";
-import { type Duplex, PassThrough, pipeline, type Transform } from "node:stream";
+import { PassThrough, pipeline, type Transform } from "node:stream";
 import { ok, type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import {
-  buildUpgradePreamble,
   emptyBodyRequestHeaders,
   isAbortError,
   jsonRequestHeaders,
@@ -33,7 +29,6 @@ import {
   relayedResponseHeaders,
   respondJson,
   respondRejection,
-  writeRawRejectionAndDestroy,
 } from "./http-io.js";
 import { daemonFailed, type ProxyRejection } from "./rejection.js";
 import { createdId, filterContainerList, taskEventFilter } from "./response-filters.js";
@@ -41,9 +36,9 @@ import { createdId, filterContainerList, taskEventFilter } from "./response-filt
 const log = logger.child({ component: "sandbox.proxy" });
 
 /**
- * Bound on a daemon reply the proxy reads whole: a container list, or an
- * exec create's `{"Id": …}`. A list of a few thousand containers stays well
- * under it.
+ * Bound on a daemon reply the proxy reads whole: a container list, an exec
+ * create's `{"Id": …}`, or an upgrade's refusal. A list of a few thousand
+ * containers stays well under it.
  */
 const MAX_BUFFERED_REPLY_BYTES = 16 * 1024 * 1024;
 
@@ -136,71 +131,6 @@ export function forward(
     .exhaustive();
 }
 
-/**
- * An upgraded stream route: send the preamble under `path` with the
- * request's `body`, replay `head`, the bytes the client sent after the
- * request, then pipe.
- */
-export function pipeUpgrade(
-  req: http.IncomingMessage,
-  clientSocket: Duplex,
-  upgrade: { path: string; body: Buffer; head: Buffer },
-  upstream: Upstream,
-): void {
-  const { path, body, head } = upgrade;
-  // The checks are async: a connection the task's teardown destroyed
-  // meanwhile gets no daemon connection. One the client has only ended is
-  // forwarded, since a half-open client can still read the answer.
-  if (clientSocket.destroyed) return;
-  const daemon = net.createConnection({ path: upstream.socketPath, signal: upstream.signal });
-  const warn = (cause: Error) => {
-    if (!isAbortError(cause)) {
-      log.warn({ err: cause.message, path: pathOf(req) }, "upstream stream error");
-    }
-  };
-  // Until the daemon's first byte nothing has reached the client, which gets
-  // a 502 for a failed dial, a reset or a clean close; after it, a failure
-  // just ends the stream.
-  const answered = () => daemon.bytesRead > 0;
-  daemon.on("error", (cause) => {
-    warn(cause);
-    if (answered()) {
-      clientSocket.destroy(cause);
-      return;
-    }
-    writeRawRejectionAndDestroy(
-      clientSocket,
-      daemonFailed(`Cogmo proxy upstream error: ${cause.message}`),
-    );
-  });
-  // The daemon connection's end ends the client's and releases it once the
-  // rest of the output is flushed, whether or not the client has ended its
-  // side.
-  daemon.once("end", () => {
-    // Nothing the client sends from here has anywhere to go.
-    clientSocket.unpipe(daemon);
-    if (answered()) {
-      clientSocket.end(() => clientSocket.destroy());
-      return;
-    }
-    log.warn({ path: pathOf(req) }, "upstream closed before answering an upgrade");
-    writeRawRejectionAndDestroy(
-      clientSocket,
-      daemonFailed("Cogmo proxy: the daemon closed the connection before answering"),
-    );
-  });
-  daemon.once("connect", () => {
-    daemon.write(buildUpgradePreamble(req, path, body));
-    if (head.length > 0) daemon.write(head);
-    // `pipe` carries the client's end to the daemon, and the client's
-    // connection stays open after it: a client that ends its side after
-    // sending stdin still reads the daemon's output.
-    clientSocket.pipe(daemon);
-    daemon.pipe(clientSocket, { end: false });
-  });
-  clientSocket.on("error", () => daemon.destroy());
-}
-
 function relay(
   req: http.IncomingMessage,
   reply: http.IncomingMessage,
@@ -281,17 +211,7 @@ function relayBuffered(
   res: http.ServerResponse,
   answer: (read: ResultAsync<Buffer, ProxyRejection>) => ResultAsync<Buffer, ProxyRejection>,
 ): void {
-  const read = new ResultAsync(readBody(reply, MAX_BUFFERED_REPLY_BYTES)).mapErr((failure) =>
-    match(failure)
-      .with({ kind: "too_large" }, ({ maxBytes }) =>
-        daemonFailed(`Cogmo proxy: the daemon's reply exceeds ${maxBytes} bytes`),
-      )
-      .with({ kind: "malformed" }, () =>
-        daemonFailed("Cogmo proxy: the daemon's reply ended early"),
-      )
-      .exhaustive(),
-  );
-  const relayed = answer(read).match(
+  const relayed = answer(readReply(reply)).match(
     (body) => {
       // A client that hung up while a child's row was written gets nothing.
       if (res.destroyed) return;
@@ -308,6 +228,23 @@ function relayBuffered(
     if (!aborted) log.error({ err: cause }, "relaying a buffered daemon reply failed");
     res.destroy();
   });
+}
+
+/**
+ * A daemon reply read whole, up to `MAX_BUFFERED_REPLY_BYTES`; one that
+ * passes the bound or ends early is `daemon_failed`.
+ */
+export function readReply(reply: http.IncomingMessage): ResultAsync<Buffer, ProxyRejection> {
+  return new ResultAsync(readBody(reply, MAX_BUFFERED_REPLY_BYTES)).mapErr((failure) =>
+    match(failure)
+      .with({ kind: "too_large" }, ({ maxBytes }) =>
+        daemonFailed(`Cogmo proxy: the daemon's reply exceeds ${maxBytes} bytes`),
+      )
+      .with({ kind: "malformed" }, () =>
+        daemonFailed("Cogmo proxy: the daemon's reply ended early"),
+      )
+      .exhaustive(),
+  );
 }
 
 /** Whether a forward ends with its client: all but a child's start, restart or removal. */

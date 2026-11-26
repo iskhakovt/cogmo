@@ -211,12 +211,14 @@ describe("router.classify", () => {
 
   describe("stream routes", () => {
     it.each([
-      ["POST", "/exec/abc/start"],
-      ["POST", "/v1.44/exec/abc/start"],
-      ["POST", "/containers/abc/attach"],
-      ["GET", "/containers/abc/attach/ws"],
-    ])("may upgrade %s %s", (method, path) => {
-      expect(classify(method, path).kind).toBe("stream");
+      ["POST", "/exec/abc/start", "tcp"],
+      ["POST", "/v1.44/exec/abc/start", "tcp"],
+      ["POST", "/containers/abc/attach", "tcp"],
+      ["GET", "/containers/abc/attach/ws", "websocket"],
+    ])("may upgrade %s %s to %s", (method, path, protocol) => {
+      const r = classify(method, path);
+      assertKind(r, "stream");
+      expect(r.upgrade).toBe(protocol);
     });
 
     it("reads an exec id that spans segments", () => {

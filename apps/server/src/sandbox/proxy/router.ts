@@ -11,10 +11,11 @@
  * name may hold a `/`.
  *
  * A **request** route goes through `http.request`, its response streaming
- * back. A **stream** route, exec start or attach, may be upgraded: an
- * upgrade is raw-piped once its checks pass, and a request without
- * `Upgrade` goes through `http.request` as any other route does, so a
- * request pipelined after it is classified on its own. A container
+ * back. A **stream** route, exec start or attach, may be upgraded to the
+ * protocol its row names: an upgrade is raw-piped once its checks pass and
+ * the daemon has switched, and a request without `Upgrade` goes through
+ * `http.request` as any other route does, so a request pipelined after it
+ * is classified on its own. A container
  * **create** is a request whose daemon answer the proxy reads and records
  * before it answers, bound to neither the client nor the task's sockets.
  */
@@ -78,17 +79,23 @@ export type StreamRoute =
   | { kind: "container"; target: ContainerTarget }
   | { kind: "exec"; target: ExecTarget };
 
+/**
+ * The `Upgrade` protocol a stream route's upgrade must name: Docker's raw
+ * stream for exec start and `/attach`, a WebSocket for `/attach/ws`.
+ */
+export type UpgradeProtocol = "tcp" | "websocket";
+
 export type Classified =
   | { kind: "reject"; rejection: ProxyRejection }
   | { kind: "request"; route: RequestRoute; query: URLSearchParams }
-  | { kind: "stream"; route: StreamRoute; query: URLSearchParams }
+  | { kind: "stream"; route: StreamRoute; upgrade: UpgradeProtocol; query: URLSearchParams }
   /** `POST /containers/create`. */
   | { kind: "create"; versionPrefix: string; query: URLSearchParams };
 
 type Outcome =
   | { kind: "reject"; rejection: ProxyRejection }
   | { kind: "request"; route: RequestRoute }
-  | { kind: "stream"; route: StreamRoute }
+  | { kind: "stream"; route: StreamRoute; upgrade: UpgradeProtocol }
   | { kind: "create"; versionPrefix: string };
 
 interface Row {
@@ -144,7 +151,8 @@ const ROWS: ReadonlyArray<Row> = [
   {
     method: "GET",
     pattern: /^\/containers\/(.+)\/(attach\/ws)$/,
-    outcome: (g, v) => stream({ kind: "container", target: container("GET", "any", g, v) }),
+    outcome: (g, v) =>
+      stream({ kind: "container", target: container("GET", "any", g, v) }, "websocket"),
   },
   {
     method: "GET",
@@ -187,7 +195,7 @@ const ROWS: ReadonlyArray<Row> = [
   {
     method: "POST",
     pattern: /^\/containers\/(.+)\/(attach)$/,
-    outcome: (g, v) => stream({ kind: "container", target: container("POST", "any", g, v) }),
+    outcome: (g, v) => stream({ kind: "container", target: container("POST", "any", g, v) }, "tcp"),
   },
   {
     method: "POST",
@@ -197,7 +205,7 @@ const ROWS: ReadonlyArray<Row> = [
   {
     method: "POST",
     pattern: /^\/exec\/(.+)\/(start)$/,
-    outcome: (g, v) => stream({ kind: "exec", target: exec(g, v) }),
+    outcome: (g, v) => stream({ kind: "exec", target: exec(g, v) }, "tcp"),
   },
   {
     method: "POST",
@@ -264,7 +272,12 @@ export function classify(method: string, rawTarget: string): Classified {
   return match(row.outcome(groups, versionPrefix, route))
     .with({ kind: "reject" }, (outcome) => outcome)
     .with({ kind: "request" }, ({ route: r }) => ({ kind: "request" as const, route: r, query }))
-    .with({ kind: "stream" }, ({ route: r }) => ({ kind: "stream" as const, route: r, query }))
+    .with({ kind: "stream" }, ({ route: r, upgrade }) => ({
+      kind: "stream" as const,
+      route: r,
+      upgrade,
+      query,
+    }))
     .with({ kind: "create" }, ({ versionPrefix: v }) => ({
       kind: "create" as const,
       versionPrefix: v,
@@ -318,6 +331,6 @@ function request(route: RequestRoute): Outcome {
   return { kind: "request", route };
 }
 
-function stream(route: StreamRoute): Outcome {
-  return { kind: "stream", route };
+function stream(route: StreamRoute, upgrade: UpgradeProtocol): Outcome {
+  return { kind: "stream", route, upgrade };
 }

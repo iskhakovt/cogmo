@@ -827,7 +827,7 @@ describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
     expect(upstreamRequests).toHaveLength(0);
   });
 
-  it("rejects an Upgrade request to a container create with 400, without forwarding", async () => {
+  it("rejects an Upgrade request to a container create with 403, without forwarding", async () => {
     const sock = await proxy.registerTask(SCOPE);
     const client = net.createConnection({ path: sock });
     await new Promise<void>((resolve) => client.once("connect", () => resolve()));
@@ -848,8 +848,8 @@ describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
       client.on("close", () => resolve());
     });
     const reply = Buffer.concat(buf).toString("utf8");
-    expect(reply).toContain("400 Bad Request");
-    expect(reply).toContain("cannot be upgraded");
+    expect(reply).toContain("403 Forbidden");
+    expect(reply).toContain("upgrading a request other than exec start or attach");
     expect(upstreamRequests).toHaveLength(0);
   });
 

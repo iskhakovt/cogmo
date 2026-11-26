@@ -288,13 +288,18 @@ export function message(r: SocketResponse): string {
   return ErrorSchema.parse(JSON.parse(r.body)).message;
 }
 
-/** A request preamble asking to upgrade to a raw stream, with no body. */
+/** A request preamble asking to upgrade to a raw stream (`Upgrade: tcp`), with no body. */
 export function upgradeRequest(method: string, path: string): string {
+  return upgradeRequestWith(method, path, "tcp");
+}
+
+/** A request preamble asking to upgrade to `protocol`, with no body. */
+export function upgradeRequestWith(method: string, path: string, protocol: string): string {
   return [
     `${method} ${path} HTTP/1.1`,
     "Host: docker",
     "Connection: Upgrade",
-    "Upgrade: tcp",
+    `Upgrade: ${protocol}`,
     "Content-Length: 0",
     "",
     "",

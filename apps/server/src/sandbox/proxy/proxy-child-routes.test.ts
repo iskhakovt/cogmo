@@ -203,10 +203,10 @@ describe("a child's create", () => {
     );
   });
 
-  it("answers 400 to an upgrade of a create, forwarding nothing", async () => {
+  it("answers 403 to an upgrade of a create, forwarding nothing", async () => {
     const reply = await h.upgradeExchange(upgradeRequest("POST", "/containers/create"));
 
-    expect(reply).toContain("400 Bad Request");
+    expect(reply).toContain("403 Forbidden");
     expect(h.received()).toEqual([]);
   });
 });

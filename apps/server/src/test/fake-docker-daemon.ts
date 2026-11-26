@@ -36,22 +36,34 @@ export interface FakeDockerDaemon {
   upgrades(): ReadonlyArray<FakeUpgrade>;
   /** Answer no upgrade from now on: record each and hold its connection open. */
   holdUpgrades(): void;
+  /** Answer every held upgrade as it would have been answered, and hold no more. */
+  releaseUpgrades(): void;
+  /**
+   * From now on, keep a refused upgrade's connection and parse it as HTTP
+   * again even when the request's `Connection` holds `close`, as a daemon
+   * that ignored it would.
+   */
+  ignoreConnectionClose(): void;
   /**
    * From now on, a switched upgrade writes `output` after its `101` and
    * ends, without waiting for the client to end its side.
    */
   finishUpgrades(output: string): void;
+  /** From now on, a switched upgrade writes `output` in the same write as its `101`. */
+  leadUpgrades(output: string): void;
   setResponder(responder: FakeDaemonResponder): void;
   close(): Promise<void>;
 }
 
 export interface FakeUpgrade {
   url: string;
-  /** `101`, a refusal (200 or 400), or no answer (`holdUpgrades`). */
+  /** `101`, a refusal (200 or 400), or no answer yet (`holdUpgrades`). */
   answer: "switched" | "refused" | "held";
   /**
-   * What the client sent after the request's body, as latin1, one character
-   * per octet; after a refusal, only what came with the request.
+   * Every byte that reached the upgrade's connection after the request's
+   * body, as latin1, one character per octet, until the connection closed:
+   * while the answer was held, after a switch, and after a refusal, whether
+   * or not it was parsed as a request.
    */
   received: string;
   closed: boolean;
@@ -67,7 +79,11 @@ export async function startFakeDockerDaemon(
   const upgrades: FakeUpgrade[] = [];
   const upgradeSockets = new Set<Duplex>();
   let holding = false;
+  /** Answers each held upgrade, once released. */
+  const held: Array<() => void> = [];
+  let ignoringClose = false;
   let finalOutput: string | null = null;
+  let leadOutput = "";
   let current = responder;
   const server = http.createServer((raw, res) => {
     started.push(`${raw.method} ${raw.url}`);
@@ -89,22 +105,22 @@ export async function startFakeDockerDaemon(
   });
   // An upgrade is answered as the daemon answers exec start: `101` (with the
   // `Sec-WebSocket-Accept` a WebSocket handshake needs, for one), then a
-  // stream that records what the client sends and, once the client ends its
-  // side, writes `late-output` and ends; or, for a detached start or a body
-  // that is not JSON, a plain 200 or 400 and no switch. After a refusal the
-  // connection is kept open and parsed as HTTP again, unless the request's
-  // `Connection` holds `close`, as Go's server does. A held upgrade gets no
-  // answer, and its connection stays open, recording what the client sends,
-  // until the client ends its side, when the daemon closes it.
+  // stream that, once the client ends its side, writes `late-output` and
+  // ends; or, for a detached start or a body that is not JSON, a plain 200 or
+  // 400 and no switch. After a refusal the connection is kept open and parsed
+  // as HTTP again, unless the request's `Connection` holds `close`, as Go's
+  // server does (`ignoreConnectionClose` keeps it). A held upgrade gets no
+  // answer until `releaseUpgrades`, and its connection stays open until the
+  // client ends its side, when the daemon closes it. Every byte the
+  // connection receives after the body is recorded, whatever the answer.
   server.on("upgrade", (raw: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     started.push(`${raw.method} ${raw.url}`);
     readUpgradeBody(raw, head)
       .then(({ body, rest }) => {
         received.push({ method: raw.method ?? "", url: raw.url ?? "", headers: raw.headers, body });
-        const answer: FakeUpgradeAnswer = holding ? { kind: "held" } : upgradeAnswer(body);
         const upgrade: FakeUpgrade = {
           url: raw.url ?? "",
-          answer: answer.kind,
+          answer: "held",
           received: rest.toString("latin1"),
           closed: false,
         };
@@ -114,42 +130,61 @@ export async function startFakeDockerDaemon(
         socket.once("close", () => {
           upgrade.closed = true;
         });
-        const record = (chunk: Buffer) => {
-          upgrade.received += chunk.toString("latin1");
-        };
-        match(answer)
-          .with({ kind: "held" }, () => {
-            socket.on("data", record);
-            socket.once("end", () => socket.end());
-          })
-          .with({ kind: "switched" }, () => {
-            socket.on("data", record);
-            socket.write(switchingResponse(raw.headers));
-            if (finalOutput !== null) {
-              socket.end(finalOutput);
-              return;
-            }
-            // A client that ended its side before the switch has already been read to its end.
-            const endStream = () => socket.end("late-output\n");
-            if (socket.readableEnded) endStream();
-            else socket.on("end", endStream);
-          })
-          .with({ kind: "refused" }, ({ status, body: refusal }) => {
-            const reply = JSON.stringify(refusal);
-            const closes = /(^|,)\s*close\s*(,|$)/i.test(raw.headers.connection ?? "");
-            socket.write(
-              `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n` +
-                `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reply)}\r\n` +
-                `${closes ? "Connection: close\r\n" : ""}\r\n${reply}`,
-            );
-            if (closes) {
-              socket.end();
-              return;
-            }
-            if (rest.length > 0) socket.unshift(rest);
-            server.emit("connection", socket);
-          })
-          .exhaustive();
+        // What arrives before a refusal is recorded once, though it is
+        // unshifted for the parser after it.
+        let replayed = 0;
+        socket.on("data", (chunk: Buffer) => {
+          const fresh = chunk.subarray(Math.min(replayed, chunk.length));
+          replayed -= chunk.length - fresh.length;
+          upgrade.received += fresh.toString("latin1");
+        });
+        const answer = (unread: Buffer) =>
+          match(upgradeAnswer(body))
+            .with({ kind: "switched" }, () => {
+              upgrade.answer = "switched";
+              socket.write(`${switchingResponse(raw.headers, body)}${leadOutput}`);
+              if (finalOutput !== null) {
+                socket.end(finalOutput);
+                return;
+              }
+              // A client that ended its side before the switch has already been read to its end.
+              const endStream = () => socket.end("late-output\n");
+              if (socket.readableEnded) endStream();
+              else socket.on("end", endStream);
+            })
+            .with({ kind: "refused" }, ({ status, body: refusal }) => {
+              upgrade.answer = "refused";
+              const reply = JSON.stringify(refusal);
+              const closes =
+                !ignoringClose && /(^|,)\s*close\s*(,|$)/i.test(raw.headers.connection ?? "");
+              socket.write(
+                `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n` +
+                  `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reply)}\r\n` +
+                  `${closes ? "Connection: close\r\n" : ""}\r\n${reply}`,
+              );
+              if (closes) {
+                socket.end();
+                return;
+              }
+              replayed = unread.length;
+              if (unread.length > 0) socket.unshift(unread);
+              server.emit("connection", socket);
+            })
+            .exhaustive();
+        if (!holding) {
+          answer(rest);
+          return;
+        }
+        const whileHeld: Buffer[] = [rest];
+        const keepHeld = (chunk: Buffer) => whileHeld.push(chunk);
+        const endHeld = () => socket.end();
+        socket.on("data", keepHeld);
+        socket.once("end", endHeld);
+        held.push(() => {
+          socket.off("data", keepHeld);
+          socket.off("end", endHeld);
+          answer(Buffer.concat(whileHeld));
+        });
       })
       .catch(() => {
         // A client that hung up mid-body: there is no one to answer.
@@ -166,8 +201,18 @@ export async function startFakeDockerDaemon(
     holdUpgrades: () => {
       holding = true;
     },
+    releaseUpgrades: () => {
+      holding = false;
+      for (const release of held.splice(0)) release();
+    },
+    ignoreConnectionClose: () => {
+      ignoringClose = true;
+    },
     finishUpgrades: (output) => {
       finalOutput = output;
+    },
+    leadUpgrades: (output) => {
+      leadOutput = output;
     },
     setResponder: (next) => {
       current = next;
@@ -194,10 +239,7 @@ async function readUpgradeBody(
   return { body: Buffer.concat(chunks).toString("utf8"), rest: head };
 }
 
-type FakeUpgradeAnswer =
-  | { kind: "held" }
-  | { kind: "switched" }
-  | { kind: "refused"; status: number; body: unknown };
+type FakeUpgradeAnswer = { kind: "switched" } | { kind: "refused"; status: number; body: unknown };
 
 /** How the daemon answers an exec start upgrade with `body`: it switches, or refuses a detached start or a body that is not JSON. */
 function upgradeAnswer(body: string): FakeUpgradeAnswer {
@@ -215,14 +257,30 @@ function upgradeAnswer(body: string): FakeUpgradeAnswer {
   }
 }
 
+/** Whether a switched upgrade's body, empty or JSON, starts an exec with `"Tty": true`. */
+function startedWithTty(body: string): boolean {
+  if (body === "") return false;
+  const parsed: unknown = JSON.parse(body);
+  return typeof parsed === "object" && parsed !== null && "Tty" in parsed && parsed.Tty === true;
+}
+
 /** RFC 6455's key suffix for `Sec-WebSocket-Accept`. */
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/** The `101` the daemon switches with: a WebSocket handshake's for `Upgrade: websocket`, `tcp` otherwise. */
-function switchingResponse(headers: http.IncomingHttpHeaders): string {
+/**
+ * The `101` the daemon switches with: a WebSocket handshake's for `Upgrade:
+ * websocket`, `tcp` otherwise, whose `Content-Type` names the stream as
+ * Docker 29.9.3 does: raw for an exec started with a TTY, multiplexed for
+ * one without, and for an attach, as to a container without a TTY.
+ */
+function switchingResponse(headers: http.IncomingHttpHeaders, body: string): string {
   const key = headers["sec-websocket-key"];
   if (headers.upgrade?.toLowerCase() !== "websocket" || key === undefined) {
-    return "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n";
+    const stream = startedWithTty(body) ? "raw-stream" : "multiplexed-stream";
+    return (
+      `HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.${stream}\r\n` +
+      "Connection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
+    );
   }
   const accept = createHash("sha1").update(`${key}${WEBSOCKET_GUID}`).digest("base64");
   return (
