@@ -3,7 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined, resolvesWithin } from "../../test/assertions.js";
 import { respondJson } from "../../test/fake-docker-daemon.js";
-import { API, OWN, upgradeRequest, useProxyHarness } from "../../test/proxy-harness.js";
+import {
+  API,
+  fillerHeaders,
+  OWN,
+  TASK_ID,
+  upgradeRequest,
+  useProxyHarness,
+} from "../../test/proxy-harness.js";
 
 const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
 vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
@@ -14,6 +21,29 @@ const ExecCreatedSchema = z.object({ Id: z.string() });
 const SETTLE_MS = 2_500;
 
 const h = useProxyHarness();
+
+interface HalfOpenClient {
+  socket: net.Socket;
+  /** Everything read so far, as latin1. */
+  received(): string;
+  closed: Promise<void>;
+}
+
+/**
+ * A raw client on the task's socket that keeps its side open after the
+ * proxy ends its own, as the Docker CLI's hijacked connection does.
+ */
+async function halfOpenClient(): Promise<HalfOpenClient> {
+  const socket = net.createConnection({ path: h.socket, allowHalfOpen: true });
+  socket.on("error", () => {});
+  let received = "";
+  socket.on("data", (c: Buffer) => {
+    received += c.toString("latin1");
+  });
+  const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+  await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+  return { socket, received: () => received, closed };
+}
 
 /** A raw client on the task's socket, collecting everything it reads. */
 async function rawClient(): Promise<{ socket: net.Socket; received: () => string }> {
@@ -46,8 +76,17 @@ function reached(marker: string): string[] {
   return h.daemon.started().filter((line) => line.includes(marker));
 }
 
-/** Header lines enough to reach the server's count, and past Node's default of 2000. */
-const MANY_HEADERS = Array.from({ length: 2000 }, () => "a: 1").join("\r\n");
+/** An exec start asking to upgrade: Host, Connection and Upgrade, then `headers`, then the body's two. */
+function upgradeWith(id: string, headers: string, body: string): string {
+  return (
+    `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
+    `${headers}Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
+  );
+}
+
+function upgradeStart(id: string, body: string): string {
+  return upgradeWith(id, "", body);
+}
 
 const SIBLING_KILL =
   "POST /containers/cogmo-task-sibling/kill HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n";
@@ -245,13 +284,6 @@ describe("an upgrade the daemon refuses", () => {
     "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n" +
     `Content-Length: ${Buffer.byteLength(PRIVILEGED)}\r\n\r\n${PRIVILEGED}`;
 
-  function upgradeStart(id: string, body: string): string {
-    return (
-      `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
-      `Content-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`
-    );
-  }
-
   it.each([
     ["a detached start", '{"Detach":true}', "200"],
     ["a start whose body the daemon rejects", '{"Detach":', "400"],
@@ -300,7 +332,7 @@ describe("an upgrade the daemon refuses", () => {
     const body = '{"Detach":false,"Tty":false}';
 
     const reply = await resolvesWithin(
-      h.rawExchange(upgradeStart(id, body)),
+      h.upgradeExchange(upgradeStart(id, body)),
       SETTLE_MS,
       "the daemon to answer the upgrade",
     );
@@ -315,20 +347,42 @@ describe("an upgrade the daemon refuses", () => {
 });
 
 describe("the checks on an upgrade", () => {
-  function upgradeWith(id: string, headers: string, body: string): string {
-    return (
-      `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
-      `${headers}Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
-    );
-  }
+  it("forwards an upgrade with 99 headers", async () => {
+    const id = await createExec();
 
-  it("answers 431 to an upgrade past the header count, reaching nothing", async () => {
+    const reply = await h.upgradeExchange(upgradeWith(id, `${fillerHeaders(94)}\r\n`, ""));
+
+    expect(reply).toMatch(/^HTTP\/1\.1 101 /);
+    expect(reached(`/exec/${id}/start`)).toHaveLength(1);
+  });
+
+  // 100 headers reach the proxy, which refuses them; Node's parser fails the 101st.
+  it.each([100, 101])(
+    "answers 431 to an upgrade with %i headers, reaching nothing",
+    async (count) => {
+      const id = await createExec();
+      const before = h.daemon.started();
+
+      const reply = await h.rawExchange(upgradeWith(id, `${fillerHeaders(count - 5)}\r\n`, ""));
+
+      expect(reply).toMatch(/^HTTP\/1\.1 431 /);
+      expect(h.daemon.started()).toEqual(before);
+    },
+  );
+
+  it("answers 431 to an upgrade whose one header passes 16 KiB, logging it and reaching nothing", async () => {
     const id = await createExec();
     const before = h.daemon.started();
+    log.info.mockClear();
 
-    const reply = await h.rawExchange(upgradeWith(id, `${MANY_HEADERS}\r\n`, ""));
+    const reply = await h.rawExchange(upgradeWith(id, `X-Big: ${"x".repeat(16 * 1024)}\r\n`, ""));
 
     expect(reply).toMatch(/^HTTP\/1\.1 431 /);
+    expect(reply).toContain("request headers must number fewer than 100 and fit in 16 KiB");
+    expect(log.info).toHaveBeenCalledWith(
+      { taskId: TASK_ID, rejection: { kind: "headers_too_large", limit: 100 } },
+      "proxy request rejected",
+    );
     expect(h.daemon.started()).toEqual(before);
   });
 
@@ -378,8 +432,9 @@ describe("the checks on an upgrade", () => {
     );
     await settle(100);
 
-    // The client stops writing with its body ten bytes short. A task socket
-    // does not allow half-open connections, so no answer can follow its FIN.
+    // The client stops writing with its body ten bytes short. Node's HTTP
+    // server, still parsing the body, ends the connection on the client's
+    // end, so no answer can follow it.
     client.socket.end();
 
     await resolvesWithin(closed, SETTLE_MS, "the connection to close");
@@ -426,6 +481,108 @@ describe("the checks on an upgrade", () => {
       }),
       "proxy request rejected",
     );
+  });
+});
+
+describe("a switched upgrade", () => {
+  const BODY = '{"Detach":false,"Tty":false}';
+
+  it("delivers the daemon's output after the client ends its side", async () => {
+    const id = await createExec();
+    const client = await halfOpenClient();
+    client.socket.write(upgradeStart(id, BODY));
+    await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 101 /));
+
+    client.socket.end("stdin\n");
+
+    await resolvesWithin(client.closed, SETTLE_MS, "the stream to end");
+    expect(client.received()).toMatch(/\r\n\r\nlate-output\n$/);
+    expect(h.daemon.streams().map((s) => s.received)).toEqual(["stdin\n"]);
+  });
+
+  it("forwards an upgrade whose client ends its side with the last of the body", async () => {
+    const id = await createExec();
+    const client = await halfOpenClient();
+    const request = upgradeStart(id, BODY);
+    client.socket.write(request.slice(0, -5));
+    await settle(100);
+
+    client.socket.end(request.slice(-5));
+
+    await resolvesWithin(client.closed, SETTLE_MS, "the stream to end");
+    expect(client.received()).toMatch(/^HTTP\/1\.1 101 [\s\S]*\r\n\r\nlate-output\n$/);
+    const start = expectDefined(
+      h.daemon.requests().find((r) => r.url === `/exec/${id}/start`),
+      "the upgrade",
+    );
+    expect(start.body).toBe(BODY);
+  });
+
+  it("sends the bytes before and after the switch once each, in order, after the body", async () => {
+    const id = await createExec();
+    const client = await halfOpenClient();
+
+    client.socket.write(`${upgradeStart(id, BODY)}MARKER-ONE`);
+    await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 101 /));
+    client.socket.end("MARKER-TWO");
+    await resolvesWithin(client.closed, SETTLE_MS, "the stream to end");
+
+    const start = expectDefined(
+      h.daemon.requests().find((r) => r.url === `/exec/${id}/start`),
+      "the upgrade",
+    );
+    expect(start.body).toBe(BODY);
+    expect(h.daemon.streams()).toEqual([
+      { url: `/exec/${id}/start`, received: "MARKER-ONEMARKER-TWO" },
+    ]);
+  });
+
+  it("forwards a header octet outside ASCII as itself", async () => {
+    const id = await createExec();
+
+    await h.upgradeExchange(Buffer.from(upgradeWith(id, "X-Ext: caf\xe9\r\n", ""), "latin1"));
+
+    const start = expectDefined(
+      h.daemon.requests().find((r) => r.url === `/exec/${id}/start`),
+      "the upgrade",
+    );
+    expect(start.headers["x-ext"]).toBe("caf\xe9");
+  });
+});
+
+describe("a task socket torn down under an upgrade", () => {
+  it.each([
+    ["with a complete request", "Content-Length: 0\r\n\r\n"],
+    ["with its body still to come", "Content-Length: 10\r\n\r\n"],
+  ])("closes a refused upgrade %s whose client keeps its side open", async (_label, framing) => {
+    const client = await halfOpenClient();
+    client.socket.write(
+      `POST /exec/${"e".repeat(64)}/start HTTP/1.1\r\nHost: docker\r\n` +
+        `Connection: Upgrade\r\nUpgrade: tcp\r\n${framing}`,
+    );
+    await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 404 /));
+
+    await resolvesWithin(h.proxy.unregisterTask(TASK_ID), SETTLE_MS, "the teardown to finish");
+    // The proxy's side is gone, so the client's next write fails and closes it.
+    client.socket.write("after the teardown");
+
+    await resolvesWithin(client.closed, SETTLE_MS, "the client to see the close");
+  });
+
+  it("closes an upgrade whose body is still arriving", async () => {
+    const id = await createExec();
+    const client = await halfOpenClient();
+    client.socket.write(
+      `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\n` +
+        'Upgrade: tcp\r\nContent-Length: 10\r\n\r\n{"a"',
+    );
+    await settle(100);
+
+    await resolvesWithin(h.proxy.unregisterTask(TASK_ID), SETTLE_MS, "the teardown to finish");
+    client.socket.write("after the teardown");
+
+    await resolvesWithin(client.closed, SETTLE_MS, "the client to see the close");
+    expect(reached(`/exec/${id}/start`)).toEqual([]);
   });
 });
 

@@ -172,6 +172,12 @@ export interface ProxyHarness {
   expectRejected(r: SocketResponse, status: number, reached: ReadonlyArray<string>): void;
   /** Write `request` on a fresh connection to the task's socket and collect everything until it closes. */
   rawExchange(request: string): Promise<string>;
+  /**
+   * Write an upgrade `request`, end the client's side at once, and collect
+   * everything, as latin1, until the connection closes: the daemon ends a
+   * switched stream once the client has ended its side.
+   */
+  upgradeExchange(request: string | Buffer): Promise<string>;
 }
 
 interface Running {
@@ -241,6 +247,7 @@ export function useProxyHarness(): ProxyHarness {
       expect(received()).toEqual(reached);
     },
     rawExchange: (request) => rawExchange(current().socket, request),
+    upgradeExchange: (request) => upgradeExchange(current().socket, request),
   };
 }
 
@@ -265,6 +272,22 @@ export function upgradeRequest(method: string, path: string): string {
     "",
     "",
   ].join("\r\n");
+}
+
+/** `count` filler header lines, each `a: 1`, joined for a hand-built request. */
+export function fillerHeaders(count: number): string {
+  return Array.from({ length: count }, () => "a: 1").join("\r\n");
+}
+
+function upgradeExchange(socketPath: string, request: string | Buffer): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const client = net.createConnection({ path: socketPath, allowHalfOpen: true });
+    const chunks: Buffer[] = [];
+    client.on("data", (c: Buffer) => chunks.push(c));
+    client.on("error", reject);
+    client.on("close", () => resolve(Buffer.concat(chunks).toString("latin1")));
+    client.once("connect", () => client.end(request));
+  });
 }
 
 function rawExchange(socketPath: string, request: string): Promise<string> {

@@ -16,7 +16,7 @@
 
 import * as http from "node:http";
 import * as net from "node:net";
-import { PassThrough, pipeline, type Transform } from "node:stream";
+import { type Duplex, PassThrough, pipeline, type Transform } from "node:stream";
 import { ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
@@ -139,12 +139,14 @@ export function forward(
  */
 export function pipeUpgrade(
   req: http.IncomingMessage,
-  clientSocket: net.Socket,
+  clientSocket: Duplex,
   upgrade: { path: string; body: Buffer; head: Buffer },
   upstream: Upstream,
 ): void {
   const { path, body, head } = upgrade;
-  // The checks are async: a client that hung up meanwhile gets no daemon connection.
+  // The checks are async: a connection the task's teardown destroyed
+  // meanwhile gets no daemon connection. One the client has only ended is
+  // forwarded, since a half-open client can still read the answer.
   if (clientSocket.destroyed) return;
   const daemon = net.createConnection({ path: upstream.socketPath, signal: upstream.signal });
   const warn = (cause: Error) => {
@@ -165,8 +167,9 @@ export function pipeUpgrade(
   daemon.once("connect", () => {
     daemon.write(buildUpgradePreamble(req, path, body));
     if (head.length > 0) daemon.write(head);
-    // `pipe` carries a half-close each way: a client that ends its write
-    // side after sending stdin lets the daemon flush.
+    // `pipe` carries each side's end to the other, and neither connection
+    // closes on its peer's end: a client that ends its side after sending
+    // stdin still reads the daemon's output.
     clientSocket.pipe(daemon);
     daemon.pipe(clientSocket);
     daemon.once("data", () => {

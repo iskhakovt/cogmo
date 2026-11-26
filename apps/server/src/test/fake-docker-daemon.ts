@@ -32,8 +32,16 @@ export interface FakeDockerDaemon {
   started(): ReadonlyArray<string>;
   /** Connections accepted so far. */
   connections(): number;
+  /** Each upgrade the daemon switched, with the bytes the client sent after the request's body. */
+  streams(): ReadonlyArray<FakeUpgradedStream>;
   setResponder(responder: FakeDaemonResponder): void;
   close(): Promise<void>;
+}
+
+export interface FakeUpgradedStream {
+  url: string;
+  /** As latin1, one character per octet. */
+  received: string;
 }
 
 export async function startFakeDockerDaemon(
@@ -43,6 +51,8 @@ export async function startFakeDockerDaemon(
   const received: FakeDaemonRequest[] = [];
   const started: string[] = [];
   let connections = 0;
+  const streams: FakeUpgradedStream[] = [];
+  const upgraded = new Set<Duplex>();
   let current = responder;
   const server = http.createServer((raw, res) => {
     started.push(`${raw.method} ${raw.url}`);
@@ -59,15 +69,15 @@ export async function startFakeDockerDaemon(
       current(req, res, raw);
     });
   });
-  // An upgrade is recorded and answered `101`, then the stream ends.
   server.on("connection", () => {
     connections += 1;
   });
-  // An upgrade is answered as the daemon answers exec start: `101`, then the
-  // stream ends; or, for a detached start or a body that is not JSON, a
-  // plain 200 or 400 and no switch. After a refusal the connection is kept
-  // open and parsed as HTTP again, unless the request's `Connection` holds
-  // `close`, as Go's server does.
+  // An upgrade is answered as the daemon answers exec start: `101`, then a
+  // stream that records what the client sends and, once the client ends its
+  // side, writes `late-output` and ends; or, for a detached start or a body
+  // that is not JSON, a plain 200 or 400 and no switch. After a refusal the
+  // connection is kept open and parsed as HTTP again, unless the request's
+  // `Connection` holds `close`, as Go's server does.
   server.on("upgrade", (raw: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     started.push(`${raw.method} ${raw.url}`);
     readUpgradeBody(raw, head)
@@ -75,7 +85,18 @@ export async function startFakeDockerDaemon(
         received.push({ method: raw.method ?? "", url: raw.url ?? "", headers: raw.headers, body });
         const refusal = upgradeRefusal(body);
         if (refusal === null) {
-          socket.end("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
+          const stream = { url: raw.url ?? "", received: rest.toString("latin1") };
+          streams.push(stream);
+          upgraded.add(socket);
+          socket.on("error", () => {});
+          socket.on("data", (chunk: Buffer) => {
+            stream.received += chunk.toString("latin1");
+          });
+          // A client that ended its side before the switch has already been read to its end.
+          const endStream = () => socket.end("late-output\n");
+          if (socket.readableEnded) endStream();
+          else socket.on("end", endStream);
+          socket.write("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
           return;
         }
         const reply = JSON.stringify(refusal.body);
@@ -103,10 +124,12 @@ export async function startFakeDockerDaemon(
     requests: () => [...received],
     started: () => [...started],
     connections: () => connections,
+    streams: () => streams.map((stream) => ({ ...stream })),
     setResponder: (next) => {
       current = next;
     },
     close: async () => {
+      for (const socket of upgraded) socket.destroy();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

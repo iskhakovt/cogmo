@@ -5,7 +5,6 @@
  */
 
 import * as http from "node:http";
-import type * as net from "node:net";
 import type { Duplex } from "node:stream";
 import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
@@ -41,11 +40,6 @@ export function writeRawStatusAndDestroy(socket: Duplex, status: number, message
     `Content-Length: ${Buffer.byteLength(body)}\r\n` +
     `Connection: close\r\n` +
     `\r\n${body}`;
-  // Nothing else listens on a socket the HTTP server has handed over. A
-  // client may keep its side open after the answer, and the task's teardown
-  // then destroys the socket with an `AbortError`, which unheard would be an
-  // uncaught exception; any other error ends a connection that is done.
-  socket.on("error", () => socket.destroy());
   socket.end(reply);
 }
 
@@ -83,7 +77,7 @@ export async function readBody(
  */
 export async function readUpgradeBody(
   req: http.IncomingMessage,
-  clientSocket: net.Socket,
+  clientSocket: Duplex,
   maxBytes: number,
 ): Promise<Result<Buffer, Extract<ProxyRejection, { kind: "too_large" | "malformed" }>>> {
   const { promise: endedEarly, resolve } = Promise.withResolvers<void>();
@@ -124,7 +118,8 @@ const HOP_BY_HOP_HEADERS: ReadonlySet<string> = new Set([
  * daemon would read the body as the next request.
  */
 export function pipedRequestHeaders(req: http.IncomingMessage): Record<string, string | string[]> {
-  const headers = withoutHopByHop(req.headers);
+  // Node answers `Expect: 100-continue` itself before the body is piped.
+  const headers = R.omit(withoutHopByHop(req.headers), ["expect"]);
   return req.headers["transfer-encoding"] === undefined
     ? headers
     : { ...headers, "transfer-encoding": "chunked" };
@@ -241,7 +236,8 @@ export function buildUpgradePreamble(
     (Array.isArray(value) ? value : [value]).map((v) => `${name}: ${v}`),
   );
   const lines = [`${req.method} ${path} HTTP/${req.httpVersion}`, ...headers, "", ""];
-  return Buffer.concat([Buffer.from(lines.join("\r\n"), "utf8"), body]);
+  // Node holds each header octet as one latin1 character; latin1 writes them back as they came.
+  return Buffer.concat([Buffer.from(lines.join("\r\n"), "latin1"), body]);
 }
 
 /**
@@ -252,7 +248,7 @@ export function pathOf(req: http.IncomingMessage): string {
   return (req.url ?? "/").split("?", 1)[0] ?? "/";
 }
 
-export function cloneHeaders(h: http.IncomingHttpHeaders): Record<string, string | string[]> {
+function cloneHeaders(h: http.IncomingHttpHeaders): Record<string, string | string[]> {
   return Object.fromEntries(
     Object.entries(h).filter((e): e is [string, string | string[]] => e[1] !== undefined),
   );

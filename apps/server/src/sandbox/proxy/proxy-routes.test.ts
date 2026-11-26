@@ -9,6 +9,7 @@ import {
   CHILD_ROW,
   COGMO_OWN,
   containerId,
+  fillerHeaders,
   message,
   OWN,
   RECORDED,
@@ -24,8 +25,13 @@ import { TESTCONTAINERS_PULL_REQUEST } from "../../test/testcontainers-requests.
 
 const ListSchema = z.array(z.looseObject({ Id: z.string() }));
 
-/** Header lines enough to reach the server's count, and past Node's default of 2000. */
-const MANY_HEADERS = Array.from({ length: 2000 }, () => "a: 1").join("\r\n");
+/** `GET /_ping` with `count` headers, Host, Connection and Content-Length among them, and a body. */
+function pingWithHeaders(count: number): string {
+  return (
+    `GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n${fillerHeaders(count - 3)}\r\n` +
+    "Content-Length: 5\r\n\r\nhello"
+  );
+}
 
 const h = useProxyHarness();
 
@@ -111,13 +117,31 @@ describe("route table", () => {
     h.expectRejected(await h.send(method, path), 403, []);
   });
 
-  it("answers 431 to a request past the header count, a body after it reaching nothing", async () => {
+  it("forwards a request with 99 headers", async () => {
+    const reply = await h.rawExchange(pingWithHeaders(99));
+
+    expect(reply).toMatch(/^HTTP\/1\.1 200 /);
+    expect(h.daemon.started()).toEqual(["GET /_ping"]);
+  });
+
+  // 100 headers reach the proxy, which refuses them; Node's parser fails the 101st.
+  it.each([100, 101])(
+    "answers 431 to a request with %i headers, the body after them reaching nothing",
+    async (count) => {
+      const reply = await h.rawExchange(pingWithHeaders(count));
+
+      expect(reply).toMatch(/^HTTP\/1\.1 431 /);
+      expect(h.daemon.started()).toEqual([]);
+    },
+  );
+
+  it("answers 431 to a request whose one header passes 16 KiB, reaching nothing", async () => {
     const reply = await h.rawExchange(
-      `GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n${MANY_HEADERS}\r\n` +
-        "Content-Length: 5\r\n\r\nhello",
+      `GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\nX-Big: ${"x".repeat(16 * 1024)}\r\n\r\n`,
     );
 
     expect(reply).toMatch(/^HTTP\/1\.1 431 /);
+    expect(reply).toContain("request headers must number fewer than 100 and fit in 16 KiB");
     expect(h.daemon.started()).toEqual([]);
   });
 
@@ -348,6 +372,15 @@ describe("hop-by-hop headers", () => {
     expect(seen["x-hop-secret"]).toBeUndefined();
     expect(seen["proxy-connection"]).toBeUndefined();
     expect(seen["x-kept"]).toBe("1");
+  });
+
+  it("drops Expect from a forward whose body is piped, which Node has answered", async () => {
+    const r = await h.send("POST", "/containers/own-child/stop", "", { expect: "100-continue" });
+
+    expect(r.status, r.body).toBe(200);
+    const stop = expectDefined(h.daemon.requests().at(-1), "the stop");
+    expect(stop.url).toBe(`/containers/${CHILD.id}/stop`);
+    expect(stop.headers.expect).toBeUndefined();
   });
 
   it("drops the headers a response's Connection names, and Proxy-Connection", async () => {

@@ -48,7 +48,8 @@ export function rejectionMessage(rejection: ProxyRejection): string {
     )
     .with(
       { kind: "headers_too_large" },
-      ({ limit }) => `Cogmo proxy: a request carries fewer than ${limit} headers, within 16 KiB`,
+      ({ limit }) =>
+        `Cogmo proxy: request headers must number fewer than ${limit} and fit in 16 KiB`,
     )
     .with(
       { kind: "expectation_failed" },

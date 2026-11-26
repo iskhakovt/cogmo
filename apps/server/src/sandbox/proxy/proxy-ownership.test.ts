@@ -2,6 +2,7 @@ import * as net from "node:net";
 import { errAsync, okAsync } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { resolvesWithin } from "../../test/assertions.js";
 import { requestOverSocket, respondJson } from "../../test/fake-docker-daemon.js";
 import {
   API,
@@ -408,7 +409,7 @@ describe("upgraded streams", () => {
     expect(h.received()).toEqual([resolveOf(SIBLING.name)]);
   });
 
-  it("opens no daemon connection for a client that hung up during the checks", async () => {
+  it("forwards and answers an upgrade whose client ended its side during the checks", async () => {
     const release = Promise.withResolvers<void>();
     h.daemon.setResponder((req, res, raw) => {
       if (req.url === `/containers/cogmo-task-own/json`) {
@@ -417,18 +418,25 @@ describe("upgraded streams", () => {
       }
       API(req, res, raw);
     });
-    const client = net.createConnection({ path: h.socket });
+    const client = net.createConnection({ path: h.socket, allowHalfOpen: true });
     client.on("error", () => {});
+    let received = "";
+    client.on("data", (c: Buffer) => {
+      received += c.toString("latin1");
+    });
+    const closed = new Promise<void>((resolve) => client.once("close", () => resolve()));
     await new Promise<void>((resolve) => client.once("connect", () => resolve()));
-    client.write(upgradeRequest("POST", "/containers/cogmo-task-own/attach?stream=1"));
+    client.end(upgradeRequest("POST", "/containers/cogmo-task-own/attach?stream=1"));
     await vi.waitFor(() => expect(h.received()).toEqual([resolveOf("cogmo-task-own")]));
 
-    client.destroy();
-    await new Promise((resolve) => setTimeout(resolve, 100));
     release.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 250));
 
-    expect(h.received()).toEqual([resolveOf("cogmo-task-own")]);
+    await resolvesWithin(closed, 2_500, "the stream to end");
+    expect(received).toMatch(/^HTTP\/1\.1 101 [\s\S]*\r\n\r\nlate-output\n$/);
+    expect(h.received()).toEqual([
+      resolveOf("cogmo-task-own"),
+      `POST /containers/${OWN.id}/attach?stream=1`,
+    ]);
   });
 
   it("answers 500 and logs an upgrade whose checks throw", async () => {
@@ -446,14 +454,18 @@ describe("upgraded streams", () => {
     );
   });
 
-  it("replays an owned attach under the full id", async () => {
-    await h.rawExchange(
-      upgradeRequest("POST", "/containers/cogmo-task-own/attach?stream=1&stdout=1"),
+  it.each([
+    ["an attach", "POST", "/attach?stream=1&stdout=1"],
+    ["a websocket attach", "GET", "/attach/ws?stream=1"],
+  ])("replays %s to an owned container under the full id", async (_label, method, suffix) => {
+    const reply = await h.upgradeExchange(
+      upgradeRequest(method, `/containers/cogmo-task-own${suffix}`),
     );
 
+    expect(reply).toMatch(/^HTTP\/1\.1 101 /);
     expect(h.received()).toEqual([
       resolveOf("cogmo-task-own"),
-      `POST /containers/${OWN.id}/attach?stream=1&stdout=1`,
+      `${method} /containers/${OWN.id}${suffix}`,
     ]);
   });
 });

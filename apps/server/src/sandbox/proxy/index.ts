@@ -2,7 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import * as http from "node:http";
 import * as net from "node:net";
 import { join } from "node:path";
-import { addAbortSignal } from "node:stream";
+import { addAbortSignal, type Duplex } from "node:stream";
 import { type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
@@ -67,9 +67,13 @@ const MAX_BUFFERED_BODY_BYTES = 1 * 1024 * 1024;
 
 /**
  * The headers the server takes per request; a real Docker client sends
- * about ten. Node fails a request past it as a client error (431), and one
- * that reaches it is refused too, before any daemon connection, so the
- * header view a forward frames its body by is never one Node cut short.
+ * about ten. Node's parser fails a request past the count
+ * (`HPE_HEADER_OVERFLOW`, from `TrackHeaderPair` in `node_http_parser.cc`),
+ * which `clientError` answers 431. A request with exactly the count is
+ * refused 431 too (`atHeaderLimit`), before any daemon connection: Node's
+ * JS side cuts a longer header list short (`parserOnHeadersComplete`), so
+ * whichever side enforces the count, a forward never frames its body by a
+ * header view Node cut short.
  */
 const MAX_HEADERS = 100;
 
@@ -161,17 +165,21 @@ export class CogmoSocketProxy {
     this.#httpServer = http.createServer();
     this.#httpServer.maxHeadersCount = MAX_HEADERS;
     this.#httpServer.on("request", (req, res) => this.#handleRequest(req, res));
-    this.#httpServer.on("upgrade", (req, socket, head) => {
-      // http.Server types `socket` as Duplex; for Unix-socket connections
-      // it's always a net.Socket, which has the methods we need.
-      this.#handleUpgrade(req, socket as net.Socket, head);
-    });
+    // The upgrade's socket is the connection itself, or, while its body is
+    // still arriving, Node's wrapper around it that holds back the bytes
+    // after the body.
+    this.#httpServer.on("upgrade", (req, socket, head) => this.#handleUpgrade(req, socket, head));
     this.#httpServer.on("clientError", (err, socket) => {
-      // Node fails a request past `maxHeadersCount`, or past its header size
-      // limit, before the proxy sees it; it answers 431 as Node's own
-      // handler would.
+      // Node's parser fails a request past `maxHeadersCount` headers, or
+      // past 16 KiB of them, before there is a request to classify; it is
+      // answered 431, as Node's own handler would, and logged as a refused
+      // request is.
       if ("code" in err && err.code === "HPE_HEADER_OVERFLOW") {
-        writeRawRejectionAndDestroy(socket, { kind: "headers_too_large", limit: MAX_HEADERS });
+        const rejection: ProxyRejection = { kind: "headers_too_large", limit: MAX_HEADERS };
+        const taskId =
+          socket instanceof net.Socket ? CONNECTION_TASK.get(socket)?.taskId : undefined;
+        log.info({ taskId, rejection }, "proxy request rejected");
+        writeRawRejectionAndDestroy(socket, rejection);
         return;
       }
       if (!isAbortError(err)) log.warn({ err: err.message }, "proxy http clientError");
@@ -248,7 +256,13 @@ export class CogmoSocketProxy {
     const controller = new AbortController();
     const { signal } = controller;
     const execIds = new ExecIds();
-    const server = net.createServer((socket) => {
+    // Half-open, as an HTTP server's own sockets are: on an upgrade, a
+    // client that ends its side after sending stdin (`echo hi | docker exec
+    // -i`) still reads the daemon's output, and one that ends its side once
+    // its request is complete still gets an answer. Node's HTTP server ends
+    // the connection itself when the client ends its side while a request
+    // is still being parsed, an upgrade's body included.
+    const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       // Destroys the socket at once if it was accepted after the abort.
       addAbortSignal(signal, socket);
       CONNECTION_TASK.set(socket, { taskId, signal, execIds });
@@ -358,7 +372,13 @@ export class CogmoSocketProxy {
    * replayed after the preamble and the body. Without the classification an
    * `Upgrade: tcp` to `/swarm/*` would slip past the route table.
    */
-  #handleUpgrade(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): void {
+  #handleUpgrade(req: http.IncomingMessage, clientSocket: Duplex, head: Buffer): void {
+    // Nothing else listens on the socket the HTTP server hands over, or on
+    // Node's wrapper around it, from here to the connection's end. The
+    // task's teardown destroys it with an `AbortError`, which unheard would
+    // be an uncaught exception; any error ends a connection there is no one
+    // else to tell.
+    clientSocket.on("error", () => clientSocket.destroy());
     const connection = CONNECTION_TASK.get(req.socket);
     const scope = connection ? this.#scopes.get(connection.taskId) : undefined;
     if (!connection || !scope) {
@@ -416,7 +436,7 @@ export class CogmoSocketProxy {
   /** A rejected upgrade, answered on the raw socket and logged as a request's is. */
   #rejectUpgrade(
     req: http.IncomingMessage,
-    clientSocket: net.Socket,
+    clientSocket: Duplex,
     scope: TaskScope,
     rejection: ProxyRejection,
   ): void {
@@ -462,10 +482,7 @@ export class CogmoSocketProxy {
   }
 }
 
-/**
- * Whether the request carries as many headers as the server collects, so
- * that Node may have dropped some from its view.
- */
+/** Whether the request carries as many headers as the server collects (`MAX_HEADERS`). */
 function atHeaderLimit(req: http.IncomingMessage): boolean {
   return req.rawHeaders.length / 2 >= MAX_HEADERS;
 }
