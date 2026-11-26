@@ -40,7 +40,7 @@ beforeEach(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "cogmo-proxy-exec-"));
   daemon = await startFakeDockerDaemon(
     join(baseDir, "docker.sock"),
-    dockerApi({ images: new Map(), arch: "amd64", bridgeGateway: "172.17.0.1" }),
+    dockerApi({ images: new Map(), arch: "amd64", bridgeGateway: "172.17.0.1", rootless: false }),
   );
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
@@ -118,6 +118,14 @@ describe("exec policy", () => {
     ["PRIVILEGED", { Cmd: ["id"], PRIVILEGED: true }],
   ])("reads the case variant %s", async (_label, body) => {
     await expectRejected(await exec(body, "/containers/abc/exec"), 403);
+  });
+
+  it("denies a privileged exec on a container name with a slash, as the daemon routes it", async () => {
+    // The daemon routes `/containers/{name:.*}/exec`; a legacy link names a
+    // container `/parent/alias`.
+    const r = await exec({ Cmd: ["sh"], Privileged: true }, "/containers/parent/alias/exec");
+
+    await expectRejected(r, 403);
   });
 
   it("forwards a case variant under its canonical name", async () => {

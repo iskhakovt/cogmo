@@ -69,12 +69,14 @@ describe("router.classify", () => {
   });
 
   describe("exec_create", () => {
-    it.each(["/containers/abc/exec", "/v1.44/containers/abc/exec", "/containers/abc%2Fexec"])(
-      "POST %s",
-      (path) => {
-        expect(classify("POST", path).kind).toBe("exec_create");
-      },
-    );
+    it.each([
+      "/containers/abc/exec",
+      "/v1.44/containers/abc/exec",
+      "/containers/abc%2Fexec",
+      "/containers/parent/alias/exec",
+    ])("POST %s", (path) => {
+      expect(classify("POST", path).kind).toBe("exec_create");
+    });
 
     it("GET /containers/abc/exec is forward", () => {
       expect(classify("GET", "/containers/abc/exec").kind).toBe("forward");

@@ -92,7 +92,7 @@ export function buildHttpRequestPreamble(req: http.IncomingMessage): Buffer {
 
 export function cloneHeaders(h: http.IncomingHttpHeaders): Record<string, string | string[]> {
   return Object.fromEntries(
-    Object.entries(h).flatMap(([name, value]) => (value === undefined ? [] : [[name, value]])),
+    Object.entries(h).filter((e): e is [string, string | string[]] => e[1] !== undefined),
   );
 }
 

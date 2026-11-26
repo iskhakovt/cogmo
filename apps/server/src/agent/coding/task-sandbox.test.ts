@@ -122,9 +122,12 @@ describe("taskSessionSpec", () => {
   const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
   const AUTH_ENV = { CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" };
 
-  function specFor(assignment: WorktreeAssignment) {
+  function specFor(
+    assignment: WorktreeAssignment,
+    siblingContainers: SandboxCapabilities["siblingContainers"] = "host-proxy",
+  ) {
     const capabilities: SandboxCapabilities = {
-      siblingContainers: "host-proxy",
+      siblingContainers,
       hostBindMount: true,
       customImage: true,
       volumes: "docker",
@@ -169,6 +172,19 @@ describe("taskSessionSpec", () => {
     });
 
     expect(spec.env).toEqual({ ...AUTH_ENV, TESTCONTAINERS_RYUK_DISABLED: "true" });
+  });
+
+  it("leaves testcontainers' Ryuk on where sibling containers are the sandbox's own", () => {
+    const spec = specFor(
+      {
+        type: "host-path",
+        branch: "cogmo/abc12345",
+        worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
+      },
+      "sandbox-internal",
+    );
+
+    expect(spec.env).toEqual(AUTH_ENV);
   });
 
   it("gives the coding session the Docker socket", () => {

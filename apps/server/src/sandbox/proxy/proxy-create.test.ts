@@ -53,7 +53,12 @@ const ForwardedSchema = z.looseObject({
 
 const ErrorSchema = z.object({ message: z.string() });
 
-const AMD64_API = dockerApi({ images: IMAGES, arch: "amd64", bridgeGateway: GATEWAY });
+const AMD64_API = dockerApi({
+  images: IMAGES,
+  arch: "amd64",
+  bridgeGateway: GATEWAY,
+  rootless: false,
+});
 
 let baseDir: string;
 let daemon: FakeDockerDaemon;
@@ -63,7 +68,7 @@ let socket: string;
 async function startDaemon(arch: string): Promise<void> {
   daemon = await startFakeDockerDaemon(
     join(baseDir, "docker.sock"),
-    dockerApi({ images: IMAGES, arch, bridgeGateway: GATEWAY }),
+    dockerApi({ images: IMAGES, arch, bridgeGateway: GATEWAY, rootless: false }),
   );
 }
 
@@ -447,6 +452,38 @@ describe("create policy: capabilities", () => {
     expect(message(r)).toContain("SYS_NICE");
   });
 
+  it("forwards the scope's runtime, runc included", async () => {
+    const runc = await proxy.registerTask({
+      ...SCOPE,
+      taskId: "019d0000-0000-7000-8000-0000000000c4",
+      runtime: "runc",
+    });
+    const r = await requestOverSocket(runc, {
+      method: "POST",
+      path: "/containers/create",
+      body: JSON.stringify({ Image: "alpine", HostConfig: { Runtime: "sysbox-runc" } }),
+    });
+
+    expect(r.status, r.body).toBe(201);
+    expect(forwarded().HostConfig.Runtime).toBe("runc");
+  });
+
+  it("labels a child one deeper than its parent", async () => {
+    const nested = await proxy.registerTask({
+      ...SCOPE,
+      taskId: "019d0000-0000-7000-8000-0000000000c5",
+      parentDepth: 1,
+    });
+    const r = await requestOverSocket(nested, {
+      method: "POST",
+      path: "/containers/create",
+      body: JSON.stringify({ Image: "alpine", Labels: { "cogmo.depth": "0" } }),
+    });
+
+    expect(r.status, r.body).toBe(201);
+    expect(forwarded().Labels["cogmo.depth"]).toBe("2");
+  });
+
   it("allows CapDrop of anything", async () => {
     const r = await create({ Image: "alpine", HostConfig: { CapDrop: ["ALL"] } }, "");
 
@@ -800,6 +837,29 @@ describe("create policy: networks", () => {
     });
   });
 
+  it("binds published ports to loopback on a rootless daemon, without reading the bridge", async () => {
+    // RootlessKit listens in the host's network namespace, where the bridge
+    // gateway is not an address.
+    daemon.setResponder(
+      dockerApi({ images: IMAGES, arch: "amd64", bridgeGateway: GATEWAY, rootless: true }),
+    );
+
+    const r = await create(
+      {
+        Image: "alpine",
+        ExposedPorts: { "5432/tcp": {} },
+        HostConfig: { PortBindings: { "5432/tcp": [{ HostIp: "0.0.0.0", HostPort: "0" }] } },
+      },
+      "",
+    );
+
+    expect(r.status, r.body).toBe(201);
+    expect(forwarded().HostConfig.PortBindings).toEqual({
+      "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "0" }],
+    });
+    expect(daemon.requests().filter((req) => req.url === "/networks/bridge")).toEqual([]);
+  });
+
   it.each(["8080", "8080-8081", " 0"])("denies a fixed HostPort %j", async (port) => {
     const r = await create(
       { Image: "alpine", HostConfig: { PortBindings: { "80/tcp": [{ HostPort: port }] } } },
@@ -911,8 +971,7 @@ describe("create policy: the image", () => {
     async (image) => {
       const r = await create({ Image: image }, "");
 
-      expect(r.status).toBeGreaterThanOrEqual(400);
-      expect(r.status).toBeLessThan(500);
+      expect(r.status, r.body).toBe(400);
       expect(daemon.requests()).toEqual([]);
     },
   );
@@ -1101,6 +1160,11 @@ describe("create policy: platform", () => {
     "freebsd",
     "macos/amd64",
     "linux//amd64",
+    "linux/amd64/",
+    "linux/amd64/../v1",
+    "linux(6.1+feature)/amd64",
+    "riscv64",
+    "not-an-os-or-arch",
   ])("denies the non-host platform %s on amd64, without a create", async (platform) => {
     const r = await create({ Image: "alpine" }, `?platform=${encodeURIComponent(platform)}`);
 
@@ -1124,11 +1188,14 @@ describe("create policy: platform", () => {
       },
     );
 
-    it.each(["linux/arm64/v9", "linux/amd64", "linux/arm/v7"])("denies %s", async (platform) => {
-      const r = await create({ Image: "alpine" }, `?platform=${encodeURIComponent(platform)}`);
+    it.each(["linux/arm64/v9", "linux/arm64/v8.2", "linux/amd64", "linux/arm/v7", "linux/armel"])(
+      "denies %s",
+      async (platform) => {
+        const r = await create({ Image: "alpine" }, `?platform=${encodeURIComponent(platform)}`);
 
-      expect(r.status, r.body).toBe(403);
-    });
+        expect(r.status, r.body).toBe(403);
+      },
+    );
   });
 });
 
@@ -1164,6 +1231,7 @@ function failing(
 const isVersion = (req: FakeDaemonRequest) => req.url === "/version";
 const isInspect = (req: FakeDaemonRequest) => req.url.startsWith("/images/");
 const isBridge = (req: FakeDaemonRequest) => req.url === "/networks/bridge";
+const isInfo = (req: FakeDaemonRequest) => req.url === "/info";
 
 describe("create policy: daemon lookups", () => {
   it.each([
@@ -1177,6 +1245,8 @@ describe("create policy: daemon lookups", () => {
       "",
     ],
     ["GET /networks/bridge fails", failing(isBridge, 404, { message: "no such network" }), ""],
+    ["GET /info fails", failing(isInfo, 500, { message: "boom" }), ""],
+    ["GET /info is unreadable", failing(isInfo, 200, { SecurityOptions: "rootless" }), ""],
   ])("answers 503 when %s, without a create", async (_label, responder, query) => {
     daemon.setResponder(responder);
 
@@ -1186,6 +1256,16 @@ describe("create policy: daemon lookups", () => {
     );
 
     expect(r.status, r.body).toBe(503);
+    expect(creates()).toEqual([]);
+  });
+
+  it("answers 400 with the daemon's reason when the image inspect refuses the reference", async () => {
+    daemon.setResponder(failing(isInspect, 400, { message: "invalid reference format" }));
+
+    const r = await create({ Image: "alpine" }, "");
+
+    expect(r.status, r.body).toBe(400);
+    expect(message(r)).toContain("invalid reference format");
     expect(creates()).toEqual([]);
   });
 

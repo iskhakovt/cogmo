@@ -53,7 +53,7 @@ export function notFound(message: string): Extract<ProxyRejection, { kind: "not_
   return { kind: "not_found", message };
 }
 
-export function malformed(message: string): ProxyRejection {
+export function malformed(message: string): Extract<ProxyRejection, { kind: "malformed" }> {
   return { kind: "malformed", message: `Cogmo proxy: ${message}` };
 }
 

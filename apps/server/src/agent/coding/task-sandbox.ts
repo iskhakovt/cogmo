@@ -31,8 +31,9 @@ const VERIFY_BASE_ENV = "COGMO_VERIFY_BASE";
 
 /**
  * testcontainers' Ryuk reaper needs a host-path bind of the Docker socket,
- * which the proxy denies. The sandbox reaper removes the containers the task
- * starts in its place.
+ * which the Docker API proxy denies, so a backend whose sibling containers go
+ * through it (`siblingContainers: "host-proxy"`) turns Ryuk off. The sandbox
+ * reaper removes the containers the task starts in its place.
  */
 const RYUK_DISABLED_ENV = { TESTCONTAINERS_RYUK_DISABLED: "true" } as const;
 
@@ -194,7 +195,7 @@ export function taskSessionSpec(args: {
       ...(args.assignment.baseSha !== undefined && {
         [VERIFY_BASE_ENV]: args.assignment.baseSha,
       }),
-      ...RYUK_DISABLED_ENV,
+      ...(args.sandbox.capabilities.siblingContainers === "host-proxy" && RYUK_DISABLED_ENV),
     },
     // The coding CLI reaches its provider, the git remote and package indexes.
     network: "bridge",

@@ -3,8 +3,8 @@
  * Design → Create policy). It builds a new body rather than patching the
  * one it received: the allowlisted fields as sent, the Cogmo labels, the
  * scope's runtime and cgroup parent, the task's resource limits, the
- * inspected image id and the published ports bound to the `bridge`
- * gateway.
+ * inspected image id and the published ports bound to the daemon's publish
+ * address.
  *
  * Every check on the body runs before any daemon lookup. The lookups go
  * through `DaemonLookups`, which the HTTP edge implements.
@@ -13,7 +13,12 @@
 import { err, ok, type Result, ResultAsync } from "neverthrow";
 import * as R from "remeda";
 import { type CreateBody, CreateBodySchema } from "./body-schemas.js";
-import { bindToGateway, checkCreateFields, publishesPorts, taskLabels } from "./create-fields.js";
+import {
+  bindPublishedPorts,
+  checkCreateFields,
+  publishesPorts,
+  taskLabels,
+} from "./create-fields.js";
 import { parseBody } from "./key-rules.js";
 import { isHostPlatform } from "./platform.js";
 import { denied, type ProxyRejection } from "./rejection.js";
@@ -64,8 +69,8 @@ export function applyContainerCreatePolicy(
         .andThen(() => new ResultAsync(lookups.inspectImage(body.Image)))
         .andThen((image) => checkSysboxEnv(image.env, "the image's Config.Env").map(() => image))
         .andThen((image) =>
-          new ResultAsync(gatewayFor(body, lookups)).map((gateway) =>
-            rebuild(body, { image, resources, gateway, scope }),
+          new ResultAsync(publishAddressFor(body, lookups)).map((address) =>
+            rebuild(body, { image, resources, address, scope }),
           ),
         ),
     )
@@ -105,18 +110,18 @@ async function checkPlatform(
  * Read on every create that publishes a port, not cached: a daemon restart
  * with another `bip` moves the gateway while this process runs.
  */
-async function gatewayFor(
+async function publishAddressFor(
   body: CreateBody,
   lookups: DaemonLookups,
 ): Promise<Result<string | null, ProxyRejection>> {
-  return publishesPorts(body.HostConfig?.PortBindings) ? lookups.bridgeGateway() : ok(null);
+  return publishesPorts(body.HostConfig?.PortBindings) ? lookups.publishAddress() : ok(null);
 }
 
 function rebuild(
   body: CreateBody,
-  parts: { image: ImageFacts; resources: ResourceFields; gateway: string | null; scope: TaskScope },
+  parts: { image: ImageFacts; resources: ResourceFields; address: string | null; scope: TaskScope },
 ): Record<string, unknown> {
-  const { image, resources, gateway, scope } = parts;
+  const { image, resources, address, scope } = parts;
   const config = R.omit(body, ["name", "platform", "Image", "Labels", "HostConfig"]);
   const host = body.HostConfig ?? {};
   const bindings = host.PortBindings;
@@ -128,7 +133,7 @@ function rebuild(
       ...R.omit(host, REPLACED_HOST_FIELDS),
       ...(bindings !== undefined && {
         PortBindings:
-          bindings === null || gateway === null ? bindings : bindToGateway(bindings, gateway),
+          bindings === null || address === null ? bindings : bindPublishedPorts(bindings, address),
       }),
       Runtime: scope.runtime,
       CgroupParent: scope.cgroupParent,

@@ -1,6 +1,7 @@
 /**
  * `DaemonLookups` over the host Docker socket: the image inspect, the
- * daemon's platform and the `bridge` gateway the create policy needs. Every
+ * daemon's platform and the address published ports bind to, which the
+ * create policy needs. Every
  * failure is a value. A lookup is bound to the task's abort signal, so a
  * teardown ends it with the task's other daemon connections.
  */
@@ -10,7 +11,7 @@ import { isIPv4 } from "node:net";
 import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 import { describeError } from "../../util/describe-error.js";
-import { notFound, unavailable } from "./rejection.js";
+import { malformed, notFound, unavailable } from "./rejection.js";
 import type { DaemonLookups, HostPlatform, ImageFacts, LookupFailure } from "./types.js";
 
 /** An image's config, labels included, is the task's own data: bound it. */
@@ -24,7 +25,19 @@ const ImageInspectSchema = z.object({
     .optional(),
 });
 
+/**
+ * Where a rootless daemon publishes a port. RootlessKit listens in the
+ * host's network namespace, where the `bridge` gateway is not an address,
+ * so a start fails with `cannot assign requested address`; loopback keeps
+ * the port off the host's other interfaces.
+ */
+const ROOTLESS_PUBLISH_ADDRESS = "127.0.0.1";
+
 const VersionSchema = z.object({ Os: z.string().min(1), Arch: z.string().min(1) });
+
+const InfoSchema = z.object({ SecurityOptions: z.array(z.string()).nullable().optional() });
+
+const DaemonErrorSchema = z.object({ message: z.string() });
 
 const NetworkInspectSchema = z.object({
   IPAM: z.object({
@@ -44,12 +57,17 @@ export function daemonLookups(args: {
   socketPath: string;
   signal: AbortSignal;
   hostPlatform: (signal: AbortSignal) => Promise<Result<HostPlatform, LookupFailure>>;
+  rootless: (signal: AbortSignal) => Promise<Result<boolean, LookupFailure>>;
 }): DaemonLookups {
   const { socketPath, signal } = args;
   return {
     inspectImage: (ref) => inspectImage(socketPath, ref, signal),
     hostPlatform: () => args.hostPlatform(signal),
-    bridgeGateway: () => bridgeGateway(socketPath, signal),
+    publishAddress: async () => {
+      const rootless = await args.rootless(signal);
+      if (rootless.isErr()) return err(rootless.error);
+      return rootless.value ? ok(ROOTLESS_PUBLISH_ADDRESS) : bridgeGateway(socketPath, signal);
+    },
   };
 }
 
@@ -82,6 +100,20 @@ export async function fetchHostPlatform(
   });
 }
 
+/** Whether the daemon runs rootless, from `name=rootless` among `GET /info`'s `SecurityOptions`. */
+export async function fetchRootless(
+  socketPath: string,
+  signal: AbortSignal,
+): Promise<Result<boolean, LookupFailure>> {
+  const reply = await getJson(socketPath, "/info", signal);
+  return reply.andThen(({ status, body }) => {
+    const parsed = InfoSchema.safeParse(body);
+    return status === 200 && parsed.success
+      ? ok((parsed.data.SecurityOptions ?? []).includes("name=rootless"))
+      : err(unavailable(`GET /info answered ${status}`));
+  });
+}
+
 /** `ref` has passed the create schema's reference check, so it is a safe path segment run. */
 async function inspectImage(
   socketPath: string,
@@ -91,6 +123,7 @@ async function inspectImage(
   const reply = await getJson(socketPath, `/images/${ref}/json`, signal);
   return reply.andThen(({ status, body }) => {
     if (status === 404) return err(notFound(`No such image: ${ref}`));
+    if (status === 400) return err(malformed(`image ${ref}: ${daemonReason(body)}`));
     const parsed = ImageInspectSchema.safeParse(body);
     return status === 200 && parsed.success
       ? ok({ id: parsed.data.Id, env: parsed.data.Config?.Env ?? [] })
@@ -114,6 +147,11 @@ async function bridgeGateway(
       ? ok(gateway)
       : err(unavailable(`GET /networks/bridge answered ${status} without an IPv4 gateway`));
   });
+}
+
+function daemonReason(body: unknown): string {
+  const parsed = DaemonErrorSchema.safeParse(body);
+  return parsed.success ? parsed.data.message : "the daemon refused it";
 }
 
 function getJson(

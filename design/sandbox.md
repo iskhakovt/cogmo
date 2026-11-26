@@ -413,11 +413,11 @@ A ref in a path or body (a full id, a unique prefix or a name) is resolved throu
 
 Exec ids are kept in memory per task: the proxy records the id from each 201 to a `POST /containers/{id}/exec` sent through the task's socket. A task therefore cannot start or resize an exec that Cogmo created on its depth-0 container, even though inspect lists those ids. A process restart loses the set, which is harmless because the containers go with it (Crash Recovery).
 
-**Caps and cost.** `[proposed]` A task holds at most 16 live children (`containers` rows at depth ≥ 1 in `starting` or `running`), 8 networks and 8 volumes in `created`, each child within the task's resource limits. A create past a cap is `denied`. Each count is read before the forward, so two concurrent creates can land one over the cap, which is benign at single-user scale (store-pattern.md → admission caps). Each container, exec, network or volume request costs one daemon lookup and one store read. A list costs one store read. A create costs one insert. `[confirmed]` A container create also costs one image inspect, plus one `GET /networks/bridge` when it publishes a port, since a daemon restart with another `bip` moves the gateway. The daemon's `GET /version` is read the first time a create names a `platform` and then kept for the life of the process, since the host's Os/Arch cannot change under it.
+**Caps and cost.** `[proposed]` A task holds at most 16 live children (`containers` rows at depth ≥ 1 in `starting` or `running`), 8 networks and 8 volumes in `created`, each child within the task's resource limits. A create past a cap is `denied`. Each count is read before the forward, so two concurrent creates can land one over the cap, which is benign at single-user scale (store-pattern.md → admission caps). Each container, exec, network or volume request costs one daemon lookup and one store read. A list costs one store read. A create costs one insert. `[confirmed]` A container create also costs one image inspect, plus one `GET /networks/bridge` when it publishes a port on a rootful daemon, since a daemon restart with another `bip` moves the gateway. The daemon's `GET /version` is read the first time a create names a `platform`, and its `GET /info` the first time one publishes a port, and both are kept for the life of the process: the host's Os/Arch cannot change under it, and the daemon behind a socket path keeps its rootless mode.
 
 **The forwarded request.** `[proposed]` The proxy never forwards `req.url`. It forwards the canonical path it classified, with refs rewritten to full ids, plus the query, parsed and re-serialised.
 
-- A version prefix below `v1.44` is `denied`, compared as the daemon's `versions.compare` does. A request with no prefix goes to the daemon without one. `[confirmed]` on the create and exec create routes.
+- A version prefix below `v1.44` is `denied`, compared as the daemon's `versions.compare` does. A request with no prefix goes to the daemon without one and gets the daemon's own version, so Cogmo requires a daemon of API 1.44 or later (Docker 25). `[confirmed]` on the create and exec create routes.
 - `[confirmed]` `POST /containers/create` forwards the query keys `name` and `platform`, each only when non-empty, and drops every other key. docker-modem copies every option into the query string as well as the body, so `Image=…&HostConfig=…` arrive as query keys; the daemon reads no create query key but those two. The path is the canonical `/containers/create` under the request's version prefix.
 - `POST /images/create` needs a non-empty `fromImage`, forwards `tag` and `platform`, denies `fromSrc`, `repo`, `message` and `changes`, and drops any other key.
 - Other routes forward their parsed query. List `filters` pass through, because the responses are filtered anyway. A child `DELETE` always carries `v=true` (Lifecycle row).
@@ -430,7 +430,7 @@ Exec ids are kept in memory per task: the proxy records the id from each 201 to 
 |-|-|-|
 | `not_found` | 404, in the daemon's wording for the object type (`No such container: <ref>`) | The ref is unknown, unowned or `reaped`, or a create names an image the daemon does not have (`No such image`). A ref to a sibling's or Cogmo's object gets the same answer as a missing one. Names still leak existence elsewhere (Residuals) |
 | `denied` | 403, naming the route, query key or field | The route class, a query key, a body field or a cap is not allowed |
-| `malformed` | 400 | The body is not a JSON object, a field fails its schema, a key holds a non-ASCII character or is `__proto__`, `constructor` or `prototype`, or two keys differ only in case |
+| `malformed` | 400 | The body is not a JSON object, ends before its `Content-Length`, or fails its schema, a key holds a non-ASCII character or is `__proto__`, `constructor` or `prototype`, two keys differ only in case, or the daemon answers the image inspect 400 for a reference it cannot parse |
 | `too_large` | 413 | A body to be rewritten is over 1 MiB |
 | `unavailable` | 503 | The store read or the daemon resolve failed, a daemon lookup the create policy needs (image inspect, `GET /version`, the `bridge` gateway) failed, the scope has no depth-0 row yet, the scope is gone because the task is being torn down, or a volume 201 is labelled with this task but another instance (Network and volume state machine). The client may retry |
 | `daemon_failed` | 502 | The daemon connection failed, or its create response could not be read |
@@ -445,7 +445,7 @@ Exec ids are kept in memory per task: the proxy records the id from each 201 to 
 | Read | `GET /containers/{id}/json`, `/top`, `/logs`, `/stats`, `/changes`, `/export`; `GET`/`HEAD /containers/{id}/archive`; `POST /containers/{id}/wait`, `/resize` | owned, any depth |
 | Write | `PUT /containers/{id}/archive` | Owned, depth ≥ 1 only. The depth-0 container's `/workspace` is a host bind, and the daemon extracts as host root with the tar's modes, so a write there could plant root-owned setuid files in the host worktree. testcontainers copies only into children |
 | Lifecycle | `POST /containers/{id}/start`, `/stop`, `/restart`, `/kill`, `/pause`, `/unpause`, `/rename`; `DELETE /containers/{id}` | Owned, depth ≥ 1 only. The depth-0 container's lifecycle belongs to Cogmo (`denied`). `start` must have an empty body. `DELETE` denies the `link` query key and is forwarded with `v=true`. `start` and `DELETE` also update the child's row |
-| Exec | `POST /containers/{id}/exec` (exec policy); `POST /exec/{id}/start`, `/resize`; `GET /exec/{id}/json` | Create needs an owned container, at any depth. The other three routes need an exec created through this task's socket |
+| Exec | `POST /containers/{id}/exec` (exec policy; `{id}` spans segments, as the daemon's `{name:.*}` route does, since a legacy link names a container `/parent/alias`); `POST /exec/{id}/start`, `/resize`; `GET /exec/{id}/json` | Create needs an owned container, at any depth. The other three routes need an exec created through this task's socket |
 | Attach | `POST /containers/{id}/attach`, `GET /containers/{id}/attach/ws` | owned, any depth |
 | Lists | `GET /containers/json`, `/networks`, `/volumes` | Forwarded. The response keeps only owned objects, plus `bridge` in `/networks` |
 | Events | `GET /events` | Forwarded. Each NDJSON line is dropped unless its `Actor.Attributes["cogmo.root_task"]` is the task's. Network and volume events carry no such attribute, so they are dropped too |
@@ -458,7 +458,7 @@ Exec ids are kept in memory per task: the proxy records the id from each 201 to 
 
 1. The body is parsed, and every object that holds struct fields is checked against the key rules under `malformed`. Data-keyed maps are exempt, since their keys are data, except that a `__proto__` key is `malformed` there too: no plain object can hold it as data. The daemon decodes with Go's `encoding/json`, which matches field names case-insensitively, Unicode folding included (`ſ` matches `s`). Rejecting non-ASCII keys and keys that differ only in case leaves no key that could reach a field the proxy did not read.
 2. Every struct field is read by its case-folded name and parsed through its own Zod schema. A number must be a JSON number, so `Memory: "1e12"` is `malformed`.
-3. A struct field that is not on the allowlist is dropped if its value is zero, and `denied`, by name, otherwise. Zero means `null`, `false`, `0`, `""`, an empty list, or a struct whose fields are all zero. The exceptions are `MaskedPaths` and `ReadonlyPaths`: there the daemon reads `[]` as "clear the runtime's defaults", which unmasks every path (`--security-opt systempaths=unconfined`), so an empty one is `denied`. The Docker CLI sends every `HostConfig` field, mostly as zeros, and `Devices` and the five `Blkio*` device lists as `[]`. Unknown fields count too, so a field from a newer API version stays closed until it is listed. That covers the legacy fields the daemon reads from a second decode of the body below API 1.52 (`MacAddress`, `HostConfig.Capabilities`): the rebuilt body never carries them.
+3. A struct field that is not on the allowlist is dropped if its value is zero, and `denied`, by name, otherwise. Zero means `null`, `false`, `0`, `""`, an empty list, or a struct whose fields are all zero. The exceptions are `MaskedPaths` and `ReadonlyPaths`: there the daemon reads `[]` as "clear the runtime's defaults", which unmasks every masked path and makes every read-only one writable (`--security-opt systempaths=unconfined`), so an empty one is `denied`. The Docker CLI sends every `HostConfig` field, mostly as zeros, and `Devices` and the five `Blkio*` device lists as `[]`. Unknown fields count too, so a field from a newer API version stays closed until it is listed. That covers the legacy fields the daemon reads from a second decode of the body below API 1.52 (`MacAddress`, `HostConfig.Capabilities`): the rebuilt body never carries them.
 4. An allowlisted field is kept exactly as sent, zero or not. Data-keyed maps keep every entry, empty values included: `ExposedPorts: {"5432/tcp": {}}`, `Volumes: {"/data": {}}`, `Tmpfs: {"/tmp": ""}`, and labels with empty values. An empty `Entrypoint: [""]`, which clears the image's entrypoint, is kept as well. The map-valued fields are `Labels`, `ExposedPorts`, `Volumes`, `HostConfig.Tmpfs`, `HostConfig.PortBindings` and `NetworkingConfig.EndpointsConfig`.
 5. The output is a fresh object with only canonical field names, plus the injected values.
 
@@ -484,7 +484,7 @@ Exec ids are kept in memory per task: the proxy records the id from each 201 to 
 | `HostConfig.CgroupnsMode` | `""` or `private` |
 | `HostConfig.NetworkMode` | `""`, `default`, `bridge` or `none`. `[proposed]` An owned network, which is rewritten to its id |
 | `NetworkingConfig.EndpointsConfig` | Keys must be `default`, `bridge` or `none`. `[proposed]` Or owned networks, rewritten to ids. Each endpoint may set `Aliases` only |
-| `HostConfig.PortBindings` | `HostPort` must be empty or `"0"`. `HostIp` is rewritten to the IPv4 gateway of the `bridge` network on every binding, so a published port is reachable from task containers and the host, and is not bound on the host's other interfaces |
+| `HostConfig.PortBindings` | `HostPort` must be empty or `"0"`. `HostIp` is rewritten on every binding, so a published port is not bound on the host's other interfaces. On a rootful daemon it becomes the IPv4 gateway of the `bridge` network, reachable from task containers and the host. On a rootless one (`name=rootless` in `GET /info`'s `SecurityOptions`) it becomes `127.0.0.1`: RootlessKit listens in the host's network namespace, where the gateway is not an address and the start would fail with `cannot assign requested address` |
 | `HostConfig.Tmpfs`; `HostConfig.Mounts` with `Type: tmpfs` | allowed. A tmpfs mount may set `Target`, `ReadOnly`, `Consistency` and `TmpfsOptions`; any other mount field, `Source` included, is denied when non-zero |
 | `HostConfig.Binds`; `HostConfig.Mounts` with `Type: volume` | Every entry is `denied` until slice 5. `[proposed]` The source must be an owned volume, with no `VolumeOptions.DriverConfig`. A host path, an unowned volume or any other mount type is `denied` |
 | `HostConfig.Runtime`, `CgroupParent` | overwritten from the scope |
@@ -523,6 +523,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 
 **Residuals.**
 
+- On a rootless daemon a task container cannot reach a child's published port. RootlessKit publishes it in the host's network namespace, so `<bridge gateway>:<mapped port>`, which testcontainers connects to from inside a container, is not reachable from the bridge, whatever `HostIp` says. A child's own bridge address and container port are. Tracked in `todo.md`.
 - There is no aggregate cap. Each child may use up to the task's limits, so 16 children can hold 16 times the task's budget until slice-level enforcement is built (Hierarchical enforcement via cgroup parent, below). Nothing caps the images a task pulls or the disk they use.
 - Networks draw from the daemon's address pools. With 8 per task, a handful of concurrent tasks can still exhaust a small default pool, and new networks then fail for everyone.
 - A pull can move a shared local tag to the registry's current digest, under every task that uses that tag.
@@ -542,7 +543,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
   - `PUT /archive` for copied files;
   - waits on logs, exec and HTTP;
   - `GET /networks/bridge` for the gateway, and `exposeHostPort`'s connect to `bridge`.
-- Ryuk needs a host-path bind of the socket, which is already denied, and optionally `Privileged`. `[confirmed]` Cogmo sets `TESTCONTAINERS_RYUK_DISABLED=true` in a coding session's env (`SessionSpec.env`, `agent/coding/task-sandbox.ts`). Children have no rows yet, so the orphan pass removes them within a minute (Enforced today). `[proposed]` With child rows (slice 3), the cascade does Ryuk's job.
+- Ryuk needs a host-path bind of the socket, which is already denied, and optionally `Privileged`. `[confirmed]` Cogmo sets `TESTCONTAINERS_RYUK_DISABLED=true` in a coding session's env (`SessionSpec.env`, `agent/coding/task-sandbox.ts`) on a backend whose sibling containers go through the proxy (`siblingContainers: "host-proxy"`); on Daytona, Ryuk runs against the sandbox's own daemon. Children have no rows yet, so the orphan pass removes them within a minute (Enforced today). `[proposed]` With child rows (slice 3), the cascade does Ryuk's job.
 - Skills sessions have no socket (`dockerSocket: false`).
 - No workflow relies on proxy-created children, which the orphan pass reaps (Enforced today).
 
@@ -560,7 +561,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
   - `MemorySwap` absent or `0` (set to `Memory`), equal (allowed), and `-1` with `Memory: 0` (`denied`);
   - `CpuQuota` with and without `CpuPeriod`, `CpuPeriod` alone, `NanoCpus` with `CpuQuota` (`denied`), and `NanoCpus` injected only when neither form is present;
   - an image whose `Config.Env` has a `SYSBOX_` key is denied;
-  - the `PortBindings` rewrite, and a fixed `HostPort`;
+  - the `PortBindings` rewrite on a rootful and a rootless daemon, and a fixed `HostPort`;
   - each `NetworkMode` form;
   - `ExposedPorts`, `Volumes`, `Tmpfs`, empty-valued labels and `Entrypoint: [""]` reach the daemon unchanged;
   - a body `name` is dropped and the query `name` forwarded;
@@ -1053,7 +1054,7 @@ src/sandbox/
     create-policy.ts, exec-policy.ts, body-schemas.ts, key-rules.ts, create-fields.ts,
     resources.ts, platform.ts, sysbox-env.ts
                                  — create and exec body policies (pure)
-    daemon-lookups.ts            — image inspect, platform and bridge gateway reads
+    daemon-lookups.ts            — image inspect, platform, rootless mode and bridge gateway reads
     rejection.ts, types.ts       — ProxyRejection, TaskScope, DaemonLookups
   daytona/
     client.ts                  — DaytonaSandboxClient

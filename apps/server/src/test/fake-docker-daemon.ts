@@ -79,11 +79,13 @@ export interface DockerApiOptions {
   arch: string;
   /** `GET /networks/bridge` → the IPv4 gateway. */
   bridgeGateway: string;
+  /** `GET /info` → `name=rootless` among the `SecurityOptions`. */
+  rootless: boolean;
 }
 
 /**
- * Answers `GET /version`, `GET /images/{name}/json` (404 for an unknown
- * image), `GET /networks/bridge`, `POST /containers/create` (201) and
+ * Answers `GET /version`, `GET /info`, `GET /images/{name}/json` (404 for an
+ * unknown image), `GET /networks/bridge`, `POST /containers/create` (201) and
  * `POST /containers/{id}/exec` (201). Everything else gets `200 {}`.
  */
 export function dockerApi(opts: DockerApiOptions): FakeDaemonResponder {
@@ -105,6 +107,15 @@ export function dockerApi(opts: DockerApiOptions): FakeDaemonResponder {
         ApiVersion: "1.52",
         Os: "linux",
         Arch: opts.arch,
+      });
+      return;
+    }
+    if (req.method === "GET" && /^\/(?:v[\d.]+\/)?info$/.test(path)) {
+      respondJson(res, 200, {
+        SecurityOptions: [
+          "name=seccomp,profile=builtin",
+          ...(opts.rootless ? ["name=rootless"] : []),
+        ],
       });
       return;
     }

@@ -120,14 +120,17 @@ export function publishesPorts(bindings: CreateHostConfig["PortBindings"]): bool
 }
 
 /**
- * Every published port bound on the `bridge` gateway, so it is reachable
- * from task containers and the host but not on the host's other interfaces.
+ * Every published port bound on `address` (`DaemonLookups.publishAddress`),
+ * so it is not bound on the host's other interfaces.
  */
-export function bindToGateway(bindings: CreatePortBindings, gateway: string): CreatePortBindings {
+export function bindPublishedPorts(
+  bindings: CreatePortBindings,
+  address: string,
+): CreatePortBindings {
   return Object.fromEntries(
     Object.entries(bindings).map(([port, list]) => [
       port,
-      list?.map((binding) => ({ ...binding, HostIp: gateway })) ?? list,
+      list?.map((binding) => ({ ...binding, HostIp: address })) ?? list,
     ]),
   );
 }

@@ -8,7 +8,12 @@ import { match, P } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
 import { applyContainerCreatePolicy } from "./create-policy.js";
-import { cachedOnSuccess, daemonLookups, fetchHostPlatform } from "./daemon-lookups.js";
+import {
+  cachedOnSuccess,
+  daemonLookups,
+  fetchHostPlatform,
+  fetchRootless,
+} from "./daemon-lookups.js";
 import { applyExecPolicy } from "./exec-policy.js";
 import {
   buildHttpRequestPreamble,
@@ -75,11 +80,8 @@ interface TaskSocket {
  * path itself is the identity. HTTP/1.1 requests forward to the host
  * `/var/run/docker.sock`; hijacked / upgraded endpoints get raw bidirectional
  * piping; a container create or exec create is buffered and rebuilt by its
- * policy, then forwarded.
- *
- * Slice 3.0e ships the proxy in isolation. Slice 3.0f wires it into the
- * supervisor: a fresh socket is allocated on `createTaskContainer` and bound
- * into the task container at `/var/run/docker.sock`.
+ * policy, then forwarded. The supervisor allocates a task's socket on
+ * `create` and binds it into the task container at `/var/run/docker.sock`.
  *
  * Single Node `http.Server` handles all parsed HTTP traffic; a tiny
  * `net.Server` per task socket tags each accepted connection with its
@@ -103,6 +105,12 @@ export class CogmoSocketProxy {
    * next create that names a platform.
    */
   #hostPlatform: (signal: AbortSignal) => Promise<Result<HostPlatform, LookupFailure>>;
+  /**
+   * Whether the daemon runs rootless, read once a create first publishes a
+   * port: the daemon behind a socket path keeps its mode, since a rootless
+   * one listens on its own user's socket. A failed read is retried.
+   */
+  #rootless: (signal: AbortSignal) => Promise<Result<boolean, LookupFailure>>;
   #closed = false;
 
   private constructor(opts: ProxyOptions) {
@@ -110,6 +118,7 @@ export class CogmoSocketProxy {
     this.#socketDir = opts.socketDir;
     const socketPath = this.#hostDockerSocket;
     this.#hostPlatform = cachedOnSuccess((signal) => fetchHostPlatform(socketPath, signal));
+    this.#rootless = cachedOnSuccess((signal) => fetchRootless(socketPath, signal));
     this.#httpServer = http.createServer();
     this.#httpServer.on("request", (req, res) => this.#handleRequest(req, res));
     this.#httpServer.on("upgrade", (req, socket, head) => {
@@ -227,7 +236,7 @@ export class CogmoSocketProxy {
 
     const route = classify(req.method ?? "GET", req.url ?? "/");
     log.debug(
-      { taskId: scope.taskId, method: req.method, url: req.url, route: route.kind },
+      { taskId: scope.taskId, method: req.method, path: pathOf(req), route: route.kind },
       "proxy request",
     );
 
@@ -244,6 +253,7 @@ export class CogmoSocketProxy {
           socketPath: this.#hostDockerSocket,
           signal,
           hostPlatform: this.#hostPlatform,
+          rootless: this.#rootless,
         });
         this.#rewriteAndForward(req, res, scope, signal, (body) =>
           applyContainerCreatePolicy({ body, query: queryOf(target) }, scope, lookups).map(
@@ -283,7 +293,10 @@ export class CogmoSocketProxy {
       rewritten.match(
         ({ path, body }) => this.#forwardWithBody(req, res, path, body, signal),
         (rejection) => {
-          log.info({ taskId: scope.taskId, url: req.url, rejection }, "proxy request rejected");
+          log.info(
+            { taskId: scope.taskId, path: pathOf(req), rejection },
+            "proxy request rejected",
+          );
           respondRejection(res, rejection);
           req.resume();
         },
@@ -292,7 +305,10 @@ export class CogmoSocketProxy {
     run().catch((cause: unknown) => {
       // The task's abort can surface anywhere in the run: teardown, not a fault.
       if (!signal.aborted) {
-        log.error({ err: cause, taskId: scope.taskId, url: req.url }, "proxy body policy failed");
+        log.error(
+          { err: cause, taskId: scope.taskId, path: pathOf(req) },
+          "proxy body policy failed",
+        );
       }
       if (!res.headersSent) {
         respondJson(res, 500, { message: `Cogmo proxy: ${describeError(cause)}` });
@@ -318,7 +334,7 @@ export class CogmoSocketProxy {
     );
     upstream.on("error", (err) => {
       if (!isAbortError(err))
-        log.warn({ err: err.message, url: req.url }, "upstream forward error");
+        log.warn({ err: err.message, path: pathOf(req) }, "upstream forward error");
       respondDaemonFailed(res, err);
     });
     req.pipe(upstream);
@@ -355,7 +371,7 @@ export class CogmoSocketProxy {
     );
     upstream.on("error", (err) => {
       if (!isAbortError(err)) {
-        log.warn({ err: err.message, url: req.url }, "upstream forward (body) error");
+        log.warn({ err: err.message, path: pathOf(req) }, "upstream forward (body) error");
       }
       respondDaemonFailed(res, err);
     });
@@ -394,7 +410,8 @@ export class CogmoSocketProxy {
       upstream.pipe(clientSocket);
     });
     upstream.on("error", (err) => {
-      if (!isAbortError(err)) log.warn({ err: err.message, url: req.url }, "upstream hijack error");
+      if (!isAbortError(err))
+        log.warn({ err: err.message, path: pathOf(req) }, "upstream hijack error");
       clientSocket.destroy(err);
     });
     clientSocket.on("error", () => upstream.destroy());
@@ -444,7 +461,7 @@ export class CogmoSocketProxy {
     });
     upstream.on("error", (err) => {
       if (!isAbortError(err))
-        log.warn({ err: err.message, url: req.url }, "upstream upgrade error");
+        log.warn({ err: err.message, path: pathOf(req) }, "upstream upgrade error");
       clientSocket.destroy(err);
     });
     clientSocket.on("error", () => upstream.destroy());
@@ -461,4 +478,12 @@ function respondDaemonFailed(res: http.ServerResponse, cause: Error): void {
     kind: "daemon_failed",
     message: `Cogmo proxy upstream error: ${cause.message}`,
   });
+}
+
+/**
+ * The request's path without its query, for logs: docker-modem copies a
+ * create's body, `Env` values included, into the query string.
+ */
+function pathOf(req: http.IncomingMessage): string {
+  return (req.url ?? "/").split("?", 1)[0] ?? "/";
 }

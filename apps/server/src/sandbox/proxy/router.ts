@@ -32,11 +32,16 @@ export type RouteOutcome =
 /**
  * The create and exec policies read their bodies with API 1.44 semantics,
  * so an older version prefix on those two routes is denied. A request with
- * no prefix gets the daemon's own version, which is newer.
+ * no prefix gets the daemon's own version, which Cogmo requires to be 1.44
+ * or later (design/sandbox.md → Proxy Design).
  */
 const MIN_API_VERSION = "1.44";
 
-const EXEC_CREATE_RE = /^\/containers\/[^/]+\/exec$/;
+/**
+ * The daemon routes `/containers/{name:.*}/exec`, so a name may span
+ * segments: a legacy link names a container `/parent/alias`.
+ */
+const EXEC_CREATE_RE = /^\/containers\/.+\/exec$/;
 
 const EXEC_START_RE = /^\/(?:v[\d.]+\/)?exec\/[^/]+\/start(\?|$)/;
 
@@ -124,13 +129,9 @@ export function classify(method: string, rawPath: string): RouteOutcome {
     return { kind: "hijack" };
   }
 
-  // Pass-through everything else: `/_ping`, `/version`, `/info`,
-  // `/containers/json`, `/containers/{id}/json`, `/images/*`,
-  // `/networks/*` (with policy on `POST /networks/create` etc.
-  // layered in later sub-PRs), `/volumes/*`, `/system/df`, …
-  // The other /containers/{id}/<action> calls flow through too — slice
-  // 3 doesn't authz them yet (the per-task socket itself is the
-  // boundary; the docker-id ownership map lands in a follow-up).
+  // Everything else is forwarded: `/_ping`, `/version`, `/info`, container
+  // reads and actions, `/images/*`, `/networks/*`, `/volumes/*`, … Ownership
+  // and the default-deny route table are design/sandbox.md → Slices, item 2.
   return { kind: "forward" };
 }
 

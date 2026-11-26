@@ -50,14 +50,21 @@ export interface HostPlatform {
 
 /**
  * How a daemon lookup fails: `not_found` for an image the daemon does not
- * have, `unavailable` for a lookup that failed.
+ * have, `malformed` for a reference the daemon refuses to parse,
+ * `unavailable` for a lookup that failed.
  */
-export type LookupFailure = Extract<ProxyRejection, { kind: "not_found" | "unavailable" }>;
+export type LookupFailure = Extract<
+  ProxyRejection,
+  { kind: "not_found" | "malformed" | "unavailable" }
+>;
 
 /** The daemon reads the create policy needs. A failure is a value. */
 export interface DaemonLookups {
   inspectImage(ref: string): Promise<Result<ImageFacts, LookupFailure>>;
   hostPlatform(): Promise<Result<HostPlatform, LookupFailure>>;
-  /** The IPv4 gateway of the default `bridge` network. */
-  bridgeGateway(): Promise<Result<string, LookupFailure>>;
+  /**
+   * The address a published port binds to: the `bridge` network's IPv4
+   * gateway on a rootful daemon, loopback on a rootless one.
+   */
+  publishAddress(): Promise<Result<string, LookupFailure>>;
 }
