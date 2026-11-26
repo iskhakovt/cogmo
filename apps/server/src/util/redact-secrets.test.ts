@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   literalSecretPattern,
-  REDACTED_BOT_SEGMENT,
   redactLiterals,
   redactSecretsInText,
   truncationSafeLength,
 } from "./redact-secrets.js";
+
+/** What a token-shaped path segment becomes. */
+const REDACTED_BOT_SEGMENT = "bot<redacted>";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";

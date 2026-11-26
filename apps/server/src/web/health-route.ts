@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
 import * as R from "remeda";
+import { match } from "ts-pattern";
 import { env } from "../env.js";
 import type { CheckStatus } from "../liveness/check.js";
 import type { CheckResult, LivenessReadings } from "../liveness/registry.js";
@@ -34,18 +35,29 @@ interface HealthBody {
 }
 
 function entry({ componentId, reading, time }: CheckResult): HealthCheckEntry {
-  return {
-    componentId,
-    componentType: "component",
-    status: reading.status,
-    ...(reading.status === "warn" && { reason: reading.reason }),
-    ...(reading.observedValue !== null && {
-      observedValue: reading.observedValue,
-      observedUnit: "s" as const,
-    }),
-    time,
-    ...(reading.status === "warn" && { output: reading.output }),
-  };
+  const observed =
+    reading.observedValue === null
+      ? {}
+      : { observedValue: reading.observedValue, observedUnit: "s" as const };
+  return match(reading)
+    .returnType<HealthCheckEntry>()
+    .with({ status: "pass" }, () => ({
+      componentId,
+      componentType: "component",
+      status: "pass",
+      ...observed,
+      time,
+    }))
+    .with({ status: "warn" }, ({ reason, output }) => ({
+      componentId,
+      componentType: "component",
+      status: "warn",
+      reason,
+      ...observed,
+      time,
+      output,
+    }))
+    .exhaustive();
 }
 
 function healthBody(liveness: LivenessReadings, withChecks: boolean): HealthBody {

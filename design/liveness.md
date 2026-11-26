@@ -33,7 +33,7 @@ One in-process check registry, read three ways:
 
 The registry evaluates every check on a 15-second tick, the first when it is built; `/health` and the gauge render the last tick from memory. A check that throws, a bug, reports `warn` (`check_error`) and logs at error. Probes alert on `status`; the gauge and the log lines name the failing check.
 
-**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only. The Telegram adapter's setup registers its configured token with the logger (`maskInLogs`), which masks it by value in every serialized line, raw or percent-encoded in either hex case, before the URL shapes; matching the written line, it covers the verdict line's `detail`, an error's cause chain and every nesting.
+**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only. The Telegram adapter's setup registers its configured token with the logger (`maskInLogs`), which masks a secret of 16 characters or more, as every Bot API token is, by value in every serialized line, raw or percent-encoded in either hex case, before the URL shapes; since it matches the serialized line, it covers the verdict line's `detail`, an error's cause chain and every nesting.
 
 The public body, and the same with a session:
 
@@ -99,7 +99,7 @@ interface ChannelError { readonly code: string; readonly detail: string | null }
 
 A pure `channelCheck(liveness, now)` turns a projection into a reading ([Verdict](#verdict-and-thresholds)), reusable by a later channel with a loop. Ages are monotonic.
 
-`startChannels` returns each row it read: the started ones with their adapter and `channelId`, and the ones whose type this build has no adapter for, which it skips with a warning; each skipped row gets a `channels:adapter` entry that always warns `unsupported`. A setup that throws fails boot (design/infrastructure.md → Boot-Time Blocking Policy), so no running process has a channel whose setup threw. `bootstrapRuntime` builds the registry from those rows and from the crons `createCronFunction` recorded, and returns it on `RuntimeDeps` for `/health` and the gauge. The tick timer is unref'd and cleared on shutdown.
+`startChannels` returns each row it read: the started ones with their adapter and `channelId`, and the ones whose type this build has no adapter for, which it skips with a warning; each skipped row gets a `channels:adapter` entry that always warns `unsupported`. A setup that throws fails boot (design/infrastructure.md → Boot-Time Blocking Policy), so no running process has a channel whose setup threw. `bootstrapRuntime` builds the registry from those rows and, from Rollout step 3, the crons `createCronFunction` recorded, and returns it on `RuntimeDeps` for `/health` and the gauge. The tick timer is unref'd and cleared on shutdown.
 
 ## Telegram receive loop `[confirmed]`
 
@@ -248,7 +248,7 @@ cron_heartbeats (
 )
 ```
 
-Owned by `liveness/store/` in the new `src/liveness/`, which also holds the registry, its projections, `channelCheck` and `createCronFunction` (`cron-function.ts`), and imports only the `ChannelLiveness` type from `transport/`.
+Owned by `liveness/store/` in `src/liveness/`, which also holds the registry, its projections, `channelCheck` and `createCronFunction` (`cron-function.ts`), and imports only the `ChannelLiveness` type from `transport/`.
 
 **Recording.** `createCronFunction(inngest, heartbeats, config, handler)` builds every cron in place of `inngest.createFunction`:
 

@@ -91,8 +91,8 @@ const MIN_MASKED_SECRET_LENGTH = 16;
  * matches it. For a credential an upstream error can echo bare, such as a
  * channel's bot token from a custom Bot API server (design/liveness.md →
  * Surface). Lines are matched after JSON serialization, so a secret should
- * hold no character JSON escapes; one shorter than 16 characters is not
- * masked.
+ * hold no character JSON escapes; one shorter than `MIN_MASKED_SECRET_LENGTH`
+ * is not masked.
  */
 export function maskInLogs(secret: string): void {
   if (secret.length < MIN_MASKED_SECRET_LENGTH || runtimeSecrets.has(secret)) return;
@@ -110,9 +110,9 @@ function redactLine(line: string): string {
  * Every line passes through the `maskInLogs` secrets, then
  * `redactSecretsInText`, on its way to `destination`, after serialization: a
  * Telegram Bot API URL carries the bot token in its path, and node-fetch puts
- * that URL in its error messages, which pino's
- * `err` serializer reaches through grammY's `HttpError.error`. Redacting the
- * serialized line covers every field and nesting depth, and every sink —
+ * that URL in its error messages, which pino's `err` serializer reaches
+ * through grammY's `HttpError.error`. Redacting the serialized line covers
+ * every field and nesting depth, and every sink —
  * `destination` and, when telemetry is on, instrumentation-pino's OTLP log
  * stream, which receives the same post-hook line.
  */

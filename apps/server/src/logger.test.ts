@@ -156,7 +156,7 @@ describe("maskInLogs", () => {
     maskInLogs("1");
     const { stream, lines } = capture();
 
-    createLogger(stream).info({ id: 1 }, "count 1");
+    createLogger(stream).error({ id: 1 }, "count 1");
 
     expect(JSON.parse(lines[0] ?? "")).toMatchObject({ id: 1, msg: "count 1" });
   });
@@ -165,7 +165,7 @@ describe("maskInLogs", () => {
     maskInLogs(SECRET);
     const { stream, lines } = capture();
 
-    createLogger(stream).info({ id: "987654" }, "nothing secret");
+    createLogger(stream).error({ id: "987654" }, "nothing secret");
 
     expect(JSON.parse(lines[0] ?? "")).toMatchObject({ id: "987654", msg: "nothing secret" });
   });

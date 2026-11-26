@@ -23,9 +23,6 @@
 /** What a Bot API token, or a secret known by value, is replaced with. */
 const REDACTED = "<redacted>";
 
-/** What a token-shaped path segment is replaced with. */
-export const REDACTED_BOT_SEGMENT = `bot${REDACTED}`;
-
 /**
  * A secret's shape, as regex sources: the `start` every match opens with and
  * the `rest`, neither matching whitespace. `replacement` stands for the whole
