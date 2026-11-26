@@ -1,0 +1,1 @@
+The skills runtime's `/proc/<pid>/stat` test helpers (`_gone` in `test_skill_tests.py`, `_alive` in `test_task_isolation.py`) treat `ProcessLookupError` as an exited process: a process reaped between the file's open and its read fails the read with ESRCH.
