@@ -71,8 +71,9 @@ export type ResponseRelay =
   /** Record the `Id` of a 201, the exec the task may then start. */
   | { kind: "exec_created"; record: (execId: string) => void }
   /**
-   * Answer once the child's row has followed the daemon's `status`; a
-   * rejection replaces the daemon's answer.
+   * Follow the daemon's `status` in the child's row as soon as its status
+   * line arrives, whether or not the body then does, and answer once the
+   * row has followed it; a rejection replaces the daemon's answer.
    */
   | { kind: "child_transition"; settle: (status: number) => Promise<Result<void, ProxyRejection>> };
 
@@ -89,6 +90,8 @@ export function forward(
     .with({ kind: "json" }, ({ bytes }) => jsonRequestHeaders(req, bytes))
     .with({ kind: "none" }, () => emptyBodyRequestHeaders(req))
     .exhaustive();
+  // Once the daemon has answered, the relay of its reply answers the client.
+  let replied = false;
   const outgoing = http.request(
     {
       socketPath: upstream.socketPath,
@@ -97,7 +100,10 @@ export function forward(
       headers,
       signal: upstream.signal,
     },
-    (reply) => relay(req, reply, res, plan.response),
+    (reply) => {
+      replied = true;
+      relay(req, reply, res, plan.response);
+    },
   );
   // The proxy's own close of the daemon request, for a client that hung up:
   // not an upstream failure, and there is no one left to answer.
@@ -105,6 +111,10 @@ export function forward(
   outgoing.on("error", (cause) => {
     if (cause === hungUp) return;
     if (!isAbortError(cause)) log.warn({ err: cause.message, path: pathOf(req) }, "upstream error");
+    // Once the daemon has answered, the relay owns the client's answer: a
+    // failure mid-reply fails the read of a body read whole, which the relay
+    // answers `daemon_failed`.
+    if (replied) return;
     respondDaemonFailed(res, cause);
   });
   // A client that hangs up before its answer is complete, even before the
@@ -224,19 +234,23 @@ function relay(
       relayStream(req, reply, res, taskEventFilter(taskContainerId));
     })
     .with({ kind: "container_list" }, ({ owned }) =>
-      relayBuffered(reply, res, async (body) =>
-        status === 200 ? filterContainerList(body, owned) : ok(body),
+      relayBuffered(reply, res, (read) =>
+        read.andThen((body) => (status === 200 ? filterContainerList(body, owned) : ok(body))),
       ),
     )
     .with({ kind: "exec_created" }, ({ record }) =>
-      relayBuffered(reply, res, async (body) => {
-        const created = status === 201 ? createdId(body) : null;
-        if (created !== null) record(created);
-        return ok(body);
-      }),
+      relayBuffered(reply, res, (read) =>
+        read.map((body) => {
+          const created = status === 201 ? createdId(body) : null;
+          if (created !== null) record(created);
+          return body;
+        }),
+      ),
     )
     .with({ kind: "child_transition" }, ({ settle }) =>
-      relayBuffered(reply, res, async (body) => (await settle(status)).map(() => body)),
+      // The row follows the status line, before the body is read, so a
+      // reply cut off after it still moves the row.
+      relayBuffered(reply, res, (read) => new ResultAsync(settle(status)).andThen(() => read)),
     )
     .exhaustive();
 }
@@ -258,42 +272,36 @@ function relayStream(
   });
 }
 
-/** Read the whole reply, pass it through `transform`, and answer with what it returns. */
+/**
+ * Read the whole reply, and answer with what `answer` makes of the read:
+ * the body to send, or the rejection that replaces it.
+ */
 function relayBuffered(
   reply: http.IncomingMessage,
   res: http.ServerResponse,
-  transform: (body: Buffer) => Promise<Result<Buffer, ProxyRejection>>,
+  answer: (read: ResultAsync<Buffer, ProxyRejection>) => ResultAsync<Buffer, ProxyRejection>,
 ): void {
-  const relayed = readBody(reply, MAX_BUFFERED_REPLY_BYTES).then((read) =>
-    read
-      .mapErr((failure) =>
-        match(failure)
-          .with({ kind: "too_large" }, ({ maxBytes }) =>
-            daemonFailed(`Cogmo proxy: the daemon's reply exceeds ${maxBytes} bytes`),
-          )
-          .with({ kind: "malformed" }, () =>
-            daemonFailed("Cogmo proxy: the daemon's reply ended early"),
-          )
-          .exhaustive(),
+  const read = new ResultAsync(readBody(reply, MAX_BUFFERED_REPLY_BYTES)).mapErr((failure) =>
+    match(failure)
+      .with({ kind: "too_large" }, ({ maxBytes }) =>
+        daemonFailed(`Cogmo proxy: the daemon's reply exceeds ${maxBytes} bytes`),
       )
-      .asyncAndThen((body) => new ResultAsync(transform(body)))
-      .match(
-        (body) => {
-          // A client that hung up while a child's row was written gets nothing.
-          if (res.destroyed) return;
-          res.writeHead(
-            reply.statusCode ?? 502,
-            rebuiltResponseHeaders(reply.headers, body.length),
-          );
-          res.end(body);
-        },
-        (rejection) => {
-          // A daemon connection that failed mid-reply has been answered
-          // already, by the forward's error listener, or has no one to answer.
-          if (res.headersSent || res.destroyed) return;
-          respondRejection(res, rejection);
-        },
-      ),
+      .with({ kind: "malformed" }, () =>
+        daemonFailed("Cogmo proxy: the daemon's reply ended early"),
+      )
+      .exhaustive(),
+  );
+  const relayed = answer(read).match(
+    (body) => {
+      // A client that hung up while a child's row was written gets nothing.
+      if (res.destroyed) return;
+      res.writeHead(reply.statusCode ?? 502, rebuiltResponseHeaders(reply.headers, body.length));
+      res.end(body);
+    },
+    (rejection) => {
+      if (res.destroyed) return;
+      respondRejection(res, rejection);
+    },
   );
   relayed.catch((cause: unknown) => {
     const aborted = cause instanceof Error && isAbortError(cause);
@@ -311,13 +319,9 @@ function boundToClient(how: ResponseRelay): boolean {
     .exhaustive();
 }
 
-/** A forward whose daemon connection failed: `daemon_failed` if nothing was sent yet. */
+/** A forward whose daemon connection failed before the daemon answered: `daemon_failed`. */
 function respondDaemonFailed(res: http.ServerResponse, cause: Error): void {
   if (res.destroyed) return;
-  if (res.headersSent) {
-    res.destroy(cause);
-    return;
-  }
   respondRejection(res, daemonFailed(`Cogmo proxy upstream error: ${cause.message}`));
 }
 

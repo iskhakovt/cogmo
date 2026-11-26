@@ -6,9 +6,11 @@
  * every later request on the child finds the row it is owned by.
  *
  * The create is bound to neither the client's connection nor the task's
- * sockets. A client that hangs up still gets its container a row; the
- * daemon request is aborted only by `upstream.signal`, which teardown fires
- * once it has waited for creates in flight.
+ * sockets. A client that hangs up still gets its container a row. The
+ * create is cut off by its 60-second deadline, and by `upstream.signal`,
+ * which teardown fires once it has waited for creates in flight: either
+ * aborts an unanswered daemon request, or an unwritten row, whose container
+ * is then removed.
  */
 
 import * as http from "node:http";
@@ -54,11 +56,10 @@ export interface CreateForward {
   /** The body the create policy rebuilt. */
   body: Buffer;
   /**
-   * Insert the row of the child a 201 names, within `deadline`. A
-   * rejection once the container has been removed, or left to the orphan
-   * pass.
+   * Insert the row of the child a 201 names unless `cutOff` aborts first.
+   * A rejection once the container is removed, or left to the orphan pass.
    */
-  record(dockerId: string, deadline: AbortSignal): Promise<Result<void, ProxyRejection>>;
+  record(dockerId: string, cutOff: AbortSignal): Promise<Result<void, ProxyRejection>>;
   /** The create's admission, held from its checks to its answer. */
   admission: CreateAdmission;
 }
@@ -106,7 +107,10 @@ export function forwardCreate(
     },
     (reply) => {
       replied = true;
-      readCreateReply(req, reply, plan, deadline.signal).then(answer, (cause: unknown) => {
+      // The row insert is cut off by the deadline, and by the socket's
+      // teardown, whose abort reaches the create through `upstream.signal`.
+      const cutOff = AbortSignal.any([deadline.signal, upstream.signal]);
+      readCreateReply(req, reply, plan, cutOff).then(answer, (cause: unknown) => {
         log.error({ err: cause, path: pathOf(req) }, "recording a created child failed");
         answer({ kind: "internal_error", message: `Cogmo proxy: ${describeError(cause)}` });
       });
@@ -138,7 +142,7 @@ async function readCreateReply(
   req: http.IncomingMessage,
   reply: http.IncomingMessage,
   plan: CreateForward,
-  deadline: AbortSignal,
+  cutOff: AbortSignal,
 ): Promise<CreateAnswer> {
   const read = await readBody(reply, MAX_CREATE_REPLY_BYTES);
   if (read.isErr()) {
@@ -165,7 +169,7 @@ async function readCreateReply(
     };
   }
   plan.admission.named(dockerId);
-  const recorded = await plan.record(dockerId, deadline);
+  const recorded = await plan.record(dockerId, cutOff);
   return recorded.match(
     (): CreateAnswer => relayed,
     (rejection): CreateAnswer => ({ kind: "reject", rejection }),

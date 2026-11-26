@@ -22,14 +22,15 @@ export function storeChildContainers(deps: {
   docker: DockerFacade;
 }): ChildContainers {
   return {
-    record: (child, deadline) =>
-      new ResultAsync(insertChildContainer(deps, child, deadline)).map(() => undefined),
+    record: (child, cutOff) =>
+      new ResultAsync(insertChildContainer(deps, child, cutOff)).map(() => undefined),
     started: (child) =>
       new ResultAsync(
         markChildRunning(deps, { id: child.id, dockerId: child.dockerId, at: new Date() }),
       ),
-    removed: (child) =>
-      new ResultAsync(markChildExited(deps, { child, cause: "removed_by_task", at: new Date() })),
-    reconcile: (children) => new ResultAsync(reconcileChildContainers(deps, children)),
+    removed: (child, cause) =>
+      new ResultAsync(markChildExited(deps, { child, cause, at: new Date() })),
+    reconcile: (children) =>
+      new ResultAsync(reconcileChildContainers(deps, { children, at: new Date() })),
   };
 }

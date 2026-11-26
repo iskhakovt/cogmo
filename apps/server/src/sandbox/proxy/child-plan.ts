@@ -12,11 +12,13 @@ import { admitWithinCap, type ChildCapContext } from "./child-cap.js";
 import type { CreateForward } from "./create-forward.js";
 import { applyContainerCreatePolicy } from "./create-policy.js";
 import type { Forward } from "./forward.js";
+import { parseJson } from "./key-rules.js";
 import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
 import { denied, type ProxyRejection, unavailable } from "./rejection.js";
 import { withQuery } from "./request-path.js";
 import type { ContainerTarget } from "./router.js";
 import type {
+  ChildExitCause,
   ChildRecord,
   DaemonLookups,
   TaskAnchor,
@@ -27,7 +29,11 @@ import type {
 /** The daemon's answers to a start that leaves the container running: started, or already running. */
 const STARTED_STATUSES: ReadonlySet<number> = new Set([204, 304]);
 const RESTARTED_STATUS = 204;
-const REMOVED_STATUS = 204;
+/** The daemon's answers to a removal that leave no container: removed, or already gone. */
+const REMOVAL_CAUSES: ReadonlyMap<number, ChildExitCause> = new Map([
+  [204, "removed_by_task"],
+  [404, "missing_from_daemon"],
+]);
 
 /**
  * The start bodies forwarded, with no body: `null` and `{}`, which clients
@@ -45,15 +51,15 @@ export interface ChildContext extends OwnershipLookups, ChildCapContext {
   createLookups: DaemonLookups;
   /** The request body, bounded; read only by a route with a body policy. */
   readBody(): Promise<Result<Buffer, ProxyRejection>>;
-  /** Insert a created child's row within `deadline`; a rejection once its container is gone. */
-  recordChild(child: ChildRecord, deadline: AbortSignal): Promise<Result<void, ProxyRejection>>;
+  /** Insert a created child's row unless `cutOff` aborts first; a rejection once its container is gone. */
+  recordChild(child: ChildRecord, cutOff: AbortSignal): Promise<Result<void, ProxyRejection>>;
   /**
    * Follow a child's start in its row. `not_found`, naming `ref`, when a
    * reap finished the row meanwhile and the container has been removed.
    */
   childStarted(child: TaskContainerRow, ref: string): Promise<Result<void, ProxyRejection>>;
-  /** Follow a child's removal in its row. */
-  childRemoved(child: TaskContainerRow): Promise<void>;
+  /** Follow in its row a child's container gone through its `DELETE`. */
+  childRemoved(child: TaskContainerRow, cause: ChildExitCause): Promise<void>;
 }
 
 /**
@@ -73,14 +79,18 @@ export async function planContainerCreate(
   if (body.isErr()) return err(body.error);
   // The task's own row is read before the policy's daemon lookups: with no
   // live row there is nothing to look anything up for.
-  const owned = await ownedContainers(ctx);
-  if (owned.isErr()) return err(owned.error);
+  const before = await ownedContainers(ctx);
+  if (before.isErr()) return err(before.error);
   const created = await applyContainerCreatePolicy(
     { body: body.value, query },
     { scope, anchor: anchor.value },
     ctx.createLookups,
   );
   if (created.isErr()) return err(created.error);
+  // The rows are read again for the cap, after those lookups: a create
+  // that settled while this one inspected its image is counted as its row.
+  const owned = await ownedContainers(ctx);
+  if (owned.isErr()) return err(owned.error);
   const admitted = await admitWithinCap(owned.value.liveChildren, ctx);
   return admitted.map((admission) => {
     const child: Omit<ChildRecord, "dockerId"> = {
@@ -95,7 +105,7 @@ export async function planContainerCreate(
     return {
       path: withQuery(`${versionPrefix}/containers/create`, created.value.query),
       body: created.value.body,
-      record: (dockerId, deadline) => ctx.recordChild({ ...child, dockerId }, deadline),
+      record: (dockerId, cutOff) => ctx.recordChild({ ...child, dockerId }, cutOff),
       admission,
     };
   });
@@ -178,7 +188,8 @@ export async function planChildRestart(
  * A true `link` is denied: with it the daemon removes a legacy link and
  * leaves the container. A false one, which docker-py and
  * testcontainers-python send, is forwarded. Once the daemon has removed
- * the child, its row moves to `exited`.
+ * the child, or answers 404 for one already gone, its row moves to
+ * `exited`.
  */
 export async function planChildRemove(
   target: ContainerTarget,
@@ -199,7 +210,8 @@ export async function planChildRemove(
       response: {
         kind: "child_transition",
         settle: async (status) => {
-          if (status === REMOVED_STATUS) await ctx.childRemoved(child);
+          const cause = REMOVAL_CAUSES.get(status);
+          if (cause !== undefined) await ctx.childRemoved(child, cause);
           return ok(undefined);
         },
       },
@@ -207,15 +219,15 @@ export async function planChildRemove(
   );
 }
 
-/** No body is zero bytes; whitespace alone is a body, and not JSON. */
+/**
+ * No body is zero bytes; whitespace alone is a body, and not JSON. A body
+ * that is not JSON is not one of the bodies that mean nothing.
+ */
 function isEmptyStartBody(body: Buffer): boolean {
   if (body.length === 0) return true;
-  try {
-    return EmptyStartBodySchema.safeParse(JSON.parse(body.toString("utf8"))).success;
-  } catch {
-    // Not JSON, so not one of the bodies that mean nothing.
-    return false;
-  }
+  return parseJson(body)
+    .map((value) => EmptyStartBodySchema.safeParse(value).success)
+    .unwrapOr(false);
 }
 
 /**

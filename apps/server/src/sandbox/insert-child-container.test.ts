@@ -40,8 +40,8 @@ function stubDocker(): {
   return { docker, container };
 }
 
-/** A deadline that never passes. */
-const NO_DEADLINE = new AbortController().signal;
+/** A cut-off that never aborts. */
+const NO_CUT_OFF = new AbortController().signal;
 
 /** No instance row has this id, so an insert naming it fails on its foreign key. */
 const UNKNOWN_INSTANCE = "019d0000-0000-7000-8000-000000000bad";
@@ -82,7 +82,7 @@ describe("insertChildContainer", () => {
     const { docker, container } = stubDocker();
     const child = await childOf();
 
-    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_DEADLINE);
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_CUT_OFF);
 
     expect(inserted.isOk()).toBe(true);
     const row = await tx((trx) => store.getContainerByDockerId(trx, "child-container"));
@@ -94,7 +94,7 @@ describe("insertChildContainer", () => {
     const { docker, container } = stubDocker();
     const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
 
-    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_DEADLINE);
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_CUT_OFF);
 
     expect(inserted.isErr() && inserted.error.kind).toBe("record_failed");
     expect(docker.getContainer).toHaveBeenCalledWith("child-container");
@@ -107,7 +107,7 @@ describe("insertChildContainer", () => {
     const child = { ...(await childOf()), resourceLimits: { cpus: -1, memory_bytes: 1, pids: 1 } };
 
     await expect(
-      insertChildContainer({ store, runInTx: tx, docker }, child, NO_DEADLINE),
+      insertChildContainer({ store, runInTx: tx, docker }, child, NO_CUT_OFF),
     ).rejects.toThrow(/cpus/);
     expect(container.remove).not.toHaveBeenCalled();
   });
@@ -123,7 +123,7 @@ describe("insertChildContainer", () => {
       );
 
     await expect(
-      insertChildContainer({ store, runInTx: misuse, docker }, child, NO_DEADLINE),
+      insertChildContainer({ store, runInTx: misuse, docker }, child, NO_CUT_OFF),
     ).rejects.toThrow("must be of type string");
     expect(container.remove).not.toHaveBeenCalled();
   });
@@ -133,7 +133,7 @@ describe("insertChildContainer", () => {
     container.remove.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
     const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
 
-    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_DEADLINE);
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_CUT_OFF);
 
     expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
     expect(container.remove).toHaveBeenCalledTimes(1);
@@ -153,7 +153,7 @@ describe("insertChildContainer", () => {
       const inserted = await insertChildContainer(
         { store, runInTx: lossy, docker },
         child,
-        NO_DEADLINE,
+        NO_CUT_OFF,
       );
 
       expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
@@ -172,7 +172,7 @@ describe("insertChildContainer", () => {
       const inserted = await insertChildContainer(
         { store, runInTx: lossy, docker },
         child,
-        NO_DEADLINE,
+        NO_CUT_OFF,
       );
 
       expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
@@ -181,11 +181,11 @@ describe("insertChildContainer", () => {
     });
   });
 
-  describe("the create's deadline", () => {
-    it("removes the container and is deadline_passed when the deadline passes before the insert", async () => {
+  describe("a cut-off", () => {
+    it("is cut_off and removes the container when the cut-off aborts before the insert", async () => {
       const { docker, container } = stubDocker();
       const child = await childOf();
-      const deadline = new AbortController();
+      const cutOff = new AbortController();
       const held = Promise.withResolvers<void>();
       const slow: Transactor = async (cb) => {
         await held.promise;
@@ -195,13 +195,15 @@ describe("insertChildContainer", () => {
       const inserting = insertChildContainer(
         { store, runInTx: slow, docker },
         child,
-        deadline.signal,
+        cutOff.signal,
       );
-      deadline.abort(new Error("the create's deadline passed"));
+      cutOff.abort(new Error("the create's deadline passed"));
       const inserted = await inserting;
 
-      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "deadline_passed" });
-      expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "cut_off" });
+      await vi.waitFor(() =>
+        expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }),
+      );
       // The insert commits late, leaving a starting row over a removed container.
       held.resolve();
       await vi.waitFor(async () =>
@@ -211,20 +213,44 @@ describe("insertChildContainer", () => {
       );
     });
 
-    it("is deadline_passed at once for a deadline already passed", async () => {
-      const { docker } = stubDocker();
+    it("answers before the container's removal finishes", async () => {
+      const { docker, container } = stubDocker();
+      const kill = Promise.withResolvers<void>();
+      container.kill.mockReturnValue(kill.promise);
       const child = await childOf();
-      const deadline = new AbortController();
-      deadline.abort(new Error("the create's deadline passed"));
+      const cutOff = new AbortController();
+      cutOff.abort(new Error("the socket was torn down"));
       const never: Transactor = () => new Promise(() => {});
 
       const inserted = await insertChildContainer(
         { store, runInTx: never, docker },
         child,
-        deadline.signal,
+        cutOff.signal,
       );
 
-      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "deadline_passed" });
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "cut_off" });
+      expect(container.kill).toHaveBeenCalled();
+      expect(container.remove).not.toHaveBeenCalled();
+      kill.resolve();
+      await vi.waitFor(() =>
+        expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }),
+      );
+    });
+
+    it("is cut_off at once for a cut-off already aborted", async () => {
+      const { docker } = stubDocker();
+      const child = await childOf();
+      const cutOff = new AbortController();
+      cutOff.abort(new Error("the create's deadline passed"));
+      const never: Transactor = () => new Promise(() => {});
+
+      const inserted = await insertChildContainer(
+        { store, runInTx: never, docker },
+        child,
+        cutOff.signal,
+      );
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "cut_off" });
     });
   });
 });

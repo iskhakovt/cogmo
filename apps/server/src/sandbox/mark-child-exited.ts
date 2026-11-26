@@ -2,7 +2,7 @@ import { ok, type Result, ResultAsync } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { markContainerExited } from "./mark-container-exited.js";
-import type { StoreFailed, TaskContainerRow } from "./proxy/index.js";
+import type { ChildExitCause, StoreFailed, TaskContainerRow } from "./proxy/index.js";
 import type { ContainerTransitionResult, SandboxStore } from "./store/index.js";
 
 interface MarkChildExitedDeps {
@@ -24,7 +24,7 @@ export async function markChildExited(
   deps: MarkChildExitedDeps,
   args: {
     child: TaskContainerRow;
-    cause: "missing_from_daemon" | "removed_by_task";
+    cause: ChildExitCause;
     at: Date;
   },
 ): Promise<Result<void, StoreFailed>> {

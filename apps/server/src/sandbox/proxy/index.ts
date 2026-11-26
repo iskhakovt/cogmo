@@ -50,6 +50,7 @@ import type {
 export type { NotServing } from "./task-sockets.js";
 export type {
   ChildContainers,
+  ChildExitCause,
   ChildRecord,
   ChildRecordFailed,
   ChildStartOutcome,
@@ -88,9 +89,9 @@ const MAX_HEADERS = 100;
 
 /**
  * Per-connection tag — set as a task socket accepts the connection: the
- * socket, whose state its handlers read on each request. A `registerTask`
- * update mid-flight (once the supervisor has the task container's row)
- * takes effect without re-binding the socket, and once the socket's
+ * socket, whose state its handlers read on each request. An `anchorTask`
+ * mid-flight (once the supervisor has the task container's row) takes
+ * effect without re-binding the socket, and once the socket's
  * teardown has begun its connections stay `unavailable`, even when the
  * task registers again on a new socket.
  */
@@ -195,7 +196,8 @@ export class CogmoSocketProxy {
    * into the task container at `/var/run/docker.sock`. A task with no live
    * registration gets a socket of its own, bound before this resolves; an
    * upsert of a live one replaces its scope, without disrupting connections
-   * in flight, and keeps its path. Rejects if the socket can't be bound,
+   * in flight, and keeps its path, and its anchor unless `scope` names one.
+   * Rejects if the socket can't be bound,
    * and when `unregisterTask` or `close` runs before the bind completes.
    */
   registerTask(scope: TaskScope): Promise<string> {

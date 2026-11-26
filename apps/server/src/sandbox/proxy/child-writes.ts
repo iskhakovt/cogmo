@@ -28,14 +28,14 @@ export function childWrites(
   taskId: string,
 ): Pick<ChildContext, "recordChild" | "childStarted" | "childRemoved" | "reconcileChildren"> {
   return {
-    recordChild: async (child, deadline) =>
-      children.record(child, deadline).mapErr((failed) =>
+    recordChild: async (child, cutOff) =>
+      children.record(child, cutOff).mapErr((failed) =>
         match(failed)
           .with({ kind: "record_failed" }, () =>
             recordFailed("the created container's row could not be recorded"),
           )
-          .with({ kind: "deadline_passed" }, () =>
-            daemonFailed("Cogmo proxy: the create did not finish within its deadline"),
+          .with({ kind: "cut_off" }, () =>
+            daemonFailed("Cogmo proxy: the create was cut off before its row was written"),
           )
           .exhaustive(),
       ),
@@ -57,8 +57,8 @@ export function childWrites(
         log.warn({ err: cause, taskId }, "child reconcile write failed");
         return unavailable("the child reconcile failed");
       }),
-    childRemoved: async (child) =>
-      (await children.removed(child)).match(
+    childRemoved: async (child, cause) =>
+      (await children.removed(child, cause)).match(
         () => undefined,
         ({ cause }) => {
           // The stale pass marks the row `exited` on its next tick.

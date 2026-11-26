@@ -10,7 +10,7 @@ import { errAsync, ok, okAsync, ResultAsync } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
-import { respondJson } from "../../test/fake-docker-daemon.js";
+import { requestOverSocket, respondJson } from "../../test/fake-docker-daemon.js";
 import {
   API,
   CHILD,
@@ -120,12 +120,25 @@ describe("a child's create", () => {
   });
 
   it("answers unavailable, reading no rows, before the scope names its own row", async () => {
-    await h.proxy.registerTask({ ...SCOPE, anchor: null });
+    await h.proxy.unregisterTask(SCOPE.taskId);
+    const fresh = await h.proxy.registerTask({ ...SCOPE, anchor: null });
 
-    const r = await h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+    const r = await requestOverSocket(fresh, {
+      method: "POST",
+      path: "/containers/create",
+      body: JSON.stringify({ Image: "alpine:3" }),
+    });
 
     expect(r.status, r.body).toBe(503);
     expect(h.rows.forTask).not.toHaveBeenCalled();
+  });
+
+  it("keeps serving a live session when its task registers again with no anchor", async () => {
+    await h.proxy.registerTask({ ...SCOPE, anchor: null });
+
+    const r = await h.send("GET", `/containers/${CHILD.name}/json`);
+
+    expect(r.status, r.body).toBe(200);
   });
 
   it("records the child of a client that hung up before the daemon answered", async () => {
@@ -270,12 +283,49 @@ describe("a child's restart", () => {
   });
 });
 
+describe("a cut-off answer to a child's start or removal", () => {
+  it.each([
+    ["POST", `/containers/${CHILD.name}/start`, "started"],
+    ["DELETE", `/containers/${CHILD.name}`, "removed"],
+  ] as const)(
+    "still moves the row on the status of a cut-off 204 to %s %s",
+    async (method, path, write) => {
+      h.daemon.setResponder((req, res, raw) => {
+        if (req.url.startsWith(`/containers/${CHILD.id}`) && req.method !== "GET") {
+          raw.socket.write("HTTP/1.1 204 No Content\r\nContent-Length: 10\r\n\r\nabc");
+          setTimeout(() => raw.socket.destroy(), 20);
+          return;
+        }
+        API(req, res, raw);
+      });
+
+      const r = await h.send(method, path);
+
+      expect(r.status, r.body).toBe(204);
+      expect(h.children[write]).toHaveBeenCalledTimes(1);
+    },
+  );
+});
+
 describe("a child's removal", () => {
+  it("moves the row to exited when the daemon no longer has the child", async () => {
+    h.daemon.setResponder((req, res, raw) =>
+      req.method === "DELETE"
+        ? respondJson(res, 404, { message: `No such container: ${CHILD.id}` })
+        : API(req, res, raw),
+    );
+
+    const r = await h.send("DELETE", `/containers/${CHILD.name}`);
+
+    expect(r.status, r.body).toBe(404);
+    expect(h.children.removed).toHaveBeenCalledWith(CHILD_ROW, "missing_from_daemon");
+  });
+
   it("moves the child's row once the daemon has removed it", async () => {
     const r = await h.send("DELETE", `/containers/${CHILD.name}?force=1`);
 
     expect(r.status, r.body).toBe(204);
-    expect(h.children.removed).toHaveBeenCalledWith(CHILD_ROW);
+    expect(h.children.removed).toHaveBeenCalledWith(CHILD_ROW, "removed_by_task");
   });
 
   it("answers the daemon's 204 when the exited write fails, and logs it", async () => {

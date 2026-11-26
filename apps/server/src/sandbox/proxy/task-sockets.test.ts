@@ -75,6 +75,42 @@ describe("TaskSockets", () => {
     expect(task.signal.aborted).toBe(true);
   });
 
+  it("keeps a serving registration's anchor on an upsert that names none", async () => {
+    const anchor = { rowId: "r", dockerId: "d" };
+    const path = await sockets.register({ ...SCOPE, anchor });
+    const task = await connect(path);
+
+    await sockets.register(SCOPE);
+
+    expect(task.state).toEqual({ kind: "serving", scope: { ...SCOPE, anchor } });
+  });
+
+  it("sets the anchor of a serving registration", async () => {
+    const path = await sockets.register(SCOPE);
+    const task = await connect(path);
+
+    const anchored = sockets.anchor(SCOPE.taskId, { rowId: "r", dockerId: "d" });
+
+    expect(anchored.isOk()).toBe(true);
+    expect(task.state).toEqual({
+      kind: "serving",
+      scope: { ...SCOPE, anchor: { rowId: "r", dockerId: "d" } },
+    });
+  });
+
+  it.each([
+    ["never registered", async () => undefined],
+    ["unregistered", async () => sockets.unregister(SCOPE.taskId)],
+    ["being torn down", async () => void sockets.unregister(SCOPE.taskId)],
+  ])("refuses an anchor for a task %s, as not_serving", async (label, settle) => {
+    if (label !== "never registered") await sockets.register(SCOPE);
+    await settle();
+
+    const anchored = sockets.anchor(SCOPE.taskId, { rowId: "r", dockerId: "d" });
+
+    expect(anchored._unsafeUnwrapErr()).toEqual({ kind: "not_serving" });
+  });
+
   it("keeps a new registration's socket file when the old one's listener closes after it bound", async () => {
     const old = await sockets.register(SCOPE);
     const tearingDown = sockets.unregister(SCOPE.taskId);

@@ -10,9 +10,10 @@
  * task's rows. A create still reading its body or running its checks is
  * not admitted yet, and holds nothing up.
  *
- * Admitted creates' daemon requests are bound to `signal`, which teardown
- * aborts only once it has waited: never to the client's connection, nor to
- * the signal that ends the task's connections.
+ * Admitted creates' daemon requests and row inserts are bound to `signal`,
+ * which a socket's teardown aborts only once it has waited, and `closeAll`
+ * at once: never to the client's connection, nor to the signal that ends
+ * the task's connections.
  */
 
 import { err, ok, type Result } from "neverthrow";

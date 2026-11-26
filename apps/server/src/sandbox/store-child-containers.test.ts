@@ -108,13 +108,17 @@ describe("storeChildContainers", () => {
     const { row } = await startingChild();
 
     expect((await children.reconcile([row]))._unsafeUnwrap()).toEqual([row]);
-    expect((await children.removed(row)).isOk()).toBe(true);
+    expect((await children.removed(row, "removed_by_task")).isOk()).toBe(true);
     expect((await tx((trx) => store.getContainer(trx, row.id)))?.status).toBe("exited");
   });
 
   it.each([
     ["a start", (children: ReturnType<typeof storeChildContainers>) => children.started(ROW)],
-    ["a removal", (children: ReturnType<typeof storeChildContainers>) => children.removed(ROW)],
+    [
+      "a removal",
+      (children: ReturnType<typeof storeChildContainers>) =>
+        children.removed(ROW, "removed_by_task"),
+    ],
   ])("is store_failed, with the cause, when %s's write throws", async (_label, call) => {
     const children = storeChildContainers({ store, runInTx: failing, docker: stubDocker() });
 

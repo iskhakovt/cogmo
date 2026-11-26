@@ -1,13 +1,3 @@
-/**
- * Supervisor unit tests — focused on the proxy wiring (slice 3.0f). The
- * full Docker-side behavior is covered by `supervisor.integration.test.ts`
- * and `supervisor.sysbox.integration.test.ts`; this file uses stub Docker +
- * stub proxy to verify the supervisor calls the proxy in the right order
- * and bind-mounts the returned socket path.
- */
-import { mkdtemp, readdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { PassThrough, type Writable } from "node:stream";
 import type { ContainerInfo } from "dockerode";
 import { sql } from "drizzle-orm";
@@ -20,7 +10,7 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { DockerContainer, DockerFacade, DockerImage, ExecInspect } from "./docker-facade.js";
 import type { ExecOutcome } from "./exec-state.js";
 import { LocalDockerSandboxClient } from "./index.js";
-import { type ChildContainers, CogmoSocketProxy, type ContainerRows } from "./proxy/index.js";
+import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { TaskAnchor, TaskScope } from "./proxy/types.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
@@ -978,53 +968,34 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(unregisters).toEqual([TASK_ID]);
   });
 
-  it("create reaps its container and rejects, opening no socket, when the task is torn down before its anchor", async () => {
+  it("create reaps its container and rejects, starting nothing, when the task is torn down before its anchor", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, container, calls } = fakeDocker({ dockerId: "docker-torn-down" });
-    const socketDir = await mkdtemp(join(tmpdir(), "cogmo-supervisor-anchor-"));
-    const proxy = await CogmoSocketProxy.create({
-      socketDir,
-      containerRows: mock<ContainerRows>(),
-      childContainers: mock<ChildContainers>(),
-    });
-    const sockets = async () => (await readdir(socketDir)).filter((f) => f.endsWith(".sock"));
-    let socketsAtStart: string[] | null = null;
-    container.start.mockImplementation(async () => {
-      calls.start += 1;
-      socketsAtStart = await sockets();
-    });
-    // The task's teardown runs once the row insert has committed, before the anchor.
-    let tornDown = false;
-    let sandbox: LocalDockerSandboxClient | undefined;
-    const teardownAfterInsert: Transactor = async (cb) => {
-      const result = await tx(cb);
-      if (!tornDown) {
-        tornDown = true;
-        await expectDefined(sandbox, "the sandbox").deleteByTaskId(TASK_ID);
-      }
-      return result;
-    };
-    sandbox = await LocalDockerSandboxClient.create({
+    const { proxy, registers, unregisters } = fakeProxy();
+    // The task's registration is gone by the time its row exists.
+    vi.mocked(proxy.anchorTask).mockReturnValue(err({ kind: "not_serving" }));
+    const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
-      runInTx: teardownAfterInsert,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       proxy,
     });
-    try {
-      await expect(sandbox.create(SPEC)).rejects.toThrow();
 
-      expect(calls.start).toBe(0);
-      expect(socketsAtStart).toBeNull();
-      expect(await sockets()).toEqual([]);
-      expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
-      const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-torn-down"));
-      expect(row?.status).toBe("reaped");
-    } finally {
-      await proxy.close();
-      await rm(socketDir, { recursive: true, force: true });
-    }
+    await expect(sandbox.create(SPEC)).rejects.toThrow(/torn down/);
+
+    expect(registers).toHaveLength(1);
+    expect(proxy.anchorTask).toHaveBeenCalledWith(TASK_ID, {
+      rowId: expect.any(String),
+      dockerId: "docker-torn-down",
+    });
+    expect(calls.start).toBe(0);
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+    // The teardown that dropped the registration owns its socket.
+    expect(unregisters).toEqual([]);
+    const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-torn-down"));
+    expect(row).toMatchObject({ status: "reaped", reapedReason: "cascade" });
   });
 
   it("deleteByTaskId reaps the task's rows when the proxy's teardown rejects", async () => {

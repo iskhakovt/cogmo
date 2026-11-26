@@ -27,9 +27,9 @@ interface ReconcileChildContainersDeps {
  */
 export async function reconcileChildContainers(
   deps: ReconcileChildContainersDeps,
-  children: ReadonlyArray<TaskContainerRow>,
+  args: { children: ReadonlyArray<TaskContainerRow>; at: Date },
 ): Promise<Result<ReadonlyArray<TaskContainerRow>, StoreFailed>> {
-  const at = new Date();
+  const { children, at } = args;
   const verdicts = await Promise.all(
     children.map(async (child): Promise<Result<TaskContainerRow[], StoreFailed>> => {
       if (await onDaemon(deps.docker, child.dockerId)) return ok([child]);

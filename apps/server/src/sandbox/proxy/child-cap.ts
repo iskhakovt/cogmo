@@ -1,10 +1,11 @@
 /**
  * The child cap (design/sandbox.md → Proxy Design → Caps and cost): a task
- * holds at most 16 live children, counting its rows at depth ≥ 1 in
- * `starting` or `running` and its creates admitted on this socket and not
- * yet settled on any of the task's sockets, a retiring one's included, an
- * admission whose child's row the read returned counting once, as the row. A create that finds the count at 16 first has the
- * task's live children reconciled against the daemon, so `docker run --rm`
+ * holds at most 16 live children. The count is its rows at depth ≥ 1 in
+ * `starting` or `running`, plus the creates admitted on any of the task's
+ * sockets, a retiring one's included, and not yet settled; an admission
+ * whose child's row the read returned counts once, as the row. A create
+ * that finds the count at 16 first has the task's live children reconciled
+ * against the daemon, so `docker run --rm`
  * children, which remove themselves with no `DELETE` through the proxy, do
  * not fill it until the reaper's next stale pass.
  *
@@ -24,7 +25,10 @@ import type { TaskContainerRow } from "./types.js";
 const MAX_LIVE_CHILDREN = 16;
 
 export interface ChildCapContext {
-  /** This socket's admitted creates. */
+  /**
+   * The task's admitted creates: `admittedBeyond` counts every socket's,
+   * and `admit` and `admitting` answer for this socket's.
+   */
   creates: Pick<CreateTracker, "admittedBeyond" | "admit" | "admitting">;
   /** The live children the daemon still has; one it no longer has moves to `exited`. */
   reconcileChildren(

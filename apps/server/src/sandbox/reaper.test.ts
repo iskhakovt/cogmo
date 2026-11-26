@@ -493,6 +493,30 @@ describe("runReap — a row another path already finished", () => {
     expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
   });
 
+  it("TTL pass: a row a proxy DELETE moved to exited during its kill is reaped once, keeping its exit time", async () => {
+    const cogmoId = await insertContainer({
+      dockerId: "c-deleted",
+      ttlMs: -1000,
+      status: "running",
+      depth: 1,
+    });
+    const { docker } = fakeDocker({
+      containers: [{ Id: "c-deleted", Created: LONG_AGO, Labels: labels() }],
+      onKill: async () => {
+        await db.execute(
+          sql`UPDATE containers SET status = 'exited', exited_at = ${EARLIER}::timestamptz WHERE id = ${cogmoId}`,
+        );
+      },
+    });
+
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+
+    expect(result.ttlReaped).toBe(1);
+    const row = await tx((trx) => store.getContainer(trx, cogmoId));
+    expect(row).toMatchObject({ status: "reaped", reapedReason: "ttl_expired" });
+    expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
+  });
+
   it("stale pass: a row reaped after the TTL read is not marked exited", async () => {
     const cogmoId = await insertContainer({
       dockerId: "c-gone-mid-tick",
@@ -533,6 +557,40 @@ describe("runReap — a row another path moved forward", () => {
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(1);
     expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
+  });
+
+  it("stale pass: a starting row that became running after the read is left for the next tick", async () => {
+    const cogmoId = await insertContainer({
+      dockerId: "c-fwd-stale",
+      ttlMs: 60_000,
+      status: "starting",
+    });
+    let started = false;
+    const { docker } = fakeDocker({
+      containers: [],
+      onList: async () => {
+        if (started) return;
+        started = true;
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, {
+            id: cogmoId,
+            from: "starting",
+            to: "running",
+            at: NOW(),
+          }),
+        );
+      },
+    });
+
+    const first = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+
+    expect(first.staleMarked).toBe(0);
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("running");
+
+    const second = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+
+    expect(second.staleMarked).toBe(1);
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("exited");
   });
 });
 

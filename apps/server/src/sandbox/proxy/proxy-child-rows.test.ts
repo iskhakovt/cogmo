@@ -76,8 +76,16 @@ const containers: FakeContainer[] = [];
 const createdIds: string[] = [];
 /** Runs before the daemon answers a child's start, as another path would. */
 let onStart: (dockerId: string) => Promise<void>;
+/** Runs before the daemon answers a child's restart. */
+let onRestart: (dockerId: string) => Promise<void>;
 /** Runs before the daemon answers a child's DELETE. */
 let onRemove: (dockerId: string) => Promise<void>;
+/** The creates whose connection closed before the daemon answered them. */
+let abandonedCreates: number;
+/** Runs before the daemon answers a child's kill. */
+let onKill: (dockerId: string) => Promise<void>;
+/** Runs before the daemon answers an image inspect. */
+let onInspect: () => Promise<void>;
 /** Holds the daemon's answer to a create until it resolves. */
 let createGate: Promise<void>;
 /**
@@ -130,7 +138,11 @@ beforeEach(async () => {
   });
   createdIds.splice(0, createdIds.length);
   onStart = async () => {};
+  onRestart = async () => {};
   onRemove = async () => {};
+  abandonedCreates = 0;
+  onKill = async () => {};
+  onInspect = async () => {};
   createGate = Promise.resolve();
   childWriteGate = Promise.resolve();
   recordGate = Promise.resolve();
@@ -165,9 +177,9 @@ afterEach(async () => {
 function gatedRecords(children: ChildContainers): ChildContainers {
   return {
     ...children,
-    record: (child, deadline) =>
+    record: (child, cutOff) =>
       children
-        .record(child, deadline)
+        .record(child, cutOff)
         .andThen((recorded) => ResultAsync.fromSafePromise(recordGate.then(() => recorded))),
   };
 }
@@ -191,13 +203,20 @@ function childDaemon(): FakeDaemonResponder {
       const id = createHash("sha256").update(`child-${created}`).digest("hex");
       containers.push({ id, name: `child-${created}`, labels: {} });
       createdIds.push(id);
+      res.once("close", () => {
+        if (!res.writableEnded) abandonedCreates += 1;
+      });
       void createGate.then(() => respondJson(res, 201, { Id: id, Warnings: [] }));
       return;
     }
-    const lifecycle = /^\/containers\/([0-9a-f]{64})\/(start|stop|kill)$/.exec(path);
+    const lifecycle = /^\/containers\/([0-9a-f]{64})\/(start|restart|stop|kill)$/.exec(path);
     if (req.method === "POST" && lifecycle?.[1] !== undefined) {
       const id = lifecycle[1];
-      const started = lifecycle[2] === "start" ? onStart(id) : Promise.resolve();
+      const started = match(lifecycle[2])
+        .with("start", () => onStart(id))
+        .with("restart", () => onRestart(id))
+        .with("kill", () => onKill(id))
+        .otherwise(() => Promise.resolve());
       void started.then(() => {
         res.writeHead(204);
         res.end();
@@ -213,6 +232,10 @@ function childDaemon(): FakeDaemonResponder {
         res.writeHead(204);
         res.end();
       });
+      return;
+    }
+    if (req.method === "GET" && path.startsWith("/images/")) {
+      void onInspect().then(() => api(req, res, raw));
       return;
     }
     // The supervisor's runtime check reads the daemon's runtimes.
@@ -538,6 +561,78 @@ describe("child rows", () => {
     await vi.waitFor(async () => expect((await rowOf(child))?.status).toBe("starting"));
   });
 
+  it("answers 502 to a create the daemon never answers before its deadline, recording nothing and releasing its admission", async () => {
+    createGate = new Promise(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let creating: Promise<SocketResponse>;
+    try {
+      creating = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+      await vi.waitFor(() => expect(creates()).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    const child = expectDefined(createdIds.at(-1), "the created child");
+
+    const r = await resolvesWithin(creating, 2_500, "the create's answer");
+
+    expect(r.status, r.body).toBe(502);
+    await vi.waitFor(() => expect(abandonedCreates).toBe(1));
+    expect(await rowOf(child)).toBeUndefined();
+    // With no admission left, the teardown has no create to wait for.
+    await resolvesWithin(proxy.unregisterTask(TASK_ID), 2_500, "the teardown");
+  });
+
+  it("answers 502 at the deadline without waiting for the rollback's removal", async () => {
+    const inserted = Promise.withResolvers<void>();
+    childWriteGate = inserted.promise;
+    const killed = Promise.withResolvers<void>();
+    onKill = () => killed.promise;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let creating: Promise<SocketResponse>;
+    try {
+      creating = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+      await vi.waitFor(() => expect(creates()).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    const child = expectDefined(createdIds.at(-1), "the created child");
+    try {
+      const r = await resolvesWithin(creating, 2_500, "the create's answer");
+
+      expect(r.status, r.body).toBe(502);
+      expect(received()).toContain(`POST /containers/${child}/kill?signal=SIGTERM`);
+      expect(received()).not.toContain(`DELETE /containers/${child}?force=true&v=true`);
+    } finally {
+      killed.resolve();
+      inserted.resolve();
+    }
+    // The removal finishes in the background.
+    await vi.waitFor(() =>
+      expect(received()).toContain(`DELETE /containers/${child}?force=true&v=true`),
+    );
+  });
+
+  it("reads the rows for the cap after the image inspect, so creates held there land at most one past it", async () => {
+    for (let n = 0; n < 15; n += 1) await insertChildRow(n, "running", "present");
+    const parked: Array<() => void> = [];
+    onInspect = () => new Promise<void>((resolve) => parked.push(resolve));
+    const first = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+    const second = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+    const third = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+    await vi.waitFor(() => expect(parked).toHaveLength(3));
+
+    // The first create's inspect is answered, and it is recorded and answered.
+    expectDefined(parked[0], "the first inspect")();
+    expect((await first).status).toBe(201);
+    expectDefined(parked[1], "the second inspect")();
+    expectDefined(parked[2], "the third inspect")();
+
+    expect([(await second).status, (await third).status]).toEqual([403, 403]);
+    expect(creates()).toHaveLength(1);
+  });
+
   it("counts a create whose row has committed once, as a row, not again as a create in flight", async () => {
     for (let n = 0; n < 14; n += 1) await insertChildRow(n, "running", "present");
     const recorded = Promise.withResolvers<void>();
@@ -591,6 +686,21 @@ describe("a client that hangs up once the daemon has its request", () => {
     onStart = () => answer.promise;
     const { hangUp } = sendRaw("POST", `/containers/${id}/start`);
     await vi.waitFor(() => expect(received()).toContain(`POST /containers/${id}/start`));
+
+    hangUp();
+    // The proxy sees the hang-up before the daemon answers.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    answer.resolve();
+
+    await vi.waitFor(async () => expect((await rowOf(id))?.status).toBe("running"));
+  });
+
+  it("still has its child's row moved to running once the daemon has restarted it", async () => {
+    const id = await createChild({ Image: IMAGE });
+    const answer = Promise.withResolvers<void>();
+    onRestart = () => answer.promise;
+    const { hangUp } = sendRaw("POST", `/containers/${id}/restart`);
+    await vi.waitFor(() => expect(received()).toContain(`POST /containers/${id}/restart`));
 
     hangUp();
     // The proxy sees the hang-up before the daemon answers.
@@ -680,7 +790,7 @@ describe("two teardowns of one task", () => {
 });
 
 describe("a create outliving the teardown's wait", () => {
-  it("leaves its child starting past the cascade, until the TTL tick reaps it", async () => {
+  it("removes its child once the teardown aborts the held insert, leaving any late row to the stale pass", async () => {
     const sandbox = await LocalDockerSandboxClient.create({
       docker: new Docker({ socketPath: daemon.socketPath }),
       store,
@@ -708,9 +818,18 @@ describe("a create outliving the teardown's wait", () => {
       vi.useRealTimers();
     }
     await deleting;
-    inserted.resolve();
-    await creating;
     const child = expectDefined(createdIds.at(-1), "the created child");
+    try {
+      // After the cascade: no row, and the container removed.
+      await vi.waitFor(() =>
+        expect(received()).toContain(`DELETE /containers/${child}?force=true&v=true`),
+      );
+      expect(await rowOf(child)).toBeUndefined();
+    } finally {
+      inserted.resolve();
+    }
+    await creating;
+    // The insert commits late, over a container already gone.
     await vi.waitFor(async () => expect((await rowOf(child))?.status).toBe("starting"));
 
     const tick = await runReap({
@@ -718,10 +837,10 @@ describe("a create outliving the teardown's wait", () => {
       store,
       runInTx: tx,
       instanceId: scope.instanceId,
-      now: () => new Date(TTL.getTime() + 1_000),
+      now: () => new Date(),
     });
 
-    expect(tick.ttlReaped).toBe(1);
-    expect(await rowOf(child)).toMatchObject({ status: "reaped", reapedReason: "ttl_expired" });
+    expect(tick.staleMarked).toBe(1);
+    expect((await rowOf(child))?.status).toBe("exited");
   });
 });

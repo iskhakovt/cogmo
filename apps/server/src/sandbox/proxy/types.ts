@@ -100,11 +100,12 @@ export interface ChildRecord {
 }
 
 /**
- * The child's row was not written: the insert failed, or the create's
- * deadline passed first. Either way its container has been removed, or
- * left to the orphan pass; the use case has logged why.
+ * The child's row was not written: the insert failed, or the create was
+ * cut off first, by its deadline or its socket's teardown. Either way its
+ * container is removed, or left to the orphan pass; the use case has
+ * logged why.
  */
-export type ChildRecordFailed = { kind: "record_failed" } | { kind: "deadline_passed" };
+export type ChildRecordFailed = { kind: "record_failed" } | { kind: "cut_off" };
 
 /**
  * Whether a child's start stands. `started` covers a row moved to
@@ -116,21 +117,30 @@ export type ChildRecordFailed = { kind: "record_failed" } | { kind: "deadline_pa
 export type ChildStartOutcome = { kind: "started" } | { kind: "reaped" };
 
 /**
+ * Why a child's container is gone without Cogmo removing it: the daemon
+ * removed it at the task's request, or no longer has it.
+ */
+export type ChildExitCause = "removed_by_task" | "missing_from_daemon";
+
+/**
  * The store writes that follow the daemon's answers to a task's child
  * requests (design/sandbox.md → Container state machine). Built at boot over
  * the sandbox store and the daemon; the proxy never reaches either itself.
  */
 export interface ChildContainers {
   /**
-   * Insert the child's row, within the create's `deadline`. A failed
-   * insert, or one the deadline passes first, removes the container, with
-   * its anonymous volumes.
+   * Insert the child's row unless `cutOff` aborts first: the create's
+   * deadline, or its socket's teardown. A failed insert, or one cut off,
+   * removes the container, with its anonymous volumes.
    */
-  record(child: ChildRecord, deadline: AbortSignal): ResultAsync<void, ChildRecordFailed>;
+  record(child: ChildRecord, cutOff: AbortSignal): ResultAsync<void, ChildRecordFailed>;
   /** `starting → running` once the daemon has started or restarted the child. */
   started(child: TaskContainerRow): ResultAsync<ChildStartOutcome, StoreFailed>;
-  /** `→ exited` once the daemon has removed the child at the task's request. */
-  removed(child: TaskContainerRow): ResultAsync<void, StoreFailed>;
+  /**
+   * `→ exited` once a task's `DELETE` of the child is answered: removed at
+   * its request, or already gone from the daemon.
+   */
+  removed(child: TaskContainerRow, cause: ChildExitCause): ResultAsync<void, StoreFailed>;
   /**
    * The live children the daemon still has. One it no longer has (a
    * `docker run --rm` child removes itself, with no `DELETE` through the

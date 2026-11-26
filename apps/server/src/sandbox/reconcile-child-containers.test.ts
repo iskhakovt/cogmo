@@ -67,6 +67,9 @@ async function child(dockerId: string): Promise<TaskContainerRow> {
   return { id: row.id, dockerId, parentId: row.parentId, depth: 1, status: "starting" };
 }
 
+/** The time the adapter hands the reconcile, which its exit writes record. */
+const AT = new Date("2026-11-20T10:00:00.000Z");
+
 describe("reconcileChildContainers", () => {
   it("keeps the children the daemon has and moves the ones it answers 404 for to exited", async () => {
     const present = await child("present");
@@ -74,11 +77,16 @@ describe("reconcileChildContainers", () => {
     const docker = daemonAnswering({ "auto-removed": 404 });
 
     const live = expectOk(
-      await reconcileChildContainers({ store, runInTx: tx, docker }, [present, removed]),
+      await reconcileChildContainers(
+        { store, runInTx: tx, docker },
+        { children: [present, removed], at: AT },
+      ),
     );
 
     expect(live).toEqual([present]);
-    expect((await tx((trx) => store.getContainer(trx, removed.id)))?.status).toBe("exited");
+    const exited = await tx((trx) => store.getContainer(trx, removed.id));
+    expect(exited?.status).toBe("exited");
+    expect(exited?.exitedAt).toEqual(AT);
     expect((await tx((trx) => store.getContainer(trx, present.id)))?.status).toBe("starting");
   });
 
@@ -94,7 +102,9 @@ describe("reconcileChildContainers", () => {
     );
     const docker = daemonAnswering({ "auto-removed": 404 });
 
-    const live = expectOk(await reconcileChildContainers({ store, runInTx: tx, docker }, [read]));
+    const live = expectOk(
+      await reconcileChildContainers({ store, runInTx: tx, docker }, { children: [read], at: AT }),
+    );
 
     expect(live).toEqual([]);
     expect((await tx((trx) => store.getContainer(trx, read.id)))?.status).toBe("exited");
@@ -105,7 +115,10 @@ describe("reconcileChildContainers", () => {
     const docker = daemonAnswering({ stopped: "exited" });
 
     const live = expectOk(
-      await reconcileChildContainers({ store, runInTx: tx, docker }, [stopped]),
+      await reconcileChildContainers(
+        { store, runInTx: tx, docker },
+        { children: [stopped], at: AT },
+      ),
     );
 
     expect(live).toEqual([stopped]);
@@ -116,7 +129,12 @@ describe("reconcileChildContainers", () => {
     const unsure = await child("unsure");
     const docker = daemonAnswering({ unsure: 500 });
 
-    const live = expectOk(await reconcileChildContainers({ store, runInTx: tx, docker }, [unsure]));
+    const live = expectOk(
+      await reconcileChildContainers(
+        { store, runInTx: tx, docker },
+        { children: [unsure], at: AT },
+      ),
+    );
 
     expect(live).toEqual([unsure]);
     expect((await tx((trx) => store.getContainer(trx, unsure.id)))?.status).toBe("starting");
@@ -129,7 +147,7 @@ describe("reconcileChildContainers", () => {
 
     const live = await reconcileChildContainers(
       { store, runInTx: failing, docker: daemonAnswering({ "auto-removed": 404 }) },
-      [removed],
+      { children: [removed], at: AT },
     );
 
     expect(live._unsafeUnwrapErr()).toEqual({ kind: "store_failed", cause });

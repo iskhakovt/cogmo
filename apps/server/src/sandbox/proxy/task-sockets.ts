@@ -73,7 +73,10 @@ export interface NotServing {
 }
 
 export interface TaskSocketRegistry {
-  /** Upsert a task's scope, binding a socket of its own for a task with no live registration. */
+  /**
+   * Upsert a task's scope, binding a socket of its own for a task with no
+   * live registration; a live one keeps its anchor unless `scope` names one.
+   */
   register(scope: TaskScope): Promise<string>;
   /** Set the anchor of the task's live registration; `not_serving` when it has none. */
   anchor(taskId: string, anchor: TaskAnchor): Result<void, NotServing>;
@@ -118,8 +121,9 @@ export class TaskSockets implements TaskSocketRegistry {
    * Upsert a task's scope. A task with no serving registration gets a new
    * socket, bound before this resolves; one with a serving registration has
    * its scope replaced, so connections in flight see the update, and keeps
-   * its path. Rejects if the socket can't be bound, and when `unregister` or
-   * `closeAll` runs before the bind completes.
+   * its path, and its anchor unless `scope` names one. Rejects if the socket
+   * can't be bound, and when `unregister` or `closeAll` runs before the bind
+   * completes.
    */
   async register(scope: TaskScope): Promise<string> {
     match(this.#state)
@@ -130,7 +134,7 @@ export class TaskSockets implements TaskSocketRegistry {
       .exhaustive();
     const { taskId } = scope;
     const task = this.#tasks.get(taskId) ?? this.#open(scope);
-    task.state = { kind: "serving", scope };
+    task.state = { kind: "serving", scope: keepingAnchor(task.state, scope) };
     try {
       await task.listening;
     } catch (err) {
@@ -300,6 +304,13 @@ function servedPath(task: Registration): string {
       throw new Error("task socket unregistered");
     })
     .exhaustive();
+}
+
+/** `scope`, with the anchor a serving registration already has when `scope` names none. */
+function keepingAnchor(state: TaskSocketState, scope: TaskScope): TaskScope {
+  return match([state, scope.anchor])
+    .with([{ kind: "serving" }, null], ([serving]) => ({ ...scope, anchor: serving.scope.anchor }))
+    .otherwise(() => scope);
 }
 
 /** End every connection of a registration, and the creates in flight on it. A second abort is a no-op. */

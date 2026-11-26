@@ -19,27 +19,31 @@ interface InsertChildContainerDeps {
 /**
  * Insert the `containers` row of a child the daemon created through the
  * proxy, in `starting` (design/sandbox.md → Container state machine), before
- * the proxy answers the task, and within the create's `deadline`.
+ * the proxy answers the task, unless `cutOff` aborts first: the create's
+ * deadline, or its socket's teardown.
  *
  * An insert the store or its driver fails leaves the daemon holding a
  * container no row records, so it is removed here, with its anonymous
- * volumes; so is one the deadline passes first, since the orphan pass
- * would otherwise remove the rowless container under a create about to
- * answer 201. A removal the daemon refuses is logged, and the orphan pass
- * removes the rowless container once its grace window has passed. An
- * insert that commits after its deadline leaves a `starting` row over a
- * removed container, which the stale pass marks `exited`. Any other throw,
- * a column's schema refusing the row among them, is a bug and is rethrown.
+ * volumes, before the failure is answered. One cut off is answered at
+ * once, and its container is removed in the background: a create past its
+ * deadline would otherwise answer 201 for a container the orphan pass may
+ * remove as rowless, and one cut off by teardown would leave the cascade a
+ * row it never listed. A removal the daemon refuses is logged, and the
+ * orphan pass removes the rowless container once its grace window has
+ * passed. An insert that commits after the cut-off leaves a `starting` row
+ * over a removed container, which the stale pass marks `exited`. Any other
+ * throw, a column's schema refusing the row among them, is a bug and is
+ * rethrown.
  */
 export async function insertChildContainer(
   deps: InsertChildContainerDeps,
   child: ChildRecord,
-  deadline: AbortSignal,
+  cutOff: AbortSignal,
 ): Promise<Result<ContainerRow, ChildRecordFailed>> {
   const inserting = deps.runInTx((tx) =>
     deps.store.insertContainer(tx, { ...child, labels: { ...child.labels } }),
   );
-  const outcome = await raceDeadline(inserting, deadline);
+  const outcome = await raceCutOff(inserting, cutOff);
   return match(outcome)
     .with(
       { kind: "inserted" },
@@ -57,20 +61,24 @@ export async function insertChildContainer(
       await removeRowless(deps.docker, child.dockerId);
       return err<ContainerRow, ChildRecordFailed>({ kind: "record_failed" });
     })
-    .with({ kind: "deadline_passed" }, async () => {
-      log.warn({ dockerId: child.dockerId }, "child container row not written in time, removing");
+    .with({ kind: "cut_off" }, async () => {
+      log.warn({ dockerId: child.dockerId }, "child container row cut off, removing");
       // The insert may still commit, over the container removed here.
       inserting.then(
         () =>
           log.warn(
             { dockerId: child.dockerId },
-            "a child row committed after its create's deadline; the stale pass marks it exited",
+            "a child row committed after its create was cut off; the stale pass marks it exited",
           ),
         (cause: unknown) =>
           log.debug({ err: cause, dockerId: child.dockerId }, "a late child row insert failed"),
       );
-      await removeRowless(deps.docker, child.dockerId);
-      return err<ContainerRow, ChildRecordFailed>({ kind: "deadline_passed" });
+      // Answered now; the removal finishes in the background. It settles
+      // its daemon failures itself, so a rejection is a bug.
+      removeRowless(deps.docker, child.dockerId).catch((cause: unknown) =>
+        log.error({ err: cause, dockerId: child.dockerId }, "removing a cut-off child threw"),
+      );
+      return err<ContainerRow, ChildRecordFailed>({ kind: "cut_off" });
     })
     .exhaustive();
 }
@@ -78,20 +86,17 @@ export async function insertChildContainer(
 type InsertOutcome =
   | { kind: "inserted"; row: ContainerRow }
   | { kind: "failed"; cause: unknown }
-  | { kind: "deadline_passed" };
+  | { kind: "cut_off" };
 
-/** The insert's outcome, or the deadline's, whichever comes first. */
-function raceDeadline(
-  inserting: Promise<ContainerRow>,
-  deadline: AbortSignal,
-): Promise<InsertOutcome> {
+/** The insert's outcome, or the cut-off's, whichever comes first. */
+function raceCutOff(inserting: Promise<ContainerRow>, cutOff: AbortSignal): Promise<InsertOutcome> {
   const settled = inserting.then(
     (row): InsertOutcome => ({ kind: "inserted", row }),
     (cause: unknown): InsertOutcome => ({ kind: "failed", cause }),
   );
-  if (deadline.aborted) return Promise.resolve({ kind: "deadline_passed" });
+  if (cutOff.aborted) return Promise.resolve({ kind: "cut_off" });
   const passed = new Promise<InsertOutcome>((resolve) => {
-    deadline.addEventListener("abort", () => resolve({ kind: "deadline_passed" }), { once: true });
+    cutOff.addEventListener("abort", () => resolve({ kind: "cut_off" }), { once: true });
   });
   return Promise.race([settled, passed]);
 }

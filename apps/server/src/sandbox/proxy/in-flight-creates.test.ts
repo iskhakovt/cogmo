@@ -41,6 +41,18 @@ describe("InFlightCreates", () => {
     expect(creates.admittedBeyond(new Set())).toBe(0);
   });
 
+  it("stops counting a create once its named child is among the rows counted", () => {
+    const creates = new InFlightCreates();
+    const named = expectOk(creates.admit());
+    expectOk(creates.admit());
+
+    named.named("child-a");
+
+    expect(creates.admittedBeyond(new Set())).toBe(2);
+    expect(creates.admittedBeyond(new Set(["child-a"]))).toBe(1);
+    expect(creates.admittedBeyond(new Set(["child-b"]))).toBe(2);
+  });
+
   it("ends an admission whose work rejects, and passes the rejection on", async () => {
     const creates = new InFlightCreates();
 
