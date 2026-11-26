@@ -9,19 +9,20 @@
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { applyContainerCreatePolicy } from "./create-policy.js";
+import type { ExecIdLookup } from "./exec-ids.js";
 import { applyExecPolicy } from "./exec-policy.js";
 import type { Forward } from "./forward.js";
 import { imageCreateQuery } from "./image-create-query.js";
 import { applyNetworkEndpointPolicy, type NetworkEndpoint } from "./network-endpoint.js";
 import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
-import { denied, notFound, type ProxyRejection } from "./rejection.js";
+import { notFound, type ProxyRejection } from "./rejection.js";
 import { withQuery } from "./request-path.js";
 import type { ContainerTarget, ExecTarget, RequestRoute, StreamRoute } from "./router.js";
 import type { DaemonLookups, TaskScope } from "./types.js";
 
 export interface StreamContext extends OwnershipLookups {
   /** The exec ids the daemon created through this task's socket. */
-  execIds: ReadonlySet<string>;
+  execIds: ExecIdLookup;
 }
 
 export interface RequestContext extends StreamContext {
@@ -30,8 +31,6 @@ export interface RequestContext extends StreamContext {
   createLookups: DaemonLookups;
   /** The request body, bounded; read only by a route with a body policy. */
   readBody(): Promise<Result<Buffer, ProxyRejection>>;
-  /** Whether the request carries a body at all. */
-  hasBody: boolean;
   /** Add an exec id the daemon created through this task's socket. */
   recordExec(execId: string): void;
 }
@@ -44,7 +43,7 @@ export function planRequest(
   return match(route)
     .with({ kind: "plain" }, async ({ path }) => ok(piped(withQuery(path, query))))
     .with({ kind: "image_create" }, async ({ versionPrefix }) =>
-      planImageCreate(versionPrefix, query, ctx),
+      planImageCreate(versionPrefix, query),
     )
     .with({ kind: "container" }, async ({ target }) =>
       (await containerPath(target, query, ctx)).map(piped),
@@ -97,17 +96,17 @@ export function planStream(
 }
 
 /**
- * A pull, which never has a body. The daemon reads this route's parameters
+ * A pull, forwarded with no body. The daemon reads this route's parameters
  * with `ParseForm`, where a form body's values override the query's, so a
- * body could turn the checked pull into an import; one is denied, and the
- * pull is forwarded with none.
+ * body could turn the checked pull into an import. docker-modem sends every
+ * POST's options as a JSON body as well as the query, so a pull with a body
+ * is normal: the body is drained and dropped, and the daemon reads the
+ * checked query alone.
  */
-async function planImageCreate(
+function planImageCreate(
   versionPrefix: string,
   query: URLSearchParams,
-  ctx: RequestContext,
-): Promise<Result<Forward, ProxyRejection>> {
-  if (ctx.hasBody) return err(denied("A POST /images/create body"));
+): Result<Forward, ProxyRejection> {
   return imageCreateQuery(query).map(
     (forwarded): Forward => ({
       path: withQuery(`${versionPrefix}/images/create`, forwarded),
@@ -192,7 +191,7 @@ async function containerPath(
 function execPath(
   target: ExecTarget,
   query: URLSearchParams,
-  execIds: ReadonlySet<string>,
+  execIds: ExecIdLookup,
 ): Result<string, ProxyRejection> {
   return execIds.has(target.id)
     ? ok(withQuery(`${target.versionPrefix}/exec/${target.id}${target.suffix}`, query))

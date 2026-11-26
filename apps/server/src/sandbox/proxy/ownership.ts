@@ -45,7 +45,7 @@ export async function ownedContainers(
   const rows = await lookups.taskRows();
   return rows.andThen((candidates) => {
     const task = candidates.find((row) => row.id === lookups.taskContainerRowId);
-    if (task === undefined) return err(unavailable("the task container has no row yet"));
+    if (task === undefined) return err(unavailable("the task container has no live row"));
     const all = candidates.filter((row) => row.id === task.id || row.parentId === task.id);
     return ok({ task, all });
   });

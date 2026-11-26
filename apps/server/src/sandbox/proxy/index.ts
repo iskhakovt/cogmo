@@ -3,7 +3,7 @@ import * as http from "node:http";
 import * as net from "node:net";
 import { join } from "node:path";
 import { addAbortSignal } from "node:stream";
-import type { Result } from "neverthrow";
+import { type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
@@ -14,9 +14,9 @@ import {
   fetchRootless,
   refLookups,
 } from "./daemon-lookups.js";
+import { type ExecIdRegistry, ExecIds } from "./exec-ids.js";
 import { forward, pipeUpgrade, respondInternalError, type Upstream } from "./forward.js";
 import {
-  hasRequestBody,
   isAbortError,
   pathOf,
   readBody,
@@ -55,10 +55,11 @@ const log = logger.child({ component: "sandbox.proxy" });
 const DEFAULT_HOST_DOCKER_SOCKET = "/var/run/docker.sock";
 
 /**
- * Hard cap on a buffered create or exec body. Docker's daemon doesn't
- * enforce a small limit either, but the proxy reads the whole body before
- * forwarding (to rebuild it); without this cap a hostile caller could ask
- * it to allocate gigabytes. 1 MiB is far above any real container spec —
+ * Hard cap on a body the proxy buffers: a container create, an exec create
+ * or a network connect or disconnect, which it rebuilds, and an upgrade's,
+ * which it forwards with the preamble. Docker's daemon doesn't enforce a
+ * small limit either, but without this cap a hostile caller could ask the
+ * proxy to allocate gigabytes. 1 MiB is far above any real container spec —
  * published images don't exceed a few KB of JSON.
  */
 const MAX_REWRITTEN_BODY_BYTES = 1 * 1024 * 1024;
@@ -77,10 +78,11 @@ interface ConnectionTask {
   /**
    * The exec ids the daemon answered 201 with to an exec create sent
    * through the task's socket: the only ids its exec routes accept. One set
-   * per task socket, shared by its connections; it lives as long as the
-   * socket, and a process restart loses it with the containers.
+   * per task socket, shared by its connections and capped (`exec-ids.ts`);
+   * it lives as long as the socket, and a process restart loses it with the
+   * containers.
    */
-  execIds: Set<string>;
+  execIds: ExecIdRegistry;
 }
 
 const CONNECTION_TASK = new WeakMap<net.Socket, ConnectionTask>();
@@ -228,7 +230,7 @@ export class CogmoSocketProxy {
     const socketPath = join(this.#socketDir, `${taskId}.sock`);
     const controller = new AbortController();
     const { signal } = controller;
-    const execIds = new Set<string>();
+    const execIds = new ExecIds();
     const server = net.createServer((socket) => {
       // Destroys the socket at once if it was accepted after the abort.
       addAbortSignal(signal, socket);
@@ -355,9 +357,18 @@ export class CogmoSocketProxy {
       )
       .with({ kind: "stream" }, ({ route, query }) => {
         planStream(route, query, this.#streamContext(connection, scope))
-          .then((path) =>
-            path.match(
-              (p) => pipeUpgrade(req, clientSocket, head, upstream, p),
+          // Node parses an upgrade's body into the request, not into `head`.
+          .then((planned) =>
+            planned.asyncAndThen((path) =>
+              new ResultAsync(readBody(req, MAX_REWRITTEN_BODY_BYTES)).map((body) => ({
+                path,
+                body,
+              })),
+            ),
+          )
+          .then((upgrade) =>
+            upgrade.match(
+              ({ path, body }) => pipeUpgrade(req, clientSocket, { path, body, head }, upstream),
               (rejection) => writeRawRejectionAndDestroy(clientSocket, rejection),
             ),
           )
@@ -404,7 +415,6 @@ export class CogmoSocketProxy {
         rootless: this.#rootless,
       }),
       readBody: () => readBody(req, MAX_REWRITTEN_BODY_BYTES),
-      hasBody: hasRequestBody(req),
       recordExec: (execId) => connection.execIds.add(execId),
     };
   }

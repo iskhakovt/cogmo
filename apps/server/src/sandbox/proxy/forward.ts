@@ -20,7 +20,7 @@ import { ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import {
-  buildHttpRequestPreamble,
+  buildUpgradePreamble,
   emptyBodyRequestHeaders,
   isAbortError,
   jsonRequestHeaders,
@@ -123,18 +123,26 @@ export function forward(
   match(plan.body)
     .with({ kind: "piped" }, () => req.pipe(outgoing))
     .with({ kind: "json" }, ({ bytes }) => outgoing.end(bytes))
-    .with({ kind: "none" }, () => outgoing.end())
+    .with({ kind: "none" }, () => {
+      // The client's body, if it sent one, goes nowhere.
+      req.resume();
+      outgoing.end();
+    })
     .exhaustive();
 }
 
-/** An upgraded stream route: replay the preamble and `head` under `path`, then pipe. */
+/**
+ * An upgraded stream route: send the preamble under `path` with the
+ * request's `body`, replay `head`, the bytes the client sent after the
+ * request, then pipe.
+ */
 export function pipeUpgrade(
   req: http.IncomingMessage,
   clientSocket: net.Socket,
-  head: Buffer,
+  upgrade: { path: string; body: Buffer; head: Buffer },
   upstream: Upstream,
-  path: string,
 ): void {
+  const { path, body, head } = upgrade;
   // The checks are async: a client that hung up meanwhile gets no daemon connection.
   if (clientSocket.destroyed) return;
   const daemon = net.createConnection({ path: upstream.socketPath, signal: upstream.signal });
@@ -154,7 +162,7 @@ export function pipeUpgrade(
   };
   daemon.once("error", failedUnanswered);
   daemon.once("connect", () => {
-    daemon.write(buildHttpRequestPreamble(req, path));
+    daemon.write(buildUpgradePreamble(req, path, body));
     if (head.length > 0) daemon.write(head);
     // `pipe` carries a half-close each way: a client that ends its write
     // side after sending stdin lets the daemon flush.

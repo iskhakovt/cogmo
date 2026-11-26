@@ -108,3 +108,16 @@ export const TESTCONTAINERS_BRIDGE_CONNECT_REQUEST = {
   headers: { ...USER_AGENT, "content-type": "application/json" },
   body: `{"Container":"${CONTAINER}","EndpointConfig":{"Aliases":[]}}`,
 } as const;
+
+/**
+ * `client.image.pull(ImageName.fromString("busybox:1.36.1"))`, recorded the
+ * same way against an image the daemon did not have. docker-modem sends a
+ * POST's options as the query and again as a JSON body; the empty
+ * `authconfig` and `platform` keys are options testcontainers left unset.
+ */
+export const TESTCONTAINERS_PULL_REQUEST = {
+  method: "POST",
+  path: "/images/create?authconfig=&platform=&fromImage=busybox&tag=1.36.1",
+  headers: { ...USER_AGENT, "content-type": "application/json" },
+  body: '{"fromImage":"busybox","tag":"1.36.1"}',
+} as const;

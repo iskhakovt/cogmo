@@ -2,6 +2,7 @@ import * as net from "node:net";
 import { errAsync, okAsync } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { expectDefined } from "../../test/assertions.js";
 import { requestOverSocket, respondJson } from "../../test/fake-docker-daemon.js";
 import {
   API,
@@ -202,6 +203,7 @@ describe("container ownership", () => {
     const r = await h.send("GET", "/containers/cogmo-task-own/json");
 
     h.expectRejected(r, 503, []);
+    expect(message(r)).toContain("the task container has no live row");
   });
 
   it("answers 404 to a child the daemon still has whose row is reaped", async () => {
@@ -369,6 +371,31 @@ describe("exec ownership", () => {
 
     expect(r.status, r.body).toBe(502);
     expect(message(r)).toContain("exceeds");
+  });
+
+  it("forgets the oldest exec id once the socket has created 4096 more", {
+    timeout: 120_000,
+  }, async () => {
+    const create = async (): Promise<string> => {
+      const r = await h.send(
+        "POST",
+        "/containers/cogmo-task-own/exec",
+        JSON.stringify({ Cmd: ["id"] }),
+      );
+      return ExecCreatedSchema.parse(JSON.parse(r.body)).Id;
+    };
+    const oldest = await create();
+    const newer: string[] = [];
+    // Sixteen at a time, so the socket's accept backlog never fills.
+    for (let batch = 0; batch < 4096 / 16; batch += 1) {
+      newer.push(...(await Promise.all(Array.from({ length: 16 }, () => create()))));
+    }
+
+    expect((await h.send("GET", `/exec/${oldest}/json`)).status).toBe(404);
+    expect((await h.send("GET", `/exec/${expectDefined(newer[0], "next")}/json`)).status).toBe(200);
+    expect(
+      (await h.send("GET", `/exec/${expectDefined(newer.at(-1), "newest")}/json`)).status,
+    ).toBe(200);
   });
 
   it("keeps each task's exec ids to its own socket", async () => {

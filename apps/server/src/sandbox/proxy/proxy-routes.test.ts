@@ -20,6 +20,7 @@ import {
   TASK_ID,
   useProxyHarness,
 } from "../../test/proxy-harness.js";
+import { TESTCONTAINERS_PULL_REQUEST } from "../../test/testcontainers-requests.js";
 
 const ListSchema = z.array(z.looseObject({ Id: z.string() }));
 
@@ -276,6 +277,46 @@ describe("lists and events", () => {
 });
 
 describe("hop-by-hop headers", () => {
+  const PRIVILEGED = JSON.stringify({ Image: "alpine:3", HostConfig: { Privileged: true } });
+  const SMUGGLED =
+    "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n" +
+    `Content-Length: ${Buffer.byteLength(PRIVILEGED)}\r\n\r\n${PRIVILEGED}`;
+
+  it("keeps a body's Content-Length that Connection names, so the body is not a second request", async () => {
+    await h.rawExchange(
+      [
+        "GET /_ping HTTP/1.1",
+        "Host: docker",
+        "Connection: close, content-length",
+        `Content-Length: ${Buffer.byteLength(SMUGGLED)}`,
+        "",
+        SMUGGLED,
+      ].join("\r\n"),
+    );
+
+    expect(h.daemon.started()).toEqual(["GET /_ping"]);
+    expect(expectDefined(h.daemon.requests()[0], "ping").body).toBe(SMUGGLED);
+  });
+
+  it("forwards a body whose Content-Length Connection names as one request carrying it", async () => {
+    await h.rawExchange(
+      [
+        "GET /containers/own-child/json HTTP/1.1",
+        "Host: docker",
+        "Connection: close, Content-Length",
+        "Content-Length: 5",
+        "",
+        "hello",
+      ].join("\r\n"),
+    );
+
+    expect(h.daemon.started()).toEqual([
+      resolveOf("own-child"),
+      `GET /containers/${CHILD.id}/json`,
+    ]);
+    expect(expectDefined(h.daemon.requests()[1], "inspect").body).toBe("hello");
+  });
+
   it("drops the headers a request's Connection names, and Proxy-Connection", async () => {
     await h.rawExchange(
       [
@@ -402,18 +443,32 @@ describe("image pulls", () => {
     h.expectRejected(await h.send("POST", `/images/create${query}`), 403, []);
   });
 
-  it("denies a pull with a form body, whose values the daemon would read over the query", async () => {
+  it("forwards the recorded testcontainers pull with its JSON body dropped", async () => {
+    const req = TESTCONTAINERS_PULL_REQUEST;
+
+    const r = await h.send(req.method, req.path, req.body, { ...req.headers });
+
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual(["POST /images/create?fromImage=busybox&tag=1.36.1"]);
+    const pull = expectDefined(h.daemon.requests()[0], "pull");
+    expect(pull.body).toBe("");
+    expect(pull.headers["content-length"]).toBe("0");
+    expect(pull.headers["content-type"]).toBeUndefined();
+  });
+
+  it("forwards a pull with a form body carrying fromSrc as a pull of the query's fromImage", async () => {
     const body = "fromImage=&fromSrc=http%3A%2F%2Fhost%2Fevil.tar&repo=cogmo-devbase&tag=latest";
 
     const r = await h.send("POST", "/images/create?fromImage=alpine", body, {
       "content-type": "application/x-www-form-urlencoded",
     });
 
-    h.expectRejected(r, 403, []);
-    expect(message(r)).toContain("body");
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual(["POST /images/create?fromImage=alpine"]);
+    expect(expectDefined(h.daemon.requests()[0], "pull").body).toBe("");
   });
 
-  it("denies a pull with a chunked body", async () => {
+  it("forwards a pull with a chunked body as a pull with none", async () => {
     const reply = await h.rawExchange(
       [
         "POST /images/create?fromImage=alpine HTTP/1.1",
@@ -428,8 +483,11 @@ describe("image pulls", () => {
       ].join("\r\n"),
     );
 
-    expect(reply).toMatch(/^HTTP\/1\.1 403 /);
-    expect(h.received()).toEqual([]);
+    expect(reply).toMatch(/^HTTP\/1\.1 200 /);
+    expect(h.received()).toEqual(["POST /images/create?fromImage=alpine"]);
+    const pull = expectDefined(h.daemon.requests()[0], "pull");
+    expect(pull.body).toBe("");
+    expect(pull.headers["transfer-encoding"]).toBeUndefined();
   });
 
   it("forwards a pull with an empty tag and platform as fromImage alone, with no body", async () => {

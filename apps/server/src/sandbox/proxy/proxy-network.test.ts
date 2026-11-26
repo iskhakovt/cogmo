@@ -58,6 +58,21 @@ describe("network connect and disconnect", () => {
     expect(forwarded.headers["content-type"]).toBe("application/json");
   });
 
+  it("forwards a disconnect sent as a form as JSON, with the full id and Force", async () => {
+    const r = await h.send(
+      "POST",
+      "/networks/bridge/disconnect",
+      JSON.stringify({ Container: "cogmo-task-own", Force: true }),
+      { "content-type": "application/x-www-form-urlencoded" },
+    );
+
+    expect(r.status, r.body).toBe(200);
+    const forwarded = expectDefined(h.daemon.requests().at(-1), "disconnect");
+    expect(forwarded.url).toBe(`/networks/${BRIDGE_NETWORK.id}/disconnect`);
+    expect(forwarded.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(forwarded.body)).toEqual({ Container: OWN.id, Force: true });
+  });
+
   it("forwards an owned container's disconnect from bridge with Force", async () => {
     const r = await h.send(
       "POST",

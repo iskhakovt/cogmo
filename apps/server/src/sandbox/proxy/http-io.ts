@@ -135,14 +135,6 @@ export function emptyBodyRequestHeaders(
   return { ...headers, "content-length": "0" };
 }
 
-/** Whether the request carries a body: a non-zero `Content-Length`, or a chunked one. */
-export function hasRequestBody(req: http.IncomingMessage): boolean {
-  return (
-    req.headers["transfer-encoding"] !== undefined ||
-    Number(req.headers["content-length"] ?? "0") > 0
-  );
-}
-
 /**
  * A daemon response's headers, relayed to the client without the hop-by-hop
  * ones: the daemon's `Connection: keep-alive` describes the proxy's
@@ -167,12 +159,23 @@ export function rebuiltResponseHeaders(
   return length === null ? headers : { ...headers, "content-length": String(length) };
 }
 
+/**
+ * Headers a `Connection` token never removes. Without its `Content-Length`
+ * a piped body would go out unframed, and the daemon would read it as the
+ * next request; `Transfer-Encoding` is re-framed by `pipedRequestHeaders`.
+ */
+const FRAMING_HEADERS: ReadonlySet<string> = new Set([
+  "content-length",
+  "transfer-encoding",
+  "host",
+]);
+
 function withoutHopByHop(h: http.IncomingHttpHeaders): Record<string, string | string[]> {
   const named: ReadonlySet<string> = new Set(
     (h.connection ?? "")
       .split(",")
       .map((token) => token.trim().toLowerCase())
-      .filter((token) => token !== ""),
+      .filter((token) => token !== "" && !FRAMING_HEADERS.has(token)),
   );
   return R.omitBy(
     cloneHeaders(h),
@@ -182,14 +185,35 @@ function withoutHopByHop(h: http.IncomingHttpHeaders): Record<string, string | s
 
 /**
  * An HTTP/1.1 request preamble (request line, headers, empty line) under
- * `path`, for an upgrade the proxy raw-pipes.
+ * `path`, for an upgrade the proxy raw-pipes, followed by `body`.
+ *
+ * `Connection: Upgrade, close` asks the daemon to close the connection once
+ * it has answered a request it does not upgrade: a detached exec start (200)
+ * or a body it refuses (400). Otherwise it would keep the connection and
+ * parse the client's following bytes, already piped, as requests nobody
+ * checked. A `101` hands the connection over before `close` applies. The
+ * body is framed by its length: Node parses an upgrade's body into the
+ * request, so it is forwarded from there, however the client framed it.
  */
-export function buildHttpRequestPreamble(req: http.IncomingMessage, path: string): Buffer {
-  const headers = Object.entries(cloneHeaders(req.headers)).flatMap(([name, value]) =>
+export function buildUpgradePreamble(
+  req: http.IncomingMessage,
+  path: string,
+  body: Buffer,
+): Buffer {
+  const kept = R.omit(cloneHeaders(req.headers), [
+    "connection",
+    "content-length",
+    "transfer-encoding",
+  ]);
+  const headers = Object.entries({
+    ...kept,
+    connection: "Upgrade, close",
+    ...(body.length > 0 && { "content-length": String(body.length) }),
+  }).flatMap(([name, value]) =>
     (Array.isArray(value) ? value : [value]).map((v) => `${name}: ${v}`),
   );
   const lines = [`${req.method} ${path} HTTP/${req.httpVersion}`, ...headers, "", ""];
-  return Buffer.from(lines.join("\r\n"), "utf8");
+  return Buffer.concat([Buffer.from(lines.join("\r\n"), "utf8"), body]);
 }
 
 /**

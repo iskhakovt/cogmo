@@ -1,7 +1,8 @@
 import * as net from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { resolvesWithin } from "../../test/assertions.js";
+import { expectDefined, resolvesWithin } from "../../test/assertions.js";
+import { respondJson } from "../../test/fake-docker-daemon.js";
 import { API, OWN, upgradeRequest, useProxyHarness } from "../../test/proxy-harness.js";
 
 const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
@@ -80,6 +81,47 @@ describe("a request pipelined after a streaming one", () => {
       "GET /containers/cogmo-task-own/json",
       `GET /containers/${OWN.id}/logs?follow=1&stdout=1`,
     ]);
+    client.socket.destroy();
+  });
+
+  it.each([
+    [
+      "a distribution lookup",
+      async () => "GET /distribution/alpine/json HTTP/1.1\r\nHost: docker\r\n\r\n",
+      "/distribution/alpine/json",
+    ],
+    [
+      "a detached exec start without Upgrade",
+      async () => {
+        const id = await createExec();
+        return (
+          `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n` +
+          `Content-Length: 15\r\n\r\n{"Detach":true}`
+        );
+      },
+      "/start",
+    ],
+  ])("is answered in order after %s whose response is held", async (_label, first, held) => {
+    const request = await first();
+    const release = Promise.withResolvers<void>();
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.endsWith(held)) return API(req, res, raw);
+      release.promise.then(() => respondJson(res, 200, {}));
+    });
+    const client = await rawClient();
+    client.socket.write(request);
+    await vi.waitFor(() => expect(reached(held)).toHaveLength(1));
+
+    client.socket.write("GET /unlisted HTTP/1.1\r\nHost: docker\r\n\r\n");
+    await settle(100);
+    expect(client.received()).toBe("");
+    release.resolve();
+
+    await vi.waitFor(() => expect(client.received()).toContain("HTTP/1.1 403"));
+    const received = client.received();
+    expect(received.indexOf("HTTP/1.1 200")).toBeGreaterThan(-1);
+    expect(received.indexOf("HTTP/1.1 200")).toBeLessThan(received.indexOf("HTTP/1.1 403"));
+    expect(reached("/unlisted")).toEqual([]);
     client.socket.destroy();
   });
 
@@ -188,6 +230,84 @@ describe("a client gone during the checks", () => {
     );
 
     expect(reached("/containers/create")).toEqual(["POST /containers/create"]);
+  });
+});
+
+describe("an upgrade the daemon refuses", () => {
+  const PRIVILEGED = JSON.stringify({
+    Image: "alpine:3",
+    HostConfig: { Privileged: true, Binds: ["/:/host"] },
+  });
+  const CREATE =
+    "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n" +
+    `Content-Length: ${Buffer.byteLength(PRIVILEGED)}\r\n\r\n${PRIVILEGED}`;
+
+  function upgradeStart(id: string, body: string): string {
+    return (
+      `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
+      `Content-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`
+    );
+  }
+
+  it.each([
+    ["a detached start", '{"Detach":true}', "200"],
+    ["a start whose body the daemon rejects", '{"Detach":', "400"],
+  ])(
+    "forwards the body of %s, and the create pipelined after it never reaches the daemon",
+    async (_label, body, status) => {
+      const id = await createExec();
+      const client = await rawClient();
+      client.socket.write(upgradeStart(id, body));
+      await vi.waitFor(() => expect(client.received()).toContain(`HTTP/1.1 ${status}`));
+      const start = expectDefined(
+        h.daemon.requests().find((r) => r.url === `/exec/${id}/start`),
+        "the upgrade",
+      );
+      expect(start.body).toBe(body);
+      expect(start.headers.connection).toBe("Upgrade, close");
+
+      client.socket.write(CREATE);
+
+      await settle(300);
+      expect(reached("/containers/create")).toEqual([]);
+      client.socket.destroy();
+    },
+  );
+
+  it.each([
+    ["a detached start", '{"Detach":true}', "200"],
+    ["a start whose body the daemon rejects", '{"Detach":', "400"],
+  ])("keeps the create out after %s, its body sent again raw", async (_label, body, status) => {
+    const id = await createExec();
+    const client = await rawClient();
+    client.socket.write(upgradeStart(id, body));
+    await settle(200);
+    client.socket.write(body);
+    await vi.waitFor(() => expect(client.received()).toContain(`HTTP/1.1 ${status}`));
+
+    client.socket.write(CREATE);
+
+    await settle(300);
+    expect(reached("/containers/create")).toEqual([]);
+    client.socket.destroy();
+  });
+
+  it("forwards an upgrade that switches, its body with it", async () => {
+    const id = await createExec();
+    const body = '{"Detach":false,"Tty":false}';
+
+    const reply = await resolvesWithin(
+      h.rawExchange(upgradeStart(id, body)),
+      SETTLE_MS,
+      "the daemon to answer the upgrade",
+    );
+
+    expect(reply).toMatch(/^HTTP\/1\.1 101 /);
+    const start = expectDefined(
+      h.daemon.requests().find((r) => r.url === `/exec/${id}/start`),
+      "the upgrade",
+    );
+    expect(start.body).toBe(body);
   });
 });
 
