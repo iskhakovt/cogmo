@@ -33,9 +33,9 @@ async function listTaskContainers(
 }
 
 function notReaped(row: ContainerRow): TaskContainerRow[] {
-  const { id, dockerId, parentId } = row;
+  const { id, dockerId, parentId, depth } = row;
   return match(row.status)
-    .with("starting", "running", "exited", (status) => [{ id, dockerId, parentId, status }])
+    .with("starting", "running", "exited", (status) => [{ id, dockerId, parentId, depth, status }])
     .with("reaped", () => [])
     .exhaustive();
 }

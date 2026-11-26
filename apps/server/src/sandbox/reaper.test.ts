@@ -682,6 +682,134 @@ describe("runReap — resilience", () => {
   });
 });
 
+describe("runReap — the next tick after a failure", () => {
+  // The states a failed write or removal leaves a row in, fed to the next
+  // tick on each side of the row's expiry.
+  it.each([
+    [
+      "a live row over a container that is gone, before expiry",
+      "running",
+      "gone",
+      60_000,
+      { status: "exited", reapedReason: null },
+    ],
+    [
+      "a live row over a container that is gone, after expiry",
+      "running",
+      "gone",
+      -1_000,
+      { status: "reaped", reapedReason: "ttl_expired" },
+    ],
+    [
+      "a starting row over a container never started, before expiry",
+      "starting",
+      "present",
+      60_000,
+      { status: "starting", reapedReason: null },
+    ],
+    [
+      "a starting row over a container never started, after expiry",
+      "starting",
+      "present",
+      -1_000,
+      { status: "reaped", reapedReason: "ttl_expired" },
+    ],
+    [
+      "an exited row, after expiry, which the TTL pass leaves to the cascade",
+      "exited",
+      "gone",
+      -1_000,
+      { status: "exited", reapedReason: null },
+    ],
+  ] as const)("%s", async (_label, status, onDaemon, ttlMs, expected) => {
+    const id = await insertContainer({ dockerId: "c-after-failure", ttlMs, status });
+    const listed: DockerSideContainer[] = match(onDaemon)
+      .with("present", (): DockerSideContainer[] => [
+        { Id: "c-after-failure", Created: LONG_AGO, Labels: labels() },
+      ])
+      .with("gone", (): DockerSideContainer[] => [])
+      .exhaustive();
+    const { docker } = fakeDocker({ containers: listed });
+
+    await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+
+    expect(await tx((trx) => store.getContainer(trx, id))).toMatchObject(expected);
+  });
+
+  it("reaps at once a row and container whose instance reconcile closed after failing to remove it", async () => {
+    // Reconcile closes the instance row even when its kill failed, so the
+    // next tick sees the instance dead, whatever the container's age.
+    const prior = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 97 }));
+    const id = await insertContainer({
+      dockerId: "c-reconcile-failed",
+      ttlMs: 60_000,
+      status: "running",
+      instanceId: prior.id,
+    });
+    await tx((trx) => store.closeInstances(trx, [prior.id]));
+    const { docker, killCalls } = fakeDocker({
+      containers: [
+        {
+          Id: "c-reconcile-failed",
+          Created: createdAgo(5_000),
+          Labels: { ...labels(), "cogmo.instance": prior.id },
+        },
+      ],
+    });
+
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+
+    expect(result.orphansReaped).toBe(1);
+    expect(killCalls).toEqual(["c-reconcile-failed"]);
+    expect(await tx((trx) => store.getContainer(trx, id))).toMatchObject({
+      status: "reaped",
+      reapedReason: "dead_instance",
+    });
+  });
+
+  it("makes one transition when two orphan passes remove one dead-instance object, each counting it", async () => {
+    const dead = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 96 }));
+    await tx((trx) => store.closeInstance(trx, dead.id));
+    const id = await insertContainer({
+      dockerId: "c-twice",
+      ttlMs: 60_000,
+      status: "running",
+      instanceId: dead.id,
+    });
+    // Both passes kill before either transitions.
+    const bothKilling = Promise.withResolvers<void>();
+    let killing = 0;
+    const { docker } = fakeDocker({
+      containers: [
+        { Id: "c-twice", Created: LONG_AGO, Labels: { ...labels(), "cogmo.instance": dead.id } },
+      ],
+      onKill: async () => {
+        killing += 1;
+        if (killing === 2) bothKilling.resolve();
+        await bothKilling.promise;
+      },
+    });
+    const transition = vi.spyOn(store, "transitionContainerStatus");
+
+    const [first, second] = await Promise.all([
+      runReap({ docker, store, runInTx: tx, instanceId, now: NOW }),
+      runReap({ docker, store, runInTx: tx, instanceId, now: NOW }),
+    ]);
+
+    const outcomes = await Promise.all(transition.mock.results.map((r) => r.value));
+    transition.mockRestore();
+    expect(outcomes).toEqual(
+      expect.arrayContaining([{ kind: "transitioned" }, { kind: "stale", status: "reaped" }]),
+    );
+    expect(outcomes).toHaveLength(2);
+    expect([first.orphansReaped, second.orphansReaped]).toEqual([1, 1]);
+    expect(await tx((trx) => store.getContainer(trx, id))).toMatchObject({
+      status: "reaped",
+      reapedReason: "dead_instance",
+    });
+  });
+});
+
 describe("runReap — concurrent invocation", () => {
   // Production guarantee: Inngest's singleton-by-name semantics on the
   // cron function id `sandbox-reaper` (see reaper.ts:223) prevent two

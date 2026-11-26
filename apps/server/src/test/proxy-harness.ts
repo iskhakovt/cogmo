@@ -94,30 +94,35 @@ export const OWN_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000bbbb",
   dockerId: OWN.id,
   parentId: null,
+  depth: 0,
   status: "running",
 };
 const SIBLING_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000dddd",
   dockerId: SIBLING.id,
   parentId: null,
+  depth: 0,
   status: "running",
 };
 export const SALVAGE_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000eeee",
   dockerId: SALVAGE.id,
   parentId: null,
+  depth: 0,
   status: "running",
 };
 export const CHILD_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000c001",
   dockerId: CHILD.id,
   parentId: OWN_ROW.id,
+  depth: 1,
   status: "running",
 };
 const RECORDED_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000c002",
   dockerId: RECORDED.id,
   parentId: OWN_ROW.id,
+  depth: 1,
   status: "running",
 };
 
@@ -213,7 +218,7 @@ export function useProxyHarness(): ProxyHarness {
     );
     const children = mock<ChildContainers>();
     children.record.mockReturnValue(okAsync(undefined));
-    children.started.mockReturnValue(okAsync({ kind: "running" }));
+    children.started.mockReturnValue(okAsync({ kind: "started" }));
     children.removed.mockReturnValue(okAsync(undefined));
     // The daemon has every child the rows name.
     children.reconcile.mockImplementation((live) => okAsync(live));

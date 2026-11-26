@@ -30,8 +30,8 @@ export function childWrites(
       (await children.started(child)).match(
         (outcome): Result<void, ProxyRejection> =>
           match(outcome)
-            .with({ kind: "running" }, (): Result<void, ProxyRejection> => ok(undefined))
-            .with({ kind: "finished" }, () => err(notFound(`No such container: ${ref}`)))
+            .with({ kind: "started" }, (): Result<void, ProxyRejection> => ok(undefined))
+            .with({ kind: "reaped" }, () => err(notFound(`No such container: ${ref}`)))
             .exhaustive(),
         ({ cause }) => {
           // The row under-reports `running`, which every reap covers.

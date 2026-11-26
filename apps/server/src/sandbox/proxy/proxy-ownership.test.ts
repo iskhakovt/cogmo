@@ -171,6 +171,7 @@ describe("container ownership", () => {
 
   it.each([
     ["a pre-1.24 HostConfig", JSON.stringify({ HostConfig: { Privileged: true } })],
+    ["whitespace alone", "   "],
     ["a list", "[]"],
     ["a string", '"x"'],
     ["text that is not JSON", "x"],

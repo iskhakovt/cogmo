@@ -81,10 +81,10 @@ describe("storeContainerRows", () => {
     const rows = expectOk(await storeContainerRows({ store, runInTx: tx }).forTask(TASK_ID));
 
     expect([...rows].sort((a, b) => a.dockerId.localeCompare(b.dockerId))).toEqual([
-      { id: exited, dockerId: "exited", parentId: task, status: "exited" },
-      { id: running, dockerId: "running", parentId: task, status: "running" },
-      { id: salvage, dockerId: "salvage", parentId: null, status: "starting" },
-      { id: task, dockerId: "task-container", parentId: null, status: "starting" },
+      { id: exited, dockerId: "exited", parentId: task, depth: 1, status: "exited" },
+      { id: running, dockerId: "running", parentId: task, depth: 1, status: "running" },
+      { id: salvage, dockerId: "salvage", parentId: null, depth: 0, status: "starting" },
+      { id: task, dockerId: "task-container", parentId: null, depth: 0, status: "starting" },
     ]);
   });
 

@@ -32,13 +32,13 @@ describe("InFlightCreates", () => {
     const creates = new InFlightCreates();
     const work = Promise.withResolvers<void>();
     const admission = expectOk(creates.admit());
-    expect(creates.admitted).toBe(1);
+    expect(creates.admittedBeyond(new Set())).toBe(1);
 
     const ran = admission.run(() => work.promise);
     work.resolve();
     await ran;
 
-    expect(creates.admitted).toBe(0);
+    expect(creates.admittedBeyond(new Set())).toBe(0);
   });
 
   it("ends an admission whose work rejects, and passes the rejection on", async () => {
@@ -49,7 +49,7 @@ describe("InFlightCreates", () => {
         throw new Error("a bug in the forward");
       }),
     ).rejects.toThrow("a bug in the forward");
-    expect(creates.admitted).toBe(0);
+    expect(creates.admittedBeyond(new Set())).toBe(0);
   });
 
   it("is settled once every create admitted has settled", async () => {
@@ -105,7 +105,7 @@ describe("InFlightCreates", () => {
 
     const admitted = creates.admit();
     expect(admitted.isErr() && admitted.error.kind).toBe("unavailable");
-    expect(creates.admitted).toBe(0);
+    expect(creates.admittedBeyond(new Set())).toBe(0);
   });
 
   it("aborts its signal with the reason given", () => {

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, rmdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, rmdir } from "node:fs/promises";
 import * as http from "node:http";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
@@ -122,6 +122,7 @@ beforeEach(async () => {
         id: expectDefined(SCOPE.anchor, "the scope's anchor").rowId,
         dockerId: TASK_CONTAINER_ID,
         parentId: null,
+        depth: 0,
         status: "running",
       },
     ]),
@@ -479,8 +480,69 @@ describe("CogmoSocketProxy", () => {
     held.end(JSON.stringify({ Id: CHILD_CONTAINER_ID }));
     await resolvesWithin(unregistering, SETTLE_MS, "the old socket's teardown");
 
-    expect(again).toBe(sock);
+    // A registration after an unregister gets a socket of its own.
+    expect(again).not.toBe(sock);
     expect(await socketExists(again)).toBe(true);
+  });
+
+  it("keeps the socket of a registration made while the unregistered one was still binding", {
+    timeout: STREAM_TEST_TIMEOUT_MS,
+  }, async () => {
+    const binding = proxy.registerTask(SCOPE).catch(() => "unregistered");
+    const unregistering = proxy.unregisterTask(SCOPE.taskId);
+
+    const again = await proxy.registerTask(SCOPE);
+    await resolvesWithin(unregistering, SETTLE_MS, "the old registration's teardown");
+    expect(await binding).toBe("unregistered");
+
+    expect(await socketExists(again)).toBe(true);
+    const r = await unixRequest(again, "GET", "/_ping");
+    expect(r.status).toBe(200);
+  });
+
+  it("aborts a create the daemon has not answered within 60 seconds, with a 502", {
+    timeout: STREAM_TEST_TIMEOUT_MS,
+  }, async () => {
+    const daemon = holdUpstreamOpen();
+    const sock = await proxy.registerTask(SCOPE);
+    const body = JSON.stringify({ Image: "alpine" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let client: ReturnType<typeof openStream>;
+    try {
+      client = openStream(
+        sock,
+        "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n" +
+          `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+      );
+      await daemon.held;
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(client.received()).toBe("");
+      await vi.advanceTimersByTimeAsync(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    await vi.waitFor(() => expect(client.received()).toContain("502 Bad Gateway"), {
+      timeout: SETTLE_MS,
+    });
+    await resolvesWithin(daemon.closed, SETTLE_MS, "the daemon connection to close");
+    // The create no longer holds a teardown up.
+    await resolvesWithin(proxy.unregisterTask(SCOPE.taskId), SETTLE_MS, "unregisterTask");
+  });
+
+  it("lets an unregisterTask made during close() join close's teardown", async () => {
+    await proxy.registerTask(SCOPE);
+    const closing = proxy.close();
+    let joined = false;
+    void proxy.unregisterTask(SCOPE.taskId).then(() => {
+      joined = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(joined).toBe(false);
+
+    await closing;
+    expect(joined).toBe(true);
   });
 
   it("close() does not wait for a create whose row is still being written", {
@@ -622,7 +684,7 @@ describe("CogmoSocketProxy", () => {
     await proxy.close();
 
     await registering;
-    expect(await socketExists(join(baseDir, "sockets", `${SCOPE.taskId}.sock`))).toBe(false);
+    expect(await socketFiles()).toEqual([]);
   });
 
   it("an unregisterTask racing registerTask leaves no listener behind", async () => {
@@ -632,11 +694,12 @@ describe("CogmoSocketProxy", () => {
     await proxy.unregisterTask(SCOPE.taskId);
 
     await registering;
-    expect(await socketExists(join(baseDir, "sockets", `${SCOPE.taskId}.sock`))).toBe(false);
+    expect(await socketFiles()).toEqual([]);
   });
 
   it("registers a task again after its socket failed to bind", async () => {
-    const blocker = join(baseDir, "sockets", `${SCOPE.taskId}.sock`);
+    // The first registration's path.
+    const blocker = join(baseDir, "sockets", `${SCOPE.taskId}-1.sock`);
     await mkdir(blocker);
     await expect(proxy.registerTask(SCOPE)).rejects.toThrow();
 
@@ -855,6 +918,11 @@ function openStream(
   });
   socket.once("connect", () => socket.write(request));
   return { closed, received: () => received, write: (more) => socket.write(more) };
+}
+
+/** The socket files left in the socket directory. */
+async function socketFiles(): Promise<string[]> {
+  return (await readdir(join(baseDir, "sockets"))).filter((name) => name.endsWith(".sock"));
 }
 
 async function socketExists(p: string): Promise<boolean> {

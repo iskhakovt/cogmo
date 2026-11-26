@@ -35,6 +35,17 @@ const log = logger.child({ component: "sandbox.proxy" });
 /** Bound on the daemon's answer to a create: `{"Id": …, "Warnings": […]}`, or an error. */
 const MAX_CREATE_REPLY_BYTES = 1024 * 1024;
 
+/**
+ * How long a create's daemon request may take, answer included, before it
+ * is aborted and answered 502, so a wedged create cannot hold its
+ * admission, a place under the child cap, or a teardown's wait for ever.
+ * The image is already inspected, so the daemon only lays out the
+ * container, which takes well under a second; and the bound sits inside
+ * the orphan pass's 2-minute grace, so a container whose create the proxy
+ * can still record is never reaped as rowless first.
+ */
+const CREATE_DEADLINE_MS = 60_000;
+
 /** A checked container create. */
 export interface CreateForward {
   /** The canonical path with the query keys the daemon reads. */
@@ -67,10 +78,16 @@ export function forwardCreate(
   plan: CreateForward,
 ): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
+  const deadline = new AbortController();
+  const timer = setTimeout(
+    () => deadline.abort(new Error("the daemon did not answer the create in time")),
+    CREATE_DEADLINE_MS,
+  );
   let answered = false;
   const answer = (outcome: CreateAnswer) => {
     if (answered) return;
     answered = true;
+    clearTimeout(timer);
     // A client that hung up, or a connection teardown destroyed, gets nothing.
     if (!res.headersSent && !res.destroyed) send(res, outcome);
     resolve();
@@ -83,7 +100,7 @@ export function forwardCreate(
       method: "POST",
       path: plan.path,
       headers: jsonRequestHeaders(req, plan.body),
-      signal: upstream.signal,
+      signal: AbortSignal.any([upstream.signal, deadline.signal]),
     },
     (reply) => {
       replied = true;
@@ -95,7 +112,11 @@ export function forwardCreate(
   );
   outgoing.on("error", (cause) => {
     if (replied) return;
-    if (!isAbortError(cause)) log.warn({ err: cause.message, path: pathOf(req) }, "upstream error");
+    if (deadline.signal.aborted) {
+      log.warn({ path: pathOf(req) }, "the daemon did not answer a create in time");
+    } else if (!isAbortError(cause)) {
+      log.warn({ err: cause.message, path: pathOf(req) }, "upstream error");
+    }
     answer({
       kind: "reject",
       rejection: daemonFailed(`Cogmo proxy upstream error: ${cause.message}`),
@@ -140,6 +161,7 @@ async function readCreateReply(
       rejection: daemonFailed("Cogmo proxy: the daemon's answer to the create names no container"),
     };
   }
+  plan.admission.named(dockerId);
   const recorded = await plan.record(dockerId);
   return recorded.match(
     (): CreateAnswer => relayed,

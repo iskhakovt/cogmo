@@ -62,7 +62,7 @@ function owned(
   const task = candidates.find((row) => row.id === rowId);
   if (task === undefined) return err(noLiveRow());
   const all = candidates.filter((row) => row.id === task.id || row.parentId === task.id);
-  const liveChildren = candidates.filter((row) => row.parentId !== null && isLive(row));
+  const liveChildren = candidates.filter((row) => row.depth >= 1 && isLive(row));
   return ok({ task, all, liveChildren });
 }
 

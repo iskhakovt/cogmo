@@ -1,21 +1,23 @@
 /**
- * `storeChildContainers` as a deliberate cross-module test: the adapter
- * over its use cases and the sandbox store on PGlite, unmocked, with only
- * the daemon stubbed, so each port method is checked for the rows it
- * leaves behind.
+ * `storeChildContainers`'s own mapping: each port method over its use case,
+ * a result passed through, and a store failure as the value the port names.
+ * The rows each use case leaves are their own suites' (`mark-child-*`,
+ * `insert-child-container`, `reconcile-child-containers`). It runs against
+ * the sandbox store on PGlite, with the daemon stubbed.
  */
 
-import { match } from "ts-pattern";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { DockerContainer, DockerFacade } from "./docker-facade.js";
-import type { TaskContainerRow } from "./proxy/index.js";
+import type { ChildRecord, TaskContainerRow } from "./proxy/index.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 import { storeChildContainers } from "./store-child-containers.js";
 
 const TASK_ID = "019d0000-0000-7000-8000-000000000001";
+const LIMITS = { cpus: 1, memory_bytes: 256 * 1024 * 1024, pids: 64 };
+const TTL = new Date("2026-12-01T00:00:00.000Z");
 
 let db: Database;
 let tx: Transactor;
@@ -27,7 +29,6 @@ beforeAll(async () => {
 });
 
 afterEach(async () => {
-  vi.restoreAllMocks();
   await truncateAll(db);
 });
 
@@ -39,171 +40,82 @@ function stubDocker(): DockerFacade {
   const container = mock<DockerContainer>();
   container.kill.mockResolvedValue(undefined);
   container.remove.mockResolvedValue(undefined);
+  container.inspect.mockResolvedValue({ State: { Status: "running" } });
   const docker = mock<DockerFacade>();
   docker.getContainer.mockReturnValue(container);
   return docker;
 }
 
-/** A child row, moved to `status` through the store's own transitions. */
-async function child(status: TaskContainerRow["status"]): Promise<TaskContainerRow> {
+/** A store whose every transaction fails, as a lost connection would. */
+const cause = Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+const failing: Transactor = () => Promise.reject(cause);
+
+const ROW: TaskContainerRow = {
+  id: "019d0000-0000-7000-8000-00000000c001",
+  dockerId: "child-container",
+  parentId: "019d0000-0000-7000-8000-00000000bbbb",
+  depth: 1,
+  status: "starting",
+};
+
+async function startingChild(): Promise<{ row: TaskContainerRow; child: ChildRecord }> {
   const instance = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
-  const row = await tx((trx) =>
-    store.insertContainer(trx, {
-      dockerId: "child-container",
-      parentId: null,
-      rootTaskId: TASK_ID,
-      depth: 1,
-      image: "alpine",
-      runtime: "runc",
-      labels: {},
-      resourceLimits: { cpus: 1, memory_bytes: 256 * 1024 * 1024, pids: 64 },
-      ttlExpiresAt: new Date("2026-12-01T00:00:00.000Z"),
-      instanceId: instance.id,
-    }),
-  );
-  const at = new Date();
-  await match(status)
-    .with("starting", async () => undefined)
-    .with("running", "exited", (to) =>
-      tx((trx) => store.transitionContainerStatus(trx, { id: row.id, at, from: "starting", to })),
-    )
-    .exhaustive();
-  return { id: row.id, dockerId: row.dockerId, parentId: row.parentId, status };
+  const child: ChildRecord = {
+    dockerId: "child-container",
+    parentId: "019d0000-0000-7000-8000-00000000bbbb",
+    rootTaskId: TASK_ID,
+    depth: 1,
+    image: "alpine",
+    runtime: "runc",
+    labels: {},
+    resourceLimits: LIMITS,
+    ttlExpiresAt: TTL,
+    instanceId: instance.id,
+  };
+  const inserted = await tx((trx) => store.insertContainer(trx, { ...child, parentId: null }));
+  // A further child of the same task, under the row just inserted.
+  return {
+    row: { ...ROW, id: inserted.id, parentId: null },
+    child: { ...child, parentId: inserted.id },
+  };
 }
 
 describe("storeChildContainers", () => {
-  it.each(["starting", "running"] as const)(
-    "moves a %s child the task removed to exited",
-    async (status) => {
-      const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
-      const row = await child(status);
-
-      const removed = await children.removed(row);
-
-      expect(removed.isOk()).toBe(true);
-      expect((await tx((trx) => store.getContainer(trx, row.id)))?.status).toBe("exited");
-    },
-  );
-
-  it("moves a removed child to exited from running when a start moved it after the ownership read", async () => {
+  it("records a child as a value, and an insert the store fails as record_failed", async () => {
     const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
-    const read = await child("starting");
-    await tx((trx) =>
-      store.transitionContainerStatus(trx, {
-        id: read.id,
-        at: new Date(),
-        from: "starting",
-        to: "running",
-      }),
-    );
+    const { child } = await startingChild();
 
-    const removed = await children.removed(read);
-
-    expect(removed.isOk()).toBe(true);
-    expect((await tx((trx) => store.getContainer(trx, read.id)))?.status).toBe("exited");
-  });
-
-  it("writes exited_at and leaves started_at null for a child removed before it started", async () => {
-    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
-    const row = await child("starting");
-
-    await children.removed(row);
-
-    const after = await tx((trx) => store.getContainer(trx, row.id));
-    expect(after?.exitedAt).toBeInstanceOf(Date);
-    expect(after?.startedAt).toBeNull();
-  });
-
-  it("leaves a removed child that a reap finished first reaped", async () => {
-    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
-    const read = await child("running");
-    await tx((trx) =>
-      store.transitionContainerStatus(trx, {
-        id: read.id,
-        at: new Date(),
-        to: "reaped",
-        reason: "cascade",
-      }),
-    );
-
-    const removed = await children.removed(read);
-
-    expect(removed.isOk()).toBe(true);
-    expect(await tx((trx) => store.getContainer(trx, read.id))).toMatchObject({
-      status: "reaped",
-      reapedReason: "cascade",
-    });
-  });
-
-  it("lets a start that finds its row stale while still starting reject, as the bug it is", async () => {
-    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
-    const row = await child("starting");
-    vi.spyOn(store, "transitionContainerStatus").mockResolvedValueOnce({
-      kind: "stale",
-      status: "starting",
-    });
-
-    await expect(children.started(row)).rejects.toThrow(/stale/);
-  });
-
-  it("writes nothing for a removed child whose row is already exited", async () => {
-    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
-    const row = await child("exited");
-    const transition = vi.spyOn(store, "transitionContainerStatus");
-
-    const removed = await children.removed(row);
-
-    expect(removed.isOk()).toBe(true);
-    expect(transition).not.toHaveBeenCalled();
-  });
-
-  it("is store_failed, with the cause, when a removal's write throws", async () => {
-    const cause = new Error("connection reset");
-    const failing: Transactor = () => Promise.reject(cause);
-    const children = storeChildContainers({ store, runInTx: failing, docker: stubDocker() });
-
-    const removed = await children.removed({
-      id: "019d0000-0000-7000-8000-00000000c001",
-      dockerId: "child-container",
-      parentId: null,
-      status: "running",
-    });
-
-    expect(removed._unsafeUnwrapErr()).toEqual({ kind: "store_failed", cause });
-  });
-
-  it("is store_failed, with the cause, when a start's write throws", async () => {
-    const cause = new Error("connection reset");
-    const failing: Transactor = () => Promise.reject(cause);
-    const children = storeChildContainers({ store, runInTx: failing, docker: stubDocker() });
-
-    const started = await children.started({
-      id: "019d0000-0000-7000-8000-00000000c001",
-      dockerId: "child-container",
-      parentId: null,
-      status: "starting",
-    });
-
-    expect(started._unsafeUnwrapErr()).toEqual({ kind: "store_failed", cause });
-  });
-
-  it("starts a child's row and records a child as values", async () => {
-    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
-    const row = await child("starting");
-
-    expect((await children.started(row))._unsafeUnwrap()).toEqual({ kind: "running" });
-    const recorded = await children.record({
-      dockerId: "second-child",
-      parentId: row.id,
-      rootTaskId: TASK_ID,
-      depth: 1,
-      image: "alpine",
-      runtime: "runc",
-      labels: {},
-      resourceLimits: { cpus: 1, memory_bytes: 256 * 1024 * 1024, pids: 64 },
-      ttlExpiresAt: new Date("2026-12-01T00:00:00.000Z"),
+    expect((await children.record({ ...child, dockerId: "second-child" })).isOk()).toBe(true);
+    const refused = await children.record({
+      ...child,
+      dockerId: "third-child",
       instanceId: "019d0000-0000-7000-8000-000000000bad",
     });
-    expect(recorded._unsafeUnwrapErr().kind).toBe("record_failed");
+    expect(refused._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
+  });
+
+  it("passes a start's outcome through", async () => {
+    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
+    const { row } = await startingChild();
+
+    expect((await children.started(row))._unsafeUnwrap()).toEqual({ kind: "started" });
+  });
+
+  it("passes a removal and a reconcile through", async () => {
+    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
+    const { row } = await startingChild();
+
+    expect((await children.reconcile([row]))._unsafeUnwrap()).toEqual([row]);
+    expect((await children.removed(row)).isOk()).toBe(true);
+    expect((await tx((trx) => store.getContainer(trx, row.id)))?.status).toBe("exited");
+  });
+
+  it.each([
+    ["a start", (children: ReturnType<typeof storeChildContainers>) => children.started(ROW)],
+    ["a removal", (children: ReturnType<typeof storeChildContainers>) => children.removed(ROW)],
+  ])("is store_failed, with the cause, when %s's write throws", async (_label, call) => {
+    const children = storeChildContainers({ store, runInTx: failing, docker: stubDocker() });
+
+    expect((await call(children))._unsafeUnwrapErr()).toEqual({ kind: "store_failed", cause });
   });
 });

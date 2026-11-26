@@ -9,7 +9,12 @@
 
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
-import { type ChildContext, planChildRemove, planChildStart } from "./child-plan.js";
+import {
+  type ChildContext,
+  planChildRemove,
+  planChildRestart,
+  planChildStart,
+} from "./child-plan.js";
 import type { ExecIdLookup } from "./exec-ids.js";
 import { applyExecPolicy } from "./exec-policy.js";
 import type { Forward } from "./forward.js";
@@ -63,6 +68,7 @@ export function planRequest(
       ),
     )
     .with({ kind: "child_start" }, ({ target }) => planChildStart(target, query, ctx))
+    .with({ kind: "child_restart" }, ({ target }) => planChildRestart(target, query, ctx))
     .with({ kind: "child_remove" }, ({ target }) => planChildRemove(target, query, ctx))
     .with({ kind: "exec_create" }, ({ ref, versionPrefix }) =>
       planExecCreate({ ref, versionPrefix }, query, ctx),

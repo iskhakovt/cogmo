@@ -120,7 +120,6 @@ describe("router.classify", () => {
       ["POST", "/containers/abc/resize", "/resize", "any"],
       ["PUT", "/containers/abc/archive", "/archive", "child"],
       ["POST", "/containers/abc/stop", "/stop", "child"],
-      ["POST", "/containers/abc/restart", "/restart", "child"],
       ["POST", "/containers/abc/kill", "/kill", "child"],
       ["POST", "/containers/abc/pause", "/pause", "child"],
       ["POST", "/containers/abc/unpause", "/unpause", "child"],
@@ -142,6 +141,7 @@ describe("router.classify", () => {
 
     it.each([
       ["POST", "/containers/abc/start", "child_start", "/start"],
+      ["POST", "/containers/abc/restart", "child_restart", "/restart"],
       ["DELETE", "/containers/abc", "child_remove", ""],
     ])("%s %s is a %s, of a child only", (method, path, kind, suffix) => {
       const r = classify(method, path);

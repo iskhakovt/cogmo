@@ -95,6 +95,7 @@ beforeEach(async () => {
         id: ANCHOR.rowId,
         dockerId: ANCHOR.dockerId,
         parentId: null,
+        depth: 0,
         status: "running",
       },
     ]),

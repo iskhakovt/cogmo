@@ -99,6 +99,16 @@ describe("insertChildContainer", () => {
     expect(await tx((trx) => store.getContainerByDockerId(trx, "child-container"))).toBeUndefined();
   });
 
+  it("rethrows a failure that is not the store's, such as a column's schema refusing the row", async () => {
+    const { docker, container } = stubDocker();
+    const child = { ...(await childOf()), resourceLimits: { cpus: -1, memory_bytes: 1, pids: 1 } };
+
+    await expect(insertChildContainer({ store, runInTx: tx, docker }, child)).rejects.toThrow(
+      /cpus/,
+    );
+    expect(container.remove).not.toHaveBeenCalled();
+  });
+
   it("is record_failed when the removal is refused too", async () => {
     const { docker, container } = stubDocker();
     container.remove.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
@@ -114,7 +124,7 @@ describe("insertChildContainer", () => {
     /** Commits the work, then fails as a connection lost before the commit's reply would. */
     const lossy: Transactor = async (cb) => {
       await tx(cb);
-      throw new Error("connection reset after commit");
+      throw Object.assign(new Error("connection reset after commit"), { code: "ECONNRESET" });
     };
 
     it("removes the container, leaving a starting row over nothing for the stale pass", async () => {

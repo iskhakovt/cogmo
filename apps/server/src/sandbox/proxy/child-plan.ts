@@ -1,5 +1,5 @@
 /**
- * The plans for a child's create, start and removal (design/sandbox.md →
+ * The plans for a child's create, start, restart and removal (design/sandbox.md →
  * Proxy Design → Child containers): each forward carries the store write
  * that follows the daemon's answer, so the child's row tracks what the
  * task did to it.
@@ -26,6 +26,7 @@ import type {
 
 /** The daemon's answers to a start that leaves the container running: started, or already running. */
 const STARTED_STATUSES: ReadonlySet<number> = new Set([204, 304]);
+const RESTARTED_STATUS = 204;
 const REMOVED_STATUS = 204;
 
 /**
@@ -47,8 +48,8 @@ export interface ChildContext extends OwnershipLookups, ChildCapContext {
   /** Insert a created child's row; `record_failed` once its container is gone. */
   recordChild(child: ChildRecord): Promise<Result<void, ProxyRejection>>;
   /**
-   * Follow a child's start in its row. `not_found`, naming `ref`, when the
-   * row had finished meanwhile and the container has been removed.
+   * Follow a child's start in its row. `not_found`, naming `ref`, when a
+   * reap finished the row meanwhile and the container has been removed.
    */
   childStarted(child: TaskContainerRow, ref: string): Promise<Result<void, ProxyRejection>>;
   /** Follow a child's removal in its row. */
@@ -70,14 +71,16 @@ export async function planContainerCreate(
   if (anchor.isErr()) return err(anchor.error);
   const body = await ctx.readBody();
   if (body.isErr()) return err(body.error);
+  // The task's own row is read before the policy's daemon lookups: with no
+  // live row there is nothing to look anything up for.
+  const owned = await ownedContainers(ctx);
+  if (owned.isErr()) return err(owned.error);
   const created = await applyContainerCreatePolicy(
     { body: body.value, query },
     { scope, anchor: anchor.value },
     ctx.createLookups,
   );
   if (created.isErr()) return err(created.error);
-  const owned = await ownedContainers(ctx);
-  if (owned.isErr()) return err(owned.error);
   const admitted = await admitWithinCap(owned.value.liveChildren, ctx);
   return admitted.map((admission) => {
     const child: Omit<ChildRecord, "dockerId"> = {
@@ -113,8 +116,9 @@ function anchorOf(scope: TaskScope): Result<TaskAnchor, ProxyRejection> {
 /**
  * A child's start, sent with no body. A body is the `HostConfig` of API
  * versions before 1.24, which the daemon refuses past seven bytes: `null`
- * and `{}` mean nothing and are accepted, and anything else is denied.
- * Once the daemon has started the child, its row moves to `running`.
+ * and `{}` mean nothing and are accepted, and anything else, whitespace
+ * alone included, is denied. Once the daemon has started the child, its
+ * row moves to `running`.
  */
 export async function planChildStart(
   target: ContainerTarget,
@@ -136,6 +140,32 @@ export async function planChildStart(
         kind: "child_transition",
         settle: async (status) =>
           STARTED_STATUSES.has(status) ? ctx.childStarted(child, target.ref) : ok(undefined),
+      },
+    }),
+  );
+}
+
+/**
+ * A child's restart, forwarded as it came. A restart that the daemon
+ * answers 204 has left the child running, so its row moves as a start's.
+ */
+export async function planChildRestart(
+  target: ContainerTarget,
+  query: URLSearchParams,
+  ctx: ChildContext,
+): Promise<Result<Forward, ProxyRejection>> {
+  const owned = await ownedContainer(ctx, target);
+  return owned.map(
+    (child): Forward => ({
+      path: withQuery(
+        `${target.versionPrefix}/containers/${child.dockerId}${target.suffix}`,
+        query,
+      ),
+      body: { kind: "piped" },
+      response: {
+        kind: "child_transition",
+        settle: async (status) =>
+          status === RESTARTED_STATUS ? ctx.childStarted(child, target.ref) : ok(undefined),
       },
     }),
   );
@@ -175,11 +205,11 @@ export async function planChildRemove(
   );
 }
 
+/** No body is zero bytes; whitespace alone is a body, and not JSON. */
 function isEmptyStartBody(body: Buffer): boolean {
-  const text = body.toString("utf8").trim();
-  if (text === "") return true;
+  if (body.length === 0) return true;
   try {
-    return EmptyStartBodySchema.safeParse(JSON.parse(text)).success;
+    return EmptyStartBodySchema.safeParse(JSON.parse(body.toString("utf8"))).success;
   } catch {
     // Not JSON, so not one of the bodies that mean nothing.
     return false;

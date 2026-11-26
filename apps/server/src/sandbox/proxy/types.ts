@@ -56,8 +56,10 @@ export interface TaskContainerRow {
   /** The row's id, which a child's `parentId` names. */
   readonly id: string;
   readonly dockerId: string;
-  /** `null` for a depth-0 row, and only for one. */
+  /** `null` for a depth-0 row. */
   readonly parentId: string | null;
+  /** 0 for a depth-0 container, 1 for a child. */
+  readonly depth: number;
   readonly status: "starting" | "running" | "exited";
 }
 
@@ -106,12 +108,13 @@ export interface ChildRecordFailed {
 }
 
 /**
- * What a child's `start` left its row as. `running` covers a row that was
- * already `running`: a child stopped and started again. `finished` is a
- * row another path moved to `exited` or `reaped` meanwhile, whose container
- * has been killed and removed.
+ * Whether a child's start stands. `started` covers a row moved to
+ * `running`, one already `running` (a child stopped and started again), and
+ * one already `exited` because the child is gone (a `--rm` child that ran,
+ * exited and removed itself before the row write). `reaped` is a row a reap
+ * finished meanwhile, whose container has been killed and removed.
  */
-export type ChildStartOutcome = { kind: "running" } | { kind: "finished" };
+export type ChildStartOutcome = { kind: "started" } | { kind: "reaped" };
 
 /**
  * The store writes that follow the daemon's answers to a task's child
@@ -121,7 +124,7 @@ export type ChildStartOutcome = { kind: "running" } | { kind: "finished" };
 export interface ChildContainers {
   /** Insert the child's row. A failed insert removes the container, with its anonymous volumes. */
   record(child: ChildRecord): ResultAsync<void, ChildRecordFailed>;
-  /** `starting → running` once the daemon has started the child. */
+  /** `starting → running` once the daemon has started or restarted the child. */
   started(child: TaskContainerRow): ResultAsync<ChildStartOutcome, StoreFailed>;
   /** `→ exited` once the daemon has removed the child at the task's request. */
   removed(child: TaskContainerRow): ResultAsync<void, StoreFailed>;

@@ -66,17 +66,19 @@ beforeEach(async () => {
   const taskRow = expectDefined(SCOPE.anchor, "the scope's anchor").rowId;
   containerRows.forTask.mockReturnValue(
     okAsync([
-      { id: taskRow, dockerId: TASK_CONTAINER.id, parentId: null, status: "running" },
+      { id: taskRow, dockerId: TASK_CONTAINER.id, parentId: null, depth: 0, status: "running" },
       {
         id: "019d0000-0000-7000-8000-00000000c001",
         dockerId: LINKED_CHILD.id,
         parentId: taskRow,
+        depth: 1,
         status: "running",
       },
       {
         id: "019d0000-0000-7000-8000-00000000c002",
         dockerId: CLI_CHILD.id,
         parentId: taskRow,
+        depth: 1,
         status: "running",
       },
     ]),

@@ -1,8 +1,7 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import * as http from "node:http";
 import * as net from "node:net";
-import { join } from "node:path";
-import { addAbortSignal, type Duplex } from "node:stream";
+import type { Duplex } from "node:stream";
 import { type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
@@ -17,7 +16,6 @@ import {
   fetchRootless,
   refLookups,
 } from "./daemon-lookups.js";
-import { type ExecIdRegistry, ExecIds } from "./exec-ids.js";
 import { forward, pipeUpgrade, respondInternalError, type Upstream } from "./forward.js";
 import {
   isAbortError,
@@ -29,7 +27,6 @@ import {
   writeRawRejectionAndDestroy,
   writeRawStatusAndDestroy,
 } from "./http-io.js";
-import { type CreateTracker, InFlightCreates } from "./in-flight-creates.js";
 import {
   planRequest,
   planStream,
@@ -39,6 +36,7 @@ import {
 } from "./plan.js";
 import { malformed, type ProxyRejection, unavailable } from "./rejection.js";
 import { classify } from "./router.js";
+import { type TaskSocket, TaskSockets } from "./task-sockets.js";
 import type {
   ChildContainers,
   ContainerRows,
@@ -87,20 +85,12 @@ const MAX_BUFFERED_BODY_BYTES = 1 * 1024 * 1024;
 const MAX_HEADERS = 100;
 
 /**
- * How long teardown waits for a task's container creates in flight before
- * it aborts them: long enough for the daemon to answer a create and the
- * row insert to land, so the cascade finds the child.
- */
-const CREATES_SETTLE_MS = 30_000;
-
-/**
- * Per-connection tag — set by the per-task net.Server's `connection`
- * listener: the task socket that accepted the connection. Its handlers read
- * that socket's scope on each request, so a `registerTask` update mid-flight
- * (once the supervisor has the task container's row) takes effect without
- * re-binding the socket, and once the socket's teardown has begun, its
- * connections stay `unavailable` even when the task registers again on a
- * new socket.
+ * Per-connection tag — set as a task socket accepts the connection: the
+ * socket, whose state its handlers read on each request. A `registerTask`
+ * update mid-flight (once the supervisor has the task container's row)
+ * takes effect without re-binding the socket, and once the socket's
+ * teardown has begun its connections stay `unavailable`, even when the
+ * task registers again on a new socket.
  */
 interface ConnectionTask {
   task: TaskSocket;
@@ -113,33 +103,6 @@ interface ConnectionTask {
 }
 
 const CONNECTION_TASK = new WeakMap<net.Socket, ConnectionTask>();
-
-/**
- * A registered task's socket. `controller` aborts at the end of
- * `unregisterTask`, and at once on `close`, which destroys every connection
- * accepted on the socket and every upstream connection opened for one —
- * hijacked streams included, so the listener's `close()` never waits on a
- * container. Upstream connections opened for its clients are bound to its
- * signal, but an admitted create's (`creates`).
- */
-interface TaskSocket {
-  taskId: string;
-  socketPath: string;
-  controller: AbortController;
-  /** Resolves once the listener is bound; rejects if binding failed. */
-  listening: Promise<net.Server>;
-  /** The live scope; `null` from the first step of the socket's teardown. */
-  scope: TaskScope | null;
-  /**
-   * The exec ids the daemon answered 201 with to an exec create sent
-   * through the socket: the only ids its exec routes accept. Shared by its
-   * connections and capped (`exec-ids.ts`); it lives as long as the socket,
-   * and a process restart loses it with the containers.
-   */
-  execIds: ExecIdRegistry;
-  /** The container creates admitted on the socket. */
-  creates: CreateTracker;
-}
 
 /**
  * Unix-socket Docker daemon proxy. Listens on multiple per-task socket
@@ -158,21 +121,10 @@ interface TaskSocket {
  */
 export class CogmoSocketProxy {
   #hostDockerSocket: string;
-  #socketDir: string;
   /** Shared HTTP server that processes parsed requests from any task socket. */
   #httpServer: http.Server;
-  /**
-   * One per task, keyed by taskId. Set before the listener binds, so an
-   * `unregisterTask` or `close` racing `registerTask` finds it.
-   */
-  #tasks = new Map<string, TaskSocket>();
-  /** Task sockets being torn down, with each teardown, which `close` aborts and awaits. */
-  #retiring = new Map<TaskSocket, Promise<void>>();
-  /**
-   * Each task's teardown in progress, which a second `unregisterTask` for
-   * the task joins, so its cascade too waits for the creates admitted.
-   */
-  #unregistering = new Map<string, Promise<void>>();
+  /** The per-task sockets, whose lifecycle `task-sockets.ts` owns. */
+  #sockets: TaskSockets;
   /**
    * The daemon's Os/Arch, read once it is first needed: the host's platform
    * cannot change while this process runs. A failed read is retried by the
@@ -187,11 +139,16 @@ export class CogmoSocketProxy {
   #rootless: (signal: AbortSignal) => Promise<Result<boolean, LookupFailure>>;
   #containerRows: ContainerRows;
   #children: ChildContainers;
-  #closed = false;
 
   private constructor(opts: ProxyOptions) {
     this.#hostDockerSocket = opts.hostDockerSocket ?? DEFAULT_HOST_DOCKER_SOCKET;
-    this.#socketDir = opts.socketDir;
+    this.#sockets = new TaskSockets({
+      socketDir: opts.socketDir,
+      onConnection: (socket, task) => {
+        CONNECTION_TASK.set(socket, { task, openResponses: new Set() });
+        this.#httpServer.emit("connection", socket);
+      },
+    });
     this.#containerRows = opts.containerRows;
     this.#children = opts.childContainers;
     const socketPath = this.#hostDockerSocket;
@@ -232,148 +189,38 @@ export class CogmoSocketProxy {
   }
 
   /**
-   * Upsert a task scope. On first call for a `taskId`: allocate the socket,
-   * bind a `net.Server` to it, and return the absolute socket path the
-   * supervisor mounts into the container at `/var/run/docker.sock`. On
-   * subsequent calls: replace the live scope (so a supervisor that registers
-   * with no anchor and updates once it has the task container's row
-   * doesn't disrupt connections in flight). Returns the same path either
-   * way so callers can store it once at first register.
-   *
-   * Rejects if the socket can't be bound, and when `unregisterTask` or
-   * `close` runs before the bind completes.
+   * Upsert a task scope, returning the socket path the supervisor mounts
+   * into the task container at `/var/run/docker.sock`. A task with no live
+   * registration gets a socket of its own, bound before this resolves; an
+   * upsert of a live one replaces its scope (so a supervisor that registers
+   * with no anchor and updates once it has the task container's row doesn't
+   * disrupt connections in flight) and keeps its path. Rejects if the
+   * socket can't be bound, and when `unregisterTask` or `close` runs before
+   * the bind completes.
    */
-  async registerTask(scope: TaskScope): Promise<string> {
-    if (this.#closed) throw new Error("proxy is closed");
-    const { taskId } = scope;
-    let task = this.#tasks.get(taskId);
-    if (!task) {
-      task = this.#openTaskSocket(scope);
-      this.#tasks.set(taskId, task);
-    }
-    task.scope = scope;
-    try {
-      await task.listening;
-    } catch (err) {
-      if (this.#tasks.get(taskId) === task) this.#tasks.delete(taskId);
-      throw err;
-    }
-    // A close or an unregister during the bind owns the task's teardown;
-    // the socket is not usable.
-    task.controller.signal.throwIfAborted();
-    if (this.#tasks.get(taskId) !== task) throw new Error("task socket unregistered");
-    return task.socketPath;
+  registerTask(scope: TaskScope): Promise<string> {
+    return this.#sockets.register(scope);
   }
 
   /**
    * Close and remove a task's socket, ending every connection made through
-   * it, in the teardown order of design/sandbox.md → Child containers: the
-   * creates admitted on it have settled, or 30 seconds have passed, before
-   * this resolves and the cascade after it lists the task's rows. A call for
-   * a task already being torn down joins that teardown, and resolves with
-   * it. Idempotent.
+   * it, in the teardown order of design/sandbox.md → Proxy Design → Teardown
+   * order: the creates admitted on it have settled, or 30 seconds have
+   * passed, before this resolves and the cascade after it lists the task's
+   * rows. A call for a task already being torn down, by an earlier call or
+   * by `close`, joins that teardown. Idempotent.
    */
   unregisterTask(taskId: string): Promise<void> {
-    const task = this.#tasks.get(taskId);
-    const pending = this.#unregistering.get(taskId);
-    if (task === undefined) return pending ?? Promise.resolve();
-    this.#tasks.delete(taskId);
-    const torn = this.#retire(task, CREATES_SETTLE_MS);
-    const teardown =
-      pending === undefined ? torn : Promise.all([pending, torn]).then(() => undefined);
-    this.#unregistering.set(taskId, teardown);
-    const forget = () => {
-      if (this.#unregistering.get(taskId) === teardown) this.#unregistering.delete(taskId);
-    };
-    teardown.then(forget, forget);
-    return teardown;
+    return this.#sockets.unregister(taskId);
   }
 
   /**
-   * Tear down all task sockets and the shared HTTP server, at once: every
-   * create in flight is aborted, with no wait for it, a teardown already
-   * waiting included, and each teardown has finished before this resolves.
+   * Tear down every task socket at once, aborting every create in flight
+   * with no wait for it, and then the shared HTTP server.
    */
   async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    const closed = new Error("proxy is closed");
-    const registered = [...this.#tasks.values()];
-    this.#tasks.clear();
-    for (const task of [...registered, ...this.#retiring.keys()]) abortTask(task, closed);
-    for (const task of registered) this.#retire(task, 0);
-    await Promise.all([...this.#retiring.values()]);
+    await this.#sockets.closeAll();
     await new Promise<void>((resolve) => this.#httpServer.close(() => resolve()));
-  }
-
-  /**
-   * One socket's teardown: drop its scope and admit no more creates; stop
-   * accepting; wait up to `settleMs` for the creates admitted; then end
-   * every connection, and any create still in flight with them.
-   */
-  #retire(task: TaskSocket, settleMs: number): Promise<void> {
-    task.scope = null;
-    task.creates.stopAdmitting();
-    const torn = (async () => {
-      const server = await task.listening.catch(() => null);
-      const listenerClosed =
-        server === null
-          ? Promise.resolve()
-          : new Promise<void>((resolve) => server.close(() => resolve()));
-      await task.creates.settled(settleMs);
-      abortTask(task, new Error("task socket unregistered"));
-      await listenerClosed;
-      // A registration of the same task during the wait owns the path.
-      if (!this.#tasks.has(task.taskId)) await rm(task.socketPath, { force: true });
-    })();
-    this.#retiring.set(task, torn);
-    const forget = () => this.#retiring.delete(task);
-    torn.then(forget, forget);
-    return torn;
-  }
-
-  #openTaskSocket(scope: TaskScope): TaskSocket {
-    const { taskId } = scope;
-    const socketPath = join(this.#socketDir, `${taskId}.sock`);
-    const controller = new AbortController();
-    const { signal } = controller;
-    // Half-open, as an HTTP server's own sockets are, for upgrades: a client
-    // that ends its side after sending stdin (`echo hi | docker exec -i`)
-    // still reads the daemon's output, and one that ends its side once its
-    // upgrade request is complete still gets the answer. A connection Node's
-    // HTTP server still owns, an ordinary request's or an upgrade's whose
-    // body is still arriving, is ended by Node when the client ends its
-    // side, and an answer still owed is dropped.
-    // The listener accepts nothing before it is bound, by which time `task` is.
-    const server = net.createServer({ allowHalfOpen: true }, (socket) => {
-      // Destroys the socket at once if it was accepted after the abort.
-      addAbortSignal(signal, socket);
-      CONNECTION_TASK.set(socket, { task, openResponses: new Set() });
-      this.#httpServer.emit("connection", socket);
-    });
-    server.on("error", (err) => log.warn({ err: err.message, taskId }, "task socket error"));
-    const listening = (async () => {
-      await rm(socketPath, { force: true });
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(socketPath, () => {
-          server.removeListener("error", reject);
-          resolve();
-        });
-      });
-      log.info({ taskId, socketPath }, "registered task proxy socket");
-      return server;
-    })();
-    const task: TaskSocket = {
-      taskId,
-      socketPath,
-      controller,
-      listening,
-      scope,
-      execIds: new ExecIds(),
-      creates: new InFlightCreates(),
-    };
-    return task;
   }
 
   // ── HTTP request dispatch ────────────────────────────────────────────────
@@ -387,13 +234,21 @@ export class CogmoSocketProxy {
     }
     connection.openResponses.add(res);
     res.once("close", () => connection.openResponses.delete(res));
-    const { scope } = connection.task;
-    if (scope === null) {
+    match(connection.task.state)
+      .with({ kind: "serving" }, ({ scope }) => this.#handleServed(req, res, connection, scope))
       // The socket is being torn down; nothing is forwarded from here on.
-      this.#reject(req, res, connection.task.taskId, unavailable("the task is being torn down"));
-      return;
-    }
+      .with({ kind: "retiring" }, () =>
+        this.#reject(req, res, connection.task.taskId, unavailable("the task is being torn down")),
+      )
+      .exhaustive();
+  }
 
+  #handleServed(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    connection: ConnectionTask,
+    scope: TaskScope,
+  ): void {
     if (atHeaderLimit(req)) {
       this.#reject(req, res, scope.taskId, { kind: "headers_too_large", limit: MAX_HEADERS });
       return;
@@ -503,16 +358,28 @@ export class CogmoSocketProxy {
       writeRawStatusAndDestroy(clientSocket, 500, "Cogmo proxy: connection has no task scope");
       return;
     }
-    const { scope } = connection.task;
-    if (scope === null) {
-      const rejection = unavailable("the task is being torn down");
-      log.info(
-        { taskId: connection.task.taskId, path: pathOf(req), rejection },
-        "proxy request rejected",
-      );
-      writeRawRejectionAndDestroy(clientSocket, rejection);
-      return;
-    }
+    match(connection.task.state)
+      .with({ kind: "serving" }, ({ scope }) =>
+        this.#handleServedUpgrade(req, clientSocket, head, connection, scope),
+      )
+      .with({ kind: "retiring" }, () => {
+        const rejection = unavailable("the task is being torn down");
+        log.info(
+          { taskId: connection.task.taskId, path: pathOf(req), rejection },
+          "proxy request rejected",
+        );
+        writeRawRejectionAndDestroy(clientSocket, rejection);
+      })
+      .exhaustive();
+  }
+
+  #handleServedUpgrade(
+    req: http.IncomingMessage,
+    clientSocket: Duplex,
+    head: Buffer,
+    connection: ConnectionTask,
+    scope: TaskScope,
+  ): void {
     // Node hands the connection over at the upgrade's headers, while an
     // earlier request's answer may still be streaming on it; any byte written
     // now would land inside that answer, so the connection is closed instead.
@@ -588,7 +455,7 @@ export class CogmoSocketProxy {
   }
 
   #upstream(connection: ConnectionTask): Upstream {
-    return { socketPath: this.#hostDockerSocket, signal: connection.task.controller.signal };
+    return { socketPath: this.#hostDockerSocket, signal: connection.task.signal };
   }
 
   #streamContext(connection: ConnectionTask, scope: TaskScope): StreamContext {
@@ -615,7 +482,7 @@ export class CogmoSocketProxy {
       scope,
       createLookups: daemonLookups({
         socketPath: this.#hostDockerSocket,
-        signal: connection.task.controller.signal,
+        signal: connection.task.signal,
         hostPlatform: this.#hostPlatform,
         rootless: this.#rootless,
       }),
@@ -625,12 +492,6 @@ export class CogmoSocketProxy {
       ...childWrites(this.#children, scope.taskId),
     };
   }
-}
-
-/** End every connection of a task, and the creates in flight on it. A second abort is a no-op. */
-function abortTask(task: TaskSocket, reason: Error): void {
-  task.controller.abort(reason);
-  task.creates.abort(reason);
 }
 
 /** Whether the request carries as many headers as the server collects (`MAX_HEADERS`). */

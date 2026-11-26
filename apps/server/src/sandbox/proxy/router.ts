@@ -55,6 +55,8 @@ export type RequestRoute =
   | { kind: "container"; target: ContainerTarget }
   /** A child's `start`, whose row follows the daemon's answer. */
   | { kind: "child_start"; target: ContainerTarget }
+  /** A child's `restart`, whose row follows the daemon's answer as a start's does. */
+  | { kind: "child_restart"; target: ContainerTarget }
   /** A child's `DELETE`, whose row follows the daemon's answer. */
   | { kind: "child_remove"; target: ContainerTarget }
   /** `POST /images/create`, under its query policy. */
@@ -93,7 +95,7 @@ interface Row {
   outcome: (groups: ReadonlyArray<string>, versionPrefix: string, route: string) => Outcome;
 }
 
-const LIFECYCLE_ACTIONS = "kill|pause|unpause|restart|stop|rename";
+const LIFECYCLE_ACTIONS = "kill|pause|unpause|stop|rename";
 
 /** A row forwarded under its canonical path with no ownership check. */
 function plainRow(method: string, pattern: RegExp): Row {
@@ -152,6 +154,11 @@ const ROWS: ReadonlyArray<Row> = [
     method: "POST",
     pattern: /^\/containers\/(.+)\/(start)$/,
     outcome: (g, v) => request({ kind: "child_start", target: container("POST", "child", g, v) }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/(restart)$/,
+    outcome: (g, v) => request({ kind: "child_restart", target: container("POST", "child", g, v) }),
   },
   {
     method: "POST",

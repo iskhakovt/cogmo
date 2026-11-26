@@ -3,9 +3,9 @@ Containers a coding task creates through the Docker API proxy are recorded as it
 - **Child rows.** When the daemon answers a proxy create with 201, the child's `containers` row is inserted in `starting` before the client gets its answer. The row records the task's container as its parent, depth 1, and the task's id, instance, TTL and effective resource limits. If the insert fails, the container is killed and removed, and the client gets a 500.
 - **Owned children.** Ownership reads the task's own row and its children, so every request on a child the task created now reaches the daemon under its full id.
 - **Lifecycle.**
-  - A proxy `start` moves the row to `running` (a 304 for an already-running child counts too). If the row was already reaped, the container is killed.
+  - A proxy `start` or `restart` moves the row to `running` (a 304 for an already-running child counts too). If a reap finished the row first, the container is killed and the start answered 404. A `docker run --rm` child that exits and removes itself before the row write still gets its start's 204.
   - A `DELETE` moves the row to `exited` and is forwarded with `v=true`. A true `link` is refused; the `link=False` docker-py and testcontainers-python send is read as the daemon reads it.
-  - `start` takes no body, `{}` or `null`, and is forwarded with none.
+  - `start` takes no body, `{}` or `null`, and is forwarded with none; whitespace alone is refused.
   - The row is written even if the client hangs up before the daemon's answer.
   - A 17th live child is refused, counting creates still in flight. Before refusing, the proxy checks the task's children against the daemon, so ones removed by `AutoRemove` (`docker run --rm`) stop counting.
 - **Cleanup.**

@@ -6,7 +6,7 @@
  */
 
 import * as net from "node:net";
-import { errAsync, okAsync } from "neverthrow";
+import { errAsync, ok, okAsync, ResultAsync } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
@@ -93,6 +93,19 @@ describe("a child's create", () => {
 
     expect(r.status, r.body).toBe(409);
     expect(h.children.record).not.toHaveBeenCalled();
+  });
+
+  it("answers unavailable with no daemon lookup, even for an image the daemon lacks, while the task's own row is missing", async () => {
+    h.rows.forTask.mockReturnValue(okAsync(TASK_ROWS.filter((row) => row.id !== OWN_ROW.id)));
+
+    const r = await h.send(
+      "POST",
+      "/containers/create",
+      JSON.stringify({ Image: "no-such:image" }),
+    );
+
+    expect(r.status, r.body).toBe(503);
+    expect(h.received()).toEqual([]);
   });
 
   it("answers unavailable, before any daemon create, while the task's own row is missing", async () => {
@@ -192,7 +205,7 @@ describe("a child's start", () => {
   });
 
   it("answers 404 for a child whose row finished while it started", async () => {
-    h.children.started.mockReturnValue(okAsync({ kind: "finished" }));
+    h.children.started.mockReturnValue(okAsync({ kind: "reaped" }));
 
     const r = await h.send("POST", `/containers/${CHILD.name}/start`);
 
@@ -239,6 +252,22 @@ describe("a child's start", () => {
   });
 });
 
+describe("a child's restart", () => {
+  it("moves the child's row as a start does once the daemon has restarted it", async () => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.includes("/restart")) return API(req, res, raw);
+      res.writeHead(204);
+      res.end();
+    });
+
+    const r = await h.send("POST", `/containers/${CHILD.name}/restart?t=0`);
+
+    expect(r.status, r.body).toBe(204);
+    expect(h.received().at(-1)).toBe(`POST /containers/${CHILD.id}/restart?t=0`);
+    expect(h.children.started).toHaveBeenCalledWith(CHILD_ROW);
+  });
+});
+
 describe("a child's removal", () => {
   it("moves the child's row once the daemon has removed it", async () => {
     const r = await h.send("DELETE", `/containers/${CHILD.name}?force=1`);
@@ -279,6 +308,7 @@ describe("the child cap", () => {
     id: `019d0000-0000-7000-8000-0000000c${String(n).padStart(4, "0")}`,
     dockerId: `child-${n}`,
     parentId: n % 2 === 0 ? OWN_ROW.id : "019d0000-0000-7000-8000-00000000aaa0",
+    depth: 1,
     status: n % 3 === 0 ? ("starting" as const) : ("running" as const),
   }));
   const reachedCreate = () =>
@@ -370,5 +400,118 @@ describe("teardown", () => {
     await vi.waitFor(() =>
       expect(Buffer.concat(chunks).toString("latin1")).toContain("503 Service Unavailable"),
     );
+  });
+
+  /** A create the daemon never answers, which keeps the teardown waiting; resolves once it is held. */
+  async function holdCreate(alsoHold: (path: string) => boolean): Promise<{
+    releaseHeld: () => void;
+  }> {
+    const held = Promise.withResolvers<void>();
+    const parked: Array<() => void> = [];
+    let creates = 0;
+    h.daemon.setResponder((req, res, raw) => {
+      if (req.url.startsWith("/containers/create")) {
+        creates += 1;
+        if (creates === 1) held.resolve();
+        return;
+      }
+      if (alsoHold(req.url)) {
+        parked.push(() => API(req, res, raw));
+        return;
+      }
+      API(req, res, raw);
+    });
+    void h
+      .send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }))
+      .catch(() => {});
+    await held.promise;
+    return {
+      releaseHeld: () =>
+        parked.splice(0).forEach((answer) => {
+          answer();
+        }),
+    };
+  }
+
+  const createsReached = () =>
+    h.received().filter((line) => line.startsWith("POST /containers/create")).length;
+
+  it("answers a create whose checks finish after the teardown began unavailable, forwarding nothing", async () => {
+    let inspects = 0;
+    const { releaseHeld } = await holdCreate((url) => {
+      if (!url.startsWith("/images/")) return false;
+      inspects += 1;
+      // The first create's inspect is answered; the second's is held.
+      return inspects >= 2;
+    });
+    const second = h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+    await vi.waitFor(() =>
+      expect(h.received().filter((l) => l.startsWith("GET /images/"))).toHaveLength(2),
+    );
+
+    void h.proxy.unregisterTask(SCOPE.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseHeld();
+
+    expect((await second).status).toBe(503);
+    expect(createsReached()).toBe(1);
+  });
+
+  it("answers a create whose cap reconcile finishes after the teardown began unavailable, forwarding nothing", async () => {
+    const fifteen = Array.from({ length: 15 }, (_, n) => ({
+      ...CHILD_ROW,
+      id: `019d0000-0000-7000-8000-0000000d${String(n).padStart(4, "0")}`,
+      dockerId: `held-child-${n}`,
+    }));
+    h.rows.forTask.mockReturnValue(okAsync([OWN_ROW, ...fifteen]));
+    await holdCreate(() => false);
+    const reconciled = Promise.withResolvers<ReadonlyArray<TaskContainerRow>>();
+    h.children.reconcile.mockReturnValue(
+      new ResultAsync(
+        reconciled.promise.then((live) => ok<ReadonlyArray<TaskContainerRow>, never>(live)),
+      ),
+    );
+    // 15 rows and the held create: the second is at the cap.
+    const second = h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+    await vi.waitFor(() => expect(h.children.reconcile).toHaveBeenCalledTimes(1));
+
+    void h.proxy.unregisterTask(SCOPE.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    reconciled.resolve(fifteen.slice(1));
+
+    expect((await second).status).toBe(503);
+    expect(createsReached()).toBe(1);
+  });
+});
+
+describe("a client that hangs up before the lifecycle request is sent", () => {
+  it.each([
+    ["POST", `/containers/${CHILD.name}/start`],
+    ["POST", `/containers/${CHILD.name}/restart`],
+    ["DELETE", `/containers/${CHILD.name}`],
+  ])("gets no %s %s sent, and no row written", async (method, path) => {
+    const parked: Array<() => void> = [];
+    h.daemon.setResponder((req, res, raw) => {
+      if (req.url === `/containers/${CHILD.name}/json`) {
+        parked.push(() => API(req, res, raw));
+        return;
+      }
+      API(req, res, raw);
+    });
+    const client = net.createConnection({ path: h.socket });
+    client.on("error", () => {});
+    client.write(`${method} ${path} HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n`);
+    await vi.waitFor(() => expect(parked).toHaveLength(1));
+
+    client.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    parked.splice(0).forEach((answer) => {
+      answer();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(h.received()).toEqual([`GET /containers/${CHILD.name}/json`]);
+    expect(h.children.started).not.toHaveBeenCalled();
+    expect(h.children.removed).not.toHaveBeenCalled();
   });
 });

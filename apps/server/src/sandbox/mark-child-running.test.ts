@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import { expectOk } from "../test/assertions.js";
@@ -82,7 +82,7 @@ describe("markChildRunning", () => {
       { id, dockerId: "child-container", at: AT },
     );
 
-    expect(expectOk(outcome)).toEqual({ kind: "running" });
+    expect(expectOk(outcome)).toEqual({ kind: "started" });
     const row = await tx((trx) => store.getContainer(trx, id));
     expect(row).toMatchObject({ status: "running", startedAt: AT });
     expect(container.kill).not.toHaveBeenCalled();
@@ -97,30 +97,63 @@ describe("markChildRunning", () => {
       { id, dockerId: "child-container", at: AT },
     );
 
-    expect(expectOk(outcome)).toEqual({ kind: "running" });
+    expect(expectOk(outcome)).toEqual({ kind: "started" });
     expect((await tx((trx) => store.getContainer(trx, id)))?.startedAt).toBeNull();
     expect(container.kill).not.toHaveBeenCalled();
   });
 
-  it.each(["exited", "reaped"] as const)(
-    "kills and removes the container of a row another path moved to %s",
-    async (status) => {
-      const { docker, container } = stubDocker();
-      const id = await childRowIn(status);
+  it("kills and removes the container of a row a reap finished while it started", async () => {
+    const { docker, container } = stubDocker();
+    const id = await childRowIn("reaped");
 
-      const outcome = await markChildRunning(
-        { store, runInTx: tx, docker },
-        { id, dockerId: "child-container", at: AT },
-      );
+    const outcome = await markChildRunning(
+      { store, runInTx: tx, docker },
+      { id, dockerId: "child-container", at: AT },
+    );
 
-      expect(expectOk(outcome)).toEqual({ kind: "finished" });
-      expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
-      expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
-      expect((await tx((trx) => store.getContainer(trx, id)))?.status).toBe(status);
-    },
-  );
+    expect(expectOk(outcome)).toEqual({ kind: "reaped" });
+    expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+    expect((await tx((trx) => store.getContainer(trx, id)))?.status).toBe("reaped");
+  });
 
-  it("is finished even when the daemon refuses the kill", async () => {
+  it("keeps the daemon's answer, killing nothing, for a row moved to exited because the child is gone", async () => {
+    // A `--rm` child that exited and removed itself after its start.
+    const { docker, container } = stubDocker();
+    const id = await childRowIn("exited");
+
+    const outcome = await markChildRunning(
+      { store, runInTx: tx, docker },
+      { id, dockerId: "child-container", at: AT },
+    );
+
+    expect(expectOk(outcome)).toEqual({ kind: "started" });
+    expect(container.kill).not.toHaveBeenCalled();
+    expect(container.remove).not.toHaveBeenCalled();
+    expect((await tx((trx) => store.getContainer(trx, id)))?.status).toBe("exited");
+  });
+
+  it("rejects, as the bug it is, a transition stale while its row is still starting", async () => {
+    const { docker } = stubDocker();
+    const id = await childRow();
+    const transition = vi.spyOn(store, "transitionContainerStatus").mockResolvedValueOnce({
+      kind: "stale",
+      status: "starting",
+    });
+
+    try {
+      await expect(
+        markChildRunning(
+          { store, runInTx: tx, docker },
+          { id, dockerId: "child-container", at: AT },
+        ),
+      ).rejects.toThrow(/stale/);
+    } finally {
+      transition.mockRestore();
+    }
+  });
+
+  it("is reaped even when the daemon refuses the kill", async () => {
     const { docker, container } = stubDocker();
     container.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
     const id = await childRowIn("reaped");
@@ -130,7 +163,7 @@ describe("markChildRunning", () => {
       { id, dockerId: "child-container", at: AT },
     );
 
-    expect(expectOk(outcome)).toEqual({ kind: "finished" });
+    expect(expectOk(outcome)).toEqual({ kind: "reaped" });
     expect(container.remove).not.toHaveBeenCalled();
   });
 });

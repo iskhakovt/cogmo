@@ -7,6 +7,7 @@ import Docker from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { Transactor } from "../db/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { requestOverSocket } from "../test/fake-docker-daemon.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { sessionNetwork } from "../test/session-network.js";
@@ -499,7 +500,13 @@ describe("LocalDockerSandboxClient with the socket proxy (real Docker, runc runt
       network: "bridge",
       dockerSocket: true,
     });
-    const socket = join(socketDir, `${taskId}.sock`);
+    // The task socket, as the supervisor bound it into the task container.
+    const binds = (await docker.getContainer(session.state.dockerId).inspect()).HostConfig.Binds;
+    const bind = expectDefined(
+      binds?.find((b) => b.endsWith(":/var/run/docker.sock")),
+      "the task socket's bind",
+    );
+    const socket = bind.slice(0, -":/var/run/docker.sock".length);
     try {
       const created = await requestOverSocket(socket, {
         method: "POST",

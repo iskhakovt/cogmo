@@ -27,18 +27,21 @@ afterAll(async () => {
   await close();
 });
 
-/** A daemon whose inspect of each id answers as `answers` says, and 200 for any other. */
-function daemonAnswering(answers: Readonly<Record<string, number>>): DockerFacade {
+/**
+ * A daemon whose inspect of each id answers as `answers` says: an HTTP
+ * error status, or the container's state; any other id is running.
+ */
+function daemonAnswering(answers: Readonly<Record<string, number | "exited">>): DockerFacade {
   const docker = mock<DockerFacade>();
   docker.getContainer.mockImplementation((id) => {
     const container = mock<DockerContainer>();
     const status = answers[id];
-    if (status === undefined) {
-      container.inspect.mockResolvedValue({ State: { Status: "running" } });
-    } else {
+    if (typeof status === "number") {
       container.inspect.mockRejectedValue(
         Object.assign(new Error(`daemon ${status}`), { statusCode: status }),
       );
+    } else {
+      container.inspect.mockResolvedValue({ State: { Status: status ?? "running" } });
     }
     return container;
   });
@@ -61,7 +64,7 @@ async function child(dockerId: string): Promise<TaskContainerRow> {
       instanceId: instance.id,
     }),
   );
-  return { id: row.id, dockerId, parentId: row.parentId, status: "starting" };
+  return { id: row.id, dockerId, parentId: row.parentId, depth: 1, status: "starting" };
 }
 
 describe("reconcileChildContainers", () => {
@@ -77,6 +80,36 @@ describe("reconcileChildContainers", () => {
     expect(live).toEqual([present]);
     expect((await tx((trx) => store.getContainer(trx, removed.id)))?.status).toBe("exited");
     expect((await tx((trx) => store.getContainer(trx, present.id)))?.status).toBe("starting");
+  });
+
+  it("moves a child the daemon lost to exited, freeing its place, though a start moved its row after the read", async () => {
+    const read = await child("auto-removed");
+    await tx((trx) =>
+      store.transitionContainerStatus(trx, {
+        id: read.id,
+        at: new Date(),
+        from: "starting",
+        to: "running",
+      }),
+    );
+    const docker = daemonAnswering({ "auto-removed": 404 });
+
+    const live = expectOk(await reconcileChildContainers({ store, runInTx: tx, docker }, [read]));
+
+    expect(live).toEqual([]);
+    expect((await tx((trx) => store.getContainer(trx, read.id)))?.status).toBe("exited");
+  });
+
+  it("keeps a child that exited but was not removed, and its place", async () => {
+    const stopped = await child("stopped");
+    const docker = daemonAnswering({ stopped: "exited" });
+
+    const live = expectOk(
+      await reconcileChildContainers({ store, runInTx: tx, docker }, [stopped]),
+    );
+
+    expect(live).toEqual([stopped]);
+    expect((await tx((trx) => store.getContainer(trx, stopped.id)))?.status).toBe("starting");
   });
 
   it("counts a child whose inspect fails otherwise as live, writing nothing", async () => {

@@ -109,7 +109,7 @@ export function forward(
   });
   // A client that hangs up before its answer is complete, even before the
   // daemon has answered at all (a `wait`), closes the daemon request with
-  // it; a child's start or removal goes on, since its row follows the answer.
+  // it; a child's start, restart or removal goes on, since its row follows the answer.
   if (boundToClient(plan.response)) {
     res.once("close", () => {
       if (!res.writableFinished) outgoing.destroy(hungUp);
@@ -302,7 +302,7 @@ function relayBuffered(
   });
 }
 
-/** Whether a forward ends with its client: all but a child's start or removal. */
+/** Whether a forward ends with its client: all but a child's start, restart or removal. */
 function boundToClient(how: ResponseRelay): boolean {
   return match(how)
     .with({ kind: "piped" }, { kind: "container_list" }, { kind: "events" }, () => true)
