@@ -96,6 +96,12 @@ interface ConnectionTask {
    * containers.
    */
   execIds: ExecIdRegistry;
+  /**
+   * The responses the HTTP server holds open on this connection. A parser
+   * error after a request that is still being answered cannot be answered
+   * itself without overtaking that answer.
+   */
+  openResponses: Set<http.ServerResponse>;
 }
 
 const CONNECTION_TASK = new WeakMap<net.Socket, ConnectionTask>();
@@ -172,13 +178,17 @@ export class CogmoSocketProxy {
     this.#httpServer.on("clientError", (err, socket) => {
       // Node's parser fails a request past `maxHeadersCount` headers, or
       // past 16 KiB of them, before there is a request to classify; it is
-      // answered 431, as Node's own handler would, and logged as a refused
-      // request is.
+      // logged as a refused request is, and answered 431 as Node's own
+      // handler would, unless an earlier request on the connection is still
+      // being answered, when the connection is closed instead.
       if ("code" in err && err.code === "HPE_HEADER_OVERFLOW") {
         const rejection: ProxyRejection = { kind: "headers_too_large", limit: MAX_HEADERS };
-        const taskId =
-          socket instanceof net.Socket ? CONNECTION_TASK.get(socket)?.taskId : undefined;
-        log.info({ taskId, rejection }, "proxy request rejected");
+        const connection = socket instanceof net.Socket ? CONNECTION_TASK.get(socket) : undefined;
+        log.info({ taskId: connection?.taskId, rejection }, "proxy request rejected");
+        if (connection !== undefined && connection.openResponses.size > 0) {
+          socket.destroy();
+          return;
+        }
         writeRawRejectionAndDestroy(socket, rejection);
         return;
       }
@@ -256,16 +266,17 @@ export class CogmoSocketProxy {
     const controller = new AbortController();
     const { signal } = controller;
     const execIds = new ExecIds();
-    // Half-open, as an HTTP server's own sockets are: on an upgrade, a
-    // client that ends its side after sending stdin (`echo hi | docker exec
-    // -i`) still reads the daemon's output, and one that ends its side once
-    // its request is complete still gets an answer. Node's HTTP server ends
-    // the connection itself when the client ends its side while a request
-    // is still being parsed, an upgrade's body included.
+    // Half-open, as an HTTP server's own sockets are, for upgrades: a client
+    // that ends its side after sending stdin (`echo hi | docker exec -i`)
+    // still reads the daemon's output, and one that ends its side once its
+    // upgrade request is complete still gets the answer. A connection Node's
+    // HTTP server still owns, an ordinary request's or an upgrade's whose
+    // body is still arriving, is ended by Node when the client ends its
+    // side, and an answer still owed is dropped.
     const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       // Destroys the socket at once if it was accepted after the abort.
       addAbortSignal(signal, socket);
-      CONNECTION_TASK.set(socket, { taskId, signal, execIds });
+      CONNECTION_TASK.set(socket, { taskId, signal, execIds, openResponses: new Set() });
       this.#httpServer.emit("connection", socket);
     });
     server.on("error", (err) => log.warn({ err: err.message, taskId }, "task socket error"));
@@ -288,6 +299,10 @@ export class CogmoSocketProxy {
 
   #handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     const connection = CONNECTION_TASK.get(req.socket);
+    if (connection !== undefined) {
+      connection.openResponses.add(res);
+      res.once("close", () => connection.openResponses.delete(res));
+    }
     const scope = connection ? this.#scopes.get(connection.taskId) : undefined;
     if (!connection || !scope) {
       // No scope tag — the connection didn't come through a registered task

@@ -2,7 +2,7 @@ import * as net from "node:net";
 import { errAsync, okAsync } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { resolvesWithin } from "../../test/assertions.js";
+import { expectDefined, resolvesWithin } from "../../test/assertions.js";
 import { requestOverSocket, respondJson } from "../../test/fake-docker-daemon.js";
 import {
   API,
@@ -400,13 +400,41 @@ describe("exec ownership", () => {
 });
 
 describe("upgraded streams", () => {
-  it("answers 404 to an upgrade to a container the task does not own", async () => {
+  it.each([
+    ["an attach", "POST", "/attach?stream=1"],
+    ["a websocket attach", "GET", "/attach/ws?stream=1"],
+  ])("answers 404 to %s on a container the task does not own", async (_label, method, suffix) => {
     const reply = await h.rawExchange(
-      upgradeRequest("POST", `/containers/${SIBLING.name}/attach?stream=1`),
+      upgradeRequest(method, `/containers/${SIBLING.name}${suffix}`),
     );
 
     expect(reply).toMatch(/^HTTP\/1\.1 404 /);
     expect(h.received()).toEqual([resolveOf(SIBLING.name)]);
+  });
+
+  it("forwards a websocket handshake on an owned attach under the full id", async () => {
+    const reply = await h.upgradeExchange(
+      [
+        "GET /containers/cogmo-task-own/attach/ws?stream=1&stdout=1 HTTP/1.1",
+        "Host: docker",
+        "Connection: Upgrade",
+        "Upgrade: websocket",
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version: 13",
+        "",
+        "",
+      ].join("\r\n"),
+    );
+
+    expect(reply).toMatch(/^HTTP\/1\.1 101 /);
+    const handshake = expectDefined(h.daemon.requests().at(-1), "the handshake");
+    expect(handshake.url).toBe(`/containers/${OWN.id}/attach/ws?stream=1&stdout=1`);
+    expect(handshake.headers).toMatchObject({
+      connection: "Upgrade, close",
+      upgrade: "websocket",
+      "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+      "sec-websocket-version": "13",
+    });
   });
 
   it("forwards and answers an upgrade whose client ended its side during the checks", async () => {

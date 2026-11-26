@@ -26,6 +26,8 @@ interface HalfOpenClient {
   socket: net.Socket;
   /** Everything read so far, as latin1. */
   received(): string;
+  /** Resolves once the proxy has ended its side. */
+  ended: Promise<void>;
   closed: Promise<void>;
 }
 
@@ -40,9 +42,30 @@ async function halfOpenClient(): Promise<HalfOpenClient> {
   socket.on("data", (c: Buffer) => {
     received += c.toString("latin1");
   });
+  const ended = new Promise<void>((resolve) => socket.once("end", () => resolve()));
   const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
   await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
-  return { socket, received: () => received, closed };
+  return { socket, received: () => received, ended, closed };
+}
+
+/**
+ * Wait until `client` has read a whole raw answer matching `answer`, then
+ * keep writing, as a client that never ends its side, until the proxy
+ * releases the connection.
+ */
+async function expectReleasedAfter(client: HalfOpenClient, answer: RegExp): Promise<void> {
+  await vi.waitFor(() => expect(client.received()).toMatch(answer));
+  const writing = setInterval(() => client.socket.write("more"), 25);
+  try {
+    await resolvesWithin(client.closed, SETTLE_MS, "the proxy to release the connection");
+  } finally {
+    clearInterval(writing);
+  }
+}
+
+/** A raw rejection with `status`, whole: the proxy's answers end in a JSON line. */
+function rawAnswer(status: number): RegExp {
+  return new RegExp(`^HTTP/1\\.1 ${status} [\\s\\S]*\\r\\n\\r\\n\\{.*\\}\\n$`);
 }
 
 /** A raw client on the task's socket, collecting everything it reads. */
@@ -370,6 +393,25 @@ describe("the checks on an upgrade", () => {
     },
   );
 
+  it.each([
+    [
+      "a request",
+      `GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n${fillerHeaders(99)}\r\n\r\n`,
+    ],
+    ["an upgrade", upgradeWith("e".repeat(64), `${fillerHeaders(96)}\r\n`, "")],
+  ])("logs %s with 101 headers once, as the parser refused it", async (_label, request) => {
+    log.info.mockClear();
+
+    await h.rawExchange(request);
+
+    expect(log.info.mock.calls).toEqual([
+      [
+        { taskId: TASK_ID, rejection: { kind: "headers_too_large", limit: 100 } },
+        "proxy request rejected",
+      ],
+    ]);
+  });
+
   it("answers 431 to an upgrade whose one header passes 16 KiB, logging it and reaching nothing", async () => {
     const id = await createExec();
     const before = h.daemon.started();
@@ -497,7 +539,7 @@ describe("a switched upgrade", () => {
 
     await resolvesWithin(client.closed, SETTLE_MS, "the stream to end");
     expect(client.received()).toMatch(/\r\n\r\nlate-output\n$/);
-    expect(h.daemon.streams().map((s) => s.received)).toEqual(["stdin\n"]);
+    expect(h.daemon.upgrades().map((u) => u.received)).toEqual(["stdin\n"]);
   });
 
   it("forwards an upgrade whose client ends its side with the last of the body", async () => {
@@ -532,8 +574,30 @@ describe("a switched upgrade", () => {
       "the upgrade",
     );
     expect(start.body).toBe(BODY);
-    expect(h.daemon.streams()).toEqual([
-      { url: `/exec/${id}/start`, received: "MARKER-ONEMARKER-TWO" },
+    expect(h.daemon.upgrades()).toMatchObject([
+      { url: `/exec/${id}/start`, answer: "switched", received: "MARKER-ONEMARKER-TWO" },
+    ]);
+  });
+
+  it("sends a body split across writes, and the bytes after it, once each and in order", async () => {
+    const id = await createExec();
+    const client = await halfOpenClient();
+    const request = upgradeStart(id, BODY);
+    client.socket.write(request.slice(0, -10));
+    await settle(100);
+
+    client.socket.write(`${request.slice(-10)}MARKER-ONE`);
+    await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 101 /));
+    client.socket.end("MARKER-TWO");
+    await resolvesWithin(client.closed, SETTLE_MS, "the stream to end");
+
+    const start = expectDefined(
+      h.daemon.requests().find((r) => r.url === `/exec/${id}/start`),
+      "the upgrade",
+    );
+    expect(start.body).toBe(BODY);
+    expect(h.daemon.upgrades()).toMatchObject([
+      { url: `/exec/${id}/start`, answer: "switched", received: "MARKER-ONEMARKER-TWO" },
     ]);
   });
 
@@ -550,24 +614,114 @@ describe("a switched upgrade", () => {
   });
 });
 
+describe("a raw answer to a client that keeps its side open", () => {
+  const UNKNOWN_EXEC = "e".repeat(64);
+
+  it("releases the connection after an upgrade's rejection", async () => {
+    const client = await halfOpenClient();
+
+    client.socket.write(upgradeRequest("POST", `/exec/${UNKNOWN_EXEC}/start`));
+
+    await expectReleasedAfter(client, rawAnswer(404));
+  });
+
+  it("releases the connection after a rejection while the body is still arriving", async () => {
+    const client = await halfOpenClient();
+
+    client.socket.write(
+      `POST /exec/${UNKNOWN_EXEC}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\n` +
+        "Upgrade: tcp\r\nContent-Length: 10\r\n\r\n",
+    );
+
+    await expectReleasedAfter(client, rawAnswer(404));
+  });
+
+  it("releases the connection after the parser's 431", async () => {
+    const client = await halfOpenClient();
+
+    client.socket.write(`GET /_ping HTTP/1.1\r\nHost: docker\r\n${fillerHeaders(100)}\r\n\r\n`);
+
+    await expectReleasedAfter(client, rawAnswer(431));
+  });
+
+  it("releases the connection after an upgrade's 502", async () => {
+    const id = await createExec();
+    await h.daemon.close();
+    const client = await halfOpenClient();
+
+    client.socket.write(upgradeRequest("POST", `/exec/${id}/start`));
+
+    await expectReleasedAfter(client, rawAnswer(502));
+  });
+
+  it("releases the connection after the daemon refuses an upgrade and closes its own", async () => {
+    const id = await createExec();
+    const client = await halfOpenClient();
+
+    client.socket.write(upgradeStart(id, '{"Detach":true}'));
+
+    await expectReleasedAfter(client, /^HTTP\/1\.1 200 [\s\S]*\r\n\r\n\{\}$/);
+    await vi.waitFor(() =>
+      expect(h.daemon.upgrades()).toMatchObject([{ answer: "refused", closed: true }]),
+    );
+  });
+});
+
+describe("a parser error behind a request still being answered", () => {
+  it.each([
+    ["101 headers", fillerHeaders(100)],
+    ["a header past 16 KiB", `X-Big: ${"x".repeat(16 * 1024)}`],
+  ])("closes the connection rather than answer ahead of it, for %s", async (_label, headers) => {
+    const release = Promise.withResolvers<void>();
+    h.daemon.setResponder((req, res, raw) => {
+      if (req.url !== "/_ping") return API(req, res, raw);
+      release.promise.then(() => API(req, res, raw));
+    });
+    const client = await halfOpenClient();
+    client.socket.write("GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n");
+    await vi.waitFor(() => expect(reached("/_ping")).toEqual(["GET /_ping"]));
+
+    client.socket.write(`GET /_ping HTTP/1.1\r\nHost: docker\r\n${headers}\r\n\r\n`);
+
+    // Bytes the proxy left unread make its close a reset rather than an end.
+    await resolvesWithin(
+      Promise.race([client.ended, client.closed]),
+      SETTLE_MS,
+      "the connection to close",
+    );
+    expect(client.received()).toBe("");
+    release.resolve();
+    client.socket.destroy();
+  });
+});
+
 describe("a task socket torn down under an upgrade", () => {
   it.each([
-    ["with a complete request", "Content-Length: 0\r\n\r\n"],
-    ["with its body still to come", "Content-Length: 10\r\n\r\n"],
-  ])("closes a refused upgrade %s whose client keeps its side open", async (_label, framing) => {
-    const client = await halfOpenClient();
-    client.socket.write(
-      `POST /exec/${"e".repeat(64)}/start HTTP/1.1\r\nHost: docker\r\n` +
-        `Connection: Upgrade\r\nUpgrade: tcp\r\n${framing}`,
-    );
-    await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 404 /));
+    ["before the daemon answers", true, ""],
+    [
+      "after the daemon's 101",
+      false,
+      "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+    ],
+  ])(
+    "closes both connections of a live upgrade %s, appending nothing",
+    async (_label, hold, answered) => {
+      const id = await createExec();
+      if (hold) h.daemon.holdUpgrades();
+      const client = await halfOpenClient();
+      client.socket.write(upgradeStart(id, '{"Detach":false,"Tty":false}'));
+      await vi.waitFor(() => expect(h.daemon.upgrades()).toHaveLength(1));
+      await vi.waitFor(() => expect(client.received()).toBe(answered));
 
-    await resolvesWithin(h.proxy.unregisterTask(TASK_ID), SETTLE_MS, "the teardown to finish");
-    // The proxy's side is gone, so the client's next write fails and closes it.
-    client.socket.write("after the teardown");
+      await resolvesWithin(h.proxy.unregisterTask(TASK_ID), SETTLE_MS, "the teardown to finish");
 
-    await resolvesWithin(client.closed, SETTLE_MS, "the client to see the close");
-  });
+      await resolvesWithin(client.ended, SETTLE_MS, "the client connection to close");
+      await vi.waitFor(() => expect(h.daemon.upgrades()).toMatchObject([{ closed: true }]));
+      await settle(100);
+      expect(client.received()).toBe(answered);
+      client.socket.destroy();
+    },
+  );
 
   it("closes an upgrade whose body is still arriving", async () => {
     const id = await createExec();
@@ -669,6 +823,29 @@ describe("streams and relays", () => {
     const reply = await h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`));
 
     expect(reply).toMatch(/^HTTP\/1\.1 502 /);
+  });
+
+  it("answers 502 to an upgrade whose daemon connection closes cleanly before its first byte", async () => {
+    const id = await createExec();
+    await h.daemon.close();
+    // Reads what it is sent, so its end is a clean one rather than a reset.
+    const closer = net.createServer((socket) => {
+      socket.resume();
+      socket.once("data", () => socket.end());
+    });
+    await new Promise<void>((resolve) => closer.listen(h.daemon.socketPath, resolve));
+    try {
+      const reply = await resolvesWithin(
+        h.rawExchange(upgradeRequest("POST", `/exec/${id}/start`)),
+        SETTLE_MS,
+        "the proxy to answer",
+      );
+
+      expect(reply).toMatch(/^HTTP\/1\.1 502 /);
+      expect(reply).toContain("the daemon closed the connection before answering");
+    } finally {
+      await new Promise<void>((resolve) => closer.close(() => resolve()));
+    }
   });
 
   it("answers 502 to an upgrade the daemon resets before its first byte", async () => {

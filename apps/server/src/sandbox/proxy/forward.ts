@@ -155,30 +155,44 @@ export function pipeUpgrade(
     }
   };
   // Until the daemon's first byte nothing has reached the client, which gets
-  // a 502 for a failed dial or a reset; after it, the stream just ends.
-  const failedUnanswered = (cause: Error) => {
+  // a 502 for a failed dial, a reset or a clean close; after it, a failure
+  // just ends the stream.
+  const answered = () => daemon.bytesRead > 0;
+  daemon.on("error", (cause) => {
     warn(cause);
+    if (answered()) {
+      clientSocket.destroy(cause);
+      return;
+    }
     writeRawRejectionAndDestroy(
       clientSocket,
       daemonFailed(`Cogmo proxy upstream error: ${cause.message}`),
     );
-  };
-  daemon.once("error", failedUnanswered);
+  });
+  // The daemon connection's end ends the client's and releases it once the
+  // rest of the output is flushed, whether or not the client has ended its
+  // side.
+  daemon.once("end", () => {
+    // Nothing the client sends from here has anywhere to go.
+    clientSocket.unpipe(daemon);
+    if (answered()) {
+      clientSocket.end(() => clientSocket.destroy());
+      return;
+    }
+    log.warn({ path: pathOf(req) }, "upstream closed before answering an upgrade");
+    writeRawRejectionAndDestroy(
+      clientSocket,
+      daemonFailed("Cogmo proxy: the daemon closed the connection before answering"),
+    );
+  });
   daemon.once("connect", () => {
     daemon.write(buildUpgradePreamble(req, path, body));
     if (head.length > 0) daemon.write(head);
-    // `pipe` carries each side's end to the other, and neither connection
-    // closes on its peer's end: a client that ends its side after sending
-    // stdin still reads the daemon's output.
+    // `pipe` carries the client's end to the daemon, and the client's
+    // connection stays open after it: a client that ends its side after
+    // sending stdin still reads the daemon's output.
     clientSocket.pipe(daemon);
-    daemon.pipe(clientSocket);
-    daemon.once("data", () => {
-      daemon.removeListener("error", failedUnanswered);
-      daemon.on("error", (cause) => {
-        warn(cause);
-        clientSocket.destroy(cause);
-      });
-    });
+    daemon.pipe(clientSocket, { end: false });
   });
   clientSocket.on("error", () => daemon.destroy());
 }

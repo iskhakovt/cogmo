@@ -32,16 +32,24 @@ export interface FakeDockerDaemon {
   started(): ReadonlyArray<string>;
   /** Connections accepted so far. */
   connections(): number;
-  /** Each upgrade the daemon switched, with the bytes the client sent after the request's body. */
-  streams(): ReadonlyArray<FakeUpgradedStream>;
+  /** Every upgrade received, in arrival order, once its body ended. */
+  upgrades(): ReadonlyArray<FakeUpgrade>;
+  /** Answer no upgrade from now on: record each and hold its connection open. */
+  holdUpgrades(): void;
   setResponder(responder: FakeDaemonResponder): void;
   close(): Promise<void>;
 }
 
-export interface FakeUpgradedStream {
+export interface FakeUpgrade {
   url: string;
-  /** As latin1, one character per octet. */
+  /** `101`, a refusal (200 or 400), or no answer (`holdUpgrades`). */
+  answer: "switched" | "refused" | "held";
+  /**
+   * What the client sent after the request's body, as latin1, one character
+   * per octet; after a refusal, only what came with the request.
+   */
   received: string;
+  closed: boolean;
 }
 
 export async function startFakeDockerDaemon(
@@ -51,8 +59,9 @@ export async function startFakeDockerDaemon(
   const received: FakeDaemonRequest[] = [];
   const started: string[] = [];
   let connections = 0;
-  const streams: FakeUpgradedStream[] = [];
-  const upgraded = new Set<Duplex>();
+  const upgrades: FakeUpgrade[] = [];
+  const upgradeSockets = new Set<Duplex>();
+  let holding = false;
   let current = responder;
   const server = http.createServer((raw, res) => {
     started.push(`${raw.method} ${raw.url}`);
@@ -77,21 +86,37 @@ export async function startFakeDockerDaemon(
   // side, writes `late-output` and ends; or, for a detached start or a body
   // that is not JSON, a plain 200 or 400 and no switch. After a refusal the
   // connection is kept open and parsed as HTTP again, unless the request's
-  // `Connection` holds `close`, as Go's server does.
+  // `Connection` holds `close`, as Go's server does. A held upgrade gets no
+  // answer, and its connection stays open, recording what the client sends,
+  // until the client ends its side, when the daemon closes it.
   server.on("upgrade", (raw: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     started.push(`${raw.method} ${raw.url}`);
     readUpgradeBody(raw, head)
       .then(({ body, rest }) => {
         received.push({ method: raw.method ?? "", url: raw.url ?? "", headers: raw.headers, body });
         const refusal = upgradeRefusal(body);
+        const upgrade: FakeUpgrade = {
+          url: raw.url ?? "",
+          answer: holding ? "held" : refusal === null ? "switched" : "refused",
+          received: rest.toString("latin1"),
+          closed: false,
+        };
+        upgrades.push(upgrade);
+        upgradeSockets.add(socket);
+        socket.on("error", () => {});
+        socket.once("close", () => {
+          upgrade.closed = true;
+        });
+        const record = (chunk: Buffer) => {
+          upgrade.received += chunk.toString("latin1");
+        };
+        if (upgrade.answer === "held") {
+          socket.on("data", record);
+          socket.once("end", () => socket.end());
+          return;
+        }
         if (refusal === null) {
-          const stream = { url: raw.url ?? "", received: rest.toString("latin1") };
-          streams.push(stream);
-          upgraded.add(socket);
-          socket.on("error", () => {});
-          socket.on("data", (chunk: Buffer) => {
-            stream.received += chunk.toString("latin1");
-          });
+          socket.on("data", record);
           // A client that ended its side before the switch has already been read to its end.
           const endStream = () => socket.end("late-output\n");
           if (socket.readableEnded) endStream();
@@ -124,12 +149,15 @@ export async function startFakeDockerDaemon(
     requests: () => [...received],
     started: () => [...started],
     connections: () => connections,
-    streams: () => streams.map((stream) => ({ ...stream })),
+    upgrades: () => upgrades.map((upgrade) => ({ ...upgrade })),
+    holdUpgrades: () => {
+      holding = true;
+    },
     setResponder: (next) => {
       current = next;
     },
     close: async () => {
-      for (const socket of upgraded) socket.destroy();
+      for (const socket of upgradeSockets) socket.destroy();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

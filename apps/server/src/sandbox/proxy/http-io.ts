@@ -26,7 +26,8 @@ export function respondRejection(res: http.ServerResponse, rejection: ProxyRejec
 
 /**
  * Answer a rejection on a raw client socket and close it, where no
- * `http.ServerResponse` is around (an upgrade).
+ * `http.ServerResponse` is around (an upgrade, or a request Node's parser
+ * failed).
  */
 export function writeRawRejectionAndDestroy(socket: Duplex, rejection: ProxyRejection): void {
   writeRawStatusAndDestroy(socket, rejectionStatus(rejection), rejectionMessage(rejection));
@@ -40,7 +41,9 @@ export function writeRawStatusAndDestroy(socket: Duplex, status: number, message
     `Content-Length: ${Buffer.byteLength(body)}\r\n` +
     `Connection: close\r\n` +
     `\r\n${body}`;
-  socket.end(reply);
+  // A half-open connection stays open while the client keeps its side open,
+  // so the socket is released once the answer is flushed.
+  socket.end(reply, () => socket.destroy());
 }
 
 /**
