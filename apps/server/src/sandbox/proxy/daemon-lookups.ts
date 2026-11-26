@@ -1,9 +1,10 @@
 /**
- * `DaemonLookups` over the host Docker socket: the image inspect, the
- * daemon's platform and the address published ports bind to, which the
- * create policy needs. Every
- * failure is a value. A lookup is bound to the task's abort signal, so a
- * teardown ends it with the task's other daemon connections.
+ * `DaemonLookups` and `RefLookups` over the host Docker socket: the image
+ * inspect, the daemon's platform and the address published ports bind to,
+ * which the create policy needs, and the container and network inspects
+ * that resolve a ref to its full id. Every failure is a value. A lookup is
+ * bound to the task's abort signal, so a teardown ends it with the task's
+ * other daemon connections.
  */
 
 import * as http from "node:http";
@@ -11,8 +12,16 @@ import { isIPv4 } from "node:net";
 import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 import { describeError } from "../../util/describe-error.js";
-import { malformed, notFound, unavailable } from "./rejection.js";
-import type { DaemonLookups, HostPlatform, ImageFacts, LookupFailure } from "./types.js";
+import { malformed, notFound, type ProxyRejection, unavailable } from "./rejection.js";
+import { encodePath } from "./request-path.js";
+import type {
+  DaemonLookups,
+  HostPlatform,
+  ImageFacts,
+  LookupFailure,
+  RefLookups,
+  ResolveFailure,
+} from "./types.js";
 
 /** An image's config, labels included, is the task's own data: bound it. */
 const MAX_REPLY_BYTES = 4 * 1024 * 1024;
@@ -38,6 +47,9 @@ const VersionSchema = z.object({ Os: z.string().min(1), Arch: z.string().min(1) 
 const InfoSchema = z.object({ SecurityOptions: z.array(z.string()).nullable().optional() });
 
 const DaemonErrorSchema = z.object({ message: z.string() });
+
+/** An inspect's `Id`: a full id, safe to put in a forwarded path. */
+const InspectIdSchema = z.object({ Id: z.string().regex(/^[0-9a-f]{64}$/) });
 
 const NetworkInspectSchema = z.object({
   IPAM: z.object({
@@ -71,6 +83,22 @@ export function daemonLookups(args: {
       if (rootless.isErr()) return err(rootless.error);
       return rootless.value ? ok(ROOTLESS_PUBLISH_ADDRESS) : bridgeGateway(socketPath, signal);
     },
+  };
+}
+
+export function refLookups(args: { socketPath: string; signal: AbortSignal }): RefLookups {
+  const { socketPath, signal } = args;
+  return {
+    resolveContainer: (ref) =>
+      resolveRef(socketPath, `/containers/${encodePath(ref)}/json`, signal, {
+        missing: `No such container: ${ref}`,
+        what: `the container inspect for ${ref}`,
+      }),
+    resolveNetwork: (ref) =>
+      resolveRef(socketPath, `/networks/${encodePath(ref)}`, signal, {
+        missing: `network ${ref} not found`,
+        what: `the network inspect for ${ref}`,
+      }),
   };
 }
 
@@ -158,6 +186,28 @@ async function bridgeGateway(
   });
 }
 
+/**
+ * The full id an inspect resolves a ref to. A 404, or the 400 the daemon
+ * gives an ambiguous id prefix, is `not_found` in the daemon's 404 wording:
+ * a ref that does not name exactly one object is answered as a missing one.
+ */
+async function resolveRef(
+  socketPath: string,
+  path: string,
+  signal: AbortSignal,
+  wording: { missing: string; what: string },
+): Promise<Result<string, ResolveFailure>> {
+  const reply = await getJson(socketPath, path, signal);
+  return reply.andThen((answer): Result<string, ResolveFailure> => {
+    const { status, body } = answer;
+    if (status === 404 || status === 400) return err(notFound(wording.missing));
+    const parsed = InspectIdSchema.safeParse(body);
+    return status === 200 && parsed.success
+      ? ok(parsed.data.Id)
+      : err(unavailable(`${wording.what} answered ${answered(answer)}`));
+  });
+}
+
 function daemonReason(body: unknown): string {
   const parsed = DaemonErrorSchema.safeParse(body);
   return parsed.success ? parsed.data.message : "the daemon refused it";
@@ -167,7 +217,7 @@ function getJson(
   socketPath: string,
   path: string,
   signal: AbortSignal,
-): Promise<Result<DaemonReply, LookupFailure>> {
+): Promise<Result<DaemonReply, Extract<ProxyRejection, { kind: "unavailable" }>>> {
   return new Promise((resolve) => {
     const fail = (cause: unknown) =>
       resolve(err(unavailable(`GET ${path}: ${describeError(cause)}`)));

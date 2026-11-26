@@ -3,34 +3,39 @@ import * as http from "node:http";
 import * as net from "node:net";
 import { join } from "node:path";
 import { addAbortSignal } from "node:stream";
-import { err, type Result } from "neverthrow";
-import { match, P } from "ts-pattern";
+import { type Result, ResultAsync } from "neverthrow";
+import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
-import { applyContainerCreatePolicy } from "./create-policy.js";
 import {
   cachedOnSuccess,
   daemonLookups,
   fetchHostPlatform,
   fetchRootless,
+  refLookups,
 } from "./daemon-lookups.js";
-import { applyExecPolicy } from "./exec-policy.js";
+import { forward, pipeRaw, pipeUpgrade, respondInternalError, type Upstream } from "./forward.js";
 import {
-  buildHttpRequestPreamble,
-  cloneHeaders,
   isAbortError,
-  queryOf,
+  pathOf,
   readBody,
   respondJson,
   respondRejection,
   writeRawRejectionAndDestroy,
   writeRawStatusAndDestroy,
 } from "./http-io.js";
-import { malformed, type ProxyRejection } from "./rejection.js";
+import { planRequest, planStream, type RequestContext, type StreamContext } from "./plan.js";
+import { malformed, type ProxyRejection, unavailable } from "./rejection.js";
 import { classify } from "./router.js";
-import type { HostPlatform, LookupFailure, ProxyOptions, TaskScope } from "./types.js";
+import type {
+  ContainerRows,
+  HostPlatform,
+  LookupFailure,
+  ProxyOptions,
+  TaskScope,
+} from "./types.js";
 
-export type { ProxyOptions, TaskScope } from "./types.js";
+export type { OwnedContainer, ProxyOptions, TaskScope } from "./types.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
 
@@ -45,21 +50,21 @@ const DEFAULT_HOST_DOCKER_SOCKET = "/var/run/docker.sock";
  */
 const MAX_REWRITTEN_BODY_BYTES = 1 * 1024 * 1024;
 
-/** A request a body policy rebuilt: where to send it and what. */
-interface Rewritten {
-  path: string;
-  body: Buffer;
-}
-
 /**
  * Per-connection task tag — set by the per-task net.Server's `connection`
  * listener. Connection handlers look up the live scope via `#scopes.get(taskId)`
  * each request, so a `registerTask` update mid-flight (e.g. once the
  * supervisor learns the parent docker id) takes effect immediately without
  * re-binding the socket. `signal` is the task's: upstream connections opened
- * for this client are bound to it.
+ * for this client are bound to it. `execIds` is the task's.
  */
-const CONNECTION_TASK = new WeakMap<net.Socket, { taskId: string; signal: AbortSignal }>();
+interface ConnectionTask {
+  taskId: string;
+  signal: AbortSignal;
+  execIds: Set<string>;
+}
+
+const CONNECTION_TASK = new WeakMap<net.Socket, ConnectionTask>();
 
 /**
  * A registered task's socket. `controller` aborts on `unregisterTask` and
@@ -72,16 +77,24 @@ interface TaskSocket {
   controller: AbortController;
   /** Resolves once the listener is bound; rejects if binding failed. */
   listening: Promise<net.Server>;
+  /**
+   * The exec ids the daemon answered 201 with to an exec create sent
+   * through this socket: the only ids its exec routes accept. They live as
+   * long as the socket; a process restart loses them with the containers.
+   */
+  execIds: Set<string>;
 }
 
 /**
  * Unix-socket Docker daemon proxy. Listens on multiple per-task socket
  * paths simultaneously; each task gets its own private socket so the socket
- * path itself is the identity. HTTP/1.1 requests forward to the host
- * `/var/run/docker.sock`; hijacked / upgraded endpoints get raw bidirectional
- * piping; a container create or exec create is buffered and rebuilt by its
- * policy, then forwarded. The supervisor allocates a task's socket on
- * `create` and binds it into the task container at `/var/run/docker.sock`.
+ * path itself is the identity. Each request is classified against the
+ * route table, checked (ownership of the container or exec it names, or a
+ * body policy) and forwarded to the host `/var/run/docker.sock` under the
+ * canonical path it was classified by; stream endpoints get raw
+ * bidirectional piping once their checks pass. The supervisor allocates a
+ * task's socket on `create` and binds it into the task container at
+ * `/var/run/docker.sock`.
  *
  * Single Node `http.Server` handles all parsed HTTP traffic; a tiny
  * `net.Server` per task socket tags each accepted connection with its
@@ -111,11 +124,13 @@ export class CogmoSocketProxy {
    * one listens on its own user's socket. A failed read is retried.
    */
   #rootless: (signal: AbortSignal) => Promise<Result<boolean, LookupFailure>>;
+  #containerRows: ContainerRows;
   #closed = false;
 
   private constructor(opts: ProxyOptions) {
     this.#hostDockerSocket = opts.hostDockerSocket ?? DEFAULT_HOST_DOCKER_SOCKET;
     this.#socketDir = opts.socketDir;
+    this.#containerRows = opts.containerRows;
     const socketPath = this.#hostDockerSocket;
     this.#hostPlatform = cachedOnSuccess((signal) => fetchHostPlatform(socketPath, signal));
     this.#rootless = cachedOnSuccess((signal) => fetchRootless(socketPath, signal));
@@ -200,10 +215,11 @@ export class CogmoSocketProxy {
     const socketPath = join(this.#socketDir, `${taskId}.sock`);
     const controller = new AbortController();
     const { signal } = controller;
+    const execIds = new Set<string>();
     const server = net.createServer((socket) => {
       // Destroys the socket at once if it was accepted after the abort.
       addAbortSignal(signal, socket);
-      CONNECTION_TASK.set(socket, { taskId, signal });
+      CONNECTION_TASK.set(socket, { taskId, signal, execIds });
       this.#httpServer.emit("connection", socket);
     });
     server.on("error", (err) => log.warn({ err: err.message, taskId }, "task socket error"));
@@ -219,7 +235,7 @@ export class CogmoSocketProxy {
       log.info({ taskId, socketPath }, "registered task proxy socket");
       return server;
     })();
-    return { socketPath, controller, listening };
+    return { socketPath, controller, listening, execIds };
   }
 
   // ── HTTP request dispatch ────────────────────────────────────────────────
@@ -234,197 +250,77 @@ export class CogmoSocketProxy {
       return;
     }
 
-    const route = classify(req.method ?? "GET", req.url ?? "/");
+    const classified = classify(req.method ?? "GET", req.url ?? "/");
     log.debug(
-      { taskId: scope.taskId, method: req.method, path: pathOf(req), route: route.kind },
+      { taskId: scope.taskId, method: req.method, path: pathOf(req), route: classified.kind },
       "proxy request",
     );
-
-    const { signal } = connection;
-    const target = req.url ?? "/";
-    match(route)
-      .with({ kind: "reject" }, ({ rejection }) => {
-        respondRejection(res, rejection);
-        // Drain the body so Node can free the parser state.
-        req.resume();
-      })
-      .with({ kind: "container_create" }, ({ versionPrefix }) => {
-        const lookups = daemonLookups({
-          socketPath: this.#hostDockerSocket,
-          signal,
-          hostPlatform: this.#hostPlatform,
-          rootless: this.#rootless,
-        });
-        this.#rewriteAndForward(req, res, scope, signal, (body) =>
-          applyContainerCreatePolicy({ body, query: queryOf(target) }, scope, lookups).map(
-            (forward) => ({
-              path: `${versionPrefix}/containers/create${forward.query === "" ? "" : `?${forward.query}`}`,
-              body: forward.body,
-            }),
+    const upstream = this.#upstream(connection);
+    match(classified)
+      .with({ kind: "reject" }, ({ rejection }) => this.#reject(req, res, scope, rejection))
+      .with({ kind: "request" }, ({ route, query }) =>
+        this.#serve(req, res, scope, upstream.signal, async () =>
+          (await planRequest(route, query, this.#requestContext(req, scope, connection))).map(
+            (plan) => () => forward(req, res, upstream, plan),
           ),
-        );
-      })
-      .with({ kind: "exec_create" }, () => {
-        this.#rewriteAndForward(req, res, scope, signal, (body) =>
-          applyExecPolicy(body).map((rebuilt) => ({ path: target, body: rebuilt })),
-        );
-      })
-      .with({ kind: "hijack" }, () => this.#hijackRequest(req, res, signal))
-      .with({ kind: "forward" }, () => this.#forwardRequest(req, res, signal))
+        ),
+      )
+      .with({ kind: "stream" }, ({ route, query }) =>
+        this.#serve(req, res, scope, upstream.signal, async () =>
+          (await planStream(route, query, this.#streamContext(connection))).map(
+            (path) => () => pipeRaw(req, res, upstream, path),
+          ),
+        ),
+      )
       .exhaustive();
   }
 
   /**
-   * Buffer the body, rebuild it through `rewrite`, and forward the result;
-   * a rejection is answered here. A throw is a bug, logged and answered 500.
+   * Run a request's checks, then its forward; a rejection is answered here.
+   * A throw, from the checks or the forward, is a bug, logged and answered
+   * 500.
    */
-  #rewriteAndForward(
+  #serve(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     scope: TaskScope,
     signal: AbortSignal,
-    rewrite: (
-      body: Buffer,
-    ) => PromiseLike<Result<Rewritten, ProxyRejection>> | Result<Rewritten, ProxyRejection>,
+    plan: () => Promise<Result<() => void, ProxyRejection>>,
   ): void {
-    const run = async () => {
-      const read = await readBody(req, MAX_REWRITTEN_BODY_BYTES);
-      const rewritten = read.isOk() ? await rewrite(read.value) : err(read.error);
-      rewritten.match(
-        ({ path, body }) => this.#forwardWithBody(req, res, path, body, signal),
-        (rejection) => {
-          log.info(
-            { taskId: scope.taskId, path: pathOf(req), rejection },
-            "proxy request rejected",
-          );
-          respondRejection(res, rejection);
-          req.resume();
-        },
-      );
-    };
-    run().catch((cause: unknown) => {
-      // The task's abort can surface anywhere in the run: teardown, not a fault.
-      if (!signal.aborted) {
-        log.error(
-          { err: cause, taskId: scope.taskId, path: pathOf(req) },
-          "proxy body policy failed",
-        );
-      }
-      if (!res.headersSent) {
-        respondJson(res, 500, { message: `Cogmo proxy: ${describeError(cause)}` });
-      }
-    });
+    plan()
+      .then((planned) =>
+        planned.match(
+          (send) => send(),
+          (rejection) => this.#reject(req, res, scope, rejection),
+        ),
+      )
+      .catch((cause: unknown) => {
+        // The task's abort can surface anywhere in the checks: teardown, not a fault.
+        if (!signal.aborted) {
+          log.error({ err: cause, taskId: scope.taskId, path: pathOf(req) }, "proxy checks failed");
+        }
+        respondInternalError(res, `Cogmo proxy: ${describeError(cause)}`);
+      });
   }
 
-  // ── Forwarding ──────────────────────────────────────────────────────────
-
-  #forwardRequest(req: http.IncomingMessage, res: http.ServerResponse, signal: AbortSignal): void {
-    const upstream = http.request(
-      {
-        socketPath: this.#hostDockerSocket,
-        method: req.method,
-        path: req.url,
-        headers: cloneHeaders(req.headers),
-        signal,
-      },
-      (upstreamRes) => {
-        res.writeHead(upstreamRes.statusCode ?? 500, upstreamRes.headers);
-        upstreamRes.pipe(res);
-      },
-    );
-    upstream.on("error", (err) => {
-      if (!isAbortError(err))
-        log.warn({ err: err.message, path: pathOf(req) }, "upstream forward error");
-      respondDaemonFailed(res, err);
-    });
-    req.pipe(upstream);
-  }
-
-  #forwardWithBody(
+  #reject(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    path: string,
-    body: Buffer,
-    signal: AbortSignal,
+    scope: TaskScope,
+    rejection: ProxyRejection,
   ): void {
-    // Rebuilt body — strip any Content-Length / Transfer-Encoding the client
-    // sent and re-supply Content-Length so the upstream sees a well-framed
-    // request. Strip Expect: 100-continue too — we already consumed the body.
-    const headers = cloneHeaders(req.headers);
-    delete headers["content-length"];
-    delete headers["transfer-encoding"];
-    delete headers.expect;
-    headers["content-length"] = String(body.length);
-
-    const upstream = http.request(
-      {
-        socketPath: this.#hostDockerSocket,
-        method: req.method,
-        path,
-        headers,
-        signal,
-      },
-      (upstreamRes) => {
-        res.writeHead(upstreamRes.statusCode ?? 500, upstreamRes.headers);
-        upstreamRes.pipe(res);
-      },
-    );
-    upstream.on("error", (err) => {
-      if (!isAbortError(err)) {
-        log.warn({ err: err.message, path: pathOf(req) }, "upstream forward (body) error");
-      }
-      respondDaemonFailed(res, err);
-    });
-    upstream.end(body);
-  }
-
-  /**
-   * Hijacked endpoints: open a fresh upstream connection, send the request
-   * line + headers verbatim, then pipe the client and upstream sockets in
-   * both directions. Covers `/exec/{id}/start`, `/containers/{id}/attach`,
-   * `/events`, log follow and `/distribution`. Once an upgrade completes
-   * the proxy does not speak the inner protocol.
-   */
-  #hijackRequest(req: http.IncomingMessage, res: http.ServerResponse, signal: AbortSignal): void {
-    const clientSocket = req.socket;
-    if (!clientSocket) {
-      respondJson(res, 500, { message: "Cogmo proxy: hijack without socket" });
-      return;
-    }
-    // Detach from the http response — we're going raw.
-    res.detachSocket?.(clientSocket);
-
-    const upstream = net.createConnection({ path: this.#hostDockerSocket, signal });
-    upstream.once("connect", () => {
-      // Replay the request line and headers to the upstream daemon. We
-      // can't use http.request here because Node's http client owns the
-      // socket lifecycle and won't expose the raw byte stream after upgrade
-      // in a way that fits Docker's hijack protocol cleanly.
-      upstream.write(buildHttpRequestPreamble(req));
-      // Pipe in both directions. Default `pipe()` propagates `end` (FIN)
-      // bidirectionally — if a client like `docker exec` half-closes its
-      // write side after sending stdin, the upstream sees the FIN and
-      // can flush. Errors on either side propagate via the `error`
-      // listeners and close both halves.
-      clientSocket.pipe(upstream);
-      upstream.pipe(clientSocket);
-    });
-    upstream.on("error", (err) => {
-      if (!isAbortError(err))
-        log.warn({ err: err.message, path: pathOf(req) }, "upstream hijack error");
-      clientSocket.destroy(err);
-    });
-    clientSocket.on("error", () => upstream.destroy());
+    log.info({ taskId: scope.taskId, path: pathOf(req), rejection }, "proxy request rejected");
+    respondRejection(res, rejection);
+    // Drain the body so Node can free the parser state.
+    req.resume();
   }
 
   /**
    * `http.IncomingMessage` upgrade event handler — fires for `Upgrade:` headers.
-   * Same raw-pipe treatment as #hijackRequest, but Node hands us the head
-   * buffer (any bytes the client sent after the headers but before we
-   * accepted the upgrade), which we replay to the upstream.
-   *
-   * Same scope + classify checks as #handleRequest. Without them an
-   * `Upgrade: tcp` to `/swarm/*` would slip past the deny prefix.
+   * Only a stream route may be upgraded, and only once its checks pass; Node
+   * hands over the bytes the client sent after the headers as `head`, which
+   * are replayed after the preamble. Without the classification an
+   * `Upgrade: tcp` to `/swarm/*` would slip past the route table.
    */
   #handleUpgrade(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): void {
     const connection = CONNECTION_TASK.get(req.socket);
@@ -432,58 +328,68 @@ export class CogmoSocketProxy {
       writeRawStatusAndDestroy(clientSocket, 500, "Cogmo proxy: connection has no task scope");
       return;
     }
-    const route = classify(req.method ?? "GET", req.url ?? "/");
-    // A body policy route and a plain forward are normal requests; only a
-    // hijack endpoint may be upgraded.
-    match(route)
+    const upstream = this.#upstream(connection);
+    match(classify(req.method ?? "GET", req.url ?? "/"))
       .with({ kind: "reject" }, ({ rejection }) =>
         writeRawRejectionAndDestroy(clientSocket, rejection),
       )
-      .with({ kind: P.union("container_create", "exec_create", "forward") }, ({ kind }) =>
-        writeRawRejectionAndDestroy(clientSocket, malformed(`${kind} endpoint cannot be upgraded`)),
+      .with({ kind: "request" }, ({ route }) =>
+        writeRawRejectionAndDestroy(
+          clientSocket,
+          malformed(`${route.kind} endpoint cannot be upgraded`),
+        ),
       )
-      .with({ kind: "hijack" }, () => this.#pipeUpgrade(req, clientSocket, head, connection.signal))
+      .with({ kind: "stream" }, ({ route, query }) => {
+        planStream(route, query, this.#streamContext(connection))
+          .then((path) =>
+            path.match(
+              (p) => pipeUpgrade(req, clientSocket, head, upstream, p),
+              (rejection) => writeRawRejectionAndDestroy(clientSocket, rejection),
+            ),
+          )
+          .catch((cause: unknown) => {
+            if (!upstream.signal.aborted) {
+              log.error({ err: cause, path: pathOf(req) }, "proxy upgrade checks failed");
+            }
+            writeRawStatusAndDestroy(clientSocket, 500, `Cogmo proxy: ${describeError(cause)}`);
+          });
+      })
       .exhaustive();
   }
 
-  #pipeUpgrade(
+  #upstream(connection: ConnectionTask): Upstream {
+    return { socketPath: this.#hostDockerSocket, signal: connection.signal };
+  }
+
+  #streamContext(connection: ConnectionTask): StreamContext {
+    const { taskId } = connection;
+    return {
+      ownedRows: () =>
+        ResultAsync.fromPromise(this.#containerRows.owned(taskId), (cause): ProxyRejection => {
+          log.warn({ err: cause, taskId }, "proxy ownership read failed");
+          return unavailable("the ownership read failed");
+        }),
+      refs: refLookups(this.#upstream(connection)),
+      execIds: connection.execIds,
+    };
+  }
+
+  #requestContext(
     req: http.IncomingMessage,
-    clientSocket: net.Socket,
-    head: Buffer,
-    signal: AbortSignal,
-  ): void {
-    const upstream = net.createConnection({ path: this.#hostDockerSocket, signal });
-    upstream.once("connect", () => {
-      upstream.write(buildHttpRequestPreamble(req));
-      if (head.length > 0) upstream.write(head);
-      clientSocket.pipe(upstream);
-      upstream.pipe(clientSocket);
-    });
-    upstream.on("error", (err) => {
-      if (!isAbortError(err))
-        log.warn({ err: err.message, path: pathOf(req) }, "upstream upgrade error");
-      clientSocket.destroy(err);
-    });
-    clientSocket.on("error", () => upstream.destroy());
+    scope: TaskScope,
+    connection: ConnectionTask,
+  ): RequestContext {
+    return {
+      ...this.#streamContext(connection),
+      scope,
+      createLookups: daemonLookups({
+        socketPath: this.#hostDockerSocket,
+        signal: connection.signal,
+        hostPlatform: this.#hostPlatform,
+        rootless: this.#rootless,
+      }),
+      readBody: () => readBody(req, MAX_REWRITTEN_BODY_BYTES),
+      recordExec: (execId) => connection.execIds.add(execId),
+    };
   }
-}
-
-/** A forward whose daemon connection failed: `daemon_failed` if nothing was sent yet. */
-function respondDaemonFailed(res: http.ServerResponse, cause: Error): void {
-  if (res.headersSent) {
-    res.destroy(cause);
-    return;
-  }
-  respondRejection(res, {
-    kind: "daemon_failed",
-    message: `Cogmo proxy upstream error: ${cause.message}`,
-  });
-}
-
-/**
- * The request's path without its query, for logs: docker-modem copies a
- * create's body, `Env` values included, into the query string.
- */
-function pathOf(req: http.IncomingMessage): string {
-  return (req.url ?? "/").split("?", 1)[0] ?? "/";
 }

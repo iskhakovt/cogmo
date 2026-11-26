@@ -1,0 +1,94 @@
+/**
+ * What the proxy reads from a daemon response: the exec id an exec create
+ * names, and the filters that keep a task to its own objects
+ * (design/sandbox.md → Proxy Design → Route table, Lists and Events). A container list keeps
+ * the containers whose rows the task owns. An event stream keeps the lines
+ * whose `Actor.Attributes["cogmo.root_task"]` is the task's: the daemon
+ * copies a container's labels into its events, and the create policy
+ * injects that label on every child. Network and volume events carry no
+ * such attribute, so they are dropped.
+ */
+
+import { Transform } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
+import { err, ok, type Result } from "neverthrow";
+import { z } from "zod";
+import { type ProxyRejection, unavailable } from "./rejection.js";
+
+/**
+ * Bound on one event line. A container event carries the container's
+ * labels, which the task chose but could not make larger than its create
+ * body's 1 MiB; a line past this is dropped up to its newline.
+ */
+const MAX_EVENT_LINE_CHARS = 4 * 1024 * 1024;
+
+const ROOT_TASK_ATTRIBUTE = "cogmo.root_task";
+
+const ContainerListSchema = z.array(z.looseObject({ Id: z.string() }));
+
+const ExecCreatedSchema = z.object({ Id: z.string().regex(/^[0-9a-f]{64}$/) });
+
+const EventSchema = z.looseObject({
+  Actor: z.looseObject({ Attributes: z.record(z.string(), z.string()).nullable().optional() }),
+});
+
+/** The `GET /containers/json` reply with only the owned containers, re-serialised. */
+export function filterContainerList(
+  raw: Buffer,
+  owned: ReadonlySet<string>,
+): Result<Buffer, ProxyRejection> {
+  const parsed = ContainerListSchema.safeParse(parseJson(raw.toString("utf8")));
+  if (!parsed.success) return err(unavailable("the daemon's container list is not a JSON list"));
+  const kept = parsed.data.filter((entry) => owned.has(entry.Id));
+  return ok(Buffer.from(JSON.stringify(kept), "utf8"));
+}
+
+/** The exec id a `POST /containers/{id}/exec` 201 names, or `null` for a body that names none. */
+export function createdExecId(body: Buffer): string | null {
+  const parsed = ExecCreatedSchema.safeParse(parseJson(body.toString("utf8")));
+  return parsed.success ? parsed.data.Id : null;
+}
+
+/**
+ * A transform over an NDJSON event stream that passes each line, newline
+ * included, only when it is one of `taskId`'s events. A line that is not
+ * an event is dropped.
+ */
+export function taskEventFilter(taskId: string): Transform {
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  let overlong = false;
+  const keep = (line: string): boolean => {
+    const parsed = EventSchema.safeParse(parseJson(line));
+    return parsed.success && parsed.data.Actor.Attributes?.[ROOT_TASK_ATTRIBUTE] === taskId;
+  };
+  const drain = (text: string): string => {
+    const lines = `${pending}${text}`.split("\n");
+    const tail = lines.pop() ?? "";
+    // The rest of a line already past the bound ends at the first newline.
+    const complete = lines
+      .filter((line, i) => !(i === 0 && overlong) && keep(line))
+      .map((line) => `${line}\n`);
+    if (lines.length > 0) overlong = false;
+    overlong ||= tail.length > MAX_EVENT_LINE_CHARS;
+    pending = overlong ? "" : tail;
+    return complete.join("");
+  };
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      callback(null, drain(decoder.write(chunk)));
+    },
+    flush(callback) {
+      const rest = drain(decoder.end());
+      callback(null, overlong || pending === "" || !keep(pending) ? rest : `${rest}${pending}`);
+    },
+  });
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}

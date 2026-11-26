@@ -7,7 +7,10 @@
 import { match, P } from "ts-pattern";
 
 export type ProxyRejection =
-  /** An image the daemon does not have, in the daemon's own wording. */
+  /**
+   * A ref the daemon cannot resolve or the task does not own, or an image
+   * the daemon does not have, in the daemon's own wording.
+   */
   | { kind: "not_found"; message: string }
   /** A route, version, query key, body field or value the policy refuses. */
   | { kind: "denied"; message: string }
@@ -15,7 +18,7 @@ export type ProxyRejection =
   | { kind: "malformed"; message: string }
   /** A body to be rewritten that is over the size cap. */
   | { kind: "too_large"; maxBytes: number }
-  /** A daemon lookup the policy needs failed; the client may retry. */
+  /** A store read or daemon lookup the checks need failed; the client may retry. */
   | { kind: "unavailable"; message: string }
   /** The daemon connection for the forward itself failed. */
   | { kind: "daemon_failed"; message: string };
@@ -59,4 +62,8 @@ export function malformed(message: string): Extract<ProxyRejection, { kind: "mal
 
 export function unavailable(message: string): Extract<ProxyRejection, { kind: "unavailable" }> {
   return { kind: "unavailable", message: `Cogmo proxy: ${message}` };
+}
+
+export function daemonFailed(message: string): Extract<ProxyRejection, { kind: "daemon_failed" }> {
+  return { kind: "daemon_failed", message };
 }

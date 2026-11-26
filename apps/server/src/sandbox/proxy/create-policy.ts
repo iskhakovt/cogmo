@@ -47,8 +47,8 @@ const REPLACED_HOST_FIELDS = [
 ] as const;
 
 interface CreateForward {
-  /** The re-serialised query, empty when no key is forwarded. */
-  query: string;
+  /** The query keys the daemon reads, when non-empty. */
+  query: URLSearchParams;
   body: Buffer;
 }
 
@@ -74,10 +74,7 @@ export function applyContainerCreatePolicy(
           ),
         ),
     )
-    .map((rebuilt) => ({
-      query: query.toString(),
-      body: Buffer.from(JSON.stringify(rebuilt), "utf8"),
-    }));
+    .map((rebuilt) => ({ query, body: Buffer.from(JSON.stringify(rebuilt), "utf8") }));
 }
 
 function forwardedQuery(query: URLSearchParams): URLSearchParams {

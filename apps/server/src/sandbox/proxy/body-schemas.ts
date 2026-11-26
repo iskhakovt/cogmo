@@ -1,8 +1,9 @@
 /**
- * The allowlist for `POST /containers/create` and `POST /containers/{id}/exec`
- * bodies, as Zod schemas (design/sandbox.md → Proxy Design → Create policy,
- * Exec policy). A field listed here is read and kept; `key-rules.ts` drops
- * or denies any other. Value rules beyond the shape live in
+ * The allowlist for `POST /containers/create`, `POST /containers/{id}/exec`
+ * and `POST /networks/{id}/connect` and `/disconnect` bodies, as Zod schemas
+ * (design/sandbox.md → Proxy Design → Create policy, Exec policy, Route
+ * table). A field listed here is read and kept; `key-rules.ts` drops or
+ * denies any other. Value rules beyond the shape live in
  * `create-fields.ts`, `resources.ts` and `sysbox-env.ts`.
  *
  * Every field is nullable, as Go's decoder reads `null` as "not set", and
@@ -161,4 +162,15 @@ export const ExecBodySchema = z.strictObject({
   ConsoleSize,
   /** Read only from the start body; CLIs before 29 also send it on the create. */
   Detach: Bool,
+});
+
+/** `Container` is resolved and rewritten to its full id; `Aliases` is the only endpoint setting. */
+export const NetworkConnectBodySchema = z.strictObject({
+  Container: z.string().min(1),
+  EndpointConfig: optional(EndpointSettings),
+});
+
+export const NetworkDisconnectBodySchema = z.strictObject({
+  Container: z.string().min(1),
+  Force: Bool,
 });

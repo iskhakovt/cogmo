@@ -15,6 +15,7 @@ import {
   LocalDockerSandboxClient,
   type SandboxClient,
 } from "../sandbox/index.js";
+import { listOwnedContainers } from "../sandbox/list-owned-containers.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -116,6 +117,9 @@ beforeAll(async () => {
   proxy = await CogmoSocketProxy.create({
     socketDir: "/tmp/cogmo-test-skills-proxy",
     hostDockerSocket: "/var/run/docker.sock",
+    containerRows: {
+      owned: (taskId) => listOwnedContainers({ store: agentStore, runInTx: tx }, taskId),
+    },
   });
 
   // Sweep any `cogmo-skills-test-deps-*` volumes left behind by prior

@@ -32,6 +32,20 @@ export interface ProxyOptions {
   hostDockerSocket?: string;
   /** Directory holding per-task sockets. Created at `create()` if missing. */
   socketDir: string;
+  /** The store's `containers` rows, which decide what a task owns. */
+  containerRows: ContainerRows;
+}
+
+/** A `containers` row a task owns: one that carries its `root_task_id` and is not `reaped`. */
+export interface OwnedContainer {
+  readonly dockerId: string;
+  readonly depth: number;
+}
+
+/** Read access to the `containers` rows, read on every request that checks ownership. */
+export interface ContainerRows {
+  /** The task's rows that are not `reaped`. Rejects when the store read fails. */
+  owned(taskId: string): Promise<ReadonlyArray<OwnedContainer>>;
 }
 
 /** What the create policy reads from an image inspect. */
@@ -67,4 +81,15 @@ export interface DaemonLookups {
    * gateway on a rootful daemon, loopback on a rootless one.
    */
   publishAddress(): Promise<Result<string, LookupFailure>>;
+}
+
+/** How a ref lookup fails: `not_found` for a ref the daemon cannot resolve, `unavailable` otherwise. */
+export type ResolveFailure = Extract<ProxyRejection, { kind: "not_found" | "unavailable" }>;
+
+/** The daemon lookups that resolve a ref in a path or body to the object's full id. */
+export interface RefLookups {
+  /** `GET /containers/{ref}/json`: a full id, a unique id prefix or a name. */
+  resolveContainer(ref: string): Promise<Result<string, ResolveFailure>>;
+  /** `GET /networks/{ref}`: a full id, a name or a unique id prefix. */
+  resolveNetwork(ref: string): Promise<Result<string, ResolveFailure>>;
 }
