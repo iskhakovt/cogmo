@@ -24,7 +24,7 @@ import { webSessions } from "./store/schema.js";
 
 const VALID_TOKEN = "secret-token";
 
-const T0 = new Date("2026-11-19T09:00:15.000Z");
+const T0 = "2026-11-19T09:00:15.000Z";
 
 /** The registry's last tick, as a test sets it. */
 let checkResults: ReadonlyArray<CheckResult> = [];
@@ -234,7 +234,10 @@ describe("web server", () => {
           webDevAllowOrigin: null,
         }));
         await new Promise<void>((resolve) => lookupServer.listen(0, "127.0.0.1", resolve));
-        lookupBase = `http://127.0.0.1:${(lookupServer.address() as AddressInfo).port}`;
+        const address = lookupServer.address();
+        if (address === null || typeof address === "string")
+          throw new Error("expected a TCP address");
+        lookupBase = `http://127.0.0.1:${address.port}`;
       });
 
       afterAll(async () => {

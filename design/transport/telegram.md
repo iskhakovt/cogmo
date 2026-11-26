@@ -169,7 +169,7 @@ A run's exit moves the state only while the state is still that run. Once `stop(
 | `adapter.ts` | `TelegramAdapter`: delivery, stream handles, voice, polling supervision and its `liveness()`, and a `stop()` that confirms handled updates |
 | `polling-state.ts` | The supervisor's states, how a run's exit reads, the 409 backoff, and the liveness projection |
 | `receive-outcome.ts` | Each `getUpdates` outcome as a receive sub-state change, and a Bot API error as a `ChannelError` |
-| `token-redaction.ts` | `TokenRedactor`: the bot token, raw and percent-encoded, masked in every adapter line that carries a Bot API error |
+| `token-redaction.ts` | `TokenRedactor`: the bot token, raw and percent-encoded, masked in the polling, command-menu and handler-error lines |
 | `private-chat-gate.ts` | The first middleware, which drops an update from outside a private chat |
 | `sender-gate.ts` | The middleware ahead of every handler that drops an update the channel doesn't admit |
 | `command-routes.ts` | Command registration on the forward-dropping composer, `/start`, `/cancel`, the command menu |

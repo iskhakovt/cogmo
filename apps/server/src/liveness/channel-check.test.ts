@@ -20,7 +20,7 @@ function liveness(overrides: Partial<ChannelLiveness> = {}): ChannelLiveness {
 
 const NETWORK: ChannelError = { code: "ECONNRESET", detail: null };
 
-function retrying(since: number, error: ChannelError = NETWORK): LoopState {
+function retrying(since: number, error: ChannelError): LoopState {
   return { kind: "retrying", since, cause: "network", error };
 }
 
@@ -105,7 +105,7 @@ describe("channelCheck", () => {
     it("masks flapping and retrying", () => {
       const reading = channelCheck(
         liveness({
-          state: retrying(NOW - STALE_MS),
+          state: retrying(NOW - STALE_MS, NETWORK),
           handlingSince: NOW - WEDGED_MS,
           conflicts: 3,
         }),
@@ -159,9 +159,25 @@ describe("channelCheck", () => {
       });
     });
 
+    it("names no other retry's error while the streak holds", () => {
+      const reading = channelCheck(
+        liveness({
+          state: retrying(NOW - 1_000, { code: "429", detail: "Too Many Requests" }),
+          conflicts: 2,
+        }),
+        NOW,
+      );
+
+      expect(reading).toMatchObject({
+        reason: "flapping",
+        output: "flapping: another poller or a webhook holds the token",
+        detail: null,
+      });
+    });
+
     it("masks retrying", () => {
       const reading = channelCheck(
-        liveness({ state: retrying(NOW - STALE_MS), conflicts: 2 }),
+        liveness({ state: retrying(NOW - STALE_MS, NETWORK), conflicts: 2 }),
         NOW,
       );
 
@@ -188,14 +204,14 @@ describe("channelCheck", () => {
     });
 
     it("passes just inside staleAfter", () => {
-      expect(channelCheck(liveness({ state: retrying(NOW - STALE_MS + 1) }), NOW).status).toBe(
-        "pass",
-      );
+      expect(
+        channelCheck(liveness({ state: retrying(NOW - STALE_MS + 1, NETWORK) }), NOW).status,
+      ).toBe("pass");
     });
 
     it("masks stale", () => {
       const reading = channelCheck(
-        liveness({ state: retrying(NOW - STALE_MS), progressAt: NOW - 10 * STALE_MS }),
+        liveness({ state: retrying(NOW - STALE_MS, NETWORK), progressAt: NOW - 10 * STALE_MS }),
         NOW,
       );
 

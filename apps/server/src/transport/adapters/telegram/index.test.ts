@@ -141,6 +141,31 @@ describe("setup", () => {
     }
   });
 
+  it("logs a handler's DOMException, token masked, without throwing", async () => {
+    const token = "123456:AAsecret-tok_en";
+    const lines = captureLogLines();
+    try {
+      await setupWith({ token });
+      const onError = expectDefined(botLifecycle.errorHandler, "bot.catch handler");
+
+      expect(() =>
+        onError({
+          error: new Error("handler failed", {
+            cause: new DOMException(`aborted ${token}`, "TimeoutError"),
+          }),
+          ctx: { update: { update_id: 1 } },
+        }),
+      ).not.toThrow();
+
+      const line = lines.filter((l) => l.includes("telegram bot error"));
+      expect(line).toHaveLength(1);
+      expect(line[0]).not.toContain(token);
+      expect(line[0]).toContain("aborted <redacted>");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("counts an update the sender gate drops as handled", async () => {
     const handler = vi.fn(async () => {});
     botLifecycle.polling = (stopped) => runUpdate(5, handler).then(() => stopped);

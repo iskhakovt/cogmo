@@ -41,9 +41,9 @@ export type StepOutcome =
 
 /**
  * Tear down `cogmo serve`: the web server first, so no request reaches a
- * stopped dependency, then the connector server, the channel adapters
- * concurrently, the liveness tick, the coding streams' sweep, MCP, the skills pool, the sandbox,
- * and the instance row.
+ * stopped dependency, then the liveness tick, the connector server, the
+ * channel adapters concurrently, the coding streams' sweep, MCP, the skills
+ * pool, the sandbox, and the instance row.
  * Each step is bounded, and one that overruns or throws doesn't stop the
  * next. The instance row stays open when the skills pool or sandbox step
  * didn't finish, so the next boot reaps the containers they left. Never
@@ -66,6 +66,9 @@ export async function shutdownServe(
   } = resources;
   const { webDrainMs, stepMs } = bounds;
   const webOutcome = await bounded("web server", webDrainMs + stepMs, () => web.close(webDrainMs));
+  // Nothing reads the verdicts once `/health` is down, and a tick while the
+  // adapters stop would log their `stopped` as a recovery.
+  const livenessOutcome = await bounded("liveness", stepMs, async () => liveness.stop());
   const connectorOutcomes = connectors
     ? [await bounded("connector server", stepMs, () => connectors.close())]
     : [];
@@ -74,7 +77,6 @@ export async function shutdownServe(
       bounded(`${channelType} adapter`, stepMs, () => adapter.stop()),
     ),
   );
-  const livenessOutcome = await bounded("liveness", stepMs, async () => liveness.stop());
   const streamsOutcome = await bounded("coding streams", stepMs, async () => codingStreams.close());
   const mcpOutcome = await bounded("mcp", stepMs, () => mcpRegistry.stop());
   const skillsOutcome = await bounded("skills pool", stepMs, () => skills.shutdown());
@@ -97,9 +99,9 @@ export async function shutdownServe(
   }
   return [
     webOutcome,
+    livenessOutcome,
     ...connectorOutcomes,
     ...adapterOutcomes,
-    livenessOutcome,
     streamsOutcome,
     mcpOutcome,
     skillsOutcome,

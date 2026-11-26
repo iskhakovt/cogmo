@@ -7,15 +7,14 @@ import {
 } from "@opentelemetry/sdk-metrics";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../logger.js";
-import type { CheckReading, LivenessCheck } from "./check.js";
-import { type LivenessClock, LivenessRegistry } from "./registry.js";
+import type { CheckReading, CheckReason, LivenessCheck } from "./check.js";
+import { LIVENESS_TICK_MS, type LivenessClock, LivenessRegistry } from "./registry.js";
 
-const TICK_MS = 15_000;
 const WALL = new Date("2026-11-19T09:00:15.000Z");
 
 const PASS: CheckReading = { status: "pass", observedValue: 3 };
 
-function warning(reason: string, detail: string | null = "raw"): CheckReading {
+function warning(reason: CheckReason, detail: string | null): CheckReading {
   return { status: "warn", reason, output: `${reason}: text`, observedValue: 90, detail };
 }
 
@@ -42,7 +41,6 @@ const registries: LivenessRegistry[] = [];
 function start(checks: ReadonlyArray<LivenessCheck>): LivenessRegistry {
   const registry = LivenessRegistry.start(checks, {
     meter: meterProvider.getMeter("test"),
-    tickMs: TICK_MS,
     clock,
   });
   registries.push(registry);
@@ -84,7 +82,7 @@ describe("LivenessRegistry", () => {
 
     expect(telegram.evaluate).toHaveBeenCalledExactlyOnceWith(42_000);
     expect(registry.results()).toEqual([
-      { check: "telegram:polling", componentId: "tg-1", reading: PASS, time: WALL },
+      { check: "telegram:polling", componentId: "tg-1", reading: PASS, time: WALL.toISOString() },
     ]);
   });
 
@@ -98,7 +96,7 @@ describe("LivenessRegistry", () => {
   it("reports warn when any entry warns", () => {
     const registry = start([
       settable("telegram:polling", "tg-1", PASS).entry,
-      settable("channels:adapter", "dc-1", warning("unsupported")).entry,
+      settable("channels:adapter", "dc-1", warning("unsupported", "raw")).entry,
     ]);
 
     expect(registry.status()).toBe("warn");
@@ -107,9 +105,9 @@ describe("LivenessRegistry", () => {
   it("evaluates again on each tick and serves the last tick between", () => {
     const telegram = settable("telegram:polling", "tg-1", PASS);
     const registry = start([telegram.entry]);
-    telegram.set(warning("stale"));
+    telegram.set(warning("stale", "raw"));
 
-    vi.advanceTimersByTime(TICK_MS - 1);
+    vi.advanceTimersByTime(LIVENESS_TICK_MS - 1);
     expect(registry.status()).toBe("pass");
 
     vi.advanceTimersByTime(1);
@@ -121,9 +119,9 @@ describe("LivenessRegistry", () => {
     const telegram = settable("telegram:polling", "tg-1", PASS);
     const registry = start([telegram.entry]);
     const before = registry.results();
-    telegram.set(warning("stale"));
+    telegram.set(warning("stale", "raw"));
 
-    vi.advanceTimersByTime(TICK_MS);
+    vi.advanceTimersByTime(LIVENESS_TICK_MS);
 
     expect(before[0]?.reading).toEqual(PASS);
   });
@@ -138,14 +136,14 @@ describe("LivenessRegistry", () => {
         expect(warn).not.toHaveBeenCalled();
         expect(info).not.toHaveBeenCalled();
 
-        telegram.set(warning("flapping"));
-        vi.advanceTimersByTime(TICK_MS);
-        vi.advanceTimersByTime(TICK_MS);
-        telegram.set(warning("wedged"));
-        vi.advanceTimersByTime(TICK_MS);
+        telegram.set(warning("flapping", "raw"));
+        vi.advanceTimersByTime(LIVENESS_TICK_MS);
+        vi.advanceTimersByTime(LIVENESS_TICK_MS);
+        telegram.set(warning("wedged", "raw"));
+        vi.advanceTimersByTime(LIVENESS_TICK_MS);
         telegram.set(PASS);
-        vi.advanceTimersByTime(TICK_MS);
-        vi.advanceTimersByTime(TICK_MS);
+        vi.advanceTimersByTime(LIVENESS_TICK_MS);
+        vi.advanceTimersByTime(LIVENESS_TICK_MS);
 
         expect(warn.mock.calls).toEqual([
           [
@@ -213,7 +211,7 @@ describe("LivenessRegistry", () => {
         const healthy = settable("crons:heartbeat", "ticker", PASS);
 
         const registry = start([broken, healthy.entry]);
-        vi.advanceTimersByTime(TICK_MS);
+        vi.advanceTimersByTime(LIVENESS_TICK_MS);
 
         expect(registry.status()).toBe("warn");
         expect(registry.results().map(({ reading }) => reading)).toEqual([
@@ -245,7 +243,7 @@ describe("LivenessRegistry", () => {
   describe("the cogmo.check.status gauge", () => {
     it("observes both states per entry with exactly check, component_id and status", async () => {
       start([
-        settable("telegram:polling", "tg-1", warning("stale")).entry,
+        settable("telegram:polling", "tg-1", warning("stale", "raw")).entry,
         settable("crons:heartbeat", "ticker", PASS).entry,
       ]);
 
@@ -277,8 +275,8 @@ describe("LivenessRegistry", () => {
     it("follows the last tick", async () => {
       const telegram = settable("telegram:polling", "tg-1", PASS);
       start([telegram.entry]);
-      telegram.set(warning("stale"));
-      vi.advanceTimersByTime(TICK_MS);
+      telegram.set(warning("stale", "raw"));
+      vi.advanceTimersByTime(LIVENESS_TICK_MS);
 
       expect(await gaugePoints()).toEqual(
         expect.arrayContaining([
@@ -292,13 +290,13 @@ describe("LivenessRegistry", () => {
   });
 
   describe("stop", () => {
-    it("clears the tick and detaches the gauge, idempotently", async () => {
+    it("clears the tick and stops observing the gauge, idempotently", async () => {
       const telegram = settable("telegram:polling", "tg-1", PASS);
       const registry = start([telegram.entry]);
 
       registry.stop();
       registry.stop();
-      vi.advanceTimersByTime(10 * TICK_MS);
+      vi.advanceTimersByTime(10 * LIVENESS_TICK_MS);
 
       expect(telegram.evaluate).toHaveBeenCalledOnce();
       expect(await gaugePoints()).toEqual([]);

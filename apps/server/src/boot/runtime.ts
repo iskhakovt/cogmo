@@ -1,10 +1,10 @@
 /**
  * Stage 4: the agent runtime `cogmo serve` runs — every Inngest function, the
  * channel adapters, the liveness registry, and the long-lived bookkeeping a
- * one-shot CLI must not start. The order below is the construction order: the model catalog loads
- * before the channels start, the runtime defaults are seeded before
- * `startChannels` matches the web channel's adapter, and the MCP registry
- * exists before any Transport is built over it.
+ * one-shot CLI must not start. The order below is the construction order:
+ * the model catalog loads before the channels start, the runtime defaults are
+ * seeded before `startChannels` matches the web channel's adapter, and the
+ * MCP registry exists before any Transport is built over it.
  */
 
 import { lookup } from "node:dns/promises";
@@ -12,7 +12,7 @@ import { metrics } from "@opentelemetry/api";
 import { createWebTools } from "../agent/web-tools.js";
 import { env } from "../env.js";
 import { channelChecks } from "../liveness/channel-check.js";
-import { LIVENESS_TICK_MS, LivenessRegistry, SYSTEM_CLOCK } from "../liveness/registry.js";
+import { LivenessRegistry, SYSTEM_CLOCK } from "../liveness/registry.js";
 import type { SkillRunnerImpl } from "../skills/runner.js";
 import { createAgentFunctions, createAgentTools, createConversationTriggers } from "./agent.js";
 import { createCodingRuntime } from "./coding.js";
@@ -81,7 +81,7 @@ export async function bootstrapRuntime(
   // Built before `serve` starts the web UI, so `/health`'s first read has a verdict.
   const liveness = LivenessRegistry.start(
     channelChecks(transport.adapters, transport.unsupportedChannels),
-    { meter: metrics.getMeter("cogmo"), tickMs: LIVENESS_TICK_MS, clock: SYSTEM_CLOCK },
+    { meter: metrics.getMeter("cogmo"), clock: SYSTEM_CLOCK },
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger

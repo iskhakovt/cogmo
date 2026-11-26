@@ -86,11 +86,11 @@ describe("shutdownServe", () => {
     expect(events).toEqual([
       "web start",
       "web end",
+      "liveness",
       "connectors start",
       "connectors end",
       "telegram start",
       "telegram end",
-      "liveness",
       "coding streams",
       "mcp start",
       "mcp end",
@@ -124,10 +124,10 @@ describe("shutdownServe", () => {
 
     expect(outcomes).toEqual([
       { step: "web server", outcome: "done" },
+      { step: "liveness", outcome: "done" },
       { step: "connector server", outcome: "done" },
       { step: "telegram adapter", outcome: "done" },
       { step: "web adapter", outcome: "done" },
-      { step: "liveness", outcome: "done" },
       { step: "coding streams", outcome: "done" },
       { step: "mcp", outcome: "done" },
       { step: "skills pool", outcome: "done" },
@@ -235,9 +235,9 @@ describe("shutdownServe", () => {
 
     expect(outcomes.map(({ step }) => step)).toEqual([
       "web server",
+      "liveness",
       "connector server",
       "telegram adapter",
-      "liveness",
       "coding streams",
       "mcp",
       "skills pool",

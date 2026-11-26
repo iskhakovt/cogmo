@@ -2,13 +2,22 @@
 
 export type CheckStatus = "pass" | "warn";
 
+/** Why an entry warns: `/health`'s `reason`. */
+export type CheckReason =
+  | "failed"
+  | "wedged"
+  | "flapping"
+  | "retrying"
+  | "stale"
+  | "unsupported"
+  | "check_error";
+
 /** One evaluation of a check. `observedValue` is in seconds. */
 export type CheckReading =
   | { readonly status: "pass"; readonly observedValue: number | null }
   | {
       readonly status: "warn";
-      /** A key from a fixed set: `/health`'s `reason`. */
-      readonly reason: string;
+      readonly reason: CheckReason;
       /** Fixed text and a normalized code, never platform text. */
       readonly output: string;
       readonly observedValue: number | null;

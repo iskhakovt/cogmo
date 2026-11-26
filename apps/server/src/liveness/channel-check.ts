@@ -2,7 +2,13 @@
 
 import { match, P } from "ts-pattern";
 import type { ChannelError, ChannelLiveness, LoopState, RetryCause } from "../transport/types.js";
-import { ageSeconds, type CheckReading, type LivenessCheck, normalizeCode } from "./check.js";
+import {
+  ageSeconds,
+  type CheckReading,
+  type CheckReason,
+  type LivenessCheck,
+  normalizeCode,
+} from "./check.js";
 
 type FailedReason = Extract<LoopState, { kind: "failed" }>["reason"];
 
@@ -27,7 +33,7 @@ function withCode(text: string, error: ChannelError | null): string {
 }
 
 function warn(
-  reason: string,
+  reason: CheckReason,
   text: string,
   observedValue: number,
   error: ChannelError | null,
@@ -41,32 +47,44 @@ function warn(
   };
 }
 
-/** A receive loop's reading at monotonic `now`; the first matching row of the verdict table decides. */
-export function channelCheck(liveness: ChannelLiveness, now: number): CheckReading {
+type Retrying = Extract<LoopState, { kind: "retrying" }>;
+
+/** The verdict table's rows for a loop that is up: `retrying` is its state when retrying, else null. */
+function runningCheck(
+  retrying: Retrying | null,
+  liveness: ChannelLiveness,
+  now: number,
+): CheckReading {
   const { progressAt, handlingSince, conflicts, thresholds } = liveness;
   const observedValue = ageSeconds(progressAt, now);
+  if (handlingSince !== null && now - handlingSince >= thresholds.wedgedAfterMs) {
+    return warn("wedged", "an update has been in hand too long", observedValue, null);
+  }
+  if (conflicts >= 2) {
+    // The streak outlives the backoff, so only a 409's own error describes it.
+    const conflictError = retrying?.cause === "conflict" ? retrying.error : null;
+    return warn("flapping", RETRY_TEXT.conflict, observedValue, conflictError);
+  }
+  if (retrying !== null && now - retrying.since >= thresholds.staleAfterMs) {
+    return warn("retrying", `after ${RETRY_TEXT[retrying.cause]}`, observedValue, retrying.error);
+  }
+  if (handlingSince === null && now - progressAt >= thresholds.staleAfterMs) {
+    return warn("stale", "no reply or update for too long", observedValue, null);
+  }
+  return { status: "pass", observedValue };
+}
+
+/** A receive loop's reading at monotonic `now`; the first matching row of the verdict table decides. */
+export function channelCheck(liveness: ChannelLiveness, now: number): CheckReading {
+  const observedValue = ageSeconds(liveness.progressAt, now);
   return match(liveness.state)
     .returnType<CheckReading>()
     .with({ kind: "failed" }, ({ reason, error }) =>
       warn("failed", FAILED_TEXT[reason], observedValue, error),
     )
     .with({ kind: "stopped" }, () => ({ status: "pass", observedValue }))
-    .with({ kind: P.union("starting", "receiving", "retrying") }, (state) => {
-      const retryError = state.kind === "retrying" ? state.error : null;
-      if (handlingSince !== null && now - handlingSince >= thresholds.wedgedAfterMs) {
-        return warn("wedged", "an update has been in hand too long", observedValue, null);
-      }
-      if (conflicts >= 2) {
-        return warn("flapping", RETRY_TEXT.conflict, observedValue, retryError);
-      }
-      if (state.kind === "retrying" && now - state.since >= thresholds.staleAfterMs) {
-        return warn("retrying", `after ${RETRY_TEXT[state.cause]}`, observedValue, state.error);
-      }
-      if (handlingSince === null && now - progressAt >= thresholds.staleAfterMs) {
-        return warn("stale", "no reply or update for too long", observedValue, null);
-      }
-      return { status: "pass", observedValue };
-    })
+    .with({ kind: "retrying" }, (retrying) => runningCheck(retrying, liveness, now))
+    .with({ kind: P.union("starting", "receiving") }, () => runningCheck(null, liveness, now))
     .exhaustive();
 }
 

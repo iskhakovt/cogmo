@@ -33,7 +33,7 @@ One in-process check registry, read three ways:
 
 The registry evaluates every check on a 15-second tick, the first when it is built; `/health` and the gauge render the last tick from memory. A check that throws, a bug, reports `warn` (`check_error`) and logs at error. Probes alert on `status`; the gauge and the log lines name the failing check.
 
-**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only, and the Telegram adapter redacts its configured token, raw and percent-encoded, from every line it writes that carries one: the verdict line's `detail`, the supervisor's lines, the command-menu warning, both offset-confirmation warnings and the `telegram bot error` line.
+**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only, and the Telegram adapter redacts its configured token, raw and percent-encoded in either hex case, from the lines that carry a polling, command-menu or handler error: the verdict line's `detail`, the supervisor's lines, the command-menu warning, both offset-confirmation warnings and the `telegram bot error` line.
 
 The public body, and the same with a session:
 
@@ -99,7 +99,7 @@ interface ChannelError { readonly code: string; readonly detail: string | null }
 
 A pure `channelCheck(liveness, now)` turns a projection into a reading ([Verdict](#verdict-and-thresholds)), reusable by a later channel with a loop. Ages are monotonic.
 
-`startChannels` returns each row it read: the started ones with their adapter and `channelId`, and the ones whose type this build has no adapter for, which it skips with a warning today; each skipped row gets a `channels:adapter` entry that always warns `unsupported`. A setup that throws fails boot (design/infrastructure.md → Boot-Time Blocking Policy), so no running process has a channel whose setup threw. `bootstrapRuntime` builds the registry from those rows and from the crons `createCronFunction` recorded, and returns it on `RuntimeDeps` for `/health` and the gauge. The tick timer is unref'd and cleared on shutdown.
+`startChannels` returns each row it read: the started ones with their adapter and `channelId`, and the ones whose type this build has no adapter for, which it skips with a warning; each skipped row gets a `channels:adapter` entry that always warns `unsupported`. A setup that throws fails boot (design/infrastructure.md → Boot-Time Blocking Policy), so no running process has a channel whose setup threw. `bootstrapRuntime` builds the registry from those rows and from the crons `createCronFunction` recorded, and returns it on `RuntimeDeps` for `/health` and the gauge. The tick timer is unref'd and cleared on shutdown.
 
 ## Telegram receive loop `[confirmed]`
 
@@ -113,9 +113,9 @@ type ReceiveState =
 type PollingState =
   | { kind: "idle" }
   | { kind: "polling"; run: Promise<void>; startedAt: number; conflicts: number;
-      receive: ReceiveState }   // added; written in place, since the supervisor finds the run by identity
-  | { kind: "backoff"; timer: NodeJS.Timeout; conflicts: number; since: number; error: ChannelError } // fields added
-  | { kind: "failed"; reason: "unauthorized" | "rejected" | "ended"; error: ChannelError | null }    // error added
+      receive: ReceiveState }   // written in place, since the supervisor finds the run by identity
+  | { kind: "backoff"; timer: NodeJS.Timeout; conflicts: number; since: number; error: ChannelError }
+  | { kind: "failed"; reason: "unauthorized" | "rejected" | "ended"; error: ChannelError | null }
   | { kind: "stopped"; drained: Promise<void> };
 ```
 
@@ -142,7 +142,7 @@ The transformer returns `prev`'s result, or rethrows its error, unchanged, and i
 | An `HttpError` wrapping grammY's client timeout, recognised by its fixed message prefix | `retrying` | `network`, `timeout` |
 | Any other throw, an `HttpError` wrapping another error included | `retrying` | `unknown`, `unknown` |
 
-Only a valid batch counts as progress: grammY polls again at once on `ok: true` with no `result`, and handles an element with no `update_id`, so either would read as a healthy poll. A `result` that is present but not an array ends the run instead: grammY's loop throws iterating it, and the supervisor reads the `TypeError` as `failed` (`rejected`). `detail` is Telegram's `description` when it is a string, token redacted, else null; no error message reaches a `ChannelError`, since a `FetchError`'s names the request URL. The supervisor's transitions map their errors the same way: a `GrammyError` by its `error_code`, `unknown` unless a non-negative integer, and anything but a `GrammyError` or `HttpError` as `unknown`.
+Only a valid batch counts as progress: grammY polls again at once on `ok: true` with no `result`, and handles an element with no `update_id`, so either would read as a healthy poll. A `result` that is present but not iterable (a number, an object, `null`) ends the run instead: grammY's loop throws iterating it, and the supervisor reads the `TypeError` as `failed` (`rejected`). A string `result` is walked a character at a time, as updates with no id. `detail` is Telegram's `description` when it is a string, token redacted, else null; no error message reaches a `ChannelError`, since a `FetchError`'s names the request URL. The supervisor's transitions map their errors the same way: a `GrammyError` by its `error_code`, `unknown` unless a non-negative integer, and anything but a `GrammyError` or `HttpError` as `unknown`.
 
 ### States
 
@@ -218,7 +218,7 @@ With `@grammyjs/runner` (`todo.md`), `handlingSince` becomes the oldest update i
 | d | Half-open connection | `polling` / `receiving`, progress ageing | `stale` at 90 s; at 500 s grammY's client gives up, `retrying` (`network`, `timeout`). |
 | e | A 4xx only `getUpdates` draws (none known to recur) | `polling` / `retrying` (`client_error`) | grammY retries it every 3 s; warns after 90 s. |
 | f | A wrong `apiRoot` that answers like a Bot API | `failed` (`rejected`) | The setup's 404 `GrammyError` is rethrown; the supervisor logs a terminal line. |
-| f′ | A wrong `apiRoot` that doesn't resolve or serves HTML | `polling` / `starting` | grammY's setup retries the `HttpError` forever; `stale` at 90 s, with no log line a log-only alert could see. Residual. |
+| f′ | A wrong `apiRoot` that doesn't resolve or serves HTML | `polling` / `starting` | grammY's setup retries the `HttpError` forever; `stale` at 90 s, with no supervisor line for a log rule on those lines to see. Residual. |
 | g | A second poller that stays | `polling` and `backoff` in turn | `flapping` until the run after the last 409 has lasted 10 minutes. |
 | g′ | A competitor polling less often than every 10 minutes | `receiving`, with a short backoff per 409 | The streak resets each time, so the check stays `pass`; each 409 logs at error. Residual: a rolling count would catch it but outlive the competitor by its window. |
 | h | 401 | `failed` (`unauthorized`) | Warns until the token is replaced and cogmo restarts. |
@@ -307,7 +307,7 @@ On the move in design/orchestration-temporal.md:
 | `/health` | `status` is not `pass` | The process is down or its event loop blocked |
 | The supervisor's log lines | The newest of the start line and the terminal lines is terminal | Nothing: a log rule can't tell a quiet process from a dead one |
 
-**The gauge** is exported every 60 s, both state-set series per entry each time. Through a Prometheus translation it arrives as `cogmo_check_status` with `check`, `component_id`, `status` and `job`, from `OTEL_SERVICE_NAME` (deploy.md → Observability); a backend that keeps OTel names stores `cogmo.check.status`. A collector in between needs a metrics pipeline fed by its OTLP receiver, which otherwise refuses every cogmo metric ([`otlpreceiver/otlp.go`](https://github.com/open-telemetry/opentelemetry-collector/blob/main/receiver/otlpreceiver/otlp.go)). Every `serve` registers crons, so the cron entries make "cogmo silent" independent of channels:
+**The gauge** is exported every 60 s, both state-set series per entry each time. Through a Prometheus translation it arrives as `cogmo_check_status` with `check`, `component_id`, `status` and `job`, from `OTEL_SERVICE_NAME` (deploy.md → Observability); a backend that keeps OTel names stores `cogmo.check.status`. A collector in between needs a metrics pipeline fed by its OTLP receiver, which otherwise refuses every cogmo metric ([`otlpreceiver/otlp.go`](https://github.com/open-telemetry/opentelemetry-collector/blob/main/receiver/otlpreceiver/otlp.go)). From Rollout step 3, every `serve` registers crons, so the cron entries make "cogmo silent" independent of channels:
 
 ```promql
 cogmo_check_status{job="cogmo", status="warn"} == 1                                        # for 5m
@@ -318,7 +318,7 @@ absent_over_time(cogmo_check_status{job="cogmo", check="crons:heartbeat", status
 
 **`/health`:** any prober that reads the public `status`, such as Gatus with `[BODY].status == pass`.
 
-**Logs, before the gauge ships:**
+**The supervisor's log lines:**
 
 | Level | Text |
 |-|-|

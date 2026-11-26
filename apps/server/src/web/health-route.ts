@@ -43,7 +43,7 @@ function entry({ componentId, reading, time }: CheckResult): HealthCheckEntry {
       observedValue: reading.observedValue,
       observedUnit: "s" as const,
     }),
-    time: time.toISOString(),
+    time,
     ...(reading.status === "warn" && { output: reading.output }),
   };
 }

@@ -44,7 +44,7 @@ type Transformer = (
   signal?: AbortSignal,
 ) => Promise<unknown>;
 
-/** The transformers installed with `bot.api.config.use`, first first. Reset before each test. */
+/** The transformers installed with `bot.api.config.use`, in install order. Reset before each test. */
 const transformers: Transformer[] = [];
 
 export const mockBotApi = {

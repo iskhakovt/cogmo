@@ -35,6 +35,10 @@ describe("TokenRedactor.text", () => {
     );
   });
 
+  it("masks the token with its colon percent-encoded in lowercase", () => {
+    expect(redact.text("token 123456%3aAAsecret-tok_en")).toBe("token <redacted>");
+  });
+
   it("masks a token percent-encoding leaves alone", () => {
     expect(new TokenRedactor("fake").text("a fake token")).toBe("a <redacted> token");
   });
@@ -138,6 +142,40 @@ describe("TokenRedactor.error", () => {
     expect(line).toContain("<redacted>");
     expect(JSON.parse(line)).toMatchObject({ type: "HttpError" });
     expect(serialized(failure)).toContain(TOKEN);
+  });
+
+  it("copies a DOMException pino can serialize, its prototype's fields included", () => {
+    const abort = new DOMException(ECHO, "TimeoutError");
+
+    const copy = redact.error(abort);
+    const line = serialized(copy);
+
+    expect(copy).toBeInstanceOf(DOMException);
+    expect(JSON.parse(line)).toMatchObject({
+      type: "DOMException",
+      name: "TimeoutError",
+      message: MASKED,
+      code: abort.code,
+    });
+    expect(line).not.toContain(TOKEN);
+  });
+
+  it("copies an error whose cause is a DOMException", () => {
+    const err = new Error("handler failed", { cause: new DOMException(ECHO, "AbortError") });
+
+    const line = serialized(redact.error(err));
+
+    expect(line).not.toContain(TOKEN);
+    expect(JSON.parse(line)).toMatchObject({ message: `handler failed: ${MASKED}` });
+  });
+
+  it("masks the errors an AggregateError carries", () => {
+    const err = new AggregateError([new Error(ECHO)], "several failed");
+
+    const line = serialized(redact.error(err));
+
+    expect(line).not.toContain(TOKEN);
+    expect(JSON.parse(line)).toMatchObject({ aggregateErrors: [{ message: MASKED }] });
   });
 
   it("masks a thrown string and hands anything else back", () => {

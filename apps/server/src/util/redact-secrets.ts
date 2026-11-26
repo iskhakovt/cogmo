@@ -21,7 +21,7 @@
  */
 
 /** What a Bot API token is replaced with. */
-const REDACTED_BOT_TOKEN = "<redacted>";
+export const REDACTED_BOT_TOKEN = "<redacted>";
 
 /** What a token-shaped path segment is replaced with. */
 export const REDACTED_BOT_SEGMENT = `bot${REDACTED_BOT_TOKEN}`;

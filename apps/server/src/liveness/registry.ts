@@ -14,8 +14,8 @@ export interface CheckResult {
   readonly check: string;
   readonly componentId: string;
   readonly reading: CheckReading;
-  /** Wall-clock time of the evaluation. */
-  readonly time: Date;
+  /** Wall-clock time of the evaluation, ISO 8601. */
+  readonly time: string;
 }
 
 /** What `/health` reads: the last tick, from memory. */
@@ -27,7 +27,7 @@ export interface LivenessReadings {
 
 /** The registry `cogmo serve` holds: its readings, and the tick shutdown stops. */
 export interface Liveness extends LivenessReadings {
-  /** Clear the tick and detach the gauge. Idempotent. */
+  /** Clear the tick and stop observing the gauge. Idempotent. */
   stop(): void;
 }
 
@@ -42,11 +42,11 @@ export const SYSTEM_CLOCK: LivenessClock = {
   wall: () => new Date(),
 };
 
+/** How often every check is evaluated. */
 export const LIVENESS_TICK_MS = 15_000;
 
 export interface LivenessRegistryOptions {
   meter: Meter;
-  tickMs: number;
   clock: LivenessClock;
 }
 
@@ -80,9 +80,17 @@ function readingOf(evaluation: Evaluation): CheckReading {
 
 /** A change of status, or of reason under `warn`. A first reading changes the verdict only by warning. */
 function verdictChanged(previous: CheckReading | undefined, next: CheckReading): boolean {
-  if (previous === undefined) return next.status === "warn";
-  if (previous.status === "warn" && next.status === "warn") return previous.reason !== next.reason;
-  return previous.status !== next.status;
+  return match([previous, next] as const)
+    .with([undefined, { status: "pass" }], () => false)
+    .with([undefined, { status: "warn" }], () => true)
+    .with([{ status: "pass" }, { status: "pass" }], () => false)
+    .with([{ status: "warn" }, { status: "warn" }], ([p, n]) => p.reason !== n.reason)
+    .with(
+      [{ status: "pass" }, { status: "warn" }],
+      [{ status: "warn" }, { status: "pass" }],
+      () => true,
+    )
+    .exhaustive();
 }
 
 function warnFields(reading: WarnReading) {
@@ -137,7 +145,7 @@ export class LivenessRegistry implements Liveness {
     };
   }
 
-  /** Build the registry, evaluate every check once, and tick every `tickMs` until `stop()`. */
+  /** Build the registry, evaluate every check once, and tick every `LIVENESS_TICK_MS` until `stop()`. */
   static start(
     checks: ReadonlyArray<LivenessCheck>,
     opts: LivenessRegistryOptions,
@@ -145,7 +153,7 @@ export class LivenessRegistry implements Liveness {
     const registry = new LivenessRegistry(checks, opts);
     registry.#tick();
     registry.#gauge.addCallback(registry.#observe);
-    registry.#timer = setInterval(() => registry.#tick(), opts.tickMs).unref();
+    registry.#timer = setInterval(() => registry.#tick(), LIVENESS_TICK_MS).unref();
     return registry;
   }
 
@@ -167,7 +175,7 @@ export class LivenessRegistry implements Liveness {
 
   #tick(): void {
     const now = this.#clock.monotonic();
-    const time = this.#clock.wall();
+    const time = this.#clock.wall().toISOString();
     // An entry keeps its index across ticks: the check list is fixed at construction.
     const evaluated = this.#checks.map((check, i) => ({
       check,
