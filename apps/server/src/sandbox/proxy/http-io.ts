@@ -76,17 +76,20 @@ export async function readBody(
  * An upgrade's body. Node emits the upgrade once the headers are in and
  * goes on parsing the body into the request; but when the client stops
  * sending before the body is complete, the request neither ends nor
- * errors, so the client socket's end counts as the body ending early.
+ * errors, so the client socket's end counts as the body ending early. The
+ * checks before this are async, so that end may already have happened.
  */
 export async function readUpgradeBody(
   req: http.IncomingMessage,
   clientSocket: Duplex,
   maxBytes: number,
 ): Promise<Result<Buffer, Extract<ProxyRejection, { kind: "too_large" | "malformed" }>>> {
+  if (req.complete) return readBody(req, maxBytes);
   const { promise: endedEarly, resolve } = Promise.withResolvers<void>();
   const onEnd = () => resolve();
   clientSocket.once("end", onEnd);
   clientSocket.once("close", onEnd);
+  if (clientSocket.readableEnded || clientSocket.destroyed) onEnd();
   try {
     return await Promise.race([
       readBody(req, maxBytes),

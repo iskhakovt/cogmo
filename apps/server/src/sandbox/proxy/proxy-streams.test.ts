@@ -1,4 +1,5 @@
 import * as net from "node:net";
+import { ResultAsync } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined, resolvesWithin } from "../../test/assertions.js";
@@ -8,6 +9,7 @@ import {
   fillerHeaders,
   OWN,
   TASK_ID,
+  TASK_ROWS,
   upgradeRequest,
   useProxyHarness,
 } from "../../test/proxy-harness.js";
@@ -119,6 +121,36 @@ const PRIVILEGED_CREATE =
   `Content-Length: ${Buffer.byteLength(PRIVILEGED)}\r\n\r\n${PRIVILEGED}`;
 
 describe("a request pipelined after a streaming one", () => {
+  it("closes the connection on an upgrade behind a held logs stream, writing nothing into it", async () => {
+    const id = await createExec();
+    const release = Promise.withResolvers<void>();
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.startsWith(`/containers/${OWN.id}/logs`)) return API(req, res, raw);
+      res.writeHead(200, { "content-type": "application/vnd.docker.multiplexed-stream" });
+      res.write("first");
+      release.promise.then(() => res.end("last"));
+    });
+    const client = await halfOpenClient();
+    client.socket.write(
+      "GET /containers/cogmo-task-own/logs?follow=1&stdout=1 HTTP/1.1\r\nHost: docker\r\n\r\n",
+    );
+    await vi.waitFor(() => expect(client.received()).toContain("first"));
+    const logsSoFar = client.received();
+
+    client.socket.write(upgradeStart(id, '{"Detach":false,"Tty":false}'));
+    await settle(200);
+
+    expect(client.received()).not.toContain("HTTP/1.1 101");
+    expect(client.received()).toBe(logsSoFar);
+    expect(reached(`/exec/${id}/start`)).toEqual([]);
+    await resolvesWithin(
+      Promise.race([client.ended, client.closed]),
+      SETTLE_MS,
+      "the connection to close",
+    );
+    release.resolve();
+  });
+
   it("is answered in order, after a held logs stream, and classified on its own", async () => {
     const release = Promise.withResolvers<void>();
     h.daemon.setResponder((req, res, raw) => {
@@ -489,6 +521,53 @@ describe("the checks on an upgrade", () => {
     expect(h.daemon.started()).toEqual(before);
   });
 
+  it("rejects an upgrade whose body the client cuts short during the checks, forwarding nothing", async () => {
+    const release = Promise.withResolvers<void>();
+    h.rows.forTask.mockImplementation(() =>
+      ResultAsync.fromSafePromise(release.promise.then(() => TASK_ROWS)),
+    );
+    log.info.mockClear();
+    const client = await halfOpenClient();
+    client.socket.write(
+      "POST /containers/cogmo-task-own/attach?stream=1 HTTP/1.1\r\nHost: docker\r\n" +
+        "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\n" +
+        "Content-Length: 100\r\n\r\n0123456789",
+    );
+    await vi.waitFor(() => expect(h.rows.forTask).toHaveBeenCalled());
+
+    // The client stops ten bytes into a 100-byte body while the store read is held.
+    client.socket.end();
+    await resolvesWithin(client.ended, SETTLE_MS, "the connection to close");
+    release.resolve();
+
+    await vi.waitFor(() =>
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: "/containers/cogmo-task-own/attach",
+          rejection: expect.objectContaining({ kind: "malformed" }),
+        }),
+        "proxy request rejected",
+      ),
+    );
+    expect(reached("/attach")).toEqual([]);
+  });
+
+  it("answers 403 to an upgrade on an unlisted route, contacting the daemon not at all", async () => {
+    log.info.mockClear();
+
+    const reply = await h.rawExchange(upgradeRequest("GET", "/swarm"));
+
+    expect(reply).toMatch(/^HTTP\/1\.1 403 /);
+    expect(log.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "/swarm",
+        rejection: expect.objectContaining({ kind: "denied" }),
+      }),
+      "proxy request rejected",
+    );
+    expect(h.daemon.started()).toEqual([]);
+  });
+
   it("sends a refused upgrade's body once, and the bytes after it no further", async () => {
     const id = await createExec();
     const before = h.daemon.requests().length;
@@ -601,6 +680,16 @@ describe("a switched upgrade", () => {
     ]);
   });
 
+  it("delivers a stream the daemon ends first, then releases a client still writing", async () => {
+    const id = await createExec();
+    h.daemon.finishUpgrades("final-output\n");
+    const client = await halfOpenClient();
+
+    client.socket.write(upgradeStart(id, BODY));
+
+    await expectReleasedAfter(client, /^HTTP\/1\.1 101 [\s\S]*\r\n\r\nfinal-output\n$/);
+  });
+
   it("forwards a header octet outside ASCII as itself", async () => {
     const id = await createExec();
 
@@ -692,6 +781,34 @@ describe("a parser error behind a request still being answered", () => {
     expect(client.received()).toBe("");
     release.resolve();
     client.socket.destroy();
+  });
+});
+
+describe("a task's signal", () => {
+  // Node sets no listener bound on an `AbortSignal`, and every connection and
+  // daemon request of a task listens on its one signal.
+  it("takes 20 concurrent requests without a listener-leak warning", async () => {
+    const warnings: Error[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning);
+    process.on("warning", onWarning);
+    const release = Promise.withResolvers<void>();
+    h.daemon.setResponder((req, res, raw) => {
+      if (req.url !== "/_ping") return API(req, res, raw);
+      release.promise.then(() => API(req, res, raw));
+    });
+    try {
+      const pings = Array.from({ length: 20 }, () => h.send("GET", "/_ping"));
+      await vi.waitFor(() => expect(reached("/_ping")).toHaveLength(20));
+      release.resolve();
+
+      const answers = await Promise.all(pings);
+
+      expect(answers.map((r) => r.status)).toEqual(Array.from({ length: 20 }, () => 200));
+      await settle(50);
+      expect(warnings.filter((w) => w.name === "MaxListenersExceededWarning")).toEqual([]);
+    } finally {
+      process.off("warning", onWarning);
+    }
   });
 });
 

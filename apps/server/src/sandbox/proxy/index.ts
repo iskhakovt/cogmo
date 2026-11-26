@@ -400,6 +400,15 @@ export class CogmoSocketProxy {
       writeRawStatusAndDestroy(clientSocket, 500, "Cogmo proxy: connection has no task scope");
       return;
     }
+    // Node hands the connection over at the upgrade's headers, while an
+    // earlier request's answer may still be streaming on it; any byte written
+    // now would land inside that answer, so the connection is closed instead.
+    if (connection.openResponses.size > 0) {
+      const rejection = malformed("an upgrade cannot follow a request still being answered");
+      log.info({ taskId: scope.taskId, path: pathOf(req), rejection }, "proxy request rejected");
+      clientSocket.destroy();
+      return;
+    }
     const reject = (rejection: ProxyRejection) =>
       this.#rejectUpgrade(req, clientSocket, scope, rejection);
     if (atHeaderLimit(req)) {

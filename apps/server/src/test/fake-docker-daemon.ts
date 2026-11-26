@@ -36,6 +36,11 @@ export interface FakeDockerDaemon {
   upgrades(): ReadonlyArray<FakeUpgrade>;
   /** Answer no upgrade from now on: record each and hold its connection open. */
   holdUpgrades(): void;
+  /**
+   * From now on, a switched upgrade writes `output` after its `101` and
+   * ends, without waiting for the client to end its side.
+   */
+  finishUpgrades(output: string): void;
   setResponder(responder: FakeDaemonResponder): void;
   close(): Promise<void>;
 }
@@ -62,6 +67,7 @@ export async function startFakeDockerDaemon(
   const upgrades: FakeUpgrade[] = [];
   const upgradeSockets = new Set<Duplex>();
   let holding = false;
+  let finalOutput: string | null = null;
   let current = responder;
   const server = http.createServer((raw, res) => {
     started.push(`${raw.method} ${raw.url}`);
@@ -81,7 +87,8 @@ export async function startFakeDockerDaemon(
   server.on("connection", () => {
     connections += 1;
   });
-  // An upgrade is answered as the daemon answers exec start: `101`, then a
+  // An upgrade is answered as the daemon answers exec start: `101` (with the
+  // `Sec-WebSocket-Accept` a WebSocket handshake needs, for one), then a
   // stream that records what the client sends and, once the client ends its
   // side, writes `late-output` and ends; or, for a detached start or a body
   // that is not JSON, a plain 200 or 400 and no switch. After a refusal the
@@ -94,10 +101,10 @@ export async function startFakeDockerDaemon(
     readUpgradeBody(raw, head)
       .then(({ body, rest }) => {
         received.push({ method: raw.method ?? "", url: raw.url ?? "", headers: raw.headers, body });
-        const refusal = upgradeRefusal(body);
+        const answer: FakeUpgradeAnswer = holding ? { kind: "held" } : upgradeAnswer(body);
         const upgrade: FakeUpgrade = {
           url: raw.url ?? "",
-          answer: holding ? "held" : refusal === null ? "switched" : "refused",
+          answer: answer.kind,
           received: rest.toString("latin1"),
           closed: false,
         };
@@ -110,33 +117,39 @@ export async function startFakeDockerDaemon(
         const record = (chunk: Buffer) => {
           upgrade.received += chunk.toString("latin1");
         };
-        if (upgrade.answer === "held") {
-          socket.on("data", record);
-          socket.once("end", () => socket.end());
-          return;
-        }
-        if (refusal === null) {
-          socket.on("data", record);
-          // A client that ended its side before the switch has already been read to its end.
-          const endStream = () => socket.end("late-output\n");
-          if (socket.readableEnded) endStream();
-          else socket.on("end", endStream);
-          socket.write("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
-          return;
-        }
-        const reply = JSON.stringify(refusal.body);
-        const closes = /(^|,)\s*close\s*(,|$)/i.test(raw.headers.connection ?? "");
-        socket.write(
-          `HTTP/1.1 ${refusal.status} ${http.STATUS_CODES[refusal.status]}\r\n` +
-            `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reply)}\r\n` +
-            `${closes ? "Connection: close\r\n" : ""}\r\n${reply}`,
-        );
-        if (closes) {
-          socket.end();
-          return;
-        }
-        if (rest.length > 0) socket.unshift(rest);
-        server.emit("connection", socket);
+        match(answer)
+          .with({ kind: "held" }, () => {
+            socket.on("data", record);
+            socket.once("end", () => socket.end());
+          })
+          .with({ kind: "switched" }, () => {
+            socket.on("data", record);
+            socket.write(switchingResponse(raw.headers));
+            if (finalOutput !== null) {
+              socket.end(finalOutput);
+              return;
+            }
+            // A client that ended its side before the switch has already been read to its end.
+            const endStream = () => socket.end("late-output\n");
+            if (socket.readableEnded) endStream();
+            else socket.on("end", endStream);
+          })
+          .with({ kind: "refused" }, ({ status, body: refusal }) => {
+            const reply = JSON.stringify(refusal);
+            const closes = /(^|,)\s*close\s*(,|$)/i.test(raw.headers.connection ?? "");
+            socket.write(
+              `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n` +
+                `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reply)}\r\n` +
+                `${closes ? "Connection: close\r\n" : ""}\r\n${reply}`,
+            );
+            if (closes) {
+              socket.end();
+              return;
+            }
+            if (rest.length > 0) socket.unshift(rest);
+            server.emit("connection", socket);
+          })
+          .exhaustive();
       })
       .catch(() => {
         // A client that hung up mid-body: there is no one to answer.
@@ -152,6 +165,9 @@ export async function startFakeDockerDaemon(
     upgrades: () => upgrades.map((upgrade) => ({ ...upgrade })),
     holdUpgrades: () => {
       holding = true;
+    },
+    finishUpgrades: (output) => {
+      finalOutput = output;
     },
     setResponder: (next) => {
       current = next;
@@ -178,20 +194,41 @@ async function readUpgradeBody(
   return { body: Buffer.concat(chunks).toString("utf8"), rest: head };
 }
 
-/** How the daemon refuses an exec start upgrade, or `null` when it switches. */
-function upgradeRefusal(body: string): { status: number; body: unknown } | null {
-  if (body === "") return null;
+type FakeUpgradeAnswer =
+  | { kind: "held" }
+  | { kind: "switched" }
+  | { kind: "refused"; status: number; body: unknown };
+
+/** How the daemon answers an exec start upgrade with `body`: it switches, or refuses a detached start or a body that is not JSON. */
+function upgradeAnswer(body: string): FakeUpgradeAnswer {
+  if (body === "") return { kind: "switched" };
   try {
     const parsed: unknown = JSON.parse(body);
     return typeof parsed === "object" &&
       parsed !== null &&
       "Detach" in parsed &&
       parsed.Detach === true
-      ? { status: 200, body: {} }
-      : null;
+      ? { kind: "refused", status: 200, body: {} }
+      : { kind: "switched" };
   } catch {
-    return { status: 400, body: { message: "invalid JSON: unexpected EOF" } };
+    return { kind: "refused", status: 400, body: { message: "invalid JSON: unexpected EOF" } };
   }
+}
+
+/** RFC 6455's key suffix for `Sec-WebSocket-Accept`. */
+const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/** The `101` the daemon switches with: a WebSocket handshake's for `Upgrade: websocket`, `tcp` otherwise. */
+function switchingResponse(headers: http.IncomingHttpHeaders): string {
+  const key = headers["sec-websocket-key"];
+  if (headers.upgrade?.toLowerCase() !== "websocket" || key === undefined) {
+    return "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n";
+  }
+  const accept = createHash("sha1").update(`${key}${WEBSOCKET_GUID}`).digest("base64");
+  return (
+    "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" +
+    `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+  );
 }
 
 export function respondJson(res: http.ServerResponse, status: number, body: unknown): void {

@@ -427,6 +427,9 @@ describe("upgraded streams", () => {
     );
 
     expect(reply).toMatch(/^HTTP\/1\.1 101 /);
+    // RFC 6455's example key and its accept value.
+    expect(reply).toContain("\r\nUpgrade: websocket\r\n");
+    expect(reply).toContain("\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n");
     const handshake = expectDefined(h.daemon.requests().at(-1), "the handshake");
     expect(handshake.url).toBe(`/containers/${OWN.id}/attach/ws?stream=1&stdout=1`);
     expect(handshake.headers).toMatchObject({
