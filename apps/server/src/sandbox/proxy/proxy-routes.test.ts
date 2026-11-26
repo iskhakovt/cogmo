@@ -276,6 +276,47 @@ describe("lists and events", () => {
 });
 
 describe("hop-by-hop headers", () => {
+  it("drops the headers a request's Connection names, and Proxy-Connection", async () => {
+    await h.rawExchange(
+      [
+        "GET /_ping HTTP/1.1",
+        "Host: docker",
+        "Connection: close, X-Hop-Secret",
+        "X-Hop-Secret: 1",
+        "Proxy-Connection: keep-alive",
+        "X-Kept: 1",
+        "",
+        "",
+      ].join("\r\n"),
+    );
+
+    const seen = expectDefined(h.daemon.requests()[0], "ping").headers;
+    expect(seen["x-hop-secret"]).toBeUndefined();
+    expect(seen["proxy-connection"]).toBeUndefined();
+    expect(seen["x-kept"]).toBe("1");
+  });
+
+  it("drops the headers a response's Connection names, and Proxy-Connection", async () => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.startsWith("/info")) return API(req, res, raw);
+      res.writeHead(200, {
+        "content-type": "application/json",
+        connection: "x-daemon-hop",
+        "x-daemon-hop": "1",
+        "proxy-connection": "keep-alive",
+        "x-kept": "1",
+      });
+      res.end("{}");
+    });
+
+    const r = await h.send("GET", "/info");
+
+    expect(r.status, r.body).toBe(200);
+    expect(r.headers["x-daemon-hop"]).toBeUndefined();
+    expect(r.headers["proxy-connection"]).toBeUndefined();
+    expect(r.headers["x-kept"]).toBe("1");
+  });
+
   it("drops them from a normal forward, a Trailer on a body-less GET included", async () => {
     const reply = await h.rawExchange(
       [
@@ -359,6 +400,46 @@ describe("image pulls", () => {
     ["no query", ""],
   ])("denies %s, reaching nothing", async (_label, query) => {
     h.expectRejected(await h.send("POST", `/images/create${query}`), 403, []);
+  });
+
+  it("denies a pull with a form body, whose values the daemon would read over the query", async () => {
+    const body = "fromImage=&fromSrc=http%3A%2F%2Fhost%2Fevil.tar&repo=cogmo-devbase&tag=latest";
+
+    const r = await h.send("POST", "/images/create?fromImage=alpine", body, {
+      "content-type": "application/x-www-form-urlencoded",
+    });
+
+    h.expectRejected(r, 403, []);
+    expect(message(r)).toContain("body");
+  });
+
+  it("denies a pull with a chunked body", async () => {
+    const reply = await h.rawExchange(
+      [
+        "POST /images/create?fromImage=alpine HTTP/1.1",
+        "Host: docker",
+        "Transfer-Encoding: chunked",
+        "Connection: close",
+        "",
+        "5\r\nhello",
+        "0",
+        "",
+        "",
+      ].join("\r\n"),
+    );
+
+    expect(reply).toMatch(/^HTTP\/1\.1 403 /);
+    expect(h.received()).toEqual([]);
+  });
+
+  it("forwards a pull with an empty tag and platform as fromImage alone, with no body", async () => {
+    const r = await h.send("POST", "/images/create?fromImage=alpine&tag=&platform=");
+
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual(["POST /images/create?fromImage=alpine"]);
+    const pull = expectDefined(h.daemon.requests()[0], "pull");
+    expect(pull.body).toBe("");
+    expect(pull.headers["content-length"]).toBe("0");
   });
 
   it("forwards a pull with only fromImage, tag and platform", async () => {

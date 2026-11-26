@@ -21,11 +21,12 @@ import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import {
   buildHttpRequestPreamble,
+  emptyBodyRequestHeaders,
   isAbortError,
+  jsonRequestHeaders,
   pathOf,
   pipedRequestHeaders,
   readBody,
-  rebuiltRequestHeaders,
   rebuiltResponseHeaders,
   relayedResponseHeaders,
   respondJson,
@@ -54,7 +55,8 @@ export interface Upstream {
 export interface Forward {
   /** The canonical path with the re-serialised query. */
   path: string;
-  body: { kind: "piped" } | { kind: "rebuilt"; bytes: Buffer };
+  /** The client's body as it came, a JSON body the proxy rebuilt, or none at all. */
+  body: { kind: "piped" } | { kind: "json"; bytes: Buffer } | { kind: "none" };
   response: ResponseRelay;
   /**
    * What happens when the client is gone before the request is sent, or
@@ -80,10 +82,15 @@ export function forward(
   plan: Forward,
 ): void {
   const gone = res.destroyed || req.socket.destroyed;
-  if (gone && plan.whenClientGone === "drop") return;
+  const send = match(plan.whenClientGone)
+    .with("drop", () => !gone)
+    .with("send", () => true)
+    .exhaustive();
+  if (!send) return;
   const headers = match(plan.body)
     .with({ kind: "piped" }, () => pipedRequestHeaders(req))
-    .with({ kind: "rebuilt" }, ({ bytes }) => rebuiltRequestHeaders(req, bytes))
+    .with({ kind: "json" }, ({ bytes }) => jsonRequestHeaders(req, bytes))
+    .with({ kind: "none" }, () => emptyBodyRequestHeaders(req))
     .exhaustive();
   const outgoing = http.request(
     {
@@ -95,7 +102,11 @@ export function forward(
     },
     (reply) => relay(req, reply, res, plan.response),
   );
+  // The proxy's own close of the daemon request, for a client that hung up:
+  // not an upstream failure, and there is no one left to answer.
+  const hungUp = new Error("the client hung up");
   outgoing.on("error", (cause) => {
+    if (cause === hungUp) return;
     if (!isAbortError(cause)) log.warn({ err: cause.message, path: pathOf(req) }, "upstream error");
     respondDaemonFailed(res, cause);
   });
@@ -104,14 +115,15 @@ export function forward(
   match(plan.whenClientGone)
     .with("drop", () =>
       res.once("close", () => {
-        if (!res.writableFinished) outgoing.destroy();
+        if (!res.writableFinished) outgoing.destroy(hungUp);
       }),
     )
     .with("send", () => undefined)
     .exhaustive();
   match(plan.body)
     .with({ kind: "piped" }, () => req.pipe(outgoing))
-    .with({ kind: "rebuilt" }, ({ bytes }) => outgoing.end(bytes))
+    .with({ kind: "json" }, ({ bytes }) => outgoing.end(bytes))
+    .with({ kind: "none" }, () => outgoing.end())
     .exhaustive();
 }
 

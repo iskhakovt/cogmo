@@ -946,6 +946,19 @@ describe("create policy: networks", () => {
 });
 
 describe("create policy: values kept as sent", () => {
+  it("forwards the rebuilt body as JSON whatever content type the client sent", async () => {
+    const r = await requestOverSocket(socket, {
+      method: "POST",
+      path: "/containers/create",
+      body: JSON.stringify({ Image: "alpine" }),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+    });
+
+    expect(r.status, r.body).toBe(201);
+    const [only] = creates();
+    expect(expectDefined(only, "create").headers["content-type"]).toBe("application/json");
+  });
+
   it("forwards data-keyed maps, empty values and an empty Entrypoint unchanged", async () => {
     const body = {
       Image: "alpine",

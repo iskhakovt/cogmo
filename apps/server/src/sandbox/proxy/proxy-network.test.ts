@@ -45,6 +45,19 @@ describe("network connect and disconnect", () => {
     },
   );
 
+  it("forwards the rebuilt connect body as JSON whatever content type the client sent", async () => {
+    const r = await h.send(
+      "POST",
+      "/networks/bridge/connect",
+      JSON.stringify({ Container: "cogmo-task-own" }),
+      { "content-type": "application/x-www-form-urlencoded" },
+    );
+
+    expect(r.status, r.body).toBe(200);
+    const forwarded = expectDefined(h.daemon.requests().at(-1), "connect");
+    expect(forwarded.headers["content-type"]).toBe("application/json");
+  });
+
   it("forwards an owned container's disconnect from bridge with Force", async () => {
     const r = await h.send(
       "POST",

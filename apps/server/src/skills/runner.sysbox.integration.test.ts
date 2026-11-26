@@ -15,8 +15,8 @@ import {
   LocalDockerSandboxClient,
   type SandboxClient,
 } from "../sandbox/index.js";
-import { storeContainerRows } from "../sandbox/list-task-containers.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
+import { storeContainerRows } from "../sandbox/store-container-rows.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectDefined } from "../test/assertions.js";

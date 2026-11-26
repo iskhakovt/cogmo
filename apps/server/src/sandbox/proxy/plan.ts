@@ -14,7 +14,7 @@ import type { Forward } from "./forward.js";
 import { imageCreateQuery } from "./image-create-query.js";
 import { applyNetworkEndpointPolicy, type NetworkEndpoint } from "./network-endpoint.js";
 import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
-import { notFound, type ProxyRejection } from "./rejection.js";
+import { denied, notFound, type ProxyRejection } from "./rejection.js";
 import { withQuery } from "./request-path.js";
 import type { ContainerTarget, ExecTarget, RequestRoute, StreamRoute } from "./router.js";
 import type { DaemonLookups, TaskScope } from "./types.js";
@@ -30,6 +30,8 @@ export interface RequestContext extends StreamContext {
   createLookups: DaemonLookups;
   /** The request body, bounded; read only by a route with a body policy. */
   readBody(): Promise<Result<Buffer, ProxyRejection>>;
+  /** Whether the request carries a body at all. */
+  hasBody: boolean;
   /** Add an exec id the daemon created through this task's socket. */
   recordExec(execId: string): void;
 }
@@ -42,9 +44,7 @@ export function planRequest(
   return match(route)
     .with({ kind: "plain" }, async ({ path }) => ok(piped(withQuery(path, query))))
     .with({ kind: "image_create" }, async ({ versionPrefix }) =>
-      imageCreateQuery(query).map((forwarded) =>
-        piped(withQuery(`${versionPrefix}/images/create`, forwarded)),
-      ),
+      planImageCreate(versionPrefix, query, ctx),
     )
     .with({ kind: "container" }, async ({ target }) =>
       (await containerPath(target, query, ctx)).map(piped),
@@ -96,6 +96,28 @@ export function planStream(
     .exhaustive();
 }
 
+/**
+ * A pull, which never has a body. The daemon reads this route's parameters
+ * with `ParseForm`, where a form body's values override the query's, so a
+ * body could turn the checked pull into an import; one is denied, and the
+ * pull is forwarded with none.
+ */
+async function planImageCreate(
+  versionPrefix: string,
+  query: URLSearchParams,
+  ctx: RequestContext,
+): Promise<Result<Forward, ProxyRejection>> {
+  if (ctx.hasBody) return err(denied("A POST /images/create body"));
+  return imageCreateQuery(query).map(
+    (forwarded): Forward => ({
+      path: withQuery(`${versionPrefix}/images/create`, forwarded),
+      body: { kind: "none" },
+      response: { kind: "piped" },
+      whenClientGone: "drop",
+    }),
+  );
+}
+
 async function planContainerCreate(
   versionPrefix: string,
   query: URLSearchParams,
@@ -134,7 +156,7 @@ async function planExecCreate(
   return owned.map(
     (container): Forward => ({
       path: withQuery(`${target.versionPrefix}/containers/${container.dockerId}/exec`, query),
-      body: { kind: "rebuilt", bytes: body.value },
+      body: { kind: "json", bytes: body.value },
       response: { kind: "exec_created", record: ctx.recordExec },
       whenClientGone: "drop",
     }),
@@ -189,7 +211,7 @@ function piped(path: string): Forward {
 function rebuilt(path: string, bytes: Buffer): Forward {
   return {
     path,
-    body: { kind: "rebuilt", bytes },
+    body: { kind: "json", bytes },
     response: { kind: "piped" },
     whenClientGone: "drop",
   };

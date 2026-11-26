@@ -37,9 +37,10 @@ describe("forward: a reply read whole", () => {
     const req = mock<http.IncomingMessage>({
       method: "POST",
       url: "/containers/abc/exec",
-      headers: { "content-type": "application/json" },
       socket: mock<net.Socket>({ destroyed: false }),
     });
+    // A plain object: a mocked one answers every header with a function.
+    req.headers = { "content-type": "application/json" };
     const res = mock<http.ServerResponse>({ destroyed: false });
     res.writeHead.mockImplementation(() => {
       throw new Error("a bug in the relay");
@@ -52,7 +53,7 @@ describe("forward: a reply read whole", () => {
       { socketPath: daemon.socketPath, signal: new AbortController().signal },
       {
         path: "/containers/abc/exec",
-        body: { kind: "rebuilt", bytes: Buffer.from('{"Cmd":["id"]}') },
+        body: { kind: "json", bytes: Buffer.from('{"Cmd":["id"]}') },
         response: { kind: "exec_created", record },
         whenClientGone: "drop",
       },

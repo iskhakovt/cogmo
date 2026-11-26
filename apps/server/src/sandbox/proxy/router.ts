@@ -124,12 +124,7 @@ const ROWS: ReadonlyArray<Row> = [
     pattern: /^\/containers\/json$/,
     outcome: (_, v, r) => request({ kind: "container_list", path: canonical(v, r) }),
   },
-  readRow("GET", /^\/containers\/(.+)\/(export|changes|json|top|stats|archive)$/),
-  {
-    method: "GET",
-    pattern: /^\/containers\/(.+)\/(logs)$/,
-    outcome: (g, v) => request({ kind: "container", target: container("GET", "any", g, v) }),
-  },
+  readRow("GET", /^\/containers\/(.+)\/(export|changes|json|top|logs|stats|archive)$/),
   {
     method: "GET",
     pattern: /^\/containers\/(.+)\/(attach\/ws)$/,

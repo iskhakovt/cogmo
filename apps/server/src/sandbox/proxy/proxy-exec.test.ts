@@ -116,6 +116,19 @@ function message(r: SocketResponse): string {
 }
 
 describe("exec policy", () => {
+  it("forwards the rebuilt body as JSON whatever content type the client sent", async () => {
+    const r = await requestOverSocket(socket, {
+      method: "POST",
+      path: "/containers/abc/exec",
+      body: JSON.stringify({ Cmd: ["id"] }),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+    });
+
+    expect(r.status, r.body).toBe(201);
+    const exec = expectDefined(daemon.requests()[1], "exec");
+    expect(exec.headers["content-type"]).toBe("application/json");
+  });
+
   it("forwards every allowed field as sent", async () => {
     const body = {
       Cmd: ["sh", "-c", "true"],

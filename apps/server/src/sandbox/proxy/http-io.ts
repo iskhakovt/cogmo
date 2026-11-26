@@ -75,10 +75,13 @@ export async function readBody(
 
 /**
  * Headers that describe one connection rather than the request, which a
- * normal forward drops: Node frames the daemon connection itself.
+ * normal forward drops in both directions: Node frames the daemon
+ * connection itself. Every header the `Connection` value names goes too
+ * (RFC 9110 §7.6.1).
  */
 const HOP_BY_HOP_HEADERS: ReadonlySet<string> = new Set([
   "connection",
+  "proxy-connection",
   "upgrade",
   "keep-alive",
   "te",
@@ -99,13 +102,45 @@ export function pipedRequestHeaders(req: http.IncomingMessage): Record<string, s
     : { ...headers, "transfer-encoding": "chunked" };
 }
 
-/** The headers of a request whose body the proxy rebuilt, framed by its length. */
-export function rebuiltRequestHeaders(
+/**
+ * The headers of a request whose JSON body the proxy rebuilt, framed by its
+ * length. The content type is JSON whatever the client sent, so the daemon
+ * never reads a route's parameters from a form body.
+ */
+export function jsonRequestHeaders(
   req: http.IncomingMessage,
   body: Buffer,
 ): Record<string, string | string[]> {
-  const headers = R.omit(withoutHopByHop(req.headers), ["content-length", "expect"]);
-  return { ...headers, "content-length": String(body.length) };
+  const headers = R.omit(withoutHopByHop(req.headers), [
+    "content-length",
+    "content-type",
+    "expect",
+  ]);
+  return {
+    ...headers,
+    "content-type": "application/json",
+    "content-length": String(body.length),
+  };
+}
+
+/** The headers of a request the proxy forwards with no body. */
+export function emptyBodyRequestHeaders(
+  req: http.IncomingMessage,
+): Record<string, string | string[]> {
+  const headers = R.omit(withoutHopByHop(req.headers), [
+    "content-length",
+    "content-type",
+    "expect",
+  ]);
+  return { ...headers, "content-length": "0" };
+}
+
+/** Whether the request carries a body: a non-zero `Content-Length`, or a chunked one. */
+export function hasRequestBody(req: http.IncomingMessage): boolean {
+  return (
+    req.headers["transfer-encoding"] !== undefined ||
+    Number(req.headers["content-length"] ?? "0") > 0
+  );
 }
 
 /**
@@ -133,13 +168,21 @@ export function rebuiltResponseHeaders(
 }
 
 function withoutHopByHop(h: http.IncomingHttpHeaders): Record<string, string | string[]> {
-  return R.omitBy(cloneHeaders(h), (_value, name) => HOP_BY_HOP_HEADERS.has(name));
+  const named: ReadonlySet<string> = new Set(
+    (h.connection ?? "")
+      .split(",")
+      .map((token) => token.trim().toLowerCase())
+      .filter((token) => token !== ""),
+  );
+  return R.omitBy(
+    cloneHeaders(h),
+    (_value, name) => HOP_BY_HOP_HEADERS.has(name) || named.has(name),
+  );
 }
 
 /**
  * An HTTP/1.1 request preamble (request line, headers, empty line) under
- * `path`, for a request the proxy replays at the byte level: one it
- * raw-pipes, upgraded or not.
+ * `path`, for an upgrade the proxy raw-pipes.
  */
 export function buildHttpRequestPreamble(req: http.IncomingMessage, path: string): Buffer {
   const headers = Object.entries(cloneHeaders(req.headers)).flatMap(([name, value]) =>

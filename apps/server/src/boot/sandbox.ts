@@ -18,8 +18,8 @@ import {
   type SandboxClient,
   type SessionSandbox,
 } from "../sandbox/index.js";
-import { storeContainerRows } from "../sandbox/list-task-containers.js";
 import type { SandboxRuntime } from "../sandbox/runtime.js";
+import { storeContainerRows } from "../sandbox/store-container-rows.js";
 import { LOCAL_DOCKER_CAPABILITIES } from "../sandbox/supervisor.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "../skills/worker-sysbox/host.js";
 import { describeError } from "../util/describe-error.js";

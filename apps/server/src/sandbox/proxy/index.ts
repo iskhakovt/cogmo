@@ -16,6 +16,7 @@ import {
 } from "./daemon-lookups.js";
 import { forward, pipeUpgrade, respondInternalError, type Upstream } from "./forward.js";
 import {
+  hasRequestBody,
   isAbortError,
   pathOf,
   readBody,
@@ -403,6 +404,7 @@ export class CogmoSocketProxy {
         rootless: this.#rootless,
       }),
       readBody: () => readBody(req, MAX_REWRITTEN_BODY_BYTES),
+      hasBody: hasRequestBody(req),
       recordExec: (execId) => connection.execIds.add(execId),
     };
   }

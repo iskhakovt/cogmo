@@ -2,8 +2,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { expectOk } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { storeContainerRows } from "./list-task-containers.js";
 import { DrizzleSandboxStore } from "./store/index.js";
+import { storeContainerRows } from "./store-container-rows.js";
 
 const TASK_ID = "019d0000-0000-7000-8000-000000000001";
 const OTHER_TASK_ID = "019d0000-0000-7000-8000-000000000002";

@@ -4,6 +4,9 @@ import { z } from "zod";
 import { resolvesWithin } from "../../test/assertions.js";
 import { API, OWN, upgradeRequest, useProxyHarness } from "../../test/proxy-harness.js";
 
+const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
+vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
+
 const ExecCreatedSchema = z.object({ Id: z.string() });
 
 /** Budget for each wait on a connection; ample headroom over the milliseconds they take. */
@@ -50,6 +53,36 @@ const PRIVILEGED_CREATE =
   `Content-Length: ${Buffer.byteLength(PRIVILEGED)}\r\n\r\n${PRIVILEGED}`;
 
 describe("a request pipelined after a streaming one", () => {
+  it("is answered in order, after a held logs stream, and classified on its own", async () => {
+    const release = Promise.withResolvers<void>();
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.startsWith(`/containers/${OWN.id}/logs`)) return API(req, res, raw);
+      res.writeHead(200, { "content-type": "application/vnd.docker.multiplexed-stream" });
+      res.write("first");
+      release.promise.then(() => res.end("last"));
+    });
+    const client = await rawClient();
+    client.socket.write(
+      "GET /containers/cogmo-task-own/logs?follow=1&stdout=1 HTTP/1.1\r\nHost: docker\r\n\r\n",
+    );
+    await vi.waitFor(() => expect(client.received()).toContain("first"));
+
+    client.socket.write("GET /unlisted HTTP/1.1\r\nHost: docker\r\n\r\n");
+    await settle(100);
+    expect(client.received()).not.toContain("HTTP/1.1 403");
+    release.resolve();
+
+    await vi.waitFor(() => expect(client.received()).toContain("HTTP/1.1 403"));
+    const received = client.received();
+    expect(received.indexOf("HTTP/1.1 200")).toBeLessThan(received.indexOf("HTTP/1.1 403"));
+    expect(received.indexOf("last")).toBeLessThan(received.indexOf("HTTP/1.1 403"));
+    expect(h.daemon.started()).toEqual([
+      "GET /containers/cogmo-task-own/json",
+      `GET /containers/${OWN.id}/logs?follow=1&stdout=1`,
+    ]);
+    client.socket.destroy();
+  });
+
   it.each([
     [
       "an owned logs",
@@ -163,7 +196,7 @@ describe("streams and relays", () => {
     ["a stats stream", "GET", "stats", true],
     ["a wait the daemon has not answered", "POST", "wait", false],
   ])(
-    "closes the daemon request when the client hangs up on %s",
+    "closes the daemon request when the client hangs up on %s, logging no upstream error",
     async (_label, method, action, answered) => {
       const closed = Promise.withResolvers<void>();
       const held = Promise.withResolvers<void>();
@@ -187,8 +220,20 @@ describe("streams and relays", () => {
       client.destroy();
 
       await resolvesWithin(closed.promise, SETTLE_MS, "the daemon connection to close");
+      await settle(100);
+      expect(log.warn.mock.calls.filter(([, msg]) => msg === "upstream error")).toEqual([]);
     },
   );
+
+  it.each([
+    ["GET", "/containers/cogmo-task-own/logs"],
+    ["GET", "/distribution/alpine/json"],
+  ])("answers 400 to an upgrade on %s %s, which is not a stream route", async (method, path) => {
+    const reply = await h.rawExchange(upgradeRequest(method, path));
+
+    expect(reply).toMatch(/^HTTP\/1\.1 400 /);
+    expect(h.received()).toEqual([]);
+  });
 
   it("answers 502 to a forwarded stream whose daemon connection fails", async () => {
     await h.daemon.close();
