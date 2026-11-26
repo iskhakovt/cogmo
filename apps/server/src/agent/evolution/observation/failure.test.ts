@@ -10,8 +10,9 @@ import { AllProvidersFailedError, RefusalError } from "../../../llm/fallback.js"
 import {
   classifyTurnFailure,
   ExtractionUnavailableError,
-  isExtractionUnavailable,
   isTerminalTurnFailure,
+  isUnavailable,
+  RetainUnavailableError,
 } from "./failure.js";
 
 function httpError(status: number, message: string): Error {
@@ -78,13 +79,17 @@ describe("classifyTurnFailure", () => {
   });
 });
 
-describe("ExtractionUnavailableError", () => {
-  it("is told apart by the name a step's failure keeps, and carries the cause's message", () => {
-    const err = new ExtractionUnavailableError(httpError(503, "overloaded"));
-
-    expect(isExtractionUnavailable({ name: err.name })).toBe(true);
-    expect(isExtractionUnavailable(new Error("connection reset"))).toBe(false);
+describe("isUnavailable", () => {
+  it.each([
+    ["an unavailable extraction", new ExtractionUnavailableError(httpError(503, "overloaded"))],
+    ["an unavailable retain", new RetainUnavailableError(new Error("overloaded"))],
+  ])("tells %s apart by the name a step's failure keeps, with the cause's message", (_l, err) => {
+    expect(isUnavailable({ name: err.name })).toBe(true);
     expect(err.message).toContain("overloaded");
+  });
+
+  it("counts anything else", () => {
+    expect(isUnavailable(new Error("connection reset"))).toBe(false);
   });
 });
 

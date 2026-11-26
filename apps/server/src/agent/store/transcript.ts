@@ -245,8 +245,8 @@ export interface TranscriptStore {
    * A conversation's complete message history with row ids, ordered by id.
    *
    * The raw transcript, not the compacted turn view — `loadTurnHistory` layers
-   * durable summaries on top of this for the LLM-facing path, while the
-   * Observer and the web history read take it as-is.
+   * durable summaries on top of this for the LLM-facing path, while the web
+   * history read takes it as-is.
    */
   listMessages(tx: Transaction, conversationId: string): Promise<ReadonlyArray<TranscriptRow>>;
 

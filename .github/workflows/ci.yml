@@ -121,6 +121,7 @@ jobs:
               - 'apps/server/src/agent/stored-content.ts'
               - 'apps/server/src/agent/evolution/event-schema.ts'
               - 'apps/server/src/agent/evolution/memory-extraction-schema.ts'
+              - 'apps/server/src/agent/evolution/observation/turn-extraction.ts'
               - 'apps/server/src/agent/pipeline/run-types.ts'
               - 'apps/server/src/agent/pipeline/types.ts'
               - 'apps/server/src/agent/transcript-head.ts'

@@ -1,7 +1,7 @@
 /**
  * Zod schemas and prompt for memory extraction.
  *
- * The extraction LLM analyzes a conversation transcript and extracts
+ * The extraction LLM analyzes one turn of a conversation and extracts
  * facts worth remembering, classifying each into a memory network.
  * Results are structured via chatTyped() for reliable parsing.
  */
@@ -119,6 +119,13 @@ export function buildExtractedMemorySchema(customNames: ReadonlyArray<string>) {
       .min(1)
       .optional()
       .describe("Optional: when or why this was learned, for temporal context"),
+    evidence: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        "The words in <turn> that state this fact, quoted verbatim: a short exact excerpt of the user's message, a tool result or the reply, not a paraphrase",
+      ),
   });
 }
 
@@ -230,9 +237,7 @@ const EXTRACTION_RULES = `## Rules for Extraction
 - **No conversation references**: Don't mention "the user said" or "in this conversation" — extract the fact itself.
 - **Admission criteria**: Only extract facts with future utility, factual confidence, and semantic novelty. Ask: "would knowing this help in a future conversation?"
 - **One fact per item**: Don't combine multiple independent facts into one entry.
-- **Return empty array if nothing qualifies**: Most short conversations have nothing worth extracting.
-
-Analyze the transcript below and extract facts worth remembering.`;
+- **Return empty array if nothing qualifies**: Most turns have nothing worth extracting.`;
 
 /** The live `memory`-category rules, listed only when there are some. */
 function memoryRulesSection(memoryRules: ReadonlyArray<string>, instruction: string): string {
@@ -247,16 +252,19 @@ ${memoryRules.map((r) => `- ${r}`).join("\n")}
 }
 
 /**
- * Build the extraction system prompt for an Observer fire. Customs are
- * templated into the compartment section verbatim; pass `[]` for the
- * core-only version. `memoryRules` are the live `memory`-category rules the
- * conversation's profile sees.
+ * Build the extraction system prompt for one turn. Customs are templated into
+ * the compartment section verbatim; pass `[]` for the core-only version.
+ * `memoryRules` are the live `memory`-category rules the fire's profile sees.
  */
 export function buildMemoryExtractionPrompt(
   customs: ReadonlyArray<CompartmentDefinition>,
   memoryRules: ReadonlyArray<string>,
 ): string {
-  return `You are a memory extraction engine. Your job is to analyze a conversation transcript between a user and an AI assistant, and extract facts worth storing in long-term memory. For each fact, assign three independent classifications: network, compartment, and trust tier.
+  return `You are a memory extraction engine. Your job is to analyze one turn of a conversation between a user and an AI assistant, and extract facts worth storing in long-term memory. For each fact, assign three independent classifications: network, compartment, and trust tier.
+
+## The Turn
+
+The message holds the turn inside a \`<turn>\` element: the user's message, the assistant's tool calls and their results, and its reply. Before it, an \`<earlier_conversation>\` element may hold the exchange that preceded the turn, which has already been analyzed: use it only to resolve what the turn refers to. Extract facts from \`<turn>\` only, and quote in \`evidence\` the words of \`<turn>\` that state each one.
 
 ## Memory Networks (what kind of knowledge)
 

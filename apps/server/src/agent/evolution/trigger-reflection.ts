@@ -14,6 +14,7 @@
  * `step.run("…", fn)` calls execute serially in-process with no memoization.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   type ObserverDeps,
   type ObserverResult,
@@ -32,5 +33,8 @@ export async function triggerReflection(
   conversationId: string,
   deps: TriggerReflectionDeps,
 ): Promise<TriggerReflectionResult> {
-  return runObserver({ data: { conversationId } }, SYNC_HARNESS, deps, "manual");
+  return runObserver({ data: { conversationId } }, SYNC_HARNESS, deps, {
+    triggeredBy: "manual",
+    runId: randomUUID(),
+  });
 }

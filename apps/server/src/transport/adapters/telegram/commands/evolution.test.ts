@@ -230,7 +230,7 @@ describe("handleReflect", () => {
     expect(digest).toContain("0 extracted, 0 drained, 2 withheld");
   });
 
-  it("reports an extraction skipped and rows deferred for a first-party fire", async () => {
+  it("reports turns held and rows deferred for a first-party fire", async () => {
     const transport = transportWith({
       evolution: {
         triggerReflection: vi.fn().mockResolvedValue(
@@ -241,7 +241,7 @@ describe("handleReflect", () => {
             memoryCount: 0,
             drained: 0,
             withheld: 0,
-            skippedForUnseenRules: 1,
+            skippedForUnseenRules: 2,
             deferredToFirstParty: 3,
           }),
         ),
@@ -251,21 +251,21 @@ describe("handleReflect", () => {
     await handleReflect(transport, ctx);
     const digest = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
     expect(digest).toContain(
-      "Memories: extraction skipped (a user's memory rule this profile can't see), 0 drained, 3 deferred.",
+      "Memories: 0 extracted, 2 turn(s) held (a user's memory rule a profile can't see), 0 drained, 3 deferred.",
     );
   });
 
-  it("reports too-short conversations clearly", async () => {
+  it("says when nothing is new since the Observer last ran", async () => {
     const transport = transportWith({
       evolution: {
         triggerReflection: vi
           .fn()
-          .mockResolvedValue(ok({ status: "skipped", reason: "too_short" })),
+          .mockResolvedValue(ok({ status: "skipped", reason: "nothing_new" })),
       },
     });
     const ctx = mkCtx();
     await handleReflect(transport, ctx);
-    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/too short/i);
+    expect(ctx.reply.mock.calls[1]?.[0]).toBe("Nothing new since the Observer last ran.");
   });
 
   it("reports no-session when there's no active conversation", async () => {
@@ -330,23 +330,6 @@ describe("handleReflect", () => {
       expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/Couldn't load the conversation/);
     });
   }
-
-  it("interpolates the live MIN_MESSAGES_FOR_EXTRACTION threshold into the too-short copy", async () => {
-    const transport = transportWith({
-      evolution: {
-        triggerReflection: vi
-          .fn()
-          .mockResolvedValue(ok({ status: "skipped", reason: "too_short" })),
-      },
-    });
-    const ctx = mkCtx();
-    await handleReflect(transport, ctx);
-    // The renderer imports MIN_MESSAGES_FOR_EXTRACTION from the
-    // Observer; this regression test catches a future drift where the
-    // copy hardcodes a number again.
-    const { MIN_MESSAGES_FOR_EXTRACTION } = await import("../../../../agent/evolution/index.js");
-    expect(ctx.reply.mock.calls[1]?.[0]).toContain(`${MIN_MESSAGES_FOR_EXTRACTION} messages`);
-  });
 });
 
 describe("handleLearned detail rendering", () => {
@@ -426,10 +409,10 @@ describe("handleLearned detail rendering", () => {
     expect(quiet).not.toContain("profile can't see");
   });
 
-  it("shows an extraction skipped and rows deferred for rules the profile can't see", async () => {
-    const reply = await detailOf(makePayload({ skipped: 1, deferred: 3 }));
+  it("shows turns held and rows deferred for rules the profile can't see", async () => {
+    const reply = await detailOf(makePayload({ skipped: 2, deferred: 3 }));
     expect(reply).toContain(
-      "Memories: skipped; a user's memory rule binds it and this profile can't see it",
+      "  held: 2 turn(s); a user's memory rule binds a profile that can't see it",
     );
     expect(reply).toContain("Pending drained: 0");
     expect(reply).toContain("  deferred to a first-party fire: 3");

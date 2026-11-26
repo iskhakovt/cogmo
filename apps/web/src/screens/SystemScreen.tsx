@@ -178,7 +178,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
         ) : (
           <>
             <Field label="extracted" value={memories.extracted} />
-            <Field label="skipped, unseen user rule" value={memories.skippedForUnseenRules} />
+            <Field label="held, unseen user rule" value={memories.skippedForUnseenRules} />
             <NetworkField byNetwork={memories.byNetwork} />
           </>
         )}

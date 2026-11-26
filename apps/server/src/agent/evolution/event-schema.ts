@@ -9,7 +9,7 @@
  * conversationId is a top-level column). `messageCount`, `profileId`, and
  * `durationMs` are added so the `/learned` digest and detail views don't
  * need to join back to `messages` / `conversations` to render "from profile
- * X, N turns, took Yms" headers.
+ * X, N messages, took Yms" headers.
  *
  * **Source of truth for the persisted shape lives here.** The runtime
  * interfaces in `extract-corrections.ts` / `extract-memories.ts` /
@@ -56,9 +56,10 @@ const ConsolidationResultSchema = z.object({
 });
 
 const MemoryExtractionResultSchema = z.object({
+  /** Facts retained. */
   extracted: z.number().int().nonnegative(),
   byNetwork: z.record(z.string(), z.number().int().nonnegative()),
-  /** Older rows omit it and read as 0. */
+  /** Turns held for a user's memory rule the profile can't see; 1 on a transcript-era row whose extraction was skipped. Older rows omit it and read as 0. */
   skippedForUnseenRules: z.number().int().nonnegative().default(0),
 });
 
@@ -76,6 +77,7 @@ export const EvolutionEventPayloadSchema = z.object({
   consolidation: ConsolidationResultSchema.nullable(),
   memories: MemoryExtractionResultSchema,
   drained: DrainResultSchema,
+  /** The conversation's message count when the fire recorded its row. */
   messageCount: z.number().int().nonnegative(),
   profileId: z.string().uuid(),
   /**
@@ -86,7 +88,7 @@ export const EvolutionEventPayloadSchema = z.object({
    * a backfill.
    */
   durationMs: z.number().int().nonnegative().optional(),
-  /** Phases that failed after their step retries, in run order; their counts above are the empty fallback, or for `corrections` the turns applied before the failure. Absent on older rows: unknown, not `[]`. */
+  /** Phases that failed after their step retries, in run order; their counts above are the empty fallback, or for a turn phase (`corrections`, `memories`) the turns it finished before the failure. Absent on older rows: unknown, not `[]`. */
   failedPhases: z.array(ObserverPhaseSchema).optional(),
 });
 export type EvolutionEventPayload = z.infer<typeof EvolutionEventPayloadSchema>;

@@ -1,12 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderProtocolError } from "../../llm/errors.js";
-import { logger } from "../../logger.js";
+import type { ChatParams } from "../../llm/types.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
 import type { MemoryRule } from "../store/index.js";
-import type { StoredMessage } from "../stored-content.js";
-import type { ObserverFire } from "./drain-pending-memories.js";
-import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
+import { extractTurnMemories, type MemoryExtractionDeps } from "./extract-memories.js";
 
 const HEALTH_RULE: MemoryRule = {
   rule: "Don't save anything about my health.",
@@ -14,411 +12,118 @@ const HEALTH_RULE: MemoryRule = {
   fromUser: true,
 };
 
-const FIRE: ObserverFire = {
-  conversationId: "conv-1",
-  userId: "user-1",
-  profileId: "profile-1",
-  seesUserRules: true,
+const HOMELAB = {
+  fact: "homelab IP is 10.0.10.10",
+  network: "world",
+  compartment: "technical",
+  trust: "first-party",
+  evidence: "My homelab IP is 10.0.10.10",
 };
-const THIRD_PARTY_FIRE: ObserverFire = { ...FIRE, seesUserRules: false };
 
-function mockExtractionDeps(
-  chatTypedResponse: { memories: Array<Record<string, unknown>> },
+function reply(text: string) {
+  return {
+    content: [{ type: "text" as const, text }],
+    stopReason: "end_turn" as const,
+    model: "mock",
+    usage: { inputTokens: 10, outputTokens: 5 },
+  };
+}
+
+function deps(
+  answer: { memories: Array<Record<string, unknown>> },
   overrides?: Partial<MemoryExtractionDeps>,
 ): MemoryExtractionDeps {
-  const provider = mockProvider({
-    chat: vi.fn().mockResolvedValue({
-      content: [{ type: "text", text: JSON.stringify(chatTypedResponse) }],
-      stopReason: "end_turn",
-      model: "mock",
-      usage: { inputTokens: 10, outputTokens: 5 },
-    }),
-  });
-
   return {
-    provider,
+    provider: mockProvider({ chat: vi.fn().mockResolvedValue(reply(JSON.stringify(answer))) }),
     model: "test-model",
-    memory: {
-      retainBatch: vi.fn().mockResolvedValue(undefined),
-    },
     customCompartments: [],
-    memoryRules: [],
-    fire: FIRE,
     ...overrides,
   };
 }
 
-const sampleHistory: StoredMessage[] = [
-  { role: "user", content: "My homelab IP is 10.0.10.10 and I prefer dark mode." },
-  { role: "assistant", content: "Got it! I'll remember your homelab IP and preference." },
-  { role: "user", content: "Also, I usually work on infrastructure stuff on weekends." },
-  { role: "assistant", content: "Noted — weekends are infrastructure time." },
-];
+const TURN = { turn: "User: My homelab IP is 10.0.10.10", context: null };
 
-describe("extractMemories", () => {
-  it("returns zeros for empty transcript", async () => {
-    const deps = mockExtractionDeps({ memories: [] });
-    const result = await extractMemories([], "user-1", null, deps);
+function sent(d: MemoryExtractionDeps): ChatParams {
+  return expectDefined(vi.mocked(d.provider.chat).mock.calls[0], "the extraction call")[0];
+}
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
-    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
-    expect(deps.provider.chat).not.toHaveBeenCalled();
+describe("extractTurnMemories", () => {
+  it("returns the model's facts with their evidence", async () => {
+    const d = deps({ memories: [{ ...HOMELAB, context: "while setting up DNS" }] });
+
+    expect(await extractTurnMemories(TURN, [], d)).toEqual([
+      { ...HOMELAB, context: "while setting up DNS" },
+    ]);
   });
 
-  it("returns zeros when no memories extracted", async () => {
-    const deps = mockExtractionDeps({ memories: [] });
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+  it("sends the turn, after the exchange before it as context", async () => {
+    const d = deps({ memories: [] });
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
-    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
-  });
+    await extractTurnMemories({ turn: "User: and the NAS?", context: "User: hi" }, [], d);
 
-  it("extracts and retains memories with network, compartment, and trust tags", async () => {
-    const deps = mockExtractionDeps({
-      memories: [
-        {
-          fact: "homelab IP is 10.0.10.10",
-          network: "world",
-          compartment: "technical",
-          trust: "first-party",
-        },
-        {
-          fact: "prefers dark mode",
-          network: "bank",
-          compartment: "personal",
-          trust: "any",
-        },
-      ],
-    });
-
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result.extracted).toBe(2);
-    expect(result.byNetwork).toEqual({ world: 1, bank: 1 });
-    expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
+    const { messages } = sent(d);
+    expect(messages).toEqual([
       {
-        content: "homelab IP is 10.0.10.10",
-        tags: ["network:world", "compartment:technical", "trust:first-party"],
-        metadata: { source: "conversation" },
-        observationScopes: "per_tag",
-      },
-      {
-        content: "prefers dark mode",
-        tags: ["network:bank", "compartment:personal", "trust:any"],
-        metadata: { source: "conversation" },
-        observationScopes: "per_tag",
+        role: "user",
+        content:
+          "<earlier_conversation>\nUser: hi\n</earlier_conversation>\n\n<turn>\nUser: and the NAS?\n</turn>",
       },
     ]);
   });
 
-  it("passes context when provided by extraction", async () => {
-    const deps = mockExtractionDeps({
-      memories: [
-        {
-          fact: "wife's birthday is March 15",
-          network: "bank",
-          compartment: "personal",
-          trust: "first-party",
-          context: "mentioned while planning a gift",
-        },
-      ],
-    });
+  it("lists the memory rules it is given, and the user's compartments, in the system prompt", async () => {
+    const d = deps(
+      { memories: [] },
+      { customCompartments: [{ name: "dnd", description: "tabletop campaign facts" }] },
+    );
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    await extractTurnMemories(TURN, [HEALTH_RULE], d);
 
-    expect(result.extracted).toBe(1);
-    expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
-      {
-        content: "wife's birthday is March 15",
-        context: "mentioned while planning a gift",
-        tags: ["network:bank", "compartment:personal", "trust:first-party"],
-        metadata: { source: "conversation" },
-        observationScopes: "per_tag",
-      },
+    const { system } = sent(d);
+    expect(system).toContain("## Memory Rules");
+    expect(system).toContain(HEALTH_RULE.rule);
+    expect(system).toContain("**dnd**: tabletop campaign facts");
+  });
+
+  it("accepts a custom compartment and refuses one outside core and the user's", async () => {
+    const custom = deps(
+      { memories: [{ ...HOMELAB, compartment: "dnd" }] },
+      { customCompartments: [{ name: "dnd", description: "campaign" }] },
+    );
+    expect(await extractTurnMemories(TURN, [], custom)).toEqual([
+      { ...HOMELAB, compartment: "dnd" },
     ]);
+
+    const unknown = deps({ memories: [{ ...HOMELAB, compartment: "dnd" }] });
+    await expect(extractTurnMemories(TURN, [], unknown)).rejects.toThrow();
   });
 
-  it("counts by network correctly", async () => {
-    const deps = mockExtractionDeps({
-      memories: [
-        { fact: "fact 1", network: "world", compartment: "technical", trust: "first-party" },
-        { fact: "fact 2", network: "world", compartment: "technical", trust: "first-party" },
-        { fact: "fact 3", network: "observation", compartment: "personal", trust: "first-party" },
-        { fact: "fact 4", network: "opinion", compartment: "personal", trust: "first-party" },
-      ],
-    });
+  it("refuses a fact without evidence", async () => {
+    const { evidence: _, ...unquoted } = HOMELAB;
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result.extracted).toBe(4);
-    expect(result.byNetwork).toEqual({ world: 2, observation: 1, opinion: 1 });
+    await expect(extractTurnMemories(TURN, [], deps({ memories: [unquoted] }))).rejects.toThrow();
   });
 
-  it("uses bankId as the Hindsight bank", async () => {
-    const deps = mockExtractionDeps({
-      memories: [
-        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
-      ],
-    });
-
-    await extractMemories(sampleHistory, "ti", null, deps);
-
-    expect(deps.memory.retainBatch).toHaveBeenCalledWith("ti", expect.any(Array));
-  });
-
-  it("catches chatTyped failure and returns zeros", async () => {
-    const deps = mockExtractionDeps(
+  it("throws a provider failure for the caller to classify", async () => {
+    const d = deps(
       { memories: [] },
       {
         provider: mockProvider({
-          chat: vi.fn().mockRejectedValue(new Error("LLM timeout")),
+          chat: vi.fn().mockRejectedValue(new ProviderProtocolError("no tool call", null)),
         }),
       },
     );
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
-    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+    await expect(extractTurnMemories(TURN, [], d)).rejects.toBeInstanceOf(ProviderProtocolError);
   });
 
-  it("degrades to a no-op when chatTyped throws ProviderProtocolError", async () => {
-    // When the structured-output parse fails irrecoverably (jsonrepair also
-    // chokes), chatTyped surfaces a ProviderProtocolError. extract-memories
-    // must catch it the same way as any other failure — degrade to zeros,
-    // skip retainBatch, no rethrow.
-    const deps = mockExtractionDeps(
-      { memories: [] },
-      {
-        provider: mockProvider({
-          chat: vi
-            .fn()
-            .mockRejectedValue(
-              new ProviderProtocolError(
-                'structured output for "memory-extraction" failed JSON.parse: empty input',
-                new SyntaxError("Unexpected end of JSON input"),
-              ),
-            ),
-        }),
-      },
-    );
+  it("recovers a trailing-comma response through chatTyped's repair", async () => {
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce(reply(`{"memories": [${JSON.stringify(HOMELAB)},]}`))
+      .mockResolvedValueOnce(reply(JSON.stringify({ memories: [HOMELAB] })));
+    const d = deps({ memories: [] }, { provider: mockProvider({ chat }) });
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
-    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
-  });
-
-  it("appends profile_class tag when profileClass is non-null", async () => {
-    const deps = mockExtractionDeps({
-      memories: [
-        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
-      ],
-    });
-
-    await extractMemories(sampleHistory, "user-1", "intimate", deps);
-
-    const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
-    const items = call?.[1] ?? [];
-    expect(items).toHaveLength(1);
-    expect(items[0]?.tags).toContain("profile_class:intimate");
-  });
-
-  it("omits profile_class tag when profileClass is null", async () => {
-    const deps = mockExtractionDeps({
-      memories: [
-        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
-      ],
-    });
-
-    await extractMemories(sampleHistory, "user-1", null, deps);
-
-    const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
-    const items = call?.[1] ?? [];
-    expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
-  });
-
-  it("templates customCompartments names + descriptions into the system prompt", async () => {
-    const customs = [
-      { name: "dnd", description: "tabletop campaign notes" },
-      { name: "music", description: "music production sessions" },
-    ];
-    const provider = mockProvider({
-      chat: vi.fn().mockResolvedValue({
-        content: [{ type: "text", text: JSON.stringify({ memories: [] }) }],
-        stopReason: "end_turn",
-        model: "mock",
-        usage: { inputTokens: 10, outputTokens: 5 },
-      }),
-    });
-    const deps: MemoryExtractionDeps = {
-      provider,
-      model: "test-model",
-      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
-      customCompartments: customs,
-      memoryRules: [],
-      fire: FIRE,
-    };
-
-    await extractMemories(sampleHistory, "user-1", null, deps);
-
-    // Single chat call; the system prompt is the second positional arg
-    // shape on `provider.chat({ system, messages, ... })`. Inspect it
-    // directly so the assertion is robust to small wrapper changes.
-    const call = vi.mocked(provider.chat).mock.calls[0]?.[0];
-    const system = (call as { system?: string } | undefined)?.system ?? "";
-    expect(system).toContain("**dnd**: tabletop campaign notes");
-    expect(system).toContain("**music**: music production sessions");
-    expect(system).toContain("Custom compartments");
-  });
-
-  it("lists the memory rules it is given in the system prompt", async () => {
-    const deps = mockExtractionDeps({ memories: [] }, { memoryRules: [HEALTH_RULE] });
-
-    await extractMemories(sampleHistory, "user-1", null, deps);
-
-    const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
-    expect(call[0].system).toContain("## Memory Rules");
-    expect(call[0].system).toContain("- Don't save anything about my health.");
-  });
-
-  it("skips extraction, and counts it, when a user's rule binds a profile that can't see it", async () => {
-    const deps = mockExtractionDeps(
-      { memories: [{ fact: "x", network: "world", compartment: "misc", trust: "any" }] },
-      { memoryRules: [HEALTH_RULE], fire: THIRD_PARTY_FIRE },
-    );
-    const info = vi.spyOn(logger, "info");
-
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 1 });
-    expect(deps.provider.chat).not.toHaveBeenCalled();
-    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
-    expect(info).toHaveBeenCalledWith(
-      expect.objectContaining({
-        conversationId: "conv-1",
-        profileId: "profile-1",
-        userId: "user-1",
-      }),
-      expect.stringContaining("skipped"),
-    );
-    info.mockRestore();
-  });
-
-  it("extracts under an operator's memory rule in a profile that can't see the user's", async () => {
-    const deps = mockExtractionDeps(
-      { memories: [] },
-      { memoryRules: [{ ...HEALTH_RULE, fromUser: false }], fire: THIRD_PARTY_FIRE },
-    );
-
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result.skippedForUnseenRules).toBe(0);
-    const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
-    expect(call[0].system).toContain("- Don't save anything about my health.");
-  });
-
-  it("retains memories with a custom compartment value emitted by the LLM", async () => {
-    const customs = [{ name: "dnd", description: "tabletop campaign notes" }];
-    const deps = mockExtractionDeps(
-      {
-        memories: [
-          {
-            fact: "campaign uses Stars Without Number rules",
-            network: "world",
-            compartment: "dnd",
-            trust: "first-party",
-          },
-        ],
-      },
-      { customCompartments: customs },
-    );
-
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result.extracted).toBe(1);
-    expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
-      expect.objectContaining({
-        content: "campaign uses Stars Without Number rules",
-        tags: ["network:world", "compartment:dnd", "trust:first-party"],
-      }),
-    ]);
-  });
-
-  it("rejects an LLM-emitted compartment value not in core ∪ customs (schema enforcement)", async () => {
-    // The structured-output schema is locked to `[...CORE, ...customNames]`
-    // — a stale prompt or LLM hallucination producing "music" with no
-    // matching custom row fails the parse, which `extractMemories` catches
-    // and degrades to a no-op. Without per-fire schema construction, the
-    // value would slip through to Hindsight as a tag the recall predicate
-    // can never match, silently inflating misc-bucket noise.
-    const deps = mockExtractionDeps(
-      {
-        memories: [
-          {
-            fact: "x",
-            network: "world",
-            compartment: "music",
-            trust: "first-party",
-          },
-        ],
-      },
-      { customCompartments: [{ name: "dnd", description: "x" }] },
-    );
-
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
-    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
-  });
-
-  it("omits profile_class tag when profileClass is undefined (Inngest replay safety)", async () => {
-    // The signature is `string | null`, but Inngest's step memoization
-    // can replay this function with a stale shape that drops the arg —
-    // arriving as `undefined`. Bare `!== null` would emit
-    // `profile_class:undefined`; the typeof guard catches both.
-    const deps = mockExtractionDeps({
-      memories: [
-        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
-      ],
-    });
-
-    await extractMemories(sampleHistory, "user-1", undefined as unknown as string | null, deps);
-
-    const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
-    const items = call?.[1] ?? [];
-    expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
-  });
-
-  it("recovers a trailing-comma extraction response via chatTyped repair", async () => {
-    // Regression: extract-memories passes `repair: {}` into chatTyped, so a
-    // trailing comma in the structured-output response is fixed by the
-    // jsonrepair pre-pass instead of crashing the extraction run.
-    const provider = mockProvider({
-      chat: vi.fn().mockResolvedValue({
-        content: [
-          {
-            type: "text",
-            text: '{"memories":[{"fact":"homelab IP is 10.0.10.10","network":"world","compartment":"technical","trust":"first-party",},],}',
-          },
-        ],
-        stopReason: "end_turn",
-        model: "mock",
-        usage: { inputTokens: 10, outputTokens: 5 },
-      }),
-    });
-    const deps: MemoryExtractionDeps = {
-      provider,
-      model: "test-model",
-      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
-      customCompartments: [],
-      memoryRules: [],
-      fire: FIRE,
-    };
-
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result.extracted).toBe(1);
-    expect(provider.chat).toHaveBeenCalledTimes(1);
+    expect(await extractTurnMemories(TURN, [], d)).toEqual([HOMELAB]);
   });
 });

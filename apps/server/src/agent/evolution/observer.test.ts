@@ -14,7 +14,13 @@ import {
   mockResolver,
   mockTransportStore,
 } from "../../test/factories.js";
-import type { AgentStore, MemoryRule, PendingMemory } from "../store/index.js";
+import type {
+  AgentStore,
+  MemoryRule,
+  OpenTurn,
+  PendingMemory,
+  TurnObservation,
+} from "../store/index.js";
 import {
   createObserver,
   type ObserverDeps,
@@ -79,7 +85,13 @@ const VALID_ANSWERS: Answers = {
   consolidation: { groups: [] },
   memories: {
     memories: [
-      { fact: "Lives in Berlin", network: "bank", compartment: "personal", trust: "first-party" },
+      {
+        fact: "Lives in Berlin",
+        network: "bank",
+        compartment: "personal",
+        trust: "first-party",
+        evidence: "I live in Berlin",
+      },
     ],
   },
   classification: { network: "bank", compartment: "personal", trust: "first-party" },
@@ -111,13 +123,61 @@ function routedProvider(overrides: Partial<Answers> = {}): LlmProvider {
 /** An outage, which the turn didn't cause: the step retries it, and then the phase fails. */
 const UNAVAILABLE = Object.assign(new Error("provider unavailable"), { status: 503 });
 
-/** The one turn the default store plans: the whole of `HISTORY`, on one cursor. */
-const PLANNED_TURN = {
+/** The one turn the default store plans for corrections: the whole of `HISTORY`, on one cursor. */
+const PLANNED_TURN: OpenTurn = {
   observationId: "obs-1",
   cursor: "cursor-1",
+  status: "pending",
   firstMessageId: "msg-0",
   attempts: 0,
 };
+
+/** The same turn's memories row. */
+const MEMORY_TURN: OpenTurn = { ...PLANNED_TURN, observationId: "mem-1" };
+
+/** A plan read that answers each phase with its own turns. */
+function plan(
+  corrections: ReadonlyArray<OpenTurn>,
+  memories: ReadonlyArray<OpenTurn> = [MEMORY_TURN],
+): AgentStore["listOpenTurns"] {
+  return vi.fn(async (_tx, { phase }) => (phase === "corrections" ? corrections : memories));
+}
+
+/**
+ * The rows the observation ids name, `pending` with `attempts` until a
+ * transition moves them, as the store holds them.
+ */
+function turnRows(attempts = 0) {
+  const rows = new Map<string, TurnObservation>();
+  const row = (id: string): TurnObservation => rows.get(id) ?? { status: "pending", attempts };
+  return {
+    getTurnObservation: vi.fn<AgentStore["getTurnObservation"]>(async (_tx, id) => row(id)),
+    transitionPendingTurn: vi.fn<AgentStore["transitionPendingTurn"]>(async (_tx, { id, to }) => {
+      const current = row(id);
+      if (current.status !== "pending") return { kind: "stale", status: current.status };
+      rows.set(
+        id,
+        to.status === "extracted"
+          ? { status: "extracted", attempts: current.attempts, extraction: to.extraction }
+          : { status: to.status, attempts: current.attempts },
+      );
+      return { kind: "transitioned" };
+    }),
+    transitionExtractedTurn: vi.fn<AgentStore["transitionExtractedTurn"]>(
+      async (_tx, { id, to }) => {
+        const current = row(id);
+        if (current.status !== "extracted") return { kind: "stale", status: current.status };
+        rows.set(
+          id,
+          to === "held_extracted"
+            ? { ...current, status: "held_extracted" }
+            : { status: "applied", attempts: current.attempts },
+        );
+        return { kind: "transitioned" };
+      },
+    ),
+  };
+}
 
 /**
  * A correction the schema cannot accept on any retry: a reinforcement has to
@@ -174,9 +234,8 @@ function observerDeps(opts: {
   return {
     runInTx: fakeRunInTx,
     agentStore: mockAgentStore({
-      listMessages: vi.fn().mockResolvedValue(HISTORY),
-      listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN]),
-      getTurnObservation: vi.fn().mockResolvedValue({ status: "pending", attempts: 0 }),
+      listOpenTurns: plan([PLANNED_TURN]),
+      ...turnRows(),
       listTurnMessages: vi
         .fn()
         .mockResolvedValue(
@@ -213,7 +272,10 @@ describe("runObserver phase isolation", () => {
     });
     const warn = vi.spyOn(logger, "warn");
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({
       status: "processed",
@@ -237,46 +299,27 @@ describe("runObserver phase isolation", () => {
     );
   });
 
-  it("keeps transcript heads out of the load-history memo", async () => {
-    const results = new Map<string, unknown>();
-    const step: ObserverStepHarness = {
-      async run<T>(id: string, fn: () => Promise<T>): Promise<T> {
-        const result = await fn();
-        results.set(id, result);
-        return result;
-      },
-    };
-    const head = {
-      length: 2,
-      base: "a".repeat(64),
-      historyStart: "msg-0",
-      digest: "b".repeat(64),
-      status: "intact" as const,
-    };
-    const rows = HISTORY.map((m, i) => ({
-      ...m,
-      id: `msg-${i}`,
-      transcriptHead: m.role === "assistant" ? head : null,
-    }));
-    const deps = observerDeps({
-      provider: routedProvider(),
-      store: { listMessages: vi.fn().mockResolvedValue(rows) },
-    });
+  it("reads no transcript: each phase reads its planned turns", async () => {
+    const deps = observerDeps({ provider: routedProvider() });
 
-    await runObserver(EVENT, step, deps, "idle");
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, { triggeredBy: "idle", runId: "run-1" });
 
-    expect(results.get("load-history")).toEqual(rows.map(({ transcriptHead: _, ...row }) => row));
+    expect(deps.agentStore.listMessages).not.toHaveBeenCalled();
+    expect(deps.agentStore.listTurnMessages).toHaveBeenCalledTimes(2);
   });
 
   it("plans the same later steps whether or not correction extraction fails", async () => {
     const clean = exhaustedRetriesStep();
-    await runObserver(EVENT, clean, observerDeps({ provider: routedProvider() }), "idle");
+    await runObserver(EVENT, clean, observerDeps({ provider: routedProvider() }), {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
     const failing = exhaustedRetriesStep();
     await runObserver(
       EVENT,
       failing,
       observerDeps({ provider: routedProvider({ corrections: UNAVAILABLE }) }),
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     // An unavailable extraction is not counted, so no step follows it.
@@ -285,12 +328,12 @@ describe("runObserver phase isolation", () => {
       "record-start-time",
       "load-conversation",
       "load-profile",
-      "load-history",
       "load-custom-compartments",
       "load-active-channel-types",
       "discover-turns",
       "observe-v1-corrections-obs-1",
-      "extract-memories",
+      "discover-memory-turns",
+      "observe-v1-memories-mem-1",
       "load-pending-memories",
       "classify-pending-memories",
       "retain-pending-memories",
@@ -308,7 +351,10 @@ describe("runObserver phase isolation", () => {
       },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({
       status: "processed",
@@ -320,22 +366,29 @@ describe("runObserver phase isolation", () => {
     expect(deps.agentStore.replaceRules).not.toHaveBeenCalled();
   });
 
-  it("drains pending rows when memory extraction fails", async () => {
+  it("drains pending rows when a turn's retain fails, and leaves the turn extracted, uncounted", async () => {
     const retainBatch = vi
       .fn<MemoryProvider["retainBatch"]>()
       .mockRejectedValueOnce(new Error("hindsight unavailable"))
       .mockResolvedValue(undefined);
+    const step = exhaustedRetriesStep();
     const deps = observerDeps({ provider: routedProvider(), memory: { retainBatch } });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(result).toMatchObject({
       status: "processed",
       memories: { extracted: 0, byNetwork: {} },
       drained: { drained: 1 },
+      failedPhases: ["memories"],
     });
     expect(retainBatch).toHaveBeenCalledTimes(2);
     expect(deps.agentStore.deletePendingMemories).toHaveBeenCalledOnce();
+    expect(step.ids).not.toContain("observe-v1-memories-exhausted-mem-1");
+    expect(deps.agentStore.recordTurnAttempt).not.toHaveBeenCalled();
+    expect(await deps.agentStore.getTurnObservation(FAKE_TX, "mem-1")).toMatchObject({
+      status: "extracted",
+    });
   });
 
   it("records the fire and leaves the rows pending when the drain's retain fails", async () => {
@@ -345,7 +398,10 @@ describe("runObserver phase isolation", () => {
       .mockRejectedValue(new Error("hindsight unavailable"));
     const deps = observerDeps({ provider: routedProvider(), memory: { retainBatch } });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({
       status: "processed",
@@ -368,8 +424,14 @@ describe("runObserver phase isolation", () => {
       store: { deletePendingMemories },
     });
 
-    const first = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
-    const second = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const first = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
+    const second = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(first).toMatchObject({ drained: { drained: 0 } });
     expect(second).toMatchObject({ drained: { drained: 1 } });
@@ -384,17 +446,18 @@ describe("runObserver phase isolation", () => {
     // caller surfaces the error to the user instead of reporting zeros.
     const deps = observerDeps({ provider: routedProvider({ corrections: UNAVAILABLE }) });
 
-    await expect(runObserver(EVENT, syncStep, deps, "idle")).rejects.toThrow(
-      /provider unavailable/,
-    );
+    await expect(
+      runObserver(EVENT, syncStep, deps, { triggeredBy: "idle", runId: "run-1" }),
+    ).rejects.toThrow(/provider unavailable/);
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 });
 
 describe("runObserver corrections by turn", () => {
-  const SECOND_TURN = {
+  const SECOND_TURN: OpenTurn = {
     observationId: "obs-2",
     cursor: "cursor-2",
+    status: "pending",
     firstMessageId: "msg-9",
     attempts: 0,
   };
@@ -403,19 +466,23 @@ describe("runObserver corrections by turn", () => {
     const step = exhaustedRetriesStep();
     const deps = observerDeps({
       provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
-      store: { listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, SECOND_TURN]) },
+      store: { listOpenTurns: plan([PLANNED_TURN, SECOND_TURN]) },
     });
 
-    const result = await runObserver(EVENT, step, deps, "idle");
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(result).toMatchObject({ status: "processed", failedPhases: [] });
     expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(expect.anything(), {
       id: "obs-1",
+      from: "pending",
       seen: 0,
       failure: { kind: "parse", message: expect.any(String) },
-      to: "pending",
+      giveUp: false,
     });
-    expect(deps.agentStore.transitionPendingTurn).not.toHaveBeenCalled();
+    expect(deps.agentStore.transitionPendingTurn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: "obs-1" }),
+    );
     expect(step.ids).toContain("observe-v1-corrections-obs-1");
     expect(step.ids).not.toContain("observe-v1-corrections-obs-2");
   });
@@ -423,10 +490,18 @@ describe("runObserver corrections by turn", () => {
   it("keeps the fire's later phases when discovery fails after its retries", async () => {
     const deps = observerDeps({
       provider: routedProvider(),
-      store: { listUndiscoveredTurns: vi.fn().mockRejectedValue(new Error("connection reset")) },
+      store: {
+        listUndiscoveredTurns: vi.fn(async (_tx, { phase }) => {
+          if (phase === "corrections") throw new Error("connection reset");
+          return [];
+        }),
+      },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({
       status: "processed",
@@ -468,23 +543,21 @@ describe("runObserver corrections by turn", () => {
       }),
     });
     const second = { ...SECOND_TURN, attempts: opts.planAttempts };
-    let reads = 0;
     const step = exhaustedRetriesStep();
     const deps = observerDeps({
       provider,
       store: {
         getCorrections: vi.fn().mockResolvedValue(RULES),
-        listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, second]),
-        // The live row's count differs from the plan's: the walk's attempt
+        listOpenTurns: plan([PLANNED_TURN, second]),
+        // The live rows' count differs from the plan's: the walk's attempt
         // must be guarded on the plan's.
-        getTurnObservation: vi.fn().mockResolvedValue({ status: "pending", attempts: 7 }),
+        ...turnRows(7),
         // Each turn's rows are `HISTORY`, on the cursor asked for; the second
-        // read fails when the second turn's database read is to fail.
+        // turn's read fails when its database read is to fail.
         listTurnMessages: vi
           .fn()
           .mockImplementation((_tx, _conversationId, cursors: ReadonlyArray<string>) => {
-            reads++;
-            if (opts.failSecond === "database" && reads > 1) {
+            if (opts.failSecond === "database" && cursors[0] === second.cursor) {
               return Promise.reject(new Error("connection reset"));
             }
             return Promise.resolve(
@@ -504,7 +577,7 @@ describe("runObserver corrections by turn", () => {
   it("keeps the turns applied before a turn's step fails for good, and counts that turn on the plan's count", async () => {
     const { step, deps } = twoTurnFire({ failSecond: "database", planAttempts: 0 });
 
-    const result = await runObserver(EVENT, step, deps, "idle");
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(result).toMatchObject({
       status: "processed",
@@ -515,16 +588,17 @@ describe("runObserver corrections by turn", () => {
     expect(step.ids).toContain("observe-v1-corrections-exhausted-obs-2");
     expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(expect.anything(), {
       id: "obs-2",
+      from: "pending",
       seen: 0,
       failure: { kind: "exhausted", message: expect.stringContaining("connection reset") },
-      to: "pending",
+      giveUp: false,
     });
   });
 
   it("leaves a turn whose extraction call was unavailable pending, uncounted", async () => {
     const { step, deps } = twoTurnFire({ failSecond: "unavailable", planAttempts: 0 });
 
-    const result = await runObserver(EVENT, step, deps, "idle");
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(result).toMatchObject({ corrections: { reinforced: 1 }, failedPhases: ["corrections"] });
     expect(step.ids).not.toContain("observe-v1-corrections-exhausted-obs-2");
@@ -534,11 +608,11 @@ describe("runObserver corrections by turn", () => {
   it("gives a turn up once its steps have failed for good on three fires", async () => {
     const { deps } = twoTurnFire({ failSecond: "database", planAttempts: 2 });
 
-    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ id: "obs-2", seen: 2, to: "failed" }),
+      expect.objectContaining({ id: "obs-2", seen: 2, giveUp: true }),
     );
   });
 
@@ -549,7 +623,7 @@ describe("runObserver corrections by turn", () => {
       recordTurnAttempt: vi.fn().mockRejectedValue(new Error("connection reset")),
     });
 
-    const result = await runObserver(EVENT, step, deps, "idle");
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(result).toMatchObject({
       status: "processed",
@@ -563,44 +637,49 @@ describe("runObserver corrections by turn", () => {
     const step = exhaustedRetriesStep();
     const deps = observerDeps({
       provider: routedProvider(),
-      store: { listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, SECOND_TURN]) },
+      store: { listOpenTurns: plan([PLANNED_TURN, SECOND_TURN]) },
     });
 
-    await runObserver(EVENT, step, deps, "idle");
+    await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
-    expect(step.ids.filter((id) => id.startsWith("observe-v1-"))).toEqual([
+    expect(step.ids.filter((id) => id.startsWith("observe-v1-corrections-"))).toEqual([
       "observe-v1-corrections-obs-1",
       "observe-v1-corrections-obs-2",
     ]);
-    expect(deps.agentStore.transitionPendingTurn).toHaveBeenCalledTimes(2);
   });
 
   it("plans at most three turns for `/reflect`, which the user waits on", async () => {
-    const pending = Array.from({ length: 5 }, (_, i) => ({
-      observationId: `obs-${i}`,
-      cursor: `cursor-${i}`,
-      firstMessageId: `msg-${i}`,
-      attempts: 0,
-    }));
+    const open = (phase: string): OpenTurn[] =>
+      Array.from({ length: 5 }, (_, i) => ({
+        observationId: `${phase}-${i}`,
+        cursor: `cursor-${i}`,
+        status: "pending",
+        firstMessageId: `msg-${i}`,
+        attempts: 0,
+      }));
     const step = exhaustedRetriesStep();
     const deps = observerDeps({
       provider: routedProvider(),
-      store: { listPendingTurns: vi.fn().mockResolvedValue(pending) },
+      store: { listOpenTurns: plan(open("obs"), open("mem")) },
     });
 
-    await runObserver(EVENT, step, deps, "manual");
+    await runObserver(EVENT, step, deps, { triggeredBy: "manual", runId: "run-1" });
 
-    expect(step.ids.filter((id) => id.startsWith("observe-v1-"))).toHaveLength(3);
+    expect(step.ids.filter((id) => id.startsWith("observe-v1-corrections-"))).toHaveLength(3);
+    expect(step.ids.filter((id) => id.startsWith("observe-v1-memories-"))).toHaveLength(3);
   });
 
   it("applies nothing and calls no model when no turn is pending", async () => {
     const provider = routedProvider();
     const deps = observerDeps({
       provider,
-      store: { listPendingTurns: vi.fn().mockResolvedValue([]) },
+      store: { listOpenTurns: plan([]) },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({ corrections: { extracted: 0, consolidationNeeded: false } });
     const prompts = vi.mocked(provider.chat).mock.calls.map(([p]) => p.system);
@@ -608,11 +687,198 @@ describe("runObserver corrections by turn", () => {
   });
 });
 
+describe("runObserver memories by turn", () => {
+  it("stores each turn's extraction with the run and the profile it ran under", async () => {
+    const deps = observerDeps({ provider: routedProvider() });
+
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, { triggeredBy: "idle", runId: "run-7" });
+
+    expect(deps.agentStore.transitionPendingTurn).toHaveBeenCalledWith(expect.anything(), {
+      id: "mem-1",
+      to: {
+        status: "extracted",
+        extraction: {
+          phase: "memories",
+          runId: "run-7",
+          profileId: "profile-1",
+          profileClass: null,
+          seesUserRules: true,
+          items: [expect.objectContaining({ fact: "Lives in Berlin" })],
+          dropped: { noEvidence: 0 },
+        },
+      },
+    });
+    expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
+      expect.objectContaining({ documentId: "observer:turn:cursor-1:0" }),
+    ]);
+  });
+
+  it("counts an extracted turn whose step fails for good on the plan's status and count", async () => {
+    const extracted: OpenTurn = { ...MEMORY_TURN, status: "extracted", attempts: 1 };
+    const rows = turnRows(1);
+    await rows.transitionPendingTurn(FAKE_TX, {
+      id: extracted.observationId,
+      to: {
+        status: "extracted",
+        extraction: {
+          phase: "memories",
+          runId: "run-0",
+          profileId: "profile-1",
+          profileClass: null,
+          seesUserRules: true,
+          items: [],
+          dropped: { noEvidence: 0 },
+        },
+      },
+    });
+    const step = exhaustedRetriesStep();
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: {
+        listOpenTurns: plan([], [extracted]),
+        ...rows,
+        transitionExtractedTurn: vi.fn().mockRejectedValue(new Error("connection reset")),
+      },
+    });
+
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
+
+    expect(result).toMatchObject({ failedPhases: ["memories"] });
+    expect(step.ids).toContain("observe-v1-memories-exhausted-mem-1");
+    expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(expect.anything(), {
+      id: "mem-1",
+      from: "extracted",
+      seen: 1,
+      failure: { kind: "exhausted", message: expect.stringContaining("connection reset") },
+      giveUp: false,
+    });
+  });
+
+  it("walks on past a held turn, and counts the turns it held", async () => {
+    const second: OpenTurn = { ...MEMORY_TURN, observationId: "mem-2", cursor: "cursor-2" };
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: {
+        getProfile: vi.fn(async (tx: Parameters<AgentStore["getProfile"]>[0], id: string) => {
+          const profile = expectDefined(await mockAgentStore().getProfile(tx, id), "profile");
+          return { ...profile, memoryScope: { compartments: ["misc"], trust: ["any" as const] } };
+        }),
+        getMemoryRules: vi
+          .fn()
+          .mockResolvedValue([{ rule: "Don't save my health.", profileId: null, fromUser: true }]),
+        listOpenTurns: plan([], [MEMORY_TURN, second]),
+      },
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
+
+    expect(result).toMatchObject({ memories: { extracted: 0, skippedForUnseenRules: 2 } });
+    expect(deps.agentStore.transitionPendingTurn).toHaveBeenCalledTimes(2);
+    expect(deps.agentStore.transitionPendingTurn).toHaveBeenCalledWith(expect.anything(), {
+      id: "mem-2",
+      to: { status: "held" },
+    });
+  });
+
+  it("records the conversation's message count with the fire", async () => {
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: {
+        getConversationStats: vi.fn().mockResolvedValue({
+          createdAt: new Date(),
+          messageCount: 12,
+          lastMessageAt: new Date(),
+        }),
+      },
+    });
+
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, { triggeredBy: "idle", runId: "run-1" });
+
+    expect(recordedPayload(deps)).toMatchObject({ messageCount: 12 });
+  });
+});
+
+describe("runObserver with nothing new", () => {
+  function quietStore(overrides: Partial<AgentStore> = {}): Partial<AgentStore> {
+    return {
+      listOpenTurns: plan([], []),
+      getPendingMemories: vi.fn().mockResolvedValue([]),
+      ...overrides,
+    };
+  }
+
+  it("writes no row and calls no model when no turn is planned and nothing is staged", async () => {
+    const provider = routedProvider();
+    const deps = observerDeps({ provider, store: quietStore() });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "manual",
+      runId: "run-1",
+    });
+
+    expect(result).toEqual({ status: "skipped", reason: "nothing_new" });
+    expect(deps.agentStore.recordEvolutionEvent).not.toHaveBeenCalled();
+    expect(provider.chat).not.toHaveBeenCalled();
+  });
+
+  it("plans the same steps on every invocation of a quiet fire", async () => {
+    const first = exhaustedRetriesStep();
+    const second = exhaustedRetriesStep();
+    const deps = observerDeps({ provider: routedProvider(), store: quietStore() });
+
+    await runObserver(EVENT, first, deps, { triggeredBy: "idle", runId: "run-1" });
+    await runObserver(EVENT, second, deps, { triggeredBy: "idle", runId: "run-1" });
+
+    expect(second.ids).toEqual(first.ids);
+    expect(first.ids).not.toContain("persist-evolution-event");
+  });
+
+  it("writes a row when only a staged row is drained", async () => {
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: quietStore({ getPendingMemories: vi.fn().mockResolvedValue(PENDING) }),
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
+
+    expect(result).toMatchObject({ status: "processed", drained: { drained: 1 } });
+    expect(deps.agentStore.recordEvolutionEvent).toHaveBeenCalledOnce();
+  });
+
+  it("writes a row when a phase failed with nothing planned", async () => {
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: quietStore({
+        listUndiscoveredTurns: vi.fn().mockRejectedValue(new Error("connection reset")),
+      }),
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
+
+    expect(result).toMatchObject({
+      status: "processed",
+      failedPhases: ["corrections", "memories"],
+    });
+  });
+});
+
 describe("runObserver phase outcomes", () => {
   it("records no failed phase on a fire where every phase completes", async () => {
     const deps = observerDeps({ provider: routedProvider() });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({ status: "processed", failedPhases: [] });
     expect(recordedPayload(deps)).toMatchObject({ failedPhases: [] });
@@ -623,7 +889,10 @@ describe("runObserver phase outcomes", () => {
       provider: routedProvider({ corrections: UNAVAILABLE }),
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({ failedPhases: ["corrections"] });
     expect(recordedPayload(deps)).toMatchObject({ failedPhases: ["corrections"] });
@@ -644,7 +913,10 @@ describe("runObserver phase outcomes", () => {
       memory: { retainBatch },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({
       corrections: { consolidationNeeded: true },
@@ -678,7 +950,7 @@ describe("runObserver rules", () => {
   it("reads the instruction rules of the conversation's user for correction extraction", async () => {
     const deps = observerDeps({ provider: routedProvider() });
 
-    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(deps.agentStore.getInstructionRules).toHaveBeenCalledWith(
       expect.anything(),
@@ -697,7 +969,7 @@ describe("runObserver rules", () => {
       store: { getMemoryRules: vi.fn().mockResolvedValue([USER_HEALTH_RULE]) },
     });
 
-    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(deps.agentStore.getMemoryRules).toHaveBeenCalledWith(expect.anything(), {
       profileIds: ["profile-1"],
@@ -722,7 +994,10 @@ describe("runObserver rules", () => {
       },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(deps.agentStore.getInstructionRules).not.toHaveBeenCalled();
     const prompts = vi.mocked(provider.chat).mock.calls.map(([params]) => params.system);
@@ -745,7 +1020,7 @@ describe("runObserver rules", () => {
       store: { getMemoryRules: vi.fn().mockResolvedValue([USER_HEALTH_RULE]) },
     });
 
-    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(recordedPayload(deps)).toMatchObject({
       memories: { skippedForUnseenRules: 0 },
@@ -767,7 +1042,7 @@ describe("runObserver rules", () => {
     });
     const step = exhaustedRetriesStep();
 
-    const result = await runObserver(EVENT, step, deps, "idle");
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(result).toMatchObject({ drained: { drained: 0, byNetwork: {}, withheld: 1 } });
     expect(step.ids).not.toContain("retain-pending-memories");
@@ -800,7 +1075,7 @@ describe("runObserver rules", () => {
     };
     const deps = observerDeps({ provider: routedProvider() });
 
-    const result = await runObserver(EVENT, step, deps, "idle");
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(result).toMatchObject({
       drained: { drained: 1, withheld: 0, deferredToFirstParty: 0 },
@@ -818,7 +1093,7 @@ describe("runObserver rules", () => {
     };
     const deps = observerDeps({ provider: routedProvider() });
 
-    const result = await runObserver(EVENT, step, deps, "idle");
+    const result = await runObserver(EVENT, step, deps, { triggeredBy: "idle", runId: "run-1" });
 
     expect(result).toMatchObject({
       drained: { drained: 1, withheld: 0, deferredToFirstParty: 0 },
@@ -842,7 +1117,10 @@ describe("runObserver rules", () => {
       },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({
       drained: { drained: 1, withheld: 0, deferredToFirstParty: 1 },

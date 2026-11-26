@@ -147,7 +147,7 @@ With one row per turn and phase, the phases advance independently (they fail ind
 | `status` | pgEnum `observation_status` NOT NULL | `pending`, `held`, `held_extracted`, `extracted`, `applied`, `failed`, `skipped` |
 | `skip_reason` | pgEnum `observation_skip_reason`, nullable | Set exactly when `status = 'skipped'`: `unanswered`, `not_user_speech`, `superseded`, `empty`, `backfilled`, `aged_out` |
 | `attempts` | integer NOT NULL | Turn-caused failed attempts. Written explicitly (0) at insert, with no default. |
-| `extraction` | JSONB, nullable | `TurnExtractionSchema`, via `jsonbZod`. Required in `held_extracted`/`extracted`, and in `applied` on rows written from 1b on (a [Slice 1a](#slice-1a) `applied` row has none); forbidden in `pending`/`held`/`skipped`, optional in `failed` (kept when the turn failed after extraction). |
+| `extraction` | JSONB, nullable | `TurnExtractionSchema`, via `jsonbZod`. Required in `held_extracted`/`extracted`, and in `applied` (a corrections row applied before 1b has none); forbidden in `pending`/`held`/`skipped`, optional in `failed` (kept when the turn failed after extraction). |
 | `failure_kind` | pgEnum `observation_failure_kind`, nullable | The last counted failure's `TurnFailure` kind: `context_overflow`, `refusal`, `output_cut_off`, `parse`, `rejected` (added by 1b), and Slice 1a's `exhausted`. Set exactly when `attempts > 0`. |
 | `failure_message` | TEXT, nullable | That failure's message, a `rejected` one led by its status. Set exactly when `failure_kind` is. |
 | `updated_at` | TIMESTAMPTZ NOT NULL | Set by every transition |
@@ -205,7 +205,7 @@ stateDiagram-v2
 | `pending` | `held` | `extractTurn` (memories) | `WHERE id = $1 AND status = 'pending'` | — |
 | `extracted` | `held_extracted` | `retainTurnMemories` | `WHERE id = $1 AND status = 'extracted'` | — (extraction kept) |
 | `held` | `pending` | `releaseHeldTurns` | `WHERE id = ANY($1) AND status = 'held'`, for turns no binding unseen rule holds | — |
-| `held_extracted` | `extracted` | `releaseHeldTurns` | `WHERE id = ANY($1) AND status = 'held_extracted'`, same condition | — (extraction kept) |
+| `held_extracted` | `extracted` | `releaseHeldTurns` | `WHERE id = ANY($1) AND status = 'held_extracted'`, for turns whose extraction's profile no binding unseen rule holds | — (extraction kept) |
 | `pending` | `extracted` | `extractTurn` | `WHERE id = $1 AND status = 'pending'` | `extraction` (carrying `runId`) |
 | `pending` | `skipped` (`empty`) | `extractTurn` | `WHERE id = $1 AND status = 'pending'` | `skip_reason` |
 | `pending`, `extracted` | same status | `recordTurnAttempt` | `WHERE id = $1 AND status = $from AND attempts = $seen`, both from the failed step's memoized `turn_failure` | `attempts + 1`, `failure_kind`, `failure_message` |
@@ -300,6 +300,9 @@ type TurnExtraction =
   | {
       readonly phase: "memories";
       readonly runId: ObservationRunId;
+      readonly profileId: ProfileId;                  // the profile it ran under, its class and
+      readonly profileClass: string | null;           // whether it saw the user's rules (Slice 2a)
+      readonly seesUserRules: boolean;
       readonly items: ReadonlyArray<MemoryItem>;      // position = document id suffix
       readonly dropped: { readonly noEvidence: number };
       readonly truncation: Truncation | null;
@@ -533,7 +536,7 @@ The same user words count in one turn: a superseded turn is skipped ([Late repli
 
 - **Inside the extract step, before any model call.** If one binds, the turn goes `pending → held`.
 - **At retain.** If a binding rule appeared after extraction, the retain step moves `extracted → held_extracted`, keeping the extraction. Held rows leave the plan, so they never fill the cap. The retain runs before the guarded `extracted → applied`, so a row another run moved to `failed` or `held_extracted` in between returns `stale` with its facts retained. Residual: it takes two runs on one turn at once (a `/reflect` beside a fire), within one retain's duration.
-- **On every fire.** `discover-turns` reads the memory rules once for the profiles of the held turns. Once nothing binds a turn (the rule is retired, or the p2 first-party-model mode lands), it releases `held_extracted` to `extracted` and `held` to `pending`, and the turn is planned like any other. A release is progress, so it can start a follow-up chain.
+- **On every fire.** `discover-turns` reads the memory rules once for the profiles of the held turns. It releases `held` to `pending` once nothing binds the turn (the rule is retired, or the p2 first-party-model mode lands), and `held_extracted` to `extracted` only once the rule binding the profile its extraction ran under is retired, since that extraction was prompted without it. A released turn is planned like any other. A release is progress, so it can start a follow-up chain.
 
 ## Follow-ups `[proposed]`
 
@@ -620,7 +623,7 @@ interface PhaseTurnCounts {
 interface TurnsPayload { readonly corrections: PhaseTurnCounts; readonly memories: PhaseTurnCounts }
 ```
 
-`corrections` and `memories` keep their item counts. `failedPhases` keeps meaning a phase-level failure: consolidation, drain, a plan that couldn't be read, or a turn phase stopped by a thrown step. `messageCount` becomes optional and is written only by a fire that ran the transcript-era memories phase. `triggered_by` gains `follow_up`.
+`corrections` and `memories` keep their item counts. `failedPhases` keeps meaning a phase-level failure: consolidation, drain, a plan that couldn't be read, or a turn phase stopped by a thrown step. `messageCount` is the conversation's message count ([Slice 2a](#slice-2a) → Audit). `triggered_by` gains `follow_up`.
 
 - **Fires that write a row.** A fire writes a row when it made progress, made a model call, paused a phase, or the drain moved rows. Otherwise it returns `skipped: "nothing_new"`, which replaces `too_short` and `MIN_MESSAGES_FOR_EXTRACTION`. A short conversation's turns are observed like any other's.
 - **`/learned`.** The digest line adds `turns 3 (1 held, 2 left)`, and a pause (`paused: auth`). The detail view lists the per-reason counts.
@@ -633,7 +636,7 @@ interface TurnsPayload { readonly corrections: PhaseTurnCounts; readonly memorie
 **Cost.** One model call per turn per phase, against one per fire today. Each call repeats the system prompt (instructions, the profile's rule list, channel types) and adds one turn plus capped context. For a 20-turn conversation with a ~2k-token system prompt and ~1.5k tokens per turn with context, that is ~70k input tokens per phase against ~32k for one transcript call: about 2–3× input, plus 20 small outputs instead of one. Prompt caching is upside, not baseline: rule labels change after applies, channel types vary per turn, and short prompts fall below providers' minimum cacheable length. The prompt puts the static instructions first and the rules and channel types after, so what can cache does. PR 1 ships one turn per call and measures against this estimate; batching k turns per call (each turn keeping its row) comes only if real days exceed it.
 
 
-**Backfill.** Existing conversations' turns are marked from `evolution_events` by DML inline in the generated migration that moves each phase to turns (`0081_turn_observations` for corrections), never a separate custom migration. Every fire before turns read the whole transcript by id and recorded its length as `messageCount`, and no code deletes messages, so the read covered exactly the first `messageCount` messages by id. For each conversation and phase, the boundary is the `messageCount`-th message by id of the latest qualifying fire.
+**Backfill.** Existing conversations' turns are marked from `evolution_events` by DML inline in the generated migration that moves each phase to turns (`0081_turn_observations` for corrections), never a separate custom migration. Every fire before turns read the whole transcript by id and recorded its length as `messageCount`, and no code deletes messages, so the read covered exactly the first `messageCount` messages by id. Rows written from `0094_observation_memories` on are no boundary: their `messageCount` is the conversation's count when the row was written. For each conversation and phase, the boundary is the `messageCount`-th message by id of the latest qualifying fire.
 
 A fire qualifies for a phase only on positive evidence that its extraction returned, since a non-qualifying fire costs a re-observation and a wrongly qualifying one loses the turns for good:
 
@@ -659,8 +662,6 @@ Residuals:
 - A whole turn whose rows committed after the fire read rows with larger ids sits under the boundary by id without the fire having read it, and is `backfilled` unobserved. The window is one transaction's commit latency, against the idle debounce.
 
 **`contradicted_in_conversation_id`.** For each non-null value, the corrections backfill sets `contradicted_in_turn_id` to the newest `backfilled` corrections row of that conversation. A conversation with none leaves it NULL, so that rule's next contradiction resets it rather than retiring it. A later migration drops the old column (Rollout).
-
-**Between PR 1 and PR 2.** Memory extraction still reads the whole transcript, with random document ids. It runs only on `conversation/idle` and `/reflect` fires, never on `observer/backlog`, so a follow-up chain doesn't re-extract the transcript once per fire. The memories backfill therefore still sees an exact boundary whenever it ships.
 
 ## Hindsight Raw Retain `[proposed]`
 
@@ -729,9 +730,9 @@ AND (status <> 'failed' OR attempts > 0)
 AND (skip_reason <> 'not_user_speech' OR turn_kind <> 'chat')
 ```
 
-A 1a `applied` row has no extraction and stays legal when 1b adds the column: 1b's CHECK requires `extraction` on `applied` rows written from 1b on and exempts older ones. `TurnObservationState` parses both.
+A 1a `applied` row has no extraction. [Slice 2a](#slice-2a) adds the column, and its CHECK requires `extraction` on memories rows only; 1b's exempts the corrections rows applied before it. `TurnObservationState` parses both.
 
-The partial index serves the plan alone: `(conversation_id, phase) WHERE status = 'pending'`.
+The partial index serves the plan alone: `(conversation_id, phase) WHERE status = 'pending'`. [Slice 2a](#slice-2a) widens it to `pending`, `held`, `held_extracted` and `extracted` (`idx_turn_observations_open`).
 
 ### 1a states and transitions
 
@@ -809,7 +810,207 @@ Every write a turn's corrections make commits with its row's `pending → applie
 | n | A rule merged or retired between extraction and apply | `applied` | `upsertCorrection` returns `stale`, counted as `unknownRuleReinforcementsSkipped` |
 | o | A function-level retry (an error outside a step) | Unchanged | As the main table's row 13: steps replay from cache, the database is the authority, and every transition is guarded |
 
-**Re-read cost.** Each fire, discovery scans every message row of the conversation twice, ids, roles and cursors and no content: `listUndiscoveredTurns`'s anti-join and `listPendingTurns`'s turn starts. Content is read for the planned turns and each one's context turn. A model call per turn replaces one per fire over the whole transcript; the memories phase still reads the whole transcript until PR 2.
+**Re-read cost.** Each fire, discovery scans every message row of the conversation twice, ids, roles and cursors and no content: `listUndiscoveredTurns`'s anti-join and `listOpenTurns`'s turn starts. Content is read for the planned turns and each one's context turn. A model call per turn replaces one per fire over the whole transcript.
+
+<a id="slice-2a"></a>
+
+## Slice 2a: Memories by Turn `[confirmed]`
+
+Each fire extracts facts from the turns no fire has observed for memories, one model call per turn. It stores the extraction on the turn's `memories` row and then retains it under document ids keyed on the turn and each fact's position. A re-run re-sends the stored facts without a model call, and Hindsight replaces the documents it already holds. No fire reads the whole transcript. This is Rollout step 2, on [Slice 1a](#slice-1a)'s machine, ahead of 1b.
+
+### What 2a ships, and what waits
+
+| Part | In 2a | Later |
+|-|-|-|
+| Unit | Answered turns by cursor, as 1a. Every kind is observed, scheduled and pipeline turns included ([Decisions](#decisions)) | `superseded`, `unanswered` (1b) |
+| States | `pending`, `held`, `held_extracted`, `extracted`, `applied`, `failed`, `skipped` (`empty`, `backfilled`, `aged_out`); the stored extraction | — |
+| Steps | `discover-memory-turns`, then one `observe-v1-memories-<observationId>` per planned turn, running extraction and retain; `observe-v1-memories-exhausted-<observationId>` as 1a's | Separate extract, apply and attempt steps (1b) |
+| Context | 1a's: the turn answered before, its user text and final reply, capped | 1b's budget |
+| Failures | 1a's classification of the extraction call; a throw from the retain uncounted; `exhausted` as 1a's, guarded on the status and count the plan read | `PhasePause`, `rejected` (1b) |
+| Profile | The conversation's current profile when the turn is extracted: its model and the rules it sees. The extraction records it, with its `profile_class` and whether it sees the user's rules | The turn's profile (1b) |
+| Budget | `TURNS_PER_PHASE`, as 1a | Follow-ups, chain and daily budgets (1b) |
+| Audit | `memories` summed over the fire's turns; a fire that changed nothing writes no row (`nothing_new`) | `turns` (1b) |
+
+### Storage
+
+`turn_observations` as in [Storage](#storage), with the memories phase's values: `memories` in `observation_phase`; `held`, `held_extracted` and `extracted` in `observation_status`. The `extraction` column is nullable JSONB, `TurnExtractionSchema` through `jsonbZod`, holding its memories variant:
+
+```typescript
+interface MemoriesExtraction {
+  readonly phase: "memories";
+  readonly runId: string;             // Inngest's run id; a fresh uuid per /reflect. Provenance.
+  readonly profileId: string;         // the profile the extraction ran under
+  readonly profileClass: string | null; // its class, tagged on every fact
+  readonly seesUserRules: boolean;    // whether its prompt could list the user's rules (admitsFirstParty)
+  readonly items: ReadonlyArray<{     // index = document id suffix
+    readonly fact: string;
+    readonly network: MemoryNetwork;
+    readonly compartment: string;     // loose: a custom compartment may be removed later
+    readonly trust: MemoryTrust;
+    readonly context?: string;
+    readonly evidence: string;
+  }>;
+  readonly dropped: { readonly noEvidence: number };
+}
+```
+
+The CHECK adds the memories phase's terms to 1a's:
+
+```sql
+(status = 'skipped') = (skip_reason IS NOT NULL)
+AND (attempts > 0) = (failure_kind IS NOT NULL)
+AND (failure_kind IS NULL) = (failure_message IS NULL)
+AND (status <> 'failed' OR attempts > 0)
+AND (skip_reason <> 'not_user_speech' OR (phase = 'corrections' AND turn_kind <> 'chat'))
+AND (status NOT IN ('held', 'held_extracted', 'extracted') OR phase = 'memories')
+AND (extraction IS NULL OR phase = 'memories')
+AND (status NOT IN ('pending', 'held', 'skipped') OR extraction IS NULL)
+AND (phase <> 'memories' OR status NOT IN ('held_extracted', 'extracted', 'applied') OR extraction IS NOT NULL)
+```
+
+The partial index widens to `WHERE status IN ('pending', 'held', 'held_extracted', 'extracted')`. The plan reads `pending` and `extracted` rows, the release `held` and `held_extracted` ones.
+
+Two migrations. `0093_observation_memories_values` adds the enum values in a file of their own, since the CHECK, the index predicate and the backfill name them ([architecture rules](../.agents/rules/architecture-rules.md) → splitting one migration into two). `0094_observation_memories` adds the column, the index and the CHECK, with the backfill inline.
+
+### 2a states and transitions
+
+The corrections phase keeps 1a's. The memories phase:
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending: discover (answered turn)
+  [*] --> skipped: migration (backfilled, aged_out)
+  pending --> held: the fire's profile is bound
+  held --> pending: released
+  pending --> skipped: renders empty
+  pending --> extracted: extraction stored
+  pending --> pending: counted failure, attempts < 3
+  pending --> failed: attempts = 3, or a terminal turn failure
+  extracted --> held_extracted: the extraction's profile is bound, and it holds a fact
+  held_extracted --> extracted: released
+  extracted --> applied: retain acknowledged, or no fact to retain
+  extracted --> extracted: counted failure, attempts < 3
+  extracted --> failed: attempts = 3 (extraction kept)
+  applied --> [*]
+  failed --> [*]
+  skipped --> [*]
+```
+
+| From | To | By | Guard | Writes |
+|-|-|-|-|-|
+| — | `pending` | `discoverTurns` | 1a's upsert | Row, `attempts = 0` |
+| `held` | `pending` | `releaseHeldTurns`, when the fire's profile is not bound | `WHERE conversation_id = $1 AND phase = 'memories' AND status = 'held'` | — |
+| `held_extracted` | `extracted` | `releaseHeldTurns`, for the rows whose extraction's profile is not bound | `WHERE id = ANY($1) AND status = 'held_extracted'` | — |
+| `pending` | `held` | `holdTurn` | `WHERE id = $1 AND status = 'pending'` | — |
+| `pending` | `skipped` (`empty`) | `skipEmptyTurn` | Same | `skip_reason` |
+| `pending` | `extracted` | `storeTurnExtraction` | Same | `extraction` |
+| `extracted` | `held_extracted` | `retainTurnMemories`, before the retain, when the extraction holds a fact and its profile is bound | `WHERE id = $1 AND status = 'extracted'` | — |
+| `extracted` | `applied` | `retainTurnMemories`, once Hindsight acknowledges, or at once for an extraction with no facts | Same | — |
+| `pending`, `extracted` | same, or `failed` | `recordTurnAttempt` | `WHERE id = $1 AND status = $from AND attempts = $seen` | `attempts + 1`, `failure_kind`, `failure_message`; `failed` at 3, or on a terminal failure from `pending`; extraction kept |
+| — | `skipped` (`backfilled`, `aged_out`) | Migration `0094_observation_memories` | — | Row |
+
+A turn-caused failure is counted from `pending`, with `$seen` read at the step's start. The exhausted step takes `$from` and `$seen` from the plan, so it counts nothing on a row another run moved since, whether it extracted the turn, held it or applied it. A step that stored its own extraction before failing for good counts nothing that fire; the next fire plans the row `extracted` and counts a recurrence. A corrections row is never `extracted`, so the corrections phase's transitions stay 1a's. Any other transition is illegal, and no store method writes one: nothing leaves `applied`, `failed` or `skipped`, and `extraction` is written once, by `pending → extracted`, and never rewritten or cleared.
+
+### Held
+
+A profile is **bound** when it doesn't see the user's instruction rules (`admitsFirstParty`) and one of the user's own memory rules is global or scoped to it (`bindsUnseenUserRule`, `src/agent/store/steering-rules.ts`). Its model can't be shown the rule, so it can't honour it.
+
+- **Before the model call.** The step reads the fire's memory rules with the row. A bound fire moves the turn `pending → held` and calls no model.
+- **Before the retain.** The step reads the rules of the profile the extraction recorded. When that profile is bound (`seesUserRules` false and a user's rule applies to it) and the extraction holds a fact, the step moves `extracted → held_extracted`, keeps the extraction, and retains nothing. An extraction with no facts has nothing a rule could forbid, and moves to `applied`. The test is the extracting profile's, not the fire's, because the prompt was that profile's.
+- **Release**, in `discover-memory-turns`, before the plan:
+  - `held → pending` when the fire's profile is not bound, since the extraction then runs under the rules that profile sees;
+  - `held_extracted → extracted` for each row whose extraction's profile is no longer bound: the rule was retired.
+
+Held rows leave the plan, so they never fill the cap. A `held_extracted` row stays held for as long as the rule that binds its extracting profile is live.
+
+### One fire
+
+`discover-memory-turns` runs `releaseHeldTurns` in one transaction. 1a's `discoverTurns` then runs for the phase in another, inserting the undiscovered turns' rows and reading the plan. The plan holds the `pending` and `extracted` turns, oldest first, up to `TURNS_PER_PHASE`, each with its status and attempt count. A turn's step:
+
+1. Reads the row. A row in neither `pending` nor `extracted` returns `done`.
+2. On a `pending` row it reads the fire's memory rules, and a bound fire holds the row. A turn that renders no text is `skipped` (`empty`). Otherwise the step calls the extraction, checks the evidence and stores the extraction (`pending → extracted`).
+3. On an `extracted` row, read at the start or just stored, it reads the extracting profile's rules, and holds the row when that profile is bound and the extraction holds a fact. Otherwise `retainBatch` sends the stored items, unless there are none, and the row moves `extracted → applied`.
+
+The retain runs outside any transaction. A throw from it is rethrown as `RetainUnavailableError`: Hindsight unreachable, or a 5xx or 4xx after the adapter's retries. The step retries it. Once the retries are spent, the row stays `extracted`, uncounted, and the next fire re-sends the stored items without a model call. A 4xx isn't counted against the turn because it can be account-wide: a removed bank, or a document id Hindsight refuses.
+
+The walk matches each outcome as 1a's does, and `held` is a clean move:
+
+| Outcome | Then |
+|-|-|
+| `applied`, `held`, `skipped` (`empty`), `done` | Next turn |
+| `taken` | Stop the phase |
+| `retryLater`, `failed` | Stop the phase |
+| A turn's step failed for good with `ExtractionUnavailableError` or `RetainUnavailableError` | Stop the phase as failed, counting nothing |
+| A turn's step failed for good with anything else | `observe-v1-memories-exhausted-<observationId>` counts it against the turn on the plan's status and count; stop the phase as failed |
+| `discover-memory-turns` failed for good | Stop the phase as failed |
+
+The memories phase runs after corrections and consolidation. A fire runs 8 steps when nothing is planned, staged or failed; otherwise at most N + M + 15 for N corrections and M memories turns planned, each walk stopping at its first outcome that isn't a clean move. The bare body calls no model, and every step id comes from a memoized plan's DB-minted ids.
+
+**Files** (`src/agent/evolution/observation/`), one use case per group of transitions:
+
+| File | Transitions |
+|-|-|
+| `release-held-turns.ts` | `held` → `pending`; `held_extracted` → `extracted` |
+| `observe-turn-memories.ts` | The step body: reads the row, dispatches to the use cases below |
+| `hold-turn.ts` | `pending` → `held` |
+| `store-turn-extraction.ts` | `pending` → `extracted` |
+| `retain-turn-memories.ts` | `extracted` → `applied` / `held_extracted` |
+| `walk-turns.ts` | Both phases' walk, the exhausted step |
+
+`skip-empty-turn.ts`, `record-turn-attempt.ts` and `discover-turns.ts` serve both phases. `extract-memories.ts` is the prompt and the call over one rendered turn.
+
+### Keys
+
+- **Document ids.** Item `i` of a turn's stored extraction retains under `observer:turn:<turn_cursor>:<i>`. `retainBatch` replaces on `document_id`, and the stored items never change, so a re-send names the same documents with the same content and tags.
+- **Tags and metadata.**
+  - `network:`, `compartment:` and `trust:` come from the item.
+  - `profile_class:` comes from the extraction's `profileClass`.
+  - Metadata is `source: conversation`, with `per_tag` observation scopes.
+- **Evidence.** An item counts only when its `evidence` quotes the turn's rendered text, tool results and forwarded text included, with case, whitespace and quote marks folded as in 1a. An item that fails is dropped and counted in `dropped.noEvidence`. A fact the model reads in the context turn is therefore not retained again.
+- **Prompt.** The memory extraction prompt reads one `<turn>`, after an optional `<earlier_conversation>` holding context to resolve references with, as the correction prompt does.
+
+### Audit
+
+- `memories.extracted` and `byNetwork` count the facts this fire retained, and `skippedForUnseenRules` the turns it held.
+- A fire that changed nothing writes no row and returns `skipped` (`nothing_new`). That is a fire with no turn planned in either phase, no staged row loaded, and no phase failed. A released row lands in the same fire's plan. A short conversation's turns are observed like any other's. `/reflect` then answers "Nothing new since the Observer last ran."
+- `messageCount` is the conversation's message count, read in the audit row's transaction.
+
+### Backfill
+
+The memories half of [Backlog and Backfill](#backlog-and-backfill-proposed) → Backfill, as DML inside `0094_observation_memories`. A fire qualifies on `memories.extracted > 0` and a `messageCount` no larger than its conversation's message count. Rows then follow the latest qualifying fire's boundary:
+
+- an answered turn at or below it is `skipped` (`backfilled`);
+- any other answered turn whose newest row is over 30 days old is `skipped` (`aged_out`);
+- every other turn gets no row.
+
+The CHECK is added after the DML, so a row it refuses rolls the file back.
+
+### Failure modes
+
+| # | Crash, race or deploy | State left | Why it is safe, or the residual |
+|-|-|-|-|
+| a | Inside the step, before `pending → extracted` commits | `pending` | The retry calls the model again, the one billable re-run; nothing was written |
+| b | After `extracted` commits, before Hindsight acknowledges | `extracted` | The retry reads the row, calls no model, and retains the stored items |
+| c | Hindsight acknowledges, then the step fails before `extracted → applied` commits | `extracted` | The retry re-sends the same items under the same document ids and tags, which Hindsight replaces, then moves the row. Residual: if a rule binding the extracting profile appears in between, the retry moves the row to `held_extracted` with its facts already retained. |
+| d | After `applied`, `held`, `held_extracted` or `skipped` commits, before Inngest records the step | That status | The re-run returns `done`. Residual: the audit row counts neither the facts of a turn applied this way nor a turn held this way. |
+| e | A turn-caused extraction failure | `pending` with `attempts + 1`, or `failed` | As 1a's row d |
+| f | The extraction throws something the classifier doesn't place | `pending`, uncounted | As 1a's row e |
+| g | The retain throws, out of the step's retries | `extracted`, uncounted | The phase stops for the fire, and later fires re-send from the stored extraction. Residual until 1b classifies Hindsight's refusals: a batch Hindsight always refuses stalls the conversation's memories walk. |
+| h | The step fails for good outside the extraction call and the retain: loading the turn or the rules, a transition, a bug | `pending` or `extracted` with `attempts + 1` (`exhausted`), or `failed` at 3 | As 1a's row e″, on the plan's status and count. When the step stored its extraction before failing, a recurrence is counted from the next fire on. A row can reach `failed` with its facts retained, when the failure followed an acknowledged retain. |
+| i | Two fires at once | Each row moves once | Both may call the model for one `pending` turn. The first `pending → extracted` commits; the second's guarded UPDATE waits, raises `40001`, and its retry finds `extracted`: `taken`. A turn-caused failure in the second run is guarded on `pending`, so it counts nothing on the first run's extraction. Two runs on one `extracted` row both retain the same documents, idempotently, and one moves the row. Residual: one duplicate model call. A run that retains while another moves the row to `held_extracted`, or to `failed` at the cap, leaves its facts retained under that row for good; the race takes two runs on one turn within one retain's duration. |
+| j | A memory rule set after the extraction's rules read, under a profile that sees the user's rules | `applied` | Residual: the extraction was prompted without the rule, so the rule binds from the next turn on |
+| k | Between `releaseHeldTurns` and `discoverTurns`, which commit separately | Rows released, no plan recorded | The step's retry finds nothing to release and plans the released rows |
+| l | A turn's reply commits after discovery's snapshot | Not discovered this fire | As 1a's row g |
+| m | A run of the transcript-era build in flight across the deploy | Whatever the database holds | Its memoized `load-history` and `extract-memories` are never requested again, and its memoized corrections plan, which carries no status, is read as `pending`, all a 1a plan holds. The Observer plans no parallel group, so no step is requested by name. Residual: if `extract-memories` retained before the deploy, its audit row isn't written, so the backfill gave its turns no row. Those turns are retained again under turn document ids, beside the transcript-era documents. The fires in flight at the deploy bound it. |
+| n | A run in flight across a later deploy that changes `MemoryTurnOutcome` | — | As 1a's row i |
+| o | A rollback to the previous build after the migrations | Memories rows unread | That build reads only corrections rows and retains from the whole transcript under fresh ids. Its writes satisfy the CHECK, and it parses the audit rows 2a writes. Residual on rolling forward: the turns its fires read get memories rows `pending` and are retained again under turn document ids. |
+| p | Backfill | Backfill above | Backlog and Backfill's residuals: a straddling turn is retained again; a fire whose retain Hindsight acknowledged before its step failed for good recorded 0, so its turns are retained again; a whole turn that committed after the fire read larger ids is `backfilled` unobserved |
+| q | Hindsight accepts an async retain, then fails processing it server-side | `applied` | As the main table's row 19 |
+| r | More open turns than the cap, or held turns, on a conversation nobody returns to | `pending`, `extracted`, `held` | As 1a's row m. A held turn waits for a fire whose profile isn't bound. |
+| s | The conversation's profile changes between fires | Each turn extracted under the fire's profile | Residual until 1b: a turn's facts follow the rules, and carry the class, of the profile the conversation had when the turn was extracted |
+| t | A function-level retry | Unchanged | As 1a's row o |
+
+**Re-read cost.** Each phase's discovery and plan scan the conversation's message rows (ids, roles and cursors) as 1a's do. Content is read for the planned turns and each one's context turn.
 
 
 ## Rollout `[proposed]`
@@ -829,18 +1030,19 @@ Each PR is shippable and reviewable on its own. Migration numbers shift if other
 
    Tests: the premise (two fires over one transcript reinforce once), Failure Modes rows a, b, e, e″, f and h as tests, (b) and (h) as replay tests with `@inngest/test` `steps:`, the classification matrix, the migration's backfill, and the learning-loop cassette re-recorded.
 
-   1b. **The rest of the corrections phase**: `ConversationObservation`, `superseded` and `unanswered`; separate extract, apply and attempt steps; `PhasePause` and `callExtractionModel`; the turn's profile and channel types; the context budget; the per-fire loop as `observer-v2` with the `observer/backlog` event, follow-ups, chain and daily budgets (`EvolutionEventStore.countTurnCallsSince`) and the run id; `turns.corrections` in the audit row, `/learned`, `/reflect` and the web table; the transcript memories phase gated to idle and manual fires; `follow_up` added to the `evolution_trigger` pgEnum and `EvolutionTriggerSchema`, and the `extraction` column with a CHECK that exempts 1a's `applied` rows, in a generated migration. Tests: each remaining Failure Modes row that applies to corrections as a replay test, each `TurnFailure` and `PhasePause` to its transition, the sync-harness throw mapping, and a concurrent-apply test on the real driver.
-2. **Memories by turn.** Contents:
-   - the memories phase on the same machine: `held` and `held_extracted`, the stored extraction, positional document ids, and evidence;
-   - its backfill, inline in the generated migration that adds the `memories` phase;
-   - `messageCount` and `too_short` retired;
+   1b. **The rest of the corrections phase**: `ConversationObservation`, `superseded` and `unanswered`; separate extract, apply and attempt steps; `PhasePause` and `callExtractionModel`; the turn's profile and channel types; the context budget; the per-fire loop as `observer-v2` with the `observer/backlog` event, follow-ups, chain and daily budgets (`EvolutionEventStore.countTurnCallsSince`); `turns.corrections` in the audit row, `/learned`, `/reflect` and the web table; `follow_up` added to the `evolution_trigger` pgEnum and `EvolutionTriggerSchema`, and the corrections variant of `extraction`, with a CHECK that exempts the corrections rows applied before it, in a generated migration; the memories variant keeps parsing 2a's rows. Tests: each remaining Failure Modes row that applies to corrections as a replay test, each `TurnFailure` and `PhasePause` to its transition, the sync-harness throw mapping, and a concurrent-apply test on the real driver.
+2. **Memories by turn**, as [Slice 2a](#slice-2a) specifies, ahead of 1b:
+   - the memories phase on 1a's machine: `held` and `held_extracted`, the stored extraction, positional document ids, and evidence;
+   - `0093_observation_memories_values` and `0094_observation_memories`, generated, with the memories backfill inline in the second;
+   - `nothing_new` for a fire that changed nothing, with `too_short` retired, and `messageCount` the conversation's message count;
+   - the run id threaded into `runObserver` and recorded on each extraction;
    - memory.md's extraction section updated.
 
-   Tests: Failure Modes rows 7, 8, 9, 19 and 21, held release to both targets, Hindsight throws through the classifier, and the re-recorded learning loop.
+   Tests: Slice 2a's Failure Modes rows b, c, d, g, h, i, k and m, with (b), (c), (h) and (m) as replay tests; held release to both targets; each CHECK refusal; `nothing_new` planning the same steps on a replay; the migration's backfill; and the learning-loop cassette re-recorded.
 3. **Drop `contradicted_in_conversation_id`.** Generated, after a release contains PR 1a, so a rollback to that release still finds no reader of the column.
 4. **Hindsight raw-retain spike**, optional, as in [Hindsight Raw Retain](#hindsight-raw-retain-proposed).
 
-When PR 2 merges, this document's sections move to `[confirmed]`; [Slice 1a](#slice-1a) already is.
+When 1b merges, this document's sections move to `[confirmed]`; [Slice 1a](#slice-1a) and [Slice 2a](#slice-2a) already are.
 
 **Side bugs**, separate fixes found while designing this:
 
@@ -849,9 +1051,9 @@ When PR 2 merges, this document's sections move to `[confirmed]`; [Slice 1a](#sl
 ## Decisions
 
 - **One model call per turn.** Measured against the ~2–3× input estimate ([Backlog and Backfill](#backlog-and-backfill-proposed)); k turns per call only if real days exceed it.
-- **Scheduled and pipeline turns are observed for memories.** The evidence check filters restated tool output, and the daily budget caps the cost.
+- **Scheduled and pipeline turns are observed for memories.** The evidence check filters restated tool output, and the per-fire cap bounds the cost, with the daily budget from 1b on.
 - **No operator retry for `failed` yet.** `failed` is visible in `/learned` and the audit row; a command comes when a real `failed` turn needs it.
-- **PR 1 carries the store and corrections together. Memories are PR 2**, with the transcript memories phase gated to idle and manual fires in between.
+- **PR 1 carries the store and corrections together. Memories are PR 2**, shipped on Slice 1a's machine ahead of 1b ([Slice 2a](#slice-2a)).
 - **PR 1 ships in two**: 1a is the cursor on this design's unit and keys ([Slice 1a](#slice-1a)), 1b the rest of the corrections machine on the same rows.
 - **`/reflect` is sync**, capped at `REFLECT_TURNS_PER_PHASE = 3`, with a follow-up for the rest.
 - **`BACKFILL_MAX_AGE` is 30 days.** Older dormant history is skipped as `aged_out`, terminally.

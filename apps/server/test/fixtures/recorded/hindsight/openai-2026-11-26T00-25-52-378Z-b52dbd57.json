@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\n## MISSION\n\nTrack anything notable in the new facts — names, numbers, dates, places, events, decisions, claims, relationships, and recurring patterns.\n\n## INPUT\n\n### New facts\n\n[F1] User has just started a new job at a bakery | When: on November 26, 2026 | Where: Alfama, Lisbon | Involving: user (occurred_start=[TS], occurred_end=[TS], mentioned_at=[TS])\n  closest existing observations: O1 (stated after this fact)\n\n### Existing observations\n\n[\n{\"id\": \"O1\", \"text\": \"User is learning to play the Portuguese guitar.\", \"proof_count\": 1, \"mentioned_at\": \"[TS]\", \"newer_than_input_facts\": true, \"source_memories\": [{\"text\": \"User is learning to play the Portuguese guitar. | Involving: user\", \"mentioned_at\": \"[TS]\"}]}\n]",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"facts\":[{\"fact_id\":\"F1\",\"about\":\"User\",\"kind\":\"lasting\",\"existing\":[{\"observation_id\":\"O1\",\"observation_about\":\"User is learning to play the Portuguese guitar.\",\"effect\":\"unrelated\",\"text\":\"\"}],\"adds\":\"yes\",\"new\":[\"User has just started a new job at a bakery.\"],\"same_as_fact\":null}],\"deletes\":[]}",
+        "usage": {
+          "prompt_tokens": 4640,
+          "completion_tokens": 80,
+          "total_tokens": 4720,
+          "prompt_tokens_details": {
+            "cached_tokens": 4352,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "439015e1"
+      }
+    }
+  ]
+}

@@ -134,7 +134,8 @@ export async function extractTurnCorrections(
   return { items: data.corrections, rulesByLabel };
 }
 
-function turnMessage(text: TurnText): string {
+/** The extraction's user message: the turn, after the exchange before it when there is one. */
+export function turnMessage(text: TurnText): string {
   const turn = `<turn>\n${text.turn}\n</turn>`;
   return text.context === null
     ? turn

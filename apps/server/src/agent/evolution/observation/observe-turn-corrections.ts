@@ -8,7 +8,7 @@
 
 import { match } from "ts-pattern";
 import { logger } from "../../../logger.js";
-import type { AgentStore, PendingTurn, TurnMessage } from "../../store/index.js";
+import type { AgentStore, OpenTurn, TurnMessage } from "../../store/index.js";
 import {
   type ApplyCorrectionsStore,
   type ExtractionDeps,
@@ -21,7 +21,7 @@ import { classifyTurnFailure, ExtractionUnavailableError } from "./failure.js";
 import { recordTurnAttempt } from "./record-turn-attempt.js";
 import { skipEmptyTurn } from "./skip-empty-turn.js";
 import type { TurnOutcome } from "./turn-outcome.js";
-import { quotesUser, renderContext, renderTurn } from "./turns.js";
+import { quotes, renderContext, renderTurn } from "./turns.js";
 
 export interface ObserveTurnDeps extends Omit<ExtractionDeps, "store"> {
   store: ExtractionDeps["store"] &
@@ -38,7 +38,7 @@ export interface ObserveTurnDeps extends Omit<ExtractionDeps, "store"> {
 
 export interface ObserveTurnArgs {
   conversationId: string;
-  turn: PendingTurn;
+  turn: OpenTurn;
   scope: ExtractionScope;
   activeChannelTypes: ReadonlyArray<string>;
 }
@@ -62,20 +62,31 @@ export async function observeTurnCorrections(
     const row = await store.getTurnObservation(tx, turn.observationId);
     // The id came from this run's plan, and no code deletes the rows.
     if (row === undefined) throw new Error(`turn observation ${turn.observationId} is missing`);
-    return match(row.status)
-      .returnType<Promise<LoadedTurn | Extract<TurnOutcome, { kind: "done" }>>>()
-      .with("applied", "failed", "skipped", async (status) => ({ kind: "done", status }))
-      .with("pending", async () => {
-        const previous = await store.findAnsweredCursorBefore(
-          tx,
-          conversationId,
-          turn.firstMessageId,
-        );
-        const cursors = previous === undefined ? [turn.cursor] : [turn.cursor, previous];
-        const rows = await store.listTurnMessages(tx, conversationId, cursors);
-        return { kind: "loaded", attempts: row.attempts, previous, rows };
-      })
-      .exhaustive();
+    return (
+      match(row.status)
+        .returnType<Promise<LoadedTurn | Extract<TurnOutcome, { kind: "done" }>>>()
+        // A corrections row is never held or extracted; the statuses are the memories phase's.
+        .with(
+          "applied",
+          "failed",
+          "skipped",
+          "held",
+          "held_extracted",
+          "extracted",
+          async (status) => ({ kind: "done", status }),
+        )
+        .with("pending", async () => {
+          const previous = await store.findAnsweredCursorBefore(
+            tx,
+            conversationId,
+            turn.firstMessageId,
+          );
+          const cursors = previous === undefined ? [turn.cursor] : [turn.cursor, previous];
+          const rows = await store.listTurnMessages(tx, conversationId, cursors);
+          return { kind: "loaded", attempts: row.attempts, previous, rows };
+        })
+        .exhaustive()
+    );
   });
   return match(loaded)
     .returnType<Promise<TurnOutcome>>()
@@ -107,10 +118,15 @@ async function observeLoaded(
     // Not the turn's doing: the step retries it, and the row stays as it is.
     if (failure === null) throw new ExtractionUnavailableError(err);
     logger.warn({ err, conversationId, observationId }, "observer: turn's extraction failed");
-    return recordTurnAttempt(deps, { observationId, seen: loaded.attempts, failure });
+    return recordTurnAttempt(deps, {
+      observationId,
+      from: "pending",
+      seen: loaded.attempts,
+      failure,
+    });
   }
 
-  const evidenced = corrections.items.filter((c) => quotesUser(c.evidence, rendered.userText));
+  const evidenced = corrections.items.filter((c) => quotes(c.evidence, rendered.userText));
   const droppedNoEvidence = corrections.items.length - evidenced.length;
   if (droppedNoEvidence > 0) {
     logger.info(

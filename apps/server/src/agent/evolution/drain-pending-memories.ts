@@ -301,7 +301,7 @@ async function loadMemoryRules(
 /**
  * Map classified rows to `RetainBatchItem`s. `metadata.source` carries the
  * staging origin so live retains, skill writes and migrations stay
- * distinguishable from transcript extractions; `metadata.skill` names the
+ * distinguishable from turn extractions; `metadata.skill` names the
  * skill on a `skill` row.
  *
  * Each row's `profile_class:<class>` tag (when present) is taken from
