@@ -20,8 +20,11 @@
  * on.
  */
 
+/** What a Bot API token is replaced with. */
+const REDACTED_BOT_TOKEN = "<redacted>";
+
 /** What a token-shaped path segment is replaced with. */
-export const REDACTED_BOT_SEGMENT = "bot<redacted>";
+export const REDACTED_BOT_SEGMENT = `bot${REDACTED_BOT_TOKEN}`;
 
 /**
  * A secret's shape, as regex sources: the `start` every match opens with and
@@ -56,16 +59,17 @@ const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   // `oat01`), then the secret.
   { start: "sk-ant-", rest: String.raw`[a-z]+\d+-[A-Za-z0-9_-]{20,}`, replacement: "$1REDACTED" },
   // A Bot API token as a path segment: `/bot`, the numeric bot id, a colon
-  // (literal or percent-encoded) and the secret's URL-safe base64 characters.
-  // Anchored on the `/` so `bot` inside a longer segment doesn't match, and
-  // host-agnostic so a self-hosted Bot API server (`apiRoot`) is covered too.
-  // There is no trailing boundary: in running text a token can be followed
-  // by any punctuation, and replacing a token-shaped prefix is the safe
-  // failure.
+  // and the secret's URL-safe base64 characters. The slash and the colon may
+  // each be percent-encoded, in either case, as in a URL carried inside
+  // another. Anchored on the slash so `bot` inside a longer segment doesn't
+  // match, and host-agnostic so a self-hosted Bot API server (`apiRoot`) is
+  // covered too. There is no trailing boundary: in running text a token can
+  // be followed by any punctuation, and replacing a token-shaped prefix is
+  // the safe failure.
   {
-    start: "/bot",
+    start: "(?:/|%2[Ff])bot",
     rest: String.raw`\d+(?::|%3[Aa])[A-Za-z0-9_-]+`,
-    replacement: `/${REDACTED_BOT_SEGMENT}`,
+    replacement: `$1${REDACTED_BOT_TOKEN}`,
   },
 ];
 

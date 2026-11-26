@@ -2,6 +2,7 @@ import { err } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
 import { logger } from "../../../logger.js";
+import { expectDefined } from "../../../test/assertions.js";
 import {
   mockAttachmentStore,
   mockInngest,
@@ -17,6 +18,7 @@ import {
   runUpdate,
 } from "../../../test/telegram/grammy-mock.js";
 import {
+  captureLogLines,
   makeCtx,
   makeDocumentCtx,
   makePhotoCtx,
@@ -111,6 +113,32 @@ describe("setup", () => {
 
     expect(handler).toHaveBeenCalledOnce();
     expect(mockBotApi.getUpdates).toHaveBeenCalledWith({ offset: 6, limit: 1, timeout: 0 });
+  });
+
+  it("masks the bot token, raw and percent-encoded, in a handler error's line", async () => {
+    const token = "123456:AAsecret-tok_en";
+    const lines = captureLogLines();
+    try {
+      await setupWith({ token });
+      const onError = expectDefined(botLifecycle.errorHandler, "bot.catch handler");
+
+      onError({
+        error: botApiError(
+          "sendMessage",
+          400,
+          `Bad Request: ${token} ${encodeURIComponent(token)} https://bot-api.local/bot${token}/x`,
+        ),
+        ctx: { update: { update_id: 1 } },
+      });
+
+      const line = lines.filter((l) => l.includes("telegram bot error"));
+      expect(line).toHaveLength(1);
+      expect(line[0]).not.toContain(token);
+      expect(line[0]).not.toContain(encodeURIComponent(token));
+      expect(line[0]).toContain("Bad Request: <redacted> <redacted>");
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("counts an update the sender gate drops as handled", async () => {

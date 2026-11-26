@@ -23,6 +23,7 @@ import {
 import { handleDisable, handleEnable, handleSkills } from "./commands/skills.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
 import type { RepoDialogs } from "./repo-dialog.js";
+import type { TokenRedactor } from "./token-redaction.js";
 
 export interface CommandRouteDeps {
   transport: Transport;
@@ -119,7 +120,7 @@ export function registerCommands(
 // Populate the client-side command menu (the "/" / Menu button in Telegram).
 // Idempotent: Telegram replaces the list on each call. Failure here is
 // non-fatal — log and proceed so the bot still starts.
-export async function publishCommandMenu(api: Bot["api"]): Promise<void> {
+export async function publishCommandMenu(api: Bot["api"], redact: TokenRedactor): Promise<void> {
   await api
     .setMyCommands([
       { command: "new", description: "Start a new conversation" },
@@ -144,5 +145,7 @@ export async function publishCommandMenu(api: Bot["api"]): Promise<void> {
       { command: "cancel", description: "Abort the current interactive dialog" },
       { command: "start", description: "Show help" },
     ])
-    .catch((err) => logger.warn({ err }, "failed to register telegram bot commands"));
+    .catch((err: unknown) =>
+      logger.warn({ err: redact.error(err) }, "failed to register telegram bot commands"),
+    );
 }

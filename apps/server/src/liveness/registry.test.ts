@@ -1,5 +1,6 @@
 import type { Attributes } from "@opentelemetry/api";
 import {
+  AggregationTemporality,
   InMemoryMetricExporter,
   MeterProvider,
   PeriodicExportingMetricReader,
@@ -14,8 +15,8 @@ const WALL = new Date("2026-11-19T09:00:15.000Z");
 
 const PASS: CheckReading = { status: "pass", observedValue: 3 };
 
-function warning(reason: string): CheckReading {
-  return { status: "warn", reason, output: `${reason}: text`, observedValue: 90, detail: "raw" };
+function warning(reason: string, detail: string | null = "raw"): CheckReading {
+  return { status: "warn", reason, output: `${reason}: text`, observedValue: 90, detail };
 }
 
 /** A check that reports whatever the test last set. */
@@ -62,7 +63,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   monotonic = 0;
   reader = new PeriodicExportingMetricReader({
-    exporter: new InMemoryMetricExporter(),
+    exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE),
     exportIntervalMillis: 60_000,
   });
   meterProvider = new MeterProvider({ readers: [reader] });
@@ -180,9 +181,7 @@ describe("LivenessRegistry", () => {
     it("logs a first reading that warns, without a detail it doesn't have", () => {
       const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
       try {
-        start([
-          settable("channels:adapter", "dc-1", { ...warning("unsupported"), detail: null }).entry,
-        ]);
+        start([settable("channels:adapter", "dc-1", warning("unsupported", null)).entry]);
 
         expect(warn).toHaveBeenCalledExactlyOnceWith(
           {

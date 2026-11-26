@@ -6,7 +6,7 @@ Some of cogmo's work fails by not happening: a Telegram receive loop that has ex
 
 1. Adapter contract: `liveness(): ChannelLiveness | null`, required on `Adapter` and `StreamingAdapter`; `startChannels` reports every row ([Channel contract](#channel-contract-confirmed)).
 2. Surface: `/health`'s top-level `status` stays public, and `checks` appears only for a valid web session ([Surface](#surface-confirmed)).
-3. Polling state: the supervisor's `PollingState` gains a receive sub-state and its projection's fields ([Telegram receive loop](#telegram-receive-loop-proposed)).
+3. Polling state: the supervisor's `PollingState` gains a receive sub-state and its projection's fields ([Telegram receive loop](#telegram-receive-loop-confirmed)).
 4. Cron storage: `src/liveness/` with `cron_heartbeats` and its boot baseline ([Cron heartbeats](#cron-heartbeats-proposed)), plus a `cogmo.cron.last_tick` gauge.
 5. Cron builder: `createCronFunction` with a final heartbeat step; `sandbox-reaper` and `model-catalog-refresh` leave design/architecture.md's single-step list; replayed log lines are accepted.
 6. Thresholds: 90 s stale, 5 min wedged, two 409s in a row; a cron overdue 5 min past the second tick after its reference, or 30 min past the next tick for a period of a day or more.
@@ -33,7 +33,7 @@ One in-process check registry, read three ways:
 
 The registry evaluates every check on a 15-second tick, the first when it is built; `/health` and the gauge render the last tick from memory. A check that throws, a bug, reports `warn` (`check_error`) and logs at error. Probes alert on `status`; the gauge and the log lines name the failing check.
 
-**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only, and the Telegram adapter redacts its configured token, raw and percent-encoded, from every line it writes that carries one: the verdict line's `detail`, the supervisor's lines, the command-menu warning and both offset-confirmation warnings.
+**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only, and the Telegram adapter redacts its configured token, raw and percent-encoded, from every line it writes that carries one: the verdict line's `detail`, the supervisor's lines, the command-menu warning, both offset-confirmation warnings and the `telegram bot error` line.
 
 The public body, and the same with a session:
 
@@ -101,7 +101,7 @@ A pure `channelCheck(liveness, now)` turns a projection into a reading ([Verdict
 
 `startChannels` returns each row it read: the started ones with their adapter and `channelId`, and the ones whose type this build has no adapter for, which it skips with a warning today; each skipped row gets a `channels:adapter` entry that always warns `unsupported`. A setup that throws fails boot (design/infrastructure.md → Boot-Time Blocking Policy), so no running process has a channel whose setup threw. `bootstrapRuntime` builds the registry from those rows and from the crons `createCronFunction` recorded, and returns it on `RuntimeDeps` for `/health` and the gauge. The tick timer is unref'd and cleared on shutdown.
 
-## Telegram receive loop `[proposed]`
+## Telegram receive loop `[confirmed]`
 
 This extends the polling supervisor's `PollingState` ([design/transport/telegram.md → Polling Supervision](transport/telegram.md#polling-supervision-confirmed), #800), and adds no second machine. The unit is one channel's loop in one `cogmo serve` process, keyed by the channel id.
 
@@ -128,21 +128,21 @@ Two writers add what the supervisor can't see, a `getUpdates` error grammY retri
 | Writer | Sees | Writes |
 |-|-|-|
 | An API transformer (`bot.api.config.use`), installed before polling starts, filtering on `getUpdates` | Every `getUpdates` outcome | The current run's `receive`; `#progressAt` on a valid batch |
-| The update-tracking middleware, ahead of every handler | Each update's start and end | `#handlingSince` when handling begins. Its `finally` clears it and, only for a numeric `update_id`, sets `#progressAt` and the handled id `stop()` confirms past, so a malformed update can't credit progress or store a `NaN` offset |
+| The update-tracking middleware, ahead of every handler | Each update's start and end | `#handlingSince` when handling begins. Its `finally` clears it and, only for an `update_id` that is a safe integer, sets `#progressAt` and the handled id `stop()` confirms past, so a malformed update can't credit progress or store a `NaN` offset |
 
 The transformer returns `prev`'s result, or rethrows its error, unchanged, and its bookkeeping can't throw: grammY reads a transformer's throw as a failed request. grammY hands it the parsed reply before checking `ok`, and wraps a failure of the request, its reply or its client timeout in an `HttpError`; a throw while building the request propagates unwrapped.
 
 | `getUpdates` outcome | `receive` | `cause`, `code` |
 |-|-|-|
-| `ok: true`, `result` an array whose every element has a numeric `update_id`; an empty array is a long-poll timeout | `receiving`, with progress | — |
+| `ok: true`, `result` an array whose every element's `update_id` is a safe integer; an empty array is a long-poll timeout | `receiving`, with progress | — |
 | `ok: false` with 401 or 409 | unchanged: the supervisor's | — |
 | `ok: false` with 429, 5xx, or another 4xx | `retrying` | `rate_limited`, `server_error` or `client_error`; the `error_code` |
 | Any other reply: `ok: true` with another `result` or none, no boolean `ok`, an `error_code` outside 400–599 | `retrying` | `bad_reply`, `unexpected-reply` |
-| An `HttpError` wrapping a node-fetch error | `retrying` | `bad_reply` for `invalid-json` (a reply that isn't JSON), else `network`; the error's system `code`, else its `type` |
+| An `HttpError` wrapping a node-fetch error, told by its `name` (`FetchError`, `AbortError`) | `retrying` | `bad_reply` for `invalid-json` (a reply that isn't JSON), else `network`; the error's system `code`, else its `type` |
 | An `HttpError` wrapping grammY's client timeout, recognised by its fixed message prefix | `retrying` | `network`, `timeout` |
-| Any other throw | `retrying` | `unknown`, `unknown` |
+| Any other throw, an `HttpError` wrapping another error included | `retrying` | `unknown`, `unknown` |
 
-Only a valid batch counts as progress: grammY polls again at once on `ok: true` with no `result`, and handles an element with no `update_id`, so either would read as a healthy poll. `detail` is Telegram's `description`, token redacted, or null; no error message reaches a `ChannelError`, since a `FetchError`'s names the request URL. The supervisor's transitions map their errors the same way, anything but a `GrammyError` or `HttpError` as `unknown`.
+Only a valid batch counts as progress: grammY polls again at once on `ok: true` with no `result`, and handles an element with no `update_id`, so either would read as a healthy poll. A `result` that is present but not an array ends the run instead: grammY's loop throws iterating it, and the supervisor reads the `TypeError` as `failed` (`rejected`). `detail` is Telegram's `description` when it is a string, token redacted, else null; no error message reaches a `ChannelError`, since a `FetchError`'s names the request URL. The supervisor's transitions map their errors the same way: a `GrammyError` by its `error_code`, `unknown` unless a non-negative integer, and anything but a `GrammyError` or `HttpError` as `unknown`.
 
 ### States
 
@@ -176,7 +176,7 @@ Polling Supervision's table holds every top-level transition. This design adds:
 | `polling` | `backoff` | Supervisor, on a 409 | — | `conflicts` (the new streak), `since`, `error` |
 | `polling` | `failed` | Supervisor | — | `error` |
 
-A transformer event outside `polling` changes nothing, such as `stop()`'s own confirming calls. No transition logs a line of its own: the supervisor's lines cover its transitions, and the verdict-change line covers a warning the sub-state raises.
+An outcome changes nothing unless the run its call was made in is still the current state, such as `stop()`'s own confirming calls or a reply that lands after its run ended. No transition logs a line of its own: the supervisor's lines cover its transitions, and the verdict-change line covers a warning the sub-state raises.
 
 | `PollingState` | Projected `LoopState` | `progressAt` from |
 |-|-|-|
