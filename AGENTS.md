@@ -53,6 +53,7 @@ Read `design/` for the full picture. Key docs:
 | [infrastructure.md](design/infrastructure.md) | Runtime requirements, Docker Compose, secrets (encrypted DB, master key, HKDF, `_FILE` convention), deployment |
 | [liveness.md](design/liveness.md) | Failures that show as absence — `/health` checks and the `cogmo.check.status` gauge, the channel liveness contract and Telegram's receive sub-state on the polling supervisor, cron heartbeats, alert rules |
 | [data-model.md](design/data-model.md) | Table index — points to schemas in domain docs, deferred tables, design decisions |
+| [ci.md](design/ci.md) | CI requirements, how the merge gate picks the CI run it reads, target workflow layout and rollout |
 | [testing.md](design/testing.md) | Local dev, unit/integration/LLM tests, mocking, evaluation dataset |
 | [tooling.md](design/tooling.md) | Dev stack — runtime, build, ORM, testing, logging, linting, Kotlin-feel patterns |
 | [decisions.md](design/decisions.md) | All decisions with rationale, eliminated options, adopted patterns |
