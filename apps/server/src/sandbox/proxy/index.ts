@@ -20,6 +20,7 @@ import {
   isAbortError,
   pathOf,
   readBody,
+  readUpgradeBody,
   respondJson,
   respondRejection,
   writeRawRejectionAndDestroy,
@@ -62,7 +63,15 @@ const DEFAULT_HOST_DOCKER_SOCKET = "/var/run/docker.sock";
  * proxy to allocate gigabytes. 1 MiB is far above any real container spec —
  * published images don't exceed a few KB of JSON.
  */
-const MAX_REWRITTEN_BODY_BYTES = 1 * 1024 * 1024;
+const MAX_BUFFERED_BODY_BYTES = 1 * 1024 * 1024;
+
+/**
+ * The headers the server takes per request; a real Docker client sends
+ * about ten. Node fails a request past it as a client error (431), and one
+ * that reaches it is refused too, before any daemon connection, so the
+ * header view a forward frames its body by is never one Node cut short.
+ */
+const MAX_HEADERS = 100;
 
 /**
  * Per-connection task tag — set by the per-task net.Server's `connection`
@@ -150,6 +159,7 @@ export class CogmoSocketProxy {
     this.#hostPlatform = cachedOnSuccess((signal) => fetchHostPlatform(socketPath, signal));
     this.#rootless = cachedOnSuccess((signal) => fetchRootless(socketPath, signal));
     this.#httpServer = http.createServer();
+    this.#httpServer.maxHeadersCount = MAX_HEADERS;
     this.#httpServer.on("request", (req, res) => this.#handleRequest(req, res));
     this.#httpServer.on("upgrade", (req, socket, head) => {
       // http.Server types `socket` as Duplex; for Unix-socket connections
@@ -157,6 +167,13 @@ export class CogmoSocketProxy {
       this.#handleUpgrade(req, socket as net.Socket, head);
     });
     this.#httpServer.on("clientError", (err, socket) => {
+      // Node fails a request past `maxHeadersCount`, or past its header size
+      // limit, before the proxy sees it; it answers 431 as Node's own
+      // handler would.
+      if ("code" in err && err.code === "HPE_HEADER_OVERFLOW") {
+        writeRawRejectionAndDestroy(socket, { kind: "headers_too_large", limit: MAX_HEADERS });
+        return;
+      }
       if (!isAbortError(err)) log.warn({ err: err.message }, "proxy http clientError");
       socket.destroy();
     });
@@ -265,6 +282,10 @@ export class CogmoSocketProxy {
       return;
     }
 
+    if (atHeaderLimit(req)) {
+      this.#reject(req, res, scope, { kind: "headers_too_large", limit: MAX_HEADERS });
+      return;
+    }
     const classified = classify(req.method ?? "GET", req.url ?? "/");
     log.debug(
       { taskId: scope.taskId, method: req.method, path: pathOf(req), route: classified.kind },
@@ -333,8 +354,8 @@ export class CogmoSocketProxy {
   /**
    * `http.IncomingMessage` upgrade event handler — fires for `Upgrade:` headers.
    * Only a stream route may be upgraded, and only once its checks pass; Node
-   * hands over the bytes the client sent after the headers as `head`, which
-   * are replayed after the preamble. Without the classification an
+   * hands over the bytes after the request's body as `head`, which are
+   * replayed after the preamble and the body. Without the classification an
    * `Upgrade: tcp` to `/swarm/*` would slip past the route table.
    */
   #handleUpgrade(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): void {
@@ -344,32 +365,42 @@ export class CogmoSocketProxy {
       writeRawStatusAndDestroy(clientSocket, 500, "Cogmo proxy: connection has no task scope");
       return;
     }
+    const reject = (rejection: ProxyRejection) =>
+      this.#rejectUpgrade(req, clientSocket, scope, rejection);
+    if (atHeaderLimit(req)) {
+      reject({ kind: "headers_too_large", limit: MAX_HEADERS });
+      return;
+    }
+    // Node never sends `100 Continue` for an upgrade, and the body is read
+    // before the daemon is dialled, so the client and the proxy would wait
+    // on each other.
+    if (req.headers.expect !== undefined) {
+      reject({ kind: "expectation_failed" });
+      return;
+    }
     const upstream = this.#upstream(connection);
     match(classify(req.method ?? "GET", req.url ?? "/"))
-      .with({ kind: "reject" }, ({ rejection }) =>
-        writeRawRejectionAndDestroy(clientSocket, rejection),
-      )
+      .with({ kind: "reject" }, ({ rejection }) => reject(rejection))
       .with({ kind: "request" }, ({ route }) =>
-        writeRawRejectionAndDestroy(
-          clientSocket,
-          malformed(`${route.kind} endpoint cannot be upgraded`),
-        ),
+        reject(malformed(`${route.kind} endpoint cannot be upgraded`)),
       )
       .with({ kind: "stream" }, ({ route, query }) => {
         planStream(route, query, this.#streamContext(connection, scope))
           // Node parses an upgrade's body into the request, not into `head`.
           .then((planned) =>
             planned.asyncAndThen((path) =>
-              new ResultAsync(readBody(req, MAX_REWRITTEN_BODY_BYTES)).map((body) => ({
-                path,
-                body,
-              })),
+              new ResultAsync(readUpgradeBody(req, clientSocket, MAX_BUFFERED_BODY_BYTES)).map(
+                (body) => ({
+                  path,
+                  body,
+                }),
+              ),
             ),
           )
           .then((upgrade) =>
             upgrade.match(
               ({ path, body }) => pipeUpgrade(req, clientSocket, { path, body, head }, upstream),
-              (rejection) => writeRawRejectionAndDestroy(clientSocket, rejection),
+              reject,
             ),
           )
           .catch((cause: unknown) => {
@@ -380,6 +411,17 @@ export class CogmoSocketProxy {
           });
       })
       .exhaustive();
+  }
+
+  /** A rejected upgrade, answered on the raw socket and logged as a request's is. */
+  #rejectUpgrade(
+    req: http.IncomingMessage,
+    clientSocket: net.Socket,
+    scope: TaskScope,
+    rejection: ProxyRejection,
+  ): void {
+    log.info({ taskId: scope.taskId, path: pathOf(req), rejection }, "proxy request rejected");
+    writeRawRejectionAndDestroy(clientSocket, rejection);
   }
 
   #upstream(connection: ConnectionTask): Upstream {
@@ -414,8 +456,16 @@ export class CogmoSocketProxy {
         hostPlatform: this.#hostPlatform,
         rootless: this.#rootless,
       }),
-      readBody: () => readBody(req, MAX_REWRITTEN_BODY_BYTES),
+      readBody: () => readBody(req, MAX_BUFFERED_BODY_BYTES),
       recordExec: (execId) => connection.execIds.add(execId),
     };
   }
+}
+
+/**
+ * Whether the request carries as many headers as the server collects, so
+ * that Node may have dropped some from its view.
+ */
+function atHeaderLimit(req: http.IncomingMessage): boolean {
+  return req.rawHeaders.length / 2 >= MAX_HEADERS;
 }

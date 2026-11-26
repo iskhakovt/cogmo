@@ -16,8 +16,12 @@ export type ProxyRejection =
   | { kind: "denied"; message: string }
   /** A body that is not a JSON object, fails its schema or breaks a key rule. */
   | { kind: "malformed"; message: string }
-  /** A body to be rewritten that is over the size cap. */
+  /** A body the proxy buffers that is over the size cap. */
   | { kind: "too_large"; maxBytes: number }
+  /** Request headers past the server's count or size limit. */
+  | { kind: "headers_too_large"; limit: number }
+  /** An upgrade asking for `100 Continue`, which the proxy never sends. */
+  | { kind: "expectation_failed" }
   /** A store read or daemon lookup the checks need failed; the client may retry. */
   | { kind: "unavailable"; message: string }
   /** The daemon connection for the forward itself failed. */
@@ -29,6 +33,8 @@ export function rejectionStatus(rejection: ProxyRejection): number {
     .with({ kind: "denied" }, () => 403)
     .with({ kind: "malformed" }, () => 400)
     .with({ kind: "too_large" }, () => 413)
+    .with({ kind: "headers_too_large" }, () => 431)
+    .with({ kind: "expectation_failed" }, () => 417)
     .with({ kind: "unavailable" }, () => 503)
     .with({ kind: "daemon_failed" }, () => 502)
     .exhaustive();
@@ -39,6 +45,14 @@ export function rejectionMessage(rejection: ProxyRejection): string {
     .with(
       { kind: "too_large" },
       ({ maxBytes }) => `Cogmo proxy: request body exceeds ${maxBytes} bytes`,
+    )
+    .with(
+      { kind: "headers_too_large" },
+      ({ limit }) => `Cogmo proxy: a request carries fewer than ${limit} headers, within 16 KiB`,
+    )
+    .with(
+      { kind: "expectation_failed" },
+      () => "Cogmo proxy: an upgrade cannot wait for 100 Continue; send its body with it",
     )
     .with(
       { kind: P.union("not_found", "denied", "malformed", "unavailable", "daemon_failed") },

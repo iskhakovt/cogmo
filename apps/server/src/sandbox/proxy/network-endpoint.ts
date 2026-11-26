@@ -33,7 +33,7 @@ export async function applyNetworkEndpointPolicy(
 ): Promise<Result<{ path: string; body: Buffer }, ProxyRejection>> {
   const route = `POST /networks/{id}/${endpoint.op}`;
   const body = parseEndpointBody(endpoint.op, raw).andThen((parsed) =>
-    checkBodyRef(parsed.Container).map(() => parsed),
+    checkBodyRef(parsed.Container).map((ref) => ({ ...parsed, Container: ref })),
   );
   if (body.isErr()) return err(body.error);
   const network = await bridgeId(endpoint.network, lookups.refs, route);

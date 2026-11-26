@@ -46,6 +46,9 @@ function reached(marker: string): string[] {
   return h.daemon.started().filter((line) => line.includes(marker));
 }
 
+/** Header lines enough to reach the server's count, and past Node's default of 2000. */
+const MANY_HEADERS = Array.from({ length: 2000 }, () => "a: 1").join("\r\n");
+
 const SIBLING_KILL =
   "POST /containers/cogmo-task-sibling/kill HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n";
 const PRIVILEGED = JSON.stringify({ Image: "alpine:3", HostConfig: { Privileged: true } });
@@ -311,7 +314,146 @@ describe("an upgrade the daemon refuses", () => {
   });
 });
 
+describe("the checks on an upgrade", () => {
+  function upgradeWith(id: string, headers: string, body: string): string {
+    return (
+      `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
+      `${headers}Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
+    );
+  }
+
+  it("answers 431 to an upgrade past the header count, reaching nothing", async () => {
+    const id = await createExec();
+    const before = h.daemon.started();
+
+    const reply = await h.rawExchange(upgradeWith(id, `${MANY_HEADERS}\r\n`, ""));
+
+    expect(reply).toMatch(/^HTTP\/1\.1 431 /);
+    expect(h.daemon.started()).toEqual(before);
+  });
+
+  it("answers 417 to an upgrade that expects 100 Continue, forwarding nothing", async () => {
+    const id = await createExec();
+    const before = h.daemon.started();
+    const client = await rawClient();
+    // The headers alone: a client that expects 100 Continue holds its body back.
+    client.socket.write(
+      `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
+        "Expect: 100-continue\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n",
+    );
+
+    await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 417 /));
+    expect(h.daemon.started()).toEqual(before);
+    client.socket.destroy();
+  });
+
+  it("answers 413 to an upgrade body over 1 MiB, reaching nothing", async () => {
+    const id = await createExec();
+    const before = h.daemon.started();
+
+    const client = await rawClient();
+
+    client.socket.write(
+      upgradeWith(id, "", JSON.stringify({ Detach: false, pad: "x".repeat(2 * 1024 * 1024) })),
+    );
+
+    // The client is still writing, so the answer, not a close, is what it sees.
+    await vi.waitFor(() => expect(client.received()).toMatch(/^HTTP\/1\.1 413 /), {
+      timeout: SETTLE_MS,
+    });
+    expect(h.daemon.started()).toEqual(before);
+    client.socket.destroy();
+  });
+
+  it("rejects an upgrade body that ends early as malformed, reaching nothing", async () => {
+    const id = await createExec();
+    const before = h.daemon.started();
+    const client = await rawClient();
+    const closed = new Promise<void>((resolve) => client.socket.once("close", () => resolve()));
+    const body = '{"Detach":false}';
+    log.info.mockClear();
+    client.socket.write(
+      `POST /exec/${id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n` +
+        `Content-Type: application/json\r\nContent-Length: ${body.length + 10}\r\n\r\n${body}`,
+    );
+    await settle(100);
+
+    // The client stops writing with its body ten bytes short. A task socket
+    // does not allow half-open connections, so no answer can follow its FIN.
+    client.socket.end();
+
+    await resolvesWithin(closed, SETTLE_MS, "the connection to close");
+    await vi.waitFor(() =>
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({ rejection: expect.objectContaining({ kind: "malformed" }) }),
+        "proxy request rejected",
+      ),
+    );
+    expect(h.daemon.started()).toEqual(before);
+  });
+
+  it("sends a refused upgrade's body once, and the bytes after it no further", async () => {
+    const id = await createExec();
+    const before = h.daemon.requests().length;
+    const client = await rawClient();
+    const closed = new Promise<void>((resolve) => client.socket.once("close", () => resolve()));
+    const body = '{"Detach":true}';
+
+    client.socket.write(`${upgradeWith(id, "", body)}OPAQUE-MARKER-BYTES`);
+
+    await resolvesWithin(closed, SETTLE_MS, "the connection to close");
+    expect(client.received()).toMatch(/^HTTP\/1\.1 200 /);
+    const sent = h.daemon.requests().slice(before);
+    expect(sent.map((r) => `${r.method} ${r.url}`)).toEqual([`POST /exec/${id}/start`]);
+    const start = expectDefined(sent[0], "the upgrade");
+    expect(start.body).toBe(body);
+    expect(start.headers.connection).toBe("Upgrade, close");
+  });
+
+  it.each([
+    ["a denied route", "GET", "/swarm"],
+    ["a request route", "GET", "/containers/cogmo-task-own/logs"],
+    ["an exec the socket did not create", "POST", `/exec/${"e".repeat(64)}/start`],
+  ])("logs the rejection of an upgrade to %s", async (_label, method, path) => {
+    log.info.mockClear();
+
+    await h.rawExchange(upgradeRequest(method, path));
+
+    expect(log.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path,
+        rejection: expect.objectContaining({ kind: expect.any(String) }),
+      }),
+      "proxy request rejected",
+    );
+  });
+});
+
 describe("streams and relays", () => {
+  it.each([
+    [
+      "a wait",
+      "POST",
+      "/containers/cogmo-task-own/wait?condition=next-exit",
+      `/containers/${OWN.id}/wait`,
+    ],
+    ["a quiet event stream", "GET", "/events", "/events"],
+  ])("relays %s's status and headers before any body", async (_label, method, path, atDaemon) => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.startsWith(atDaemon)) return API(req, res, raw);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.flushHeaders();
+    });
+    const client = await rawClient();
+
+    client.socket.write(`${method} ${path} HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n`);
+
+    await vi.waitFor(() =>
+      expect(client.received()).toMatch(/^HTTP\/1\.1 200 OK\r\n[\s\S]*\r\n\r\n$/),
+    );
+    client.socket.destroy();
+  });
+
   it.each([
     ["a stats stream", "GET", "stats", true],
     ["a wait the daemon has not answered", "POST", "wait", false],

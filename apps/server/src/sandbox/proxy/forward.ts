@@ -9,8 +9,9 @@
  * objects, or read for the exec id it creates. Every request but an
  * upgrade is a normal forward, so the client connection stays under Node's
  * parser and a request pipelined after one is classified on its own. An
- * upgrade is raw-piped: its request line and headers are replayed under
- * the canonical path, then both sockets are piped.
+ * upgrade is raw-piped: its request line, headers and body are sent under
+ * the canonical path with `Connection: Upgrade, close`, then both sockets
+ * are piped.
  */
 
 import * as http from "node:http";
@@ -192,17 +193,23 @@ function relay(
   }
   const status = reply.statusCode ?? 502;
   match(how)
+    // A streamed answer's headers go out at once, not with its first body
+    // byte: `docker run` blocks on a `wait`'s headers before it starts the
+    // container, and a quiet event stream sends no body for a long time.
     .with({ kind: "piped" }, () => {
       res.writeHead(status, relayedResponseHeaders(reply.headers));
+      res.flushHeaders();
       relayStream(req, reply, res, new PassThrough());
     })
     .with({ kind: "events" }, ({ taskContainerId }) => {
       if (status !== 200) {
         res.writeHead(status, relayedResponseHeaders(reply.headers));
+        res.flushHeaders();
         relayStream(req, reply, res, new PassThrough());
         return;
       }
       res.writeHead(status, rebuiltResponseHeaders(reply.headers, null));
+      res.flushHeaders();
       relayStream(req, reply, res, taskEventFilter(taskContainerId));
     })
     .with({ kind: "container_list" }, ({ owned }) =>

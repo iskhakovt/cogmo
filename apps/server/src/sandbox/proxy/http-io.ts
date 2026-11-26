@@ -6,6 +6,7 @@
 
 import * as http from "node:http";
 import type * as net from "node:net";
+import type { Duplex } from "node:stream";
 import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
 import { describeError } from "../../util/describe-error.js";
@@ -28,15 +29,11 @@ export function respondRejection(res: http.ServerResponse, rejection: ProxyRejec
  * Answer a rejection on a raw client socket and close it, where no
  * `http.ServerResponse` is around (an upgrade).
  */
-export function writeRawRejectionAndDestroy(socket: net.Socket, rejection: ProxyRejection): void {
+export function writeRawRejectionAndDestroy(socket: Duplex, rejection: ProxyRejection): void {
   writeRawStatusAndDestroy(socket, rejectionStatus(rejection), rejectionMessage(rejection));
 }
 
-export function writeRawStatusAndDestroy(
-  socket: net.Socket,
-  status: number,
-  message: string,
-): void {
+export function writeRawStatusAndDestroy(socket: Duplex, status: number, message: string): void {
   const body = `${JSON.stringify({ message })}\n`;
   const reply =
     `HTTP/1.1 ${status} ${http.STATUS_CODES[status] ?? ""}\r\n` +
@@ -44,6 +41,11 @@ export function writeRawStatusAndDestroy(
     `Content-Length: ${Buffer.byteLength(body)}\r\n` +
     `Connection: close\r\n` +
     `\r\n${body}`;
+  // Nothing else listens on a socket the HTTP server has handed over. A
+  // client may keep its side open after the answer, and the task's teardown
+  // then destroys the socket with an `AbortError`, which unheard would be an
+  // uncaught exception; any other error ends a connection that is done.
+  socket.on("error", () => socket.destroy());
   socket.end(reply);
 }
 
@@ -71,6 +73,32 @@ export async function readBody(
     return err(malformed(`the request body ended early: ${describeError(cause)}`));
   }
   return ok(Buffer.concat(chunks));
+}
+
+/**
+ * An upgrade's body. Node emits the upgrade once the headers are in and
+ * goes on parsing the body into the request; but when the client stops
+ * sending before the body is complete, the request neither ends nor
+ * errors, so the client socket's end counts as the body ending early.
+ */
+export async function readUpgradeBody(
+  req: http.IncomingMessage,
+  clientSocket: net.Socket,
+  maxBytes: number,
+): Promise<Result<Buffer, Extract<ProxyRejection, { kind: "too_large" | "malformed" }>>> {
+  const { promise: endedEarly, resolve } = Promise.withResolvers<void>();
+  const onEnd = () => resolve();
+  clientSocket.once("end", onEnd);
+  clientSocket.once("close", onEnd);
+  try {
+    return await Promise.race([
+      readBody(req, maxBytes),
+      endedEarly.then(() => err(malformed("the request body ended early"))),
+    ]);
+  } finally {
+    clientSocket.removeListener("end", onEnd);
+    clientSocket.removeListener("close", onEnd);
+  }
 }
 
 /**

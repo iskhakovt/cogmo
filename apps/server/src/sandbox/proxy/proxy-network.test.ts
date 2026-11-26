@@ -4,6 +4,7 @@ import { BRIDGE_NETWORK, respondJson } from "../../test/fake-docker-daemon.js";
 import {
   API,
   api,
+  CHILD,
   message,
   OWN,
   RECORDED_BRIDGE,
@@ -57,6 +58,21 @@ describe("network connect and disconnect", () => {
     const forwarded = expectDefined(h.daemon.requests().at(-1), "connect");
     expect(forwarded.headers["content-type"]).toBe("application/json");
   });
+
+  it.each([
+    ["connect", "/own-child"],
+    ["disconnect", "/own-child"],
+  ])(
+    "resolves a %s body's Container written as docker inspect prints a name, %s",
+    async (op, ref) => {
+      const r = await h.send("POST", `/networks/bridge/${op}`, JSON.stringify({ Container: ref }));
+
+      expect(r.status, r.body).toBe(200);
+      const forwarded = expectDefined(h.daemon.requests().at(-1), op);
+      expect(forwarded.url).toBe(`/networks/${BRIDGE_NETWORK.id}/${op}`);
+      expect(JSON.parse(forwarded.body)).toEqual({ Container: CHILD.id });
+    },
+  );
 
   it("forwards a disconnect sent as a form as JSON, with the full id and Force", async () => {
     const r = await h.send(
@@ -156,7 +172,7 @@ describe("network connect and disconnect", () => {
     h.expectRejected(r, 403, []);
   });
 
-  it.each(["../cogmo-task-own", "./cogmo-task-own", "/cogmo-task-own", "a//b", "x/.."])(
+  it.each(["../cogmo-task-own", "./cogmo-task-own", "//cogmo-task-own", "a//b", "x/.."])(
     "answers 404 to a body Container %j before any lookup",
     async (ref) => {
       const r = await h.send(

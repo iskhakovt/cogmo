@@ -70,27 +70,32 @@ export async function startFakeDockerDaemon(
   // `close`, as Go's server does.
   server.on("upgrade", (raw: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     started.push(`${raw.method} ${raw.url}`);
-    readUpgradeBody(raw, head).then(({ body, rest }) => {
-      received.push({ method: raw.method ?? "", url: raw.url ?? "", headers: raw.headers, body });
-      const refusal = upgradeRefusal(body);
-      if (refusal === null) {
-        socket.end("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
-        return;
-      }
-      const reply = JSON.stringify(refusal.body);
-      const closes = /(^|,)\s*close\s*(,|$)/i.test(raw.headers.connection ?? "");
-      socket.write(
-        `HTTP/1.1 ${refusal.status} ${http.STATUS_CODES[refusal.status]}\r\n` +
-          `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reply)}\r\n` +
-          `${closes ? "Connection: close\r\n" : ""}\r\n${reply}`,
-      );
-      if (closes) {
-        socket.end();
-        return;
-      }
-      if (rest.length > 0) socket.unshift(rest);
-      server.emit("connection", socket);
-    });
+    readUpgradeBody(raw, head)
+      .then(({ body, rest }) => {
+        received.push({ method: raw.method ?? "", url: raw.url ?? "", headers: raw.headers, body });
+        const refusal = upgradeRefusal(body);
+        if (refusal === null) {
+          socket.end("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
+          return;
+        }
+        const reply = JSON.stringify(refusal.body);
+        const closes = /(^|,)\s*close\s*(,|$)/i.test(raw.headers.connection ?? "");
+        socket.write(
+          `HTTP/1.1 ${refusal.status} ${http.STATUS_CODES[refusal.status]}\r\n` +
+            `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reply)}\r\n` +
+            `${closes ? "Connection: close\r\n" : ""}\r\n${reply}`,
+        );
+        if (closes) {
+          socket.end();
+          return;
+        }
+        if (rest.length > 0) socket.unshift(rest);
+        server.emit("connection", socket);
+      })
+      .catch(() => {
+        // A client that hung up mid-body: there is no one to answer.
+        socket.destroy();
+      });
   });
   await new Promise<void>((resolve) => server.listen(socketPath, resolve));
   return {

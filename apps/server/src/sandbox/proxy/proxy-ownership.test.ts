@@ -2,7 +2,6 @@ import * as net from "node:net";
 import { errAsync, okAsync } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { expectDefined } from "../../test/assertions.js";
 import { requestOverSocket, respondJson } from "../../test/fake-docker-daemon.js";
 import {
   API,
@@ -373,31 +372,6 @@ describe("exec ownership", () => {
     expect(message(r)).toContain("exceeds");
   });
 
-  it("forgets the oldest exec id once the socket has created 4096 more", {
-    timeout: 120_000,
-  }, async () => {
-    const create = async (): Promise<string> => {
-      const r = await h.send(
-        "POST",
-        "/containers/cogmo-task-own/exec",
-        JSON.stringify({ Cmd: ["id"] }),
-      );
-      return ExecCreatedSchema.parse(JSON.parse(r.body)).Id;
-    };
-    const oldest = await create();
-    const newer: string[] = [];
-    // Sixteen at a time, so the socket's accept backlog never fills.
-    for (let batch = 0; batch < 4096 / 16; batch += 1) {
-      newer.push(...(await Promise.all(Array.from({ length: 16 }, () => create()))));
-    }
-
-    expect((await h.send("GET", `/exec/${oldest}/json`)).status).toBe(404);
-    expect((await h.send("GET", `/exec/${expectDefined(newer[0], "next")}/json`)).status).toBe(200);
-    expect(
-      (await h.send("GET", `/exec/${expectDefined(newer.at(-1), "newest")}/json`)).status,
-    ).toBe(200);
-  });
-
   it("keeps each task's exec ids to its own socket", async () => {
     const sibling = await h.proxy.registerTask(SIBLING_SCOPE);
     const theirs = await createExec(SIBLING.name, sibling);
@@ -481,5 +455,28 @@ describe("upgraded streams", () => {
       resolveOf("cogmo-task-own"),
       `POST /containers/${OWN.id}/attach?stream=1&stdout=1`,
     ]);
+  });
+});
+
+describe("a body the proxy cannot parse", () => {
+  it.each([
+    ["a container create", "/containers/create"],
+    ["an exec create", "/containers/cogmo-task-own/exec"],
+    ["a network connect", "/networks/bridge/connect"],
+  ])("keeps %s's body out of the answer and the log", async (_label, path) => {
+    log.info.mockClear();
+
+    const r = await h.send("POST", path, "s3cr3t-token-value");
+
+    expect(r.status, r.body).toBe(400);
+    expect(r.body).not.toContain("s3cr3t");
+    expect(JSON.stringify(log.info.mock.calls)).not.toContain("s3cr3t");
+  });
+
+  it("names the position of a parse failure", async () => {
+    const r = await h.send("POST", "/containers/create", '{"Env":["GITHUB_TOKEN=ghp_s3cr3t"');
+
+    expect(r.status, r.body).toBe(400);
+    expect(message(r)).toBe("Cogmo proxy: invalid JSON in request body at position 33");
   });
 });

@@ -77,10 +77,13 @@ export async function ownedContainer(
 
 /**
  * A ref from a request body, which unlike a path ref has not been
- * canonicalised: an empty, `.` or `..` segment would move the inspect it
- * goes into to another path, and names no container.
+ * canonicalised, as the ref to resolve. One leading `/` goes, since a name
+ * is printed that way (`docker inspect`'s `.Name`). An empty, `.` or `..`
+ * segment would move the inspect it goes into to another path, and names
+ * no container.
  */
 export function checkBodyRef(ref: string): Result<string, ProxyRejection> {
-  const unclean = ref.split("/").some((s) => s === "" || s === "." || s === "..");
-  return unclean ? err(notFound(`No such container: ${ref}`)) : ok(ref);
+  const name = ref.startsWith("/") ? ref.slice(1) : ref;
+  const unclean = name.split("/").some((s) => s === "" || s === "." || s === "..");
+  return unclean ? err(notFound(`No such container: ${ref}`)) : ok(name);
 }

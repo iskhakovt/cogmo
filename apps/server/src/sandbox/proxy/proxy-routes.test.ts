@@ -24,6 +24,9 @@ import { TESTCONTAINERS_PULL_REQUEST } from "../../test/testcontainers-requests.
 
 const ListSchema = z.array(z.looseObject({ Id: z.string() }));
 
+/** Header lines enough to reach the server's count, and past Node's default of 2000. */
+const MANY_HEADERS = Array.from({ length: 2000 }, () => "a: 1").join("\r\n");
+
 const h = useProxyHarness();
 
 function event(id: string, attributes: Readonly<Record<string, string>>): string {
@@ -106,6 +109,16 @@ describe("route table", () => {
     ["GET", "/v1.43/events"],
   ])("denies %s %s without contacting the daemon", async (method, path) => {
     h.expectRejected(await h.send(method, path), 403, []);
+  });
+
+  it("answers 431 to a request past the header count, a body after it reaching nothing", async () => {
+    const reply = await h.rawExchange(
+      `GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n${MANY_HEADERS}\r\n` +
+        "Content-Length: 5\r\n\r\nhello",
+    );
+
+    expect(reply).toMatch(/^HTTP\/1\.1 431 /);
+    expect(h.daemon.started()).toEqual([]);
   });
 
   it.each([
