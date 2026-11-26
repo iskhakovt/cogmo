@@ -12,7 +12,7 @@ import { applyContainerCreatePolicy } from "./create-policy.js";
 import { applyExecPolicy } from "./exec-policy.js";
 import type { Forward } from "./forward.js";
 import { applyNetworkEndpointPolicy, type NetworkEndpoint } from "./network-endpoint.js";
-import { liveOwnedRows, type OwnershipLookups, ownedContainer } from "./ownership.js";
+import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
 import { notFound, type ProxyRejection } from "./rejection.js";
 import { withQuery } from "./request-path.js";
 import type { ContainerTarget, ExecTarget, RequestRoute, StreamRoute } from "./router.js";
@@ -45,20 +45,22 @@ export function planRequest(
     )
     .with({ kind: "exec" }, async ({ target }) => execPath(target, query, ctx.execIds).map(piped))
     .with({ kind: "container_list" }, async ({ path }) =>
-      (await liveOwnedRows(ctx)).map(
-        (rows): Forward => ({
+      (await ownedContainers(ctx)).map(
+        ({ all }): Forward => ({
           path: withQuery(path, query),
           body: { kind: "piped" },
-          response: { kind: "container_list", owned: new Set(rows.map((r) => r.dockerId)) },
+          response: { kind: "container_list", owned: new Set(all.map((r) => r.dockerId)) },
         }),
       ),
     )
     .with({ kind: "events" }, async ({ path }) =>
-      ok<Forward>({
-        path: withQuery(path, query),
-        body: { kind: "piped" },
-        response: { kind: "events", taskId: ctx.scope.taskId },
-      }),
+      (await ownedContainers(ctx)).map(
+        ({ task }): Forward => ({
+          path: withQuery(path, query),
+          body: { kind: "piped" },
+          response: { kind: "events", taskContainerId: task.dockerId },
+        }),
+      ),
     )
     .with({ kind: "container_create" }, ({ versionPrefix }) =>
       planContainerCreate(versionPrefix, query, ctx),

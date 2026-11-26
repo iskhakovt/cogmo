@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { okAsync } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -25,7 +26,7 @@ vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
 const SCOPE: TaskScope = {
   taskId: "019d0000-0000-7000-8000-00000000aaaa",
   parentContainerRowId: "019d0000-0000-7000-8000-00000000bbbb",
-  parentDockerId: "docker-parent-abc",
+  parentDockerId: `ab${"0".repeat(62)}`,
   parentDepth: 0,
   runtime: "sysbox-runc",
   cgroupParent: "cogmo-task-abc.slice",
@@ -62,11 +63,14 @@ beforeEach(async () => {
     }),
   );
   const containerRows = mock<ContainerRows>();
-  containerRows.owned.mockResolvedValue([
-    { dockerId: TASK_CONTAINER.id, depth: 0 },
-    { dockerId: LINKED_CHILD.id, depth: 1 },
-    { dockerId: CLI_CHILD.id, depth: 1 },
-  ]);
+  const taskRow = SCOPE.parentContainerRowId;
+  containerRows.forTask.mockReturnValue(
+    okAsync([
+      { id: taskRow, dockerId: TASK_CONTAINER.id, parentId: null },
+      { id: "019d0000-0000-7000-8000-00000000c001", dockerId: LINKED_CHILD.id, parentId: taskRow },
+      { id: "019d0000-0000-7000-8000-00000000c002", dockerId: CLI_CHILD.id, parentId: taskRow },
+    ]),
+  );
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
     hostDockerSocket: daemon.socketPath,

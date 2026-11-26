@@ -123,7 +123,8 @@ type Resolved<T> = { kind: "found"; item: T } | { kind: "missing" } | { kind: "a
  * `POST /containers/{ref}/exec` (201 with a fresh exec id). A container or
  * network ref resolves as the daemon resolves it: full id, then name, then
  * unique id prefix; an ambiguous prefix gets the daemon's 400 and an unknown
- * ref its 404. Everything else gets `200 {}`.
+ * ref its 404. A path with an empty, `.` or `..` segment gets the 301 the
+ * daemon's router answers it with. Everything else gets `200 {}`.
  */
 export function dockerApi(opts: DockerApiOptions): FakeDaemonResponder {
   let execs = 0;
@@ -131,6 +132,12 @@ export function dockerApi(opts: DockerApiOptions): FakeDaemonResponder {
     const path = decodedPath(req.url);
     if (path === null) {
       respondJson(res, 400, { message: "invalid URL escape" });
+      return;
+    }
+    // The daemon's router redirects a path with an empty, `.` or `..` segment to its clean form.
+    if (/\/\/|\/\.{1,2}(\/|$)/.test(path)) {
+      res.writeHead(301, { location: "/" });
+      res.end();
       return;
     }
     const image = /^\/images\/(.+)\/json$/.exec(path);

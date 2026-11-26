@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import Docker from "dockerode";
+import { ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
@@ -18,7 +19,7 @@ import {
   type SandboxClient,
   type SessionSandbox,
 } from "../sandbox/index.js";
-import { listOwnedContainers } from "../sandbox/list-owned-containers.js";
+import { listTaskContainers } from "../sandbox/list-task-containers.js";
 import type { SandboxRuntime } from "../sandbox/runtime.js";
 import { LOCAL_DOCKER_CAPABILITIES } from "../sandbox/supervisor.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "../skills/worker-sysbox/host.js";
@@ -186,8 +187,11 @@ async function bootstrapLocalDocker(core: CoreDeps, runtime: SandboxRuntime): Pr
     socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
     hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
     containerRows: {
-      owned: (taskId) =>
-        listOwnedContainers({ store: core.sandboxStore, runInTx: core.runInTx }, taskId),
+      forTask: (taskId) =>
+        ResultAsync.fromPromise(
+          listTaskContainers({ store: core.sandboxStore, runInTx: core.runInTx }, taskId),
+          (cause) => ({ kind: "store_failed" as const, cause }),
+        ),
     },
   });
   const localDocker = await createSandboxBackend({

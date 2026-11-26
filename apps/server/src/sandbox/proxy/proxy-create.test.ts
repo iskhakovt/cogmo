@@ -55,14 +55,18 @@ const ForwardedSchema = z.looseObject({
 
 const ErrorSchema = z.object({ message: z.string() });
 
-const AMD64_API = dockerApi({
-  images: IMAGES,
-  containers: [],
-  networks: [BRIDGE_NETWORK],
-  arch: "amd64",
-  bridgeGateway: GATEWAY,
-  rootless: false,
-});
+/** The fake daemon with these images, no containers and only `bridge`. */
+function createApi(daemon: { arch: string; rootless: boolean }): FakeDaemonResponder {
+  return dockerApi({
+    images: IMAGES,
+    containers: [],
+    networks: [BRIDGE_NETWORK],
+    bridgeGateway: GATEWAY,
+    ...daemon,
+  });
+}
+
+const AMD64_API = createApi({ arch: "amd64", rootless: false });
 
 let baseDir: string;
 let daemon: FakeDockerDaemon;
@@ -72,14 +76,7 @@ let socket: string;
 async function startDaemon(arch: string): Promise<void> {
   daemon = await startFakeDockerDaemon(
     join(baseDir, "docker.sock"),
-    dockerApi({
-      images: IMAGES,
-      containers: [],
-      networks: [BRIDGE_NETWORK],
-      arch,
-      bridgeGateway: GATEWAY,
-      rootless: false,
-    }),
+    createApi({ arch, rootless: false }),
   );
 }
 
@@ -910,16 +907,7 @@ describe("create policy: networks", () => {
   it("binds published ports to loopback on a rootless daemon, without reading the bridge", async () => {
     // RootlessKit listens in the host's network namespace, where the bridge
     // gateway is not an address.
-    daemon.setResponder(
-      dockerApi({
-        images: IMAGES,
-        containers: [],
-        networks: [BRIDGE_NETWORK],
-        arch: "amd64",
-        bridgeGateway: GATEWAY,
-        rootless: true,
-      }),
-    );
+    daemon.setResponder(createApi({ arch: "amd64", rootless: true }));
 
     const r = await create(
       {
@@ -1353,16 +1341,7 @@ describe("create policy: daemon lookups", () => {
   ])(
     "reads GET /info once, rootless %s, with %d bridge reads over two publishing creates",
     async (rootless, bridgeReads) => {
-      daemon.setResponder(
-        dockerApi({
-          images: IMAGES,
-          containers: [],
-          networks: [BRIDGE_NETWORK],
-          arch: "amd64",
-          bridgeGateway: GATEWAY,
-          rootless,
-        }),
-      );
+      daemon.setResponder(createApi({ arch: "amd64", rootless }));
       const publishing = {
         Image: "alpine",
         HostConfig: { PortBindings: { "80/tcp": [{ HostPort: "0" }] } },

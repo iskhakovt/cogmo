@@ -3,6 +3,7 @@ import * as http from "node:http";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { okAsync } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -110,7 +111,9 @@ beforeEach(async () => {
   await new Promise<void>((resolve) => upstream.listen(upstreamSocketPath, resolve));
 
   const containerRows = mock<ContainerRows>();
-  containerRows.owned.mockResolvedValue([{ dockerId: TASK_CONTAINER_ID, depth: 0 }]);
+  containerRows.forTask.mockReturnValue(
+    okAsync([{ id: SCOPE.parentContainerRowId, dockerId: TASK_CONTAINER_ID, parentId: null }]),
+  );
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
     hostDockerSocket: upstreamSocketPath,
@@ -373,7 +376,7 @@ describe("CogmoSocketProxy", () => {
     await proxy.unregisterTask(SCOPE.taskId);
 
     events.write(
-      `${JSON.stringify({ status: "start", Actor: { Attributes: { "cogmo.root_task": other } } })}\n`,
+      `${JSON.stringify({ status: "start", Actor: { ID: TASK_CONTAINER_ID, Attributes: {} } })}\n`,
     );
     await vi.waitFor(() => expect(client.received()).toContain('"status":"start"'), {
       timeout: SETTLE_MS,

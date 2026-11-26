@@ -169,6 +169,16 @@ const ROWS: ReadonlyArray<Row> = [
     pattern: /^\/containers\/(.+)\/(archive)$/,
     outcome: (g, v) => request({ kind: "container", target: container("PUT", "child", g, v) }),
   },
+  // The daemon's checkpoint router, registered ahead of the container
+  // router, takes this path with single-segment `{name}` and `{checkpoint}`.
+  {
+    method: "DELETE",
+    pattern: /^\/containers\/[^/]+\/checkpoints\/[^/]+$/,
+    outcome: () => ({
+      kind: "reject",
+      rejection: denied("DELETE /containers/{id}/checkpoints/{checkpoint}"),
+    }),
+  },
   {
     method: "DELETE",
     pattern: /^\/containers\/(.+)$/,

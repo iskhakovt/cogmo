@@ -13,7 +13,7 @@
 
 import * as http from "node:http";
 import * as net from "node:net";
-import { pipeline } from "node:stream";
+import { PassThrough, pipeline, type Transform } from "node:stream";
 import { ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
@@ -28,6 +28,7 @@ import {
   relayedResponseHeaders,
   respondJson,
   respondRejection,
+  writeRawRejectionAndDestroy,
 } from "./http-io.js";
 import { daemonFailed, type ProxyRejection } from "./rejection.js";
 import { createdExecId, filterContainerList, taskEventFilter } from "./response-filters.js";
@@ -59,8 +60,8 @@ export type ResponseRelay =
   | { kind: "piped" }
   /** Keep only the containers whose ids the task owns. */
   | { kind: "container_list"; owned: ReadonlySet<string> }
-  /** Keep only the event lines labelled with the task. */
-  | { kind: "events"; taskId: string }
+  /** Keep only the event lines of the task's own container and its children. */
+  | { kind: "events"; taskContainerId: string }
   /** Record the `Id` of a 201, the exec the task may then start. */
   | { kind: "exec_created"; record: (execId: string) => void };
 
@@ -87,6 +88,11 @@ export function forward(
   outgoing.on("error", (cause) => {
     if (!isAbortError(cause)) log.warn({ err: cause.message, path: pathOf(req) }, "upstream error");
     respondDaemonFailed(res, cause);
+  });
+  // A client that hangs up before its answer is complete, even before the
+  // daemon has answered at all (a `wait`), closes the daemon request with it.
+  res.once("close", () => {
+    if (!res.writableFinished) outgoing.destroy();
   });
   match(plan.body)
     .with({ kind: "piped" }, () => req.pipe(outgoing))
@@ -121,19 +127,33 @@ export function pipeUpgrade(
   // The checks are async: a client that hung up meanwhile gets no daemon connection.
   if (clientSocket.destroyed) return;
   const daemon = net.createConnection({ path: upstream.socketPath, signal: upstream.signal });
+  const warn = (cause: Error) => {
+    if (!isAbortError(cause)) {
+      log.warn({ err: cause.message, path: pathOf(req) }, "upstream stream error");
+    }
+  };
+  // Before the connection opens nothing has reached the client, which gets
+  // a 502; after it, the stream just ends.
+  const dialFailed = (cause: Error) => {
+    warn(cause);
+    writeRawRejectionAndDestroy(
+      clientSocket,
+      daemonFailed(`Cogmo proxy upstream error: ${cause.message}`),
+    );
+  };
+  daemon.once("error", dialFailed);
   daemon.once("connect", () => {
+    daemon.removeListener("error", dialFailed);
+    daemon.on("error", (cause) => {
+      warn(cause);
+      clientSocket.destroy(cause);
+    });
     daemon.write(buildHttpRequestPreamble(req, path));
     if (head.length > 0) daemon.write(head);
     // `pipe` carries a half-close each way: a client that ends its write
     // side after sending stdin lets the daemon flush.
     clientSocket.pipe(daemon);
     daemon.pipe(clientSocket);
-  });
-  daemon.on("error", (cause) => {
-    if (!isAbortError(cause)) {
-      log.warn({ err: cause.message, path: pathOf(req) }, "upstream stream error");
-    }
-    clientSocket.destroy(cause);
   });
   clientSocket.on("error", () => daemon.destroy());
 }
@@ -148,20 +168,16 @@ function relay(
   match(how)
     .with({ kind: "piped" }, () => {
       res.writeHead(status, relayedResponseHeaders(reply.headers));
-      reply.pipe(res);
+      relayStream(req, reply, res, new PassThrough());
     })
-    .with({ kind: "events" }, ({ taskId }) => {
+    .with({ kind: "events" }, ({ taskContainerId }) => {
       if (status !== 200) {
         res.writeHead(status, relayedResponseHeaders(reply.headers));
-        reply.pipe(res);
+        relayStream(req, reply, res, new PassThrough());
         return;
       }
       res.writeHead(status, rebuiltResponseHeaders(reply.headers, null));
-      pipeline(reply, taskEventFilter(taskId), res, (cause) => {
-        if (cause !== null && cause !== undefined && !isAbortError(cause)) {
-          log.debug({ err: cause.message, path: pathOf(req) }, "event stream ended");
-        }
-      });
+      relayStream(req, reply, res, taskEventFilter(taskContainerId));
     })
     .with({ kind: "container_list" }, ({ owned }) =>
       relayBuffered(reply, res, (body) =>
@@ -176,6 +192,23 @@ function relay(
       }),
     )
     .exhaustive();
+}
+
+/**
+ * Stream the reply through `through` to the client. `pipeline` destroys
+ * the reply, and with it the daemon connection, when the client hangs up.
+ */
+function relayStream(
+  req: http.IncomingMessage,
+  reply: http.IncomingMessage,
+  res: http.ServerResponse,
+  through: Transform,
+): void {
+  pipeline(reply, through, res, (cause) => {
+    if (cause !== null && cause !== undefined && !isAbortError(cause)) {
+      log.debug({ err: cause.message, path: pathOf(req) }, "relayed stream ended early");
+    }
+  });
 }
 
 /** Read the whole reply, pass it through `transform`, and answer with what it returns. */

@@ -5,18 +5,22 @@ import { expectOk } from "../../test/assertions.js";
 import { createdExecId, filterContainerList, taskEventFilter } from "./response-filters.js";
 
 const TASK = "019d0000-0000-7000-8000-00000000aaaa";
-const OTHER = "019d0000-0000-7000-8000-00000000cccc";
+/** The task's own container. */
+const TASK_CONTAINER = "1a".padEnd(64, "0");
+const SIBLING_CONTAINER = "3c".padEnd(64, "0");
 
-function event(attributes: Record<string, string> | null): string {
+function event(id: string, attributes: Record<string, string> | null): string {
   return JSON.stringify({
     Type: "container",
     Action: "start",
-    Actor: { ID: "x", Attributes: attributes },
+    Actor: { ID: id, Attributes: attributes },
   });
 }
 
 async function filtered(chunks: ReadonlyArray<Buffer | string>): Promise<string> {
-  return text(Readable.from(chunks.map((c) => Buffer.from(c))).pipe(taskEventFilter(TASK)));
+  return text(
+    Readable.from(chunks.map((c) => Buffer.from(c))).pipe(taskEventFilter(TASK_CONTAINER)),
+  );
 }
 
 describe("filterContainerList", () => {
@@ -58,24 +62,32 @@ describe("createdExecId", () => {
 });
 
 describe("taskEventFilter", () => {
-  it("keeps the task's lines and drops every other", async () => {
-    const own = event({ "cogmo.root_task": TASK });
+  it("keeps the task container's lines and its children's, and drops every other", async () => {
+    const own = event(TASK_CONTAINER, { "cogmo.root_task": TASK, "cogmo.parent": "" });
+    const child = event("2b".padEnd(64, "0"), { "cogmo.parent": TASK_CONTAINER });
     const out = await filtered([
       [
         own,
-        event({ "cogmo.root_task": OTHER }),
-        event(null),
+        event("7a".padEnd(64, "0"), { "cogmo.root_task": TASK, "cogmo.parent": "" }),
+        child,
+        event(SIBLING_CONTAINER, null),
+        event("8b".padEnd(64, "0"), { "cogmo.parent": SIBLING_CONTAINER }),
+        JSON.stringify({
+          Type: "network",
+          Actor: { ID: "n", Attributes: { container: TASK_CONTAINER } },
+        }),
         JSON.stringify({ Type: "volume", Actor: { ID: "v", Attributes: { driver: "local" } } }),
+        JSON.stringify({ Type: "container", Actor: { Attributes: { "cogmo.parent": "" } } }),
         "not json",
         "",
       ].join("\n"),
     ]);
 
-    expect(out).toBe(`${own}\n`);
+    expect(out).toBe(`${own}\n${child}\n`);
   });
 
   it("reassembles a line split across chunks, a multi-byte character included", async () => {
-    const own = event({ "cogmo.root_task": TASK, name: "ünïcode" });
+    const own = event(TASK_CONTAINER, { name: "ünïcode" });
     const bytes = Buffer.from(`${own}\n`);
     const cut = bytes.indexOf(Buffer.from("ü")) + 1;
 
@@ -85,14 +97,14 @@ describe("taskEventFilter", () => {
   });
 
   it("keeps a last line the stream ends without a newline", async () => {
-    const own = event({ "cogmo.root_task": TASK });
+    const own = event(TASK_CONTAINER, null);
 
     expect(await filtered([own])).toBe(own);
   });
 
   it("drops a line past the bound up to its newline and keeps the next", async () => {
-    const own = event({ "cogmo.root_task": TASK });
-    const huge = `{"Actor":{"Attributes":{"cogmo.root_task":"${TASK}","x":"${"y".repeat(5 * 1024 * 1024)}"}}}`;
+    const own = event(TASK_CONTAINER, null);
+    const huge = `{"Actor":{"ID":"${TASK_CONTAINER}","Attributes":{"x":"${"y".repeat(5 * 1024 * 1024)}"}}}`;
     const half = Math.floor(huge.length / 2);
 
     const out = await filtered([huge.slice(0, half), huge.slice(half), `\n${own}\n`]);

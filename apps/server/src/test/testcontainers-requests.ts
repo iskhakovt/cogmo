@@ -33,7 +33,7 @@ const USER_AGENT = { "user-agent": "tc-node/12.2.1" } as const;
 /**
  * The requests on the started container that need no body policy, in the
  * order the run sent them. `PUT /archive` carried a 2048-byte tar with
- * `Transfer-Encoding: chunked`; the exec create, start and inspect are in
+ * `Transfer-Encoding: chunked`; the exec create and inspect are in
  * `TESTCONTAINERS_EXEC_REQUESTS`.
  */
 export const TESTCONTAINERS_CONTAINER_REQUESTS = [
@@ -82,9 +82,10 @@ export const TESTCONTAINERS_CONTAINER_REQUESTS = [
 ] as const;
 
 /**
- * `exec(["cat", "/tmp/hello.txt"])`: the create, then the start, which
- * carries no `Upgrade` header and a 41-byte JSON body, then the inspect for
- * the exit code. `{id}` is the exec create's 201 `Id`.
+ * `exec(["cat", "/tmp/hello.txt"])`: the create, and the inspect that reads
+ * the exit code, which names the exec create's 201 `Id` as `{id}`. Between
+ * them the client starts the exec with a POST that carries no `Upgrade`
+ * header and the 41-byte JSON body `{"stdin":true,"Detach":false,"Tty":false}`.
  */
 export const TESTCONTAINERS_EXEC_REQUESTS = {
   create: {
@@ -92,12 +93,6 @@ export const TESTCONTAINERS_EXEC_REQUESTS = {
     path: `/containers/${CONTAINER}/exec`,
     headers: { ...USER_AGENT, "content-type": "application/json" },
     body: '{"Cmd":["cat","/tmp/hello.txt"],"AttachStdout":true,"AttachStderr":true}',
-  },
-  start: {
-    method: "POST",
-    path: "/exec/{id}/start",
-    headers: { ...USER_AGENT, "content-type": "application/json" },
-    body: '{"stdin":true,"Detach":false,"Tty":false}',
   },
   inspect: { method: "GET", path: "/exec/{id}/json", headers: USER_AGENT },
 } as const;

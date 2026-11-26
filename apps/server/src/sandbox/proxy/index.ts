@@ -3,7 +3,7 @@ import * as http from "node:http";
 import * as net from "node:net";
 import { join } from "node:path";
 import { addAbortSignal } from "node:stream";
-import { type Result, ResultAsync } from "neverthrow";
+import type { Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
@@ -35,7 +35,7 @@ import type {
   TaskScope,
 } from "./types.js";
 
-export type { OwnedContainer, ProxyOptions, TaskScope } from "./types.js";
+export type { ProxyOptions, TaskContainerRow, TaskScope } from "./types.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
 
@@ -56,11 +56,17 @@ const MAX_REWRITTEN_BODY_BYTES = 1 * 1024 * 1024;
  * each request, so a `registerTask` update mid-flight (e.g. once the
  * supervisor learns the parent docker id) takes effect immediately without
  * re-binding the socket. `signal` is the task's: upstream connections opened
- * for this client are bound to it. `execIds` is the task's.
+ * for this client are bound to it.
  */
 interface ConnectionTask {
   taskId: string;
   signal: AbortSignal;
+  /**
+   * The exec ids the daemon answered 201 with to an exec create sent
+   * through the task's socket: the only ids its exec routes accept. One set
+   * per task socket, shared by its connections; it lives as long as the
+   * socket, and a process restart loses it with the containers.
+   */
   execIds: Set<string>;
 }
 
@@ -77,12 +83,6 @@ interface TaskSocket {
   controller: AbortController;
   /** Resolves once the listener is bound; rejects if binding failed. */
   listening: Promise<net.Server>;
-  /**
-   * The exec ids the daemon answered 201 with to an exec create sent
-   * through this socket: the only ids its exec routes accept. They live as
-   * long as the socket; a process restart loses them with the containers.
-   */
-  execIds: Set<string>;
 }
 
 /**
@@ -235,7 +235,7 @@ export class CogmoSocketProxy {
       log.info({ taskId, socketPath }, "registered task proxy socket");
       return server;
     })();
-    return { socketPath, controller, listening, execIds };
+    return { socketPath, controller, listening };
   }
 
   // ── HTTP request dispatch ────────────────────────────────────────────────
@@ -267,7 +267,7 @@ export class CogmoSocketProxy {
       )
       .with({ kind: "stream" }, ({ route, query }) =>
         this.#serve(req, res, scope, upstream.signal, async () =>
-          (await planStream(route, query, this.#streamContext(connection))).map(
+          (await planStream(route, query, this.#streamContext(connection, scope))).map(
             (path) => () => pipeRaw(req, res, upstream, path),
           ),
         ),
@@ -324,7 +324,8 @@ export class CogmoSocketProxy {
    */
   #handleUpgrade(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): void {
     const connection = CONNECTION_TASK.get(req.socket);
-    if (!connection || !this.#scopes.has(connection.taskId)) {
+    const scope = connection ? this.#scopes.get(connection.taskId) : undefined;
+    if (!connection || !scope) {
       writeRawStatusAndDestroy(clientSocket, 500, "Cogmo proxy: connection has no task scope");
       return;
     }
@@ -340,7 +341,7 @@ export class CogmoSocketProxy {
         ),
       )
       .with({ kind: "stream" }, ({ route, query }) => {
-        planStream(route, query, this.#streamContext(connection))
+        planStream(route, query, this.#streamContext(connection, scope))
           .then((path) =>
             path.match(
               (p) => pipeUpgrade(req, clientSocket, head, upstream, p),
@@ -361,14 +362,15 @@ export class CogmoSocketProxy {
     return { socketPath: this.#hostDockerSocket, signal: connection.signal };
   }
 
-  #streamContext(connection: ConnectionTask): StreamContext {
+  #streamContext(connection: ConnectionTask, scope: TaskScope): StreamContext {
     const { taskId } = connection;
     return {
-      ownedRows: () =>
-        ResultAsync.fromPromise(this.#containerRows.owned(taskId), (cause): ProxyRejection => {
+      taskRows: () =>
+        this.#containerRows.forTask(taskId).mapErr(({ cause }): ProxyRejection => {
           log.warn({ err: cause, taskId }, "proxy ownership read failed");
           return unavailable("the ownership read failed");
         }),
+      taskContainerRowId: scope.parentContainerRowId,
       refs: refLookups(this.#upstream(connection)),
       execIds: connection.execIds,
     };
@@ -380,7 +382,7 @@ export class CogmoSocketProxy {
     connection: ConnectionTask,
   ): RequestContext {
     return {
-      ...this.#streamContext(connection),
+      ...this.#streamContext(connection, scope),
       scope,
       createLookups: daemonLookups({
         socketPath: this.#hostDockerSocket,

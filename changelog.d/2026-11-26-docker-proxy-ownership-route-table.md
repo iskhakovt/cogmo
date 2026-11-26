@@ -8,6 +8,5 @@ The Docker API proxy forwards only requests on a task's own containers and exec 
   - A route the table doesn't list is refused, which covers `POST /containers/{id}/update` and every prune, build, swarm and plugin route.
   - Image, network and volume routes stay forwarded until their own policies land, except two. `DELETE /volumes/{name}` is refused. Network connect and disconnect work only for the task's own container on `bridge`, which testcontainers' port forwarder needs.
 - **The forwarded request.** The proxy always forwards the canonical path it checked, with refs rewritten and the query re-serialised, never the client's raw request target. API versions below 1.44 are refused on every route. Hop-by-hop headers are dropped in both directions, which also stops a `Trailer` header on a body-less request from crashing `cogmo serve` with an uncaught `ERR_HTTP_TRAILER_INVALID`.
-- **Requests pinned.** testcontainers-node 12.2.1's real requests, captured through a logging proxy in front of the daemon, are pinned as fixtures.
 
 Containers a task creates get no rows until the next slice, so testcontainers can create a child but every later request on it gets a 404. Child rows, and exec start without `Upgrade` as a normal request, are the next slice (todo.md → Docker API proxy authorization boundary, slice 3).

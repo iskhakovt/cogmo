@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { listOwnedContainers } from "./list-owned-containers.js";
+import { listTaskContainers } from "./list-task-containers.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 
 const TASK_ID = "019d0000-0000-7000-8000-000000000001";
@@ -28,12 +28,12 @@ async function insert(row: {
   instanceId: string;
   dockerId: string;
   rootTaskId: string;
-  depth: number;
+  parentId: string | null;
 }): Promise<string> {
   const inserted = await tx((trx) =>
     store.insertContainer(trx, {
       ...row,
-      parentId: null,
+      depth: row.parentId === null ? 0 : 1,
       image: "cogmo/devbase:test",
       runtime: "sysbox-runc",
       labels: { "cogmo.root_task": row.rootTaskId },
@@ -44,20 +44,17 @@ async function insert(row: {
   return inserted.id;
 }
 
-describe("listOwnedContainers", () => {
-  it("lists the task's rows in every state but reaped", async () => {
+describe("listTaskContainers", () => {
+  it("lists the task's rows in every state but reaped, with their lineage", async () => {
     const instance = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const instanceId = instance.id;
-    await insert({ instanceId, dockerId: "task-container", rootTaskId: TASK_ID, depth: 0 });
-    const running = await insert({
-      instanceId,
-      dockerId: "running",
-      rootTaskId: TASK_ID,
-      depth: 1,
-    });
-    const exited = await insert({ instanceId, dockerId: "exited", rootTaskId: TASK_ID, depth: 1 });
-    const reaped = await insert({ instanceId, dockerId: "reaped", rootTaskId: TASK_ID, depth: 1 });
-    await insert({ instanceId, dockerId: "sibling", rootTaskId: OTHER_TASK_ID, depth: 0 });
+    const base = { instanceId, rootTaskId: TASK_ID };
+    const task = await insert({ ...base, dockerId: "task-container", parentId: null });
+    const running = await insert({ ...base, dockerId: "running", parentId: task });
+    const exited = await insert({ ...base, dockerId: "exited", parentId: task });
+    const reaped = await insert({ ...base, dockerId: "reaped", parentId: task });
+    const salvage = await insert({ ...base, dockerId: "salvage", parentId: null });
+    await insert({ instanceId, rootTaskId: OTHER_TASK_ID, dockerId: "sibling", parentId: null });
     const at = new Date();
     await tx(async (trx) => {
       await store.transitionContainerStatus(trx, {
@@ -80,16 +77,17 @@ describe("listOwnedContainers", () => {
       });
     });
 
-    const owned = await listOwnedContainers({ store, runInTx: tx }, TASK_ID);
+    const rows = await listTaskContainers({ store, runInTx: tx }, TASK_ID);
 
-    expect([...owned].sort((a, b) => a.dockerId.localeCompare(b.dockerId))).toEqual([
-      { dockerId: "exited", depth: 1 },
-      { dockerId: "running", depth: 1 },
-      { dockerId: "task-container", depth: 0 },
+    expect([...rows].sort((a, b) => a.dockerId.localeCompare(b.dockerId))).toEqual([
+      { id: exited, dockerId: "exited", parentId: task },
+      { id: running, dockerId: "running", parentId: task },
+      { id: salvage, dockerId: "salvage", parentId: null },
+      { id: task, dockerId: "task-container", parentId: null },
     ]);
   });
 
   it("lists nothing for a task with no rows", async () => {
-    expect(await listOwnedContainers({ store, runInTx: tx }, TASK_ID)).toEqual([]);
+    expect(await listTaskContainers({ store, runInTx: tx }, TASK_ID)).toEqual([]);
   });
 });

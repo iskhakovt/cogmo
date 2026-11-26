@@ -5,15 +5,16 @@
  * default `bridge`, identified by its resolved id rather than its name: the
  * testcontainers port forwarder names it by id. The body's `Container` must
  * be a container the task owns, at any depth, and is rewritten to its full
- * id. A connect body may set `EndpointConfig.Aliases` only, a disconnect
- * body `Force`.
+ * id; a ref with an empty, `.` or `..` segment is `not_found` before any
+ * lookup. A connect body may set `EndpointConfig.Aliases` only, a
+ * disconnect body `Force`.
  */
 
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { NetworkConnectBodySchema, NetworkDisconnectBodySchema } from "./body-schemas.js";
 import { parseBody } from "./key-rules.js";
-import { type OwnershipLookups, ownedContainer } from "./ownership.js";
+import { checkBodyRef, type OwnershipLookups, ownedContainer } from "./ownership.js";
 import { denied, type ProxyRejection, unavailable } from "./rejection.js";
 import type { RefLookups } from "./types.js";
 
@@ -31,7 +32,9 @@ export async function applyNetworkEndpointPolicy(
   lookups: OwnershipLookups,
 ): Promise<Result<{ path: string; body: Buffer }, ProxyRejection>> {
   const route = `POST /networks/{id}/${endpoint.op}`;
-  const body = parseEndpointBody(endpoint.op, raw);
+  const body = parseEndpointBody(endpoint.op, raw).andThen((parsed) =>
+    checkBodyRef(parsed.Container).map(() => parsed),
+  );
   if (body.isErr()) return err(body.error);
   const network = await bridgeId(endpoint.network, lookups.refs, route);
   if (network.isErr()) return err(network.error);

@@ -1,4 +1,4 @@
-import type { Result } from "neverthrow";
+import type { Result, ResultAsync } from "neverthrow";
 import type { ResourceLimits } from "../types.js";
 import type { ProxyRejection } from "./rejection.js";
 
@@ -11,7 +11,10 @@ import type { ProxyRejection } from "./rejection.js";
 export interface TaskScope {
   /** Cogmo `coding_tasks.id` — denormalized into `cogmo.root_task` label. */
   taskId: string;
-  /** Cogmo `coding_tasks.id` for the supervisor-created depth-0 container. */
+  /**
+   * The `containers` row id of the supervisor-created depth-0 container,
+   * which the task's ownership is anchored to; `""` until that row exists.
+   */
   parentContainerRowId: string;
   /** Docker id of the depth-0 task container — written into `cogmo.parent`. */
   parentDockerId: string;
@@ -36,16 +39,28 @@ export interface ProxyOptions {
   containerRows: ContainerRows;
 }
 
-/** A `containers` row a task owns: one that carries its `root_task_id` and is not `reaped`. */
-export interface OwnedContainer {
+/** A `containers` row that carries a task's `root_task_id` and is not `reaped`. */
+export interface TaskContainerRow {
+  /** The row's id, which a child's `parentId` names. */
+  readonly id: string;
   readonly dockerId: string;
-  readonly depth: number;
+  /** `null` for a depth-0 row. */
+  readonly parentId: string | null;
 }
 
-/** Read access to the `containers` rows, read on every request that checks ownership. */
+/** The store read failed; the proxy answers `unavailable`. */
+export interface StoreFailed {
+  kind: "store_failed";
+  cause: unknown;
+}
+
+/**
+ * Read access to the `containers` rows, read on every request that checks
+ * ownership. A task owns only its scope's depth-0 row and that row's
+ * children among them (`ownership.ts`).
+ */
 export interface ContainerRows {
-  /** The task's rows that are not `reaped`. Rejects when the store read fails. */
-  owned(taskId: string): Promise<ReadonlyArray<OwnedContainer>>;
+  forTask(taskId: string): ResultAsync<ReadonlyArray<TaskContainerRow>, StoreFailed>;
 }
 
 /** What the create policy reads from an image inspect. */

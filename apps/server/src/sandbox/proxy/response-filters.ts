@@ -1,12 +1,15 @@
 /**
  * What the proxy reads from a daemon response: the exec id an exec create
  * names, and the filters that keep a task to its own objects
- * (design/sandbox.md → Proxy Design → Route table, Lists and Events). A container list keeps
- * the containers whose rows the task owns. An event stream keeps the lines
- * whose `Actor.Attributes["cogmo.root_task"]` is the task's: the daemon
- * copies a container's labels into its events, and the create policy
- * injects that label on every child. Network and volume events carry no
- * such attribute, so they are dropped.
+ * (design/sandbox.md → Proxy Design → Route table, Lists and Events). A
+ * container list keeps the containers whose rows the task owns. An event
+ * stream keeps the lines of the task's own container, by `Actor.ID`, and of
+ * its children, whose `Actor.Attributes["cogmo.parent"]` is that
+ * container's id: the daemon copies a container's labels into its events,
+ * and the create policy overwrites any `cogmo.*` label a task sends. A line
+ * labelled only with the task's `cogmo.root_task` is dropped, since Cogmo's
+ * other depth-0 containers for the task, such as salvage, carry it too, and
+ * so are network and volume events, which carry no such attribute.
  */
 
 import { Transform } from "node:stream";
@@ -22,14 +25,17 @@ import { type ProxyRejection, unavailable } from "./rejection.js";
  */
 const MAX_EVENT_LINE_CHARS = 4 * 1024 * 1024;
 
-const ROOT_TASK_ATTRIBUTE = "cogmo.root_task";
+const PARENT_ATTRIBUTE = "cogmo.parent";
 
 const ContainerListSchema = z.array(z.looseObject({ Id: z.string() }));
 
 const ExecCreatedSchema = z.object({ Id: z.string().regex(/^[0-9a-f]{64}$/) });
 
 const EventSchema = z.looseObject({
-  Actor: z.looseObject({ Attributes: z.record(z.string(), z.string()).nullable().optional() }),
+  Actor: z.looseObject({
+    ID: z.string().optional(),
+    Attributes: z.record(z.string(), z.string()).nullable().optional(),
+  }),
 });
 
 /** The `GET /containers/json` reply with only the owned containers, re-serialised. */
@@ -51,16 +57,18 @@ export function createdExecId(body: Buffer): string | null {
 
 /**
  * A transform over an NDJSON event stream that passes each line, newline
- * included, only when it is one of `taskId`'s events. A line that is not
- * an event is dropped.
+ * included, only when it is an event of the container `taskContainerId`
+ * or of one of its children. A line that is not an event is dropped.
  */
-export function taskEventFilter(taskId: string): Transform {
+export function taskEventFilter(taskContainerId: string): Transform {
   const decoder = new StringDecoder("utf8");
   let pending = "";
   let overlong = false;
   const keep = (line: string): boolean => {
     const parsed = EventSchema.safeParse(parseJson(line));
-    return parsed.success && parsed.data.Actor.Attributes?.[ROOT_TASK_ATTRIBUTE] === taskId;
+    if (!parsed.success) return false;
+    const { ID, Attributes } = parsed.data.Actor;
+    return ID === taskContainerId || Attributes?.[PARENT_ATTRIBUTE] === taskContainerId;
   };
   const drain = (text: string): string => {
     const lines = `${pending}${text}`.split("\n");

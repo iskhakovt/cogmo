@@ -11,6 +11,7 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
+import * as R from "remeda";
 import { denied, malformed, type ProxyRejection } from "./rejection.js";
 
 /**
@@ -30,9 +31,11 @@ export interface RequestTarget {
 
 /**
  * Split a request target into its version prefix, canonical route and
- * query. A target outside printable ASCII, with a fragment or with a
- * malformed percent-encoding is `malformed`; a version prefix below
- * `MIN_API_VERSION` is `denied`.
+ * query. A target outside printable ASCII or with a fragment is
+ * `malformed`, and so is a percent escape in the path that does not decode
+ * to UTF-8 or one in the query that is not two hex digits, which
+ * `URLSearchParams` would otherwise keep as literal text. A version prefix
+ * below `MIN_API_VERSION` is `denied`.
  */
 export function parseTarget(raw: string): Result<RequestTarget, ProxyRejection> {
   if (!/^[\x21-\x7e]*$/.test(raw) || raw.includes("#")) {
@@ -40,7 +43,11 @@ export function parseTarget(raw: string): Result<RequestTarget, ProxyRejection> 
   }
   const at = raw.indexOf("?");
   const rawPath = at === -1 ? raw : raw.slice(0, at);
-  const query = new URLSearchParams(at === -1 ? "" : raw.slice(at + 1));
+  const rawQuery = at === -1 ? "" : raw.slice(at + 1);
+  if (/%(?![0-9A-Fa-f]{2})/.test(rawQuery)) {
+    return err(malformed("the request query has a malformed percent-encoding"));
+  }
+  const query = new URLSearchParams(rawQuery);
   return decodePath(rawPath).andThen((decoded) => {
     const path = canonicalisePath(decoded);
     const m = /^\/v([\d.]+)(\/.*)?$/.exec(path);
@@ -85,12 +92,15 @@ function decodePath(rawPath: string): Result<string, ProxyRejection> {
  * `//containers//x/json` classify as the daemon routes them.
  */
 function canonicalisePath(decoded: string): string {
-  const resolved: string[] = [];
-  // A stateful scan: `..` pops what the segments before it pushed.
-  for (const segment of decoded.replace(/\\/g, "/").split("/")) {
-    if (segment === "..") resolved.pop();
-    else if (segment !== "" && segment !== ".") resolved.push(segment);
-  }
+  const resolved = R.reduce(
+    decoded.replace(/\\/g, "/").split("/"),
+    (kept: string[], segment) => {
+      if (segment === "..") kept.pop();
+      else if (segment !== "" && segment !== ".") kept.push(segment);
+      return kept;
+    },
+    [],
+  );
   return `/${resolved.join("/")}`;
 }
 
