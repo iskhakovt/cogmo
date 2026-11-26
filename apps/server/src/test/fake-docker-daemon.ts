@@ -142,7 +142,7 @@ export async function startFakeDockerDaemon(
           match(upgradeAnswer(body))
             .with({ kind: "switched" }, () => {
               upgrade.answer = "switched";
-              socket.write(`${switchingResponse(raw.headers)}${leadOutput}`);
+              socket.write(`${switchingResponse(raw.headers, body)}${leadOutput}`);
               if (finalOutput !== null) {
                 socket.end(finalOutput);
                 return;
@@ -257,14 +257,30 @@ function upgradeAnswer(body: string): FakeUpgradeAnswer {
   }
 }
 
+/** Whether a switched upgrade's body, empty or JSON, starts an exec with `"Tty": true`. */
+function startedWithTty(body: string): boolean {
+  if (body === "") return false;
+  const parsed: unknown = JSON.parse(body);
+  return typeof parsed === "object" && parsed !== null && "Tty" in parsed && parsed.Tty === true;
+}
+
 /** RFC 6455's key suffix for `Sec-WebSocket-Accept`. */
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/** The `101` the daemon switches with: a WebSocket handshake's for `Upgrade: websocket`, `tcp` otherwise. */
-function switchingResponse(headers: http.IncomingHttpHeaders): string {
+/**
+ * The `101` the daemon switches with: a WebSocket handshake's for `Upgrade:
+ * websocket`, `tcp` otherwise, whose `Content-Type` names the stream as
+ * Docker 29.9.3 does: raw for an exec started with a TTY, multiplexed for
+ * one without, and for an attach, as to a container without a TTY.
+ */
+function switchingResponse(headers: http.IncomingHttpHeaders, body: string): string {
   const key = headers["sec-websocket-key"];
   if (headers.upgrade?.toLowerCase() !== "websocket" || key === undefined) {
-    return "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n";
+    const stream = startedWithTty(body) ? "raw-stream" : "multiplexed-stream";
+    return (
+      `HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.${stream}\r\n` +
+      "Connection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
+    );
   }
   const accept = createHash("sha1").update(`${key}${WEBSOCKET_GUID}`).digest("base64");
   return (

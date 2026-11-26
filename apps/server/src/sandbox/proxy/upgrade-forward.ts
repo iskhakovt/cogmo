@@ -6,8 +6,6 @@
  * has parsed the daemon's answer. A `101` opens a raw pipe both ways. Any
  * other answer is read whole and relayed, and both connections end, so no
  * byte the client sent after the body reaches a daemon that did not switch.
- * A framed refusal is relayed whether or not the daemon honours `close`;
- * an unframed one ends only at the daemon's close.
  */
 
 import * as http from "node:http";
@@ -39,17 +37,22 @@ export interface UpgradeForward {
   head: Buffer;
 }
 
-/**
- * Forward a checked upgrade. `reject` answers and logs a rejection the
- * forward itself comes to, a 502, which goes only to a client still there
- * on a task not being torn down.
- */
+/** The task an upgrade's forward answers to. */
+export interface ForwardingTask {
+  readonly taskId: string;
+  /**
+   * Answers and logs a rejection the forward itself comes to, a 502, which
+   * goes only to a client still there on a task not being torn down.
+   */
+  reject(rejection: ProxyRejection): void;
+}
+
 export function forwardUpgrade(
   req: http.IncomingMessage,
   clientSocket: Duplex,
   upgrade: UpgradeForward,
   upstream: Upstream,
-  reject: (rejection: ProxyRejection) => void,
+  task: ForwardingTask,
 ): void {
   // The checks are async: a connection the task's teardown destroyed
   // meanwhile gets no daemon connection. One the client has only ended is
@@ -67,7 +70,7 @@ export function forwardUpgrade(
   // Once Node has parsed the daemon's answer, its relay owns the client.
   let answered = false;
   const answerable = (rejection: ProxyRejection) => {
-    if (!clientSocket.destroyed && !upstream.signal.aborted) reject(rejection);
+    if (!clientSocket.destroyed && !upstream.signal.aborted) task.reject(rejection);
   };
   // The proxy's own close of the request, for a client that is gone: not an
   // upstream failure, and there is no one left to answer.
@@ -83,7 +86,7 @@ export function forwardUpgrade(
   });
   outgoing.on("response", (reply) => {
     answered = true;
-    relayRefusal(clientSocket, outgoing, reply, answerable);
+    relayRefusal({ req, clientSocket, outgoing, taskId: task.taskId }, reply, answerable);
   });
   // Until then nothing has reached the client, which gets a 502 for a
   // failed dial, a reset, a clean close or an answer that is not HTTP.
@@ -148,6 +151,14 @@ function openStream(
   daemon.pipe(clientSocket, { end: false });
 }
 
+/** An upgrade the daemon answered without switching, and the connections it ends. */
+interface RefusedUpgrade {
+  req: http.IncomingMessage;
+  clientSocket: Duplex;
+  outgoing: http.ClientRequest;
+  taskId: string;
+}
+
 /**
  * The daemon answered without switching: its answer, read whole, goes to
  * the client framed by its length with `Connection: close`, and both
@@ -157,8 +168,7 @@ function openStream(
  * ignores `close` it waits until the task's teardown.
  */
 function relayRefusal(
-  clientSocket: Duplex,
-  outgoing: http.ClientRequest,
+  { req, clientSocket, outgoing, taskId }: RefusedUpgrade,
   reply: http.IncomingMessage,
   reject: (rejection: ProxyRejection) => void,
 ): void {
@@ -167,7 +177,7 @@ function relayRefusal(
     // The daemon connection ends once its answer is read, whether or not it would close of itself.
     .then(() => outgoing.destroy())
     .catch((cause: unknown) => {
-      log.error({ err: cause }, "relaying an upgrade's refusal failed");
+      log.error({ err: cause, taskId, path: pathOf(req) }, "relaying an upgrade's refusal failed");
       outgoing.destroy();
       clientSocket.destroy();
     });

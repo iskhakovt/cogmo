@@ -2,10 +2,12 @@
  * An upgrade on a task socket's connection (design/sandbox.md → Proxy
  * Design → Upgraded streams). Only a stream route may be upgraded, only to
  * the protocol its route names, and only once its checks pass; the
- * forward itself is `upgrade-forward.ts`. Every refusal is answered on the
- * raw socket and logged as a refused request is. Without the
- * classification an `Upgrade: tcp` to `/swarm/*` would slip past the route
- * table.
+ * forward itself is `upgrade-forward.ts`. A refusal is logged as a refused
+ * request is and answered on the raw socket, except an upgrade behind an
+ * answer still being sent, whose connection is closed with nothing
+ * written; a connection that came through no task socket gets a bare 500.
+ * Without the classification an `Upgrade: tcp` to `/swarm/*` would slip
+ * past the route table.
  */
 
 import type * as http from "node:http";
@@ -65,6 +67,16 @@ export function handleUpgrade(
     writeRawStatusAndDestroy(clientSocket, 500, "Cogmo proxy: connection has no task scope");
     return;
   }
+  // Node hands the connection over at the upgrade's headers, while an
+  // earlier request's answer may still be streaming on it, on a socket that
+  // serves or one being torn down; any byte written now would land inside
+  // that answer, so the connection is closed instead.
+  if (connection.answering) {
+    const rejection = malformed("an upgrade cannot follow a request still being answered");
+    log.info({ taskId: connection.taskId, path: pathOf(req), rejection }, "proxy request rejected");
+    clientSocket.destroy();
+    return;
+  }
   match(connection.state)
     .with({ kind: "serving" }, ({ scope }) =>
       serveUpgrade(req, clientSocket, head, connection, scope),
@@ -87,15 +99,6 @@ function serveUpgrade(
   connection: UpgradeConnection,
   scope: TaskScope,
 ): void {
-  // Node hands the connection over at the upgrade's headers, while an
-  // earlier request's answer may still be streaming on it; any byte written
-  // now would land inside that answer, so the connection is closed instead.
-  if (connection.answering) {
-    const rejection = malformed("an upgrade cannot follow a request still being answered");
-    log.info({ taskId: scope.taskId, path: pathOf(req), rejection }, "proxy request rejected");
-    clientSocket.destroy();
-    return;
-  }
   const reject = (rejection: ProxyRejection) =>
     rejectUpgrade(req, clientSocket, scope.taskId, rejection);
   const framed = upgradeFraming(req);
@@ -177,9 +180,10 @@ function forwardChecked(
     .then((checked) =>
       checked.match(
         (upgrade) =>
-          forwardUpgrade(req, clientSocket, upgrade, upstream, (rejection) =>
-            rejectUpgrade(req, clientSocket, scope.taskId, rejection),
-          ),
+          forwardUpgrade(req, clientSocket, upgrade, upstream, {
+            taskId: scope.taskId,
+            reject: (rejection) => rejectUpgrade(req, clientSocket, scope.taskId, rejection),
+          }),
         (rejection) => rejectUpgrade(req, clientSocket, scope.taskId, rejection),
       ),
     )

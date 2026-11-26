@@ -10,6 +10,7 @@ import {
   respondJson,
   startFakeDockerDaemon,
 } from "../../test/fake-docker-daemon.js";
+import type { ProxyRejection } from "./rejection.js";
 import { forwardUpgrade } from "./upgrade-forward.js";
 
 const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
@@ -62,6 +63,16 @@ function openClient(): { socket: Duplex; written: () => string } {
 
 const EMPTY = { path: START, body: Buffer.alloc(0), head: Buffer.from("held") };
 
+const TASK_ID = "019d0000-0000-7000-8000-00000000aaaa";
+
+/** The task a forward answers to, rejecting through `reject`. */
+function task(reject: (rejection: ProxyRejection) => void): {
+  taskId: string;
+  reject: (rejection: ProxyRejection) => void;
+} {
+  return { taskId: TASK_ID, reject };
+}
+
 describe("forwardUpgrade", () => {
   it("opens no daemon connection for a client connection already destroyed", async () => {
     const client = new PassThrough();
@@ -72,7 +83,7 @@ describe("forwardUpgrade", () => {
       client,
       { path: START, body: Buffer.alloc(0), head: Buffer.alloc(0) },
       upstream(),
-      vi.fn(),
+      task(vi.fn()),
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -83,7 +94,7 @@ describe("forwardUpgrade", () => {
     daemon.holdUpgrades();
     const client = new PassThrough();
     const reject = vi.fn();
-    forwardUpgrade(startRequest(), client, EMPTY, upstream(), reject);
+    forwardUpgrade(startRequest(), client, EMPTY, upstream(), task(reject));
     await vi.waitFor(() => expect(daemon.upgrades()).toHaveLength(1));
 
     client.destroy();
@@ -96,43 +107,47 @@ describe("forwardUpgrade", () => {
     expect(reject).not.toHaveBeenCalled();
   });
 
-  it("closes the daemon request when the task's signal aborts while the daemon holds its answer", async () => {
+  it("closes the daemon request, unanswered, when the task's signal aborts while the daemon holds its answer", async () => {
     daemon.holdUpgrades();
-    const task = new AbortController();
+    const teardown = new AbortController();
     const client = openClient();
+    const reject = vi.fn();
     forwardUpgrade(
       startRequest(),
       client.socket,
       EMPTY,
-      { socketPath: daemon.socketPath, signal: task.signal },
-      vi.fn(),
+      { socketPath: daemon.socketPath, signal: teardown.signal },
+      task(reject),
     );
     await vi.waitFor(() => expect(daemon.upgrades()).toHaveLength(1));
 
-    task.abort();
+    teardown.abort();
 
     await vi.waitFor(() =>
       expect(daemon.upgrades()).toMatchObject([{ answer: "held", received: "", closed: true }]),
     );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(reject).not.toHaveBeenCalled();
     expect(client.socket.destroyed).toBe(false);
   });
 
-  it("closes the daemon connection when the task's signal aborts after the switch", async () => {
-    const task = new AbortController();
+  it("closes both connections when the task's signal aborts after the switch", async () => {
+    const teardown = new AbortController();
     const client = openClient();
     forwardUpgrade(
       startRequest(),
       client.socket,
       EMPTY,
-      { socketPath: daemon.socketPath, signal: task.signal },
-      vi.fn(),
+      { socketPath: daemon.socketPath, signal: teardown.signal },
+      task(vi.fn()),
     );
     await vi.waitFor(() => expect(client.written()).toMatch(/^HTTP\/1\.1 101 /));
     expect(daemon.upgrades()).toMatchObject([{ answer: "switched", closed: false }]);
 
-    task.abort();
+    teardown.abort();
 
     await vi.waitFor(() => expect(daemon.upgrades()).toMatchObject([{ closed: true }]));
+    await vi.waitFor(() => expect(client.socket.destroyed).toBe(true));
   });
 
   it("logs and closes both connections when relaying a refusal throws", async () => {
@@ -146,12 +161,12 @@ describe("forwardUpgrade", () => {
       client,
       { path: START, body: Buffer.from('{"Detach":true}'), head: Buffer.alloc(0) },
       upstream(),
-      vi.fn(),
+      task(vi.fn()),
     );
 
     await vi.waitFor(() =>
       expect(log.error).toHaveBeenCalledWith(
-        expect.objectContaining({ err: expect.any(Error) }),
+        { err: expect.any(Error), taskId: TASK_ID, path: START },
         "relaying an upgrade's refusal failed",
       ),
     );
