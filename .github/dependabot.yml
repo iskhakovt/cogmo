@@ -38,11 +38,12 @@ updates:
     # A pyodide major is a Python minor (314 → 3.14), which the skills image
     # has to move with; see the docker `*python` entry.
     #
-    # `@daytona/sdk` stays on 0.x, which Daytona still publishes
-    # (`v0-latest`); its minors arrive in `npm-minor`. SDK 2.x drops the
-    # client's `apiUrl`: its v0 namespace reaches only Daytona Cloud, which
-    # breaks `DAYTONA_API_URL` and the replay mock, and its v2 namespace is a
-    # different API. Moving to it is a todo.md entry, not a bump.
+    # `@daytona/sdk` version updates stay on 0.x, which Daytona still
+    # publishes (`v0-latest`); its minors arrive in `npm-minor`. SDK 2.x
+    # drops the client's `apiUrl`: its v0 namespace reaches only Daytona
+    # Cloud, which breaks `DAYTONA_API_URL` and the replay mock, and its v2
+    # namespace is a different API. Moving to it is a todo.md entry, not a
+    # bump.
     ignore:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
