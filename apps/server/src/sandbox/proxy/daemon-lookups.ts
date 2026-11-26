@@ -1,14 +1,15 @@
 /**
  * `DaemonLookups` over the host Docker socket: the image inspect, the
  * daemon's platform and the address published ports bind to, which the
- * create policy needs. Every
- * failure is a value. A lookup is bound to the task's abort signal, so a
- * teardown ends it with the task's other daemon connections.
+ * create policy needs. Every failure is a value. A lookup is bound to the
+ * task's abort signal, so a teardown ends it with the task's other daemon
+ * connections.
  */
 
 import * as http from "node:http";
 import { isIPv4 } from "node:net";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { describeError } from "../../util/describe-error.js";
 import { malformed, notFound, unavailable } from "./rejection.js";
@@ -50,10 +51,7 @@ const NetworkInspectSchema = z.object({
 
 interface DaemonReply {
   status: number;
-  /** `null` when the body is not JSON. */
-  body: unknown;
-  /** Why the body is not JSON, for the lookup's `unavailable` message. */
-  unparsed: string | null;
+  body: { kind: "json"; value: unknown } | { kind: "not_json" };
 }
 
 export function daemonLookups(args: {
@@ -96,7 +94,8 @@ export async function fetchHostPlatform(
 ): Promise<Result<HostPlatform, LookupFailure>> {
   const reply = await getJson(socketPath, "/version", signal);
   return reply.andThen((answer) => {
-    const { status, body } = answer;
+    const { status } = answer;
+    const body = jsonOf(answer);
     const parsed = VersionSchema.safeParse(body);
     return status === 200 && parsed.success
       ? ok({ os: parsed.data.Os, arch: parsed.data.Arch })
@@ -111,7 +110,8 @@ export async function fetchRootless(
 ): Promise<Result<boolean, LookupFailure>> {
   const reply = await getJson(socketPath, "/info", signal);
   return reply.andThen((answer) => {
-    const { status, body } = answer;
+    const { status } = answer;
+    const body = jsonOf(answer);
     const parsed = InfoSchema.safeParse(body);
     return status === 200 && parsed.success
       ? ok((parsed.data.SecurityOptions ?? []).includes("name=rootless"))
@@ -127,7 +127,8 @@ async function inspectImage(
 ): Promise<Result<ImageFacts, LookupFailure>> {
   const reply = await getJson(socketPath, `/images/${ref}/json`, signal);
   return reply.andThen((answer) => {
-    const { status, body } = answer;
+    const { status } = answer;
+    const body = jsonOf(answer);
     if (status === 404) return err(notFound(`No such image: ${ref}`));
     if (status === 400) return err(malformed(`image ${ref}: ${daemonReason(body)}`));
     const parsed = ImageInspectSchema.safeParse(body);
@@ -143,7 +144,8 @@ async function bridgeGateway(
 ): Promise<Result<string, LookupFailure>> {
   const reply = await getJson(socketPath, "/networks/bridge", signal);
   return reply.andThen((answer) => {
-    const { status, body } = answer;
+    const { status } = answer;
+    const body = jsonOf(answer);
     const parsed = NetworkInspectSchema.safeParse(body);
     const gateway = parsed.success
       ? (parsed.data.IPAM.Config ?? [])
@@ -192,21 +194,32 @@ function getJson(
 }
 
 /**
- * The status with the body parsed, or `null` for a body that is not JSON: a
- * 404 still means the image is missing, and each lookup's schema refuses a
- * `null` it needed.
+ * The status with the body parsed, or `not_json`: a 404 still means the image
+ * is missing whatever the body says.
  */
 function parseReply(status: number, raw: Buffer): DaemonReply {
   try {
-    return { status, body: JSON.parse(raw.toString("utf8")), unparsed: null };
-  } catch (cause) {
-    return { status, body: null, unparsed: describeError(cause) };
+    return { status, body: { kind: "json", value: JSON.parse(raw.toString("utf8")) } };
+  } catch {
+    return { status, body: { kind: "not_json" } };
   }
 }
 
-/** `200`, or `200 with a body that is not JSON (…)`, for an `unavailable` message. */
+/** The parsed body, or `undefined`, which every lookup's schema refuses. */
+function jsonOf(reply: DaemonReply): unknown {
+  return match(reply.body)
+    .with({ kind: "json" }, ({ value }) => value)
+    .with({ kind: "not_json" }, () => undefined)
+    .exhaustive();
+}
+
+/**
+ * `200`, or `200 with a body that is not JSON`, for an `unavailable` message.
+ * The parse error is left out: V8's message quotes the body.
+ */
 function answered(reply: DaemonReply): string {
-  return reply.unparsed === null
-    ? String(reply.status)
-    : `${reply.status} with a body that is not JSON (${reply.unparsed})`;
+  return match(reply.body)
+    .with({ kind: "json" }, () => String(reply.status))
+    .with({ kind: "not_json" }, () => `${reply.status} with a body that is not JSON`)
+    .exhaustive();
 }
