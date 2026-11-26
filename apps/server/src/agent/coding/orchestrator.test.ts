@@ -458,6 +458,7 @@ describe("runCodingTask", () => {
     expect(createCalls[0]?.env).toEqual({
       CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth",
       COGMO_VERIFY_BASE: head.trim(),
+      TESTCONTAINERS_RYUK_DISABLED: "true",
     });
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.worktreeAssignment?.baseSha).toBe(head.trim());
