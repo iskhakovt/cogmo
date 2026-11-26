@@ -683,6 +683,8 @@ describe("create policy: resources", () => {
       expect(host).not.toHaveProperty("CpuPeriod");
       expect(host).not.toHaveProperty("NanoCpus");
       expect(host.MemorySwap).toBe(GIB);
+    } else {
+      expect(daemon.requests()).toEqual([]);
     }
   });
 
@@ -728,6 +730,7 @@ describe("create policy: resources", () => {
     );
     expect(above.status, above.body).toBe(403);
     expect(message(above)).toContain("ShmSize");
+    expect(creates()).toHaveLength(1);
   });
 
   it.each([
@@ -1278,6 +1281,7 @@ describe("create policy: platform", () => {
         const r = await create({ Image: "alpine" }, `?platform=${encodeURIComponent(platform)}`);
 
         expect(r.status, r.body).toBe(403);
+        expect(creates()).toEqual([]);
       },
     );
   });

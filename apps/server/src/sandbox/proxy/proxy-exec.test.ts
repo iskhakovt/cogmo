@@ -187,7 +187,6 @@ describe("exec policy", () => {
   });
 
   it("logs a rejected request's path without its query", async () => {
-    log.info.mockClear();
     const r = await exec(
       { Cmd: ["id"], Privileged: true },
       "/containers/abc/exec?Env=TOKEN%3Ds3cret",
