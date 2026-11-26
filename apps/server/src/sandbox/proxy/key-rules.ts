@@ -62,11 +62,18 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * The body parsed as JSON. A failure names at most the position: V8's
+ * message quotes the text around it, and a body can hold a secret (an `Env`
+ * token) that a rejection's message and its log line must not carry.
+ */
 function parseJson(raw: Buffer): Result<unknown, ProxyRejection> {
   try {
     return ok(JSON.parse(raw.toString("utf8")));
   } catch (cause) {
-    return err(malformed(`invalid JSON in request body: ${String(cause)}`));
+    const position = /at position (\d+)/.exec(String(cause))?.[1];
+    const where = position === undefined ? "" : ` at position ${position}`;
+    return err(malformed(`invalid JSON in request body${where}`));
   }
 }
 

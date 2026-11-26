@@ -19,6 +19,7 @@ import {
   type SessionSandbox,
 } from "../sandbox/index.js";
 import type { SandboxRuntime } from "../sandbox/runtime.js";
+import { storeContainerRows } from "../sandbox/store-container-rows.js";
 import { LOCAL_DOCKER_CAPABILITIES } from "../sandbox/supervisor.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "../skills/worker-sysbox/host.js";
 import { describeError } from "../util/describe-error.js";
@@ -184,6 +185,7 @@ async function bootstrapLocalDocker(core: CoreDeps, runtime: SandboxRuntime): Pr
   const proxy = await CogmoSocketProxy.create({
     socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
     hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
+    containerRows: storeContainerRows({ store: core.sandboxStore, runInTx: core.runInTx }),
   });
   const localDocker = await createSandboxBackend({
     backend: "local-docker",

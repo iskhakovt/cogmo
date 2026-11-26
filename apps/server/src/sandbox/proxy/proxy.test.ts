@@ -3,11 +3,13 @@ import * as http from "node:http";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { okAsync } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { expectDefined, resolvesWithin } from "../../test/assertions.js";
 import { CogmoSocketProxy } from "./index.js";
-import type { TaskScope } from "./types.js";
+import type { ContainerRows, TaskScope } from "./types.js";
 
 // Subset of the Docker /containers/create body schema covering the fields
 // these tests assert on. `passthrough()` keeps all upstream fields visible
@@ -72,6 +74,9 @@ const SCOPE: TaskScope = {
 /** What the daemon answers every image inspect with; a create forwards its id. */
 const IMAGE_ID = `sha256:${"a".repeat(64)}`;
 
+/** What the daemon resolves every container ref to: the task's own container. */
+const TASK_CONTAINER_ID = "d".repeat(64);
+
 beforeEach(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "cogmo-proxy-test-"));
   upstreamSocketPath = join(baseDir, "docker.sock");
@@ -95,14 +100,24 @@ beforeEach(async () => {
         res.end(JSON.stringify({ Id: IMAGE_ID, Config: { Env: [] } }));
         return;
       }
+      if (req.method === "GET" && /^\/containers\/[^/]+\/json$/.test(req.url ?? "")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ Id: TASK_CONTAINER_ID }));
+        return;
+      }
       upstreamResponder(req, res);
     });
   });
   await new Promise<void>((resolve) => upstream.listen(upstreamSocketPath, resolve));
 
+  const containerRows = mock<ContainerRows>();
+  containerRows.forTask.mockReturnValue(
+    okAsync([{ id: SCOPE.parentContainerRowId, dockerId: TASK_CONTAINER_ID, parentId: null }]),
+  );
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
     hostDockerSocket: upstreamSocketPath,
+    containerRows,
   });
 });
 
@@ -236,18 +251,6 @@ describe("CogmoSocketProxy", () => {
     expect(r.status).toBe(502);
   });
 
-  it("DELETE /containers/abc forwards (slice 3 ownership check lands in 3.0f)", async () => {
-    upstreamResponder = (_req, res) => {
-      res.writeHead(204);
-      res.end();
-    };
-    const sock = await proxy.registerTask(SCOPE);
-    const r = await unixRequest(sock, "DELETE", "/containers/abc");
-    expect(r.status).toBe(204);
-    expect(upstreamRequests).toHaveLength(1);
-    expect(expectDefined(upstreamRequests[0], "DELETE request").method).toBe("DELETE");
-  });
-
   it("isolates task scopes — two registered tasks each get their own socket", async () => {
     upstreamResponder = (_req, res) => {
       res.writeHead(201);
@@ -309,7 +312,20 @@ describe("CogmoSocketProxy", () => {
     expect(err.message).toMatch(/ENOENT|connect/);
   });
 
-  it("unregisterTask ends a hijacked stream instead of waiting on it", {
+  it("unregisterTask ends a followed log stream instead of waiting on it", {
+    timeout: STREAM_TEST_TIMEOUT_MS,
+  }, async () => {
+    const daemon = holdUpstreamOpen();
+    const sock = await proxy.registerTask(SCOPE);
+    const client = openStream(
+      sock,
+      "GET /containers/abc/logs?follow=1 HTTP/1.1\r\nHost: docker\r\n\r\n",
+    );
+
+    await expectUnregisterEnds(daemon, client);
+  });
+
+  it("unregisterTask ends an event stream instead of waiting on it", {
     timeout: STREAM_TEST_TIMEOUT_MS,
   }, async () => {
     const daemon = holdUpstreamOpen();
@@ -352,16 +368,16 @@ describe("CogmoSocketProxy", () => {
   }, async () => {
     const daemon = holdUpstreamOpen();
     await proxy.registerTask(SCOPE);
-    const sock = await proxy.registerTask({
-      ...SCOPE,
-      taskId: "019d0000-0000-7000-8000-0000000000b2",
-    });
+    const other = "019d0000-0000-7000-8000-0000000000b2";
+    const sock = await proxy.registerTask({ ...SCOPE, taskId: other });
     const client = openStream(sock, "GET /events HTTP/1.1\r\nHost: docker\r\n\r\n");
     const events = await resolvesWithin(daemon.held, SETTLE_MS, "the request to reach the daemon");
 
     await proxy.unregisterTask(SCOPE.taskId);
 
-    events.write('{"status":"start"}\n');
+    events.write(
+      `${JSON.stringify({ status: "start", Actor: { ID: TASK_CONTAINER_ID, Attributes: {} } })}\n`,
+    );
     await vi.waitFor(() => expect(client.received()).toContain('"status":"start"'), {
       timeout: SETTLE_MS,
     });
@@ -412,15 +428,17 @@ describe("CogmoSocketProxy", () => {
 });
 
 describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
-  it("forwards request method, path, and body verbatim on plain GET", async () => {
+  it("forwards a plain GET under its canonical path and re-serialised query", async () => {
     upstreamResponder = (_req, res) => {
       res.writeHead(200);
       res.end("hello");
     };
     const sock = await proxy.registerTask(SCOPE);
-    const r = await unixRequest(sock, "GET", "/foo?bar=baz");
+    const r = await unixRequest(sock, "GET", "/images//./json?all=1&filter=a%20b");
     expect(r.body).toBe("hello");
-    expect(expectDefined(upstreamRequests[0], "GET /foo request").url).toBe("/foo?bar=baz");
+    expect(expectDefined(upstreamRequests[0], "GET /images/json request").url).toBe(
+      "/images/json?all=1&filter=a+b",
+    );
   });
 
   it("forwards POST /containers/create with chunked transfer encoding", async () => {

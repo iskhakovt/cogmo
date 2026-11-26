@@ -1,220 +1,279 @@
 /**
- * Endpoint classification for the Docker socket proxy.
+ * The route table (design/sandbox.md → Proxy Design → Route table). Pure:
+ * given a method and request target, it names the route and what its
+ * checks need, or the rejection. The first matching row wins, and a path
+ * no row matches is `denied`, so a route the daemon adds later stays
+ * closed until it is listed.
  *
- * Pure module — given a method + path, decides what to do:
+ * The patterns mirror the daemon's router (`daemon/server/router/*` in
+ * moby): a `{name:.*}` there spans segments, so `(.+)` here does too. A
+ * legacy link names a container `/parent/alias`, and an exec id or image
+ * name may hold a `/`.
  *
- * - **reject** — a `ProxyRejection` the edge answers without contacting the
- *   daemon: a denied endpoint family, or a create or exec create under an
- *   API version below `MIN_API_VERSION`.
- * - **container_create** / **exec_create** — buffer the body and run it
- *   through its policy (`create-policy.ts`, `exec-policy.ts`).
- * - **hijack** — the endpoint upgrades to a raw bidirectional stream
- *   (`/exec/{id}/start`, `/containers/{id}/attach`, `/events`, log follow).
- *   Caller pipes the upgraded sockets in both directions and stays out of
- *   the way.
- * - **forward** — plain HTTP/1.1 round-trip to the upstream daemon socket,
- *   no body inspection.
- *
- * References for the endpoint set:
- *   buildkite/sockguard, CpuID/dockerd-ci-proxy, Tecnativa/docker-socket-proxy.
+ * A **request** route goes through `http.request`, its response streaming
+ * back. A **stream** route, exec start or attach, may be upgraded: an
+ * upgrade is raw-piped once its checks pass, and a request without
+ * `Upgrade` goes through `http.request` as any other route does, so a
+ * request pipelined after it is classified on its own.
  */
 
+import { match } from "ts-pattern";
 import { denied, type ProxyRejection } from "./rejection.js";
-
-export type RouteOutcome =
-  | { kind: "reject"; rejection: ProxyRejection }
-  /** `versionPrefix` is `""` or the request's `/v<version>`, forwarded as is. */
-  | { kind: "container_create"; versionPrefix: string }
-  | { kind: "exec_create" }
-  | { kind: "hijack" }
-  | { kind: "forward" };
+import { encodePath, parseTarget } from "./request-path.js";
 
 /**
- * The create and exec policies read their bodies with API 1.44 semantics,
- * so an older version prefix on those two routes is denied. A request with
- * no prefix gets the daemon's own version, which Cogmo requires to be 1.44
- * or later (design/sandbox.md → Proxy Design).
+ * Whether a container route accepts the task's own depth-0 container.
+ * Lifecycle routes and archive writes need a child: the task container's
+ * lifecycle is Cogmo's, and its `/workspace` is a host bind.
  */
-const MIN_API_VERSION = "1.44";
+export type DepthRule = "any" | "child";
 
-/**
- * The daemon routes `/containers/{name:.*}/exec`, so a name may span
- * segments: a legacy link names a container `/parent/alias`.
- */
-const EXEC_CREATE_RE = /^\/containers\/.+\/exec$/;
-
-const EXEC_START_RE = /^\/(?:v[\d.]+\/)?exec\/[^/]+\/start(\?|$)/;
-
-/**
- * Endpoints whose response is a stream that long-polls or upgrades.
- * `/events` is the live container event feed; `/distribution/.../json`
- * is the registry-distribution metadata fetch. `/build` and `/session`
- * are denied wholesale (see `DENY_PREFIXES`) so they don't appear here.
- */
-const STREAMING_GET_RE = /^\/(?:v[\d.]+\/)?(?:events|distribution\/[^/]+\/json)(\?|$)/;
-
-/**
- * Endpoint families denied wholesale.
- *
- * - `/swarm`, `/plugins`, `/nodes` — admin surfaces an unprivileged
- *   container has no business touching.
- * - `/build`, `/session` — image production. `/build` lets in-container
- *   code build arbitrary images and push via `--push` / auth headers;
- *   `/session` is BuildKit's gRPC channel which does the same. Until
- *   we have a registry allowlist + BuildKit gRPC inspection (P3 in
- *   `design/sandbox.md`), block both. Local in-container `docker
- *   build` against testcontainers patterns still works because the
- *   common case there is `/containers/create` against a pre-built
- *   image, not `/build`.
- * - `/auth` — populates the daemon's registry-credential cache; a
- *   subsequent `/images/create` (pull) with private images, or any
- *   future `/build --push` if the deny above were ever lifted, would
- *   ride on those creds. Block at the source.
- */
-const DENY_PREFIXES: readonly string[] = [
-  "/swarm",
-  "/plugins",
-  "/nodes",
-  "/build",
-  "/session",
-  "/auth",
-];
-
-/**
- * Classify a request. Strips the optional `/v1.NN/` API-version prefix before
- * matching so callers can use either prefixed (`/v1.47/containers/json`) or
- * unprefixed (`/containers/json`) paths interchangeably. Canonicalises
- * percent-encoded characters and collapses redundant slashes/dot-segments
- * before any prefix match — otherwise `/v1.43/swarm%2Finit` or `/swarm/./x`
- * would slip past the deny check on raw-string compares.
- */
-export function classify(method: string, rawPath: string): RouteOutcome {
-  const path = canonicalisePath(stripQuery(rawPath));
-  const upper = method.toUpperCase();
-
-  const deniedPrefix = DENY_PREFIXES.find((prefix) => matchesPrefix(path, prefix));
-  if (deniedPrefix !== undefined) {
-    return { kind: "reject", rejection: denied(`${deniedPrefix}/*`) };
-  }
-
-  const { version, route } = splitVersion(path);
-  if (upper === "POST" && route === "/containers/create") {
-    return atLeastFloor(version, {
-      kind: "container_create",
-      versionPrefix: version === null ? "" : `/v${version}`,
-    });
-  }
-  if (upper === "POST" && EXEC_CREATE_RE.test(route)) {
-    return atLeastFloor(version, { kind: "exec_create" });
-  }
-
-  // Hijacked: `/exec/{id}/start` upgrades to raw bytes once Docker accepts.
-  if (upper === "POST" && EXEC_START_RE.test(path)) {
-    return { kind: "hijack" };
-  }
-
-  // `/containers/{id}/attach` — same hijack mechanism as exec/start.
-  if (upper === "POST" && /\/(?:v[\d.]+\/)?containers\/[^/]+\/attach$/.test(path)) {
-    return { kind: "hijack" };
-  }
-
-  // GET /containers/{id}/logs?follow=1 — long-polled stream. Without follow,
-  // it's a normal short response; classify them both as hijack so the same
-  // pipe handler covers both (it works equally well for short responses).
-  if (upper === "GET" && /\/(?:v[\d.]+\/)?containers\/[^/]+\/logs$/.test(path)) {
-    return { kind: "hijack" };
-  }
-
-  if (upper === "GET" && STREAMING_GET_RE.test(path)) {
-    return { kind: "hijack" };
-  }
-
-  // Everything else is forwarded: `/_ping`, `/version`, `/info`, container
-  // reads and actions, `/images/*`, `/networks/*`, `/volumes/*`, … Ownership
-  // and the default-deny route table are design/sandbox.md → Slices, item 2.
-  return { kind: "forward" };
+export interface ContainerTarget {
+  /** The ref as sent: a full id, a unique id prefix or a name. */
+  ref: string;
+  versionPrefix: string;
+  /** The route after the container id: `/json`, `/archive`, or `""` for a `DELETE`. */
+  suffix: string;
+  depth: DepthRule;
+  /** The route class, `POST /containers/{id}/stop`, for a rejection message. */
+  route: string;
 }
 
-function atLeastFloor(version: string | null, outcome: RouteOutcome): RouteOutcome {
-  if (version === null || compareVersions(version, MIN_API_VERSION) >= 0) return outcome;
+export interface ExecTarget {
+  /** The exec id as sent. */
+  id: string;
+  versionPrefix: string;
+  /** `/start`, `/resize` or `/json`. */
+  suffix: string;
+}
+
+export type RequestRoute =
+  /** Forwarded without an ownership check: the meta routes, and image, network and volume routes until their policies land. */
+  | { kind: "plain"; path: string }
+  | { kind: "container"; target: ContainerTarget }
+  | { kind: "container_create"; versionPrefix: string }
+  /** `POST /images/create`, under its query policy. */
+  | { kind: "image_create"; versionPrefix: string }
+  | { kind: "exec_create"; ref: string; versionPrefix: string }
+  | { kind: "exec"; target: ExecTarget }
+  | { kind: "container_list"; path: string }
+  | { kind: "events"; path: string }
+  | {
+      kind: "network_endpoint";
+      network: string;
+      op: "connect" | "disconnect";
+      versionPrefix: string;
+    };
+
+export type StreamRoute =
+  | { kind: "container"; target: ContainerTarget }
+  | { kind: "exec"; target: ExecTarget };
+
+export type Classified =
+  | { kind: "reject"; rejection: ProxyRejection }
+  | { kind: "request"; route: RequestRoute; query: URLSearchParams }
+  | { kind: "stream"; route: StreamRoute; query: URLSearchParams };
+
+type Outcome =
+  | { kind: "reject"; rejection: ProxyRejection }
+  | { kind: "request"; route: RequestRoute }
+  | { kind: "stream"; route: StreamRoute };
+
+interface Row {
+  method: string;
+  pattern: RegExp;
+  outcome: (groups: ReadonlyArray<string>, versionPrefix: string, route: string) => Outcome;
+}
+
+const LIFECYCLE_ACTIONS = "kill|pause|unpause|restart|start|stop|rename";
+
+/** A row forwarded under its canonical path with no ownership check. */
+function plainRow(method: string, pattern: RegExp): Row {
   return {
-    kind: "reject",
-    rejection: denied(`API version v${version} (the minimum is v${MIN_API_VERSION})`),
+    method,
+    pattern,
+    outcome: (_, v, r) => request({ kind: "plain", path: canonical(v, r) }),
   };
 }
 
-function splitVersion(path: string): { version: string | null; route: string } {
-  const m = /^\/v([\d.]+)(\/.*)?$/.exec(path);
-  return m?.[1] === undefined
-    ? { version: null, route: path }
-    : { version: m[1], route: m[2] ?? "/" };
+/** A container route that accepts any owned container, the task's own included. */
+function readRow(method: string, pattern: RegExp): Row {
+  return {
+    method,
+    pattern,
+    outcome: (g, v) => request({ kind: "container", target: container(method, "any", g, v) }),
+  };
 }
 
-/**
- * The daemon's `versions.compare`: dot-separated parts compared as
- * integers, a missing or unreadable part counting as 0.
- */
-function compareVersions(a: string, b: string): number {
-  const left = a.split(".").map(versionPart);
-  const right = b.split(".").map(versionPart);
-  const length = Math.max(left.length, right.length);
-  const diff = Array.from({ length }, (_, i) => (left[i] ?? 0) - (right[i] ?? 0)).find(
-    (d) => d !== 0,
-  );
-  return Math.sign(diff ?? 0);
+/** Rows in the daemon's own order within each method. */
+const ROWS: ReadonlyArray<Row> = [
+  // Meta
+  plainRow("GET", /^\/_ping$/),
+  plainRow("HEAD", /^\/_ping$/),
+  plainRow("GET", /^\/version$/),
+  plainRow("GET", /^\/info$/),
+  {
+    method: "GET",
+    pattern: /^\/events$/,
+    outcome: (_, v, r) => request({ kind: "events", path: canonical(v, r) }),
+  },
+  // Containers
+  readRow("HEAD", /^\/containers\/(.+)\/(archive)$/),
+  {
+    method: "GET",
+    pattern: /^\/containers\/json$/,
+    outcome: (_, v, r) => request({ kind: "container_list", path: canonical(v, r) }),
+  },
+  readRow("GET", /^\/containers\/(.+)\/(export|changes|json|top|logs|stats|archive)$/),
+  {
+    method: "GET",
+    pattern: /^\/containers\/(.+)\/(attach\/ws)$/,
+    outcome: (g, v) => stream({ kind: "container", target: container("GET", "any", g, v) }),
+  },
+  {
+    method: "GET",
+    pattern: /^\/exec\/(.+)\/(json)$/,
+    outcome: (g, v) => request({ kind: "exec", target: exec(g, v) }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/create$/,
+    outcome: (_, v) => request({ kind: "container_create", versionPrefix: v }),
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^/containers/(.+)/(${LIFECYCLE_ACTIONS})$`),
+    outcome: (g, v) => request({ kind: "container", target: container("POST", "child", g, v) }),
+  },
+  readRow("POST", /^\/containers\/(.+)\/(wait|resize)$/),
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/(attach)$/,
+    outcome: (g, v) => stream({ kind: "container", target: container("POST", "any", g, v) }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/exec$/,
+    outcome: (g, v) => request({ kind: "exec_create", ref: nth(g, 0), versionPrefix: v }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/exec\/(.+)\/(start)$/,
+    outcome: (g, v) => stream({ kind: "exec", target: exec(g, v) }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/exec\/(.+)\/(resize)$/,
+    outcome: (g, v) => request({ kind: "exec", target: exec(g, v) }),
+  },
+  {
+    method: "PUT",
+    pattern: /^\/containers\/(.+)\/(archive)$/,
+    outcome: (g, v) => request({ kind: "container", target: container("PUT", "child", g, v) }),
+  },
+  // The daemon's checkpoint router, registered ahead of the container
+  // router, takes this path with single-segment `{name}` and `{checkpoint}`.
+  {
+    method: "DELETE",
+    pattern: /^\/containers\/[^/]+\/checkpoints\/[^/]+$/,
+    outcome: () => ({
+      kind: "reject",
+      rejection: denied("DELETE /containers/{id}/checkpoints/{checkpoint}"),
+    }),
+  },
+  {
+    method: "DELETE",
+    pattern: /^\/containers\/(.+)$/,
+    outcome: (g, v) => request({ kind: "container", target: container("DELETE", "child", g, v) }),
+  },
+  // Images
+  plainRow("GET", /^\/images\/json$/),
+  plainRow("GET", /^\/images\/(.+)\/(history|json)$/),
+  {
+    method: "POST",
+    pattern: /^\/images\/create$/,
+    outcome: (_, v) => request({ kind: "image_create", versionPrefix: v }),
+  },
+  plainRow("GET", /^\/distribution\/(.+)\/json$/),
+  // Networks
+  plainRow("GET", /^\/networks$/),
+  plainRow("GET", /^\/networks\/(.+)$/),
+  plainRow("POST", /^\/networks\/create$/),
+  networkEndpointRow("connect"),
+  networkEndpointRow("disconnect"),
+  plainRow("DELETE", /^\/networks\/(.+)$/),
+  // Volumes
+  plainRow("GET", /^\/volumes$/),
+  plainRow("GET", /^\/volumes\/(.+)$/),
+  plainRow("POST", /^\/volumes\/create$/),
+  {
+    method: "DELETE",
+    pattern: /^\/volumes\/(.+)$/,
+    outcome: () => ({ kind: "reject", rejection: denied("DELETE /volumes/{name}") }),
+  },
+];
+
+/** Classify a request by the first row its method and canonical route match. */
+export function classify(method: string, rawTarget: string): Classified {
+  const parsed = parseTarget(rawTarget);
+  if (parsed.isErr()) return { kind: "reject", rejection: parsed.error };
+  const { versionPrefix, route, query } = parsed.value;
+  const upper = method.toUpperCase();
+  const row = ROWS.find((r) => r.method === upper && r.pattern.test(route));
+  if (row === undefined) return { kind: "reject", rejection: denied(`${upper} ${route}`) };
+  const groups = row.pattern.exec(route)?.slice(1) ?? [];
+  return match(row.outcome(groups, versionPrefix, route))
+    .with({ kind: "reject" }, (outcome) => outcome)
+    .with({ kind: "request" }, ({ route: r }) => ({ kind: "request" as const, route: r, query }))
+    .with({ kind: "stream" }, ({ route: r }) => ({ kind: "stream" as const, route: r, query }))
+    .exhaustive();
 }
 
-function versionPart(part: string): number {
-  const n = Number(part);
-  return /^\d+$/.test(part) && Number.isSafeInteger(n) ? n : 0;
+function networkEndpointRow(op: "connect" | "disconnect"): Row {
+  return {
+    method: "POST",
+    pattern: new RegExp(`^/networks/(.+)/${op}$`),
+    outcome: (g, versionPrefix) =>
+      request({ kind: "network_endpoint", network: nth(g, 0), op, versionPrefix }),
+  };
 }
 
-function stripQuery(rawPath: string): string {
-  const q = rawPath.indexOf("?");
-  return q === -1 ? rawPath : rawPath.slice(0, q);
+function canonical(versionPrefix: string, route: string): string {
+  return `${versionPrefix}${encodePath(route)}`;
 }
 
-/**
- * Canonicalise a path before classification:
- *   1. percent-decode (handles `%2F`, `%5C`, `%2E` etc. — Docker decodes
- *      these on its end, so encoded variants of `/swarm` or `/etc` would
- *      otherwise route differently here than they execute on the daemon)
- *   2. collapse `\` to `/` (Windows-style path separators)
- *   3. collapse `//+` runs to `/`
- *   4. resolve `.` / `..` segments against the path root, stopping at `/`
- *
- * Malformed encoding (`%XX` with non-hex) is treated as opaque — keep the
- * raw bytes; the classifier still falls through to `forward` and the
- * daemon will reject. We don't try to be lenient here.
- */
-function canonicalisePath(p: string): string {
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(p);
-  } catch {
-    decoded = p;
-  }
-  // Backslash → slash; multiple slashes → one.
-  let normalised = decoded.replace(/\\/g, "/").replace(/\/+/g, "/");
-  if (!normalised.startsWith("/")) normalised = `/${normalised}`;
-
-  // Resolve `.` / `..` segments. Bounded — segment count == slash count + 1.
-  const segments = normalised.split("/");
-  const out: string[] = [];
-  for (const seg of segments) {
-    if (seg === "" || seg === ".") continue;
-    if (seg === "..") {
-      out.pop();
-      continue;
-    }
-    out.push(seg);
-  }
-  return `/${out.join("/")}`;
+function container(
+  method: string,
+  depth: DepthRule,
+  groups: ReadonlyArray<string>,
+  versionPrefix: string,
+): ContainerTarget {
+  const action = groups[1];
+  const suffix = action === undefined ? "" : `/${action}`;
+  return {
+    ref: nth(groups, 0),
+    versionPrefix,
+    suffix,
+    depth,
+    route: `${method} /containers/{id}${suffix}`,
+  };
 }
 
-/** True if `path` equals or starts with `prefix` (segment-aware). */
-function matchesPrefix(path: string, prefix: string): boolean {
-  // Strip optional API version prefix.
-  const stripped = path.replace(/^\/v[\d.]+/, "");
-  return stripped === prefix || stripped.startsWith(`${prefix}/`);
+function exec(groups: ReadonlyArray<string>, versionPrefix: string): ExecTarget {
+  return { id: nth(groups, 0), versionPrefix, suffix: `/${nth(groups, 1)}` };
+}
+
+/** A capture group the row's pattern always has. */
+function nth(groups: ReadonlyArray<string>, index: number): string {
+  const group = groups[index];
+  if (group === undefined) throw new Error(`route pattern has no capture group ${index}`);
+  return group;
+}
+
+function request(route: RequestRoute): Outcome {
+  return { kind: "request", route };
+}
+
+function stream(route: StreamRoute): Outcome {
+  return { kind: "stream", route };
 }

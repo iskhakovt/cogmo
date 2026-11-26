@@ -2,10 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
 import { DOCKER_CLI_CREATE_REQUEST } from "../../test/docker-cli-create-request.js";
 import {
+  BRIDGE_NETWORK,
   dockerApi,
   type FakeDaemonRequest,
   type FakeDaemonResponder,
@@ -18,7 +20,7 @@ import {
 } from "../../test/fake-docker-daemon.js";
 import { TESTCONTAINERS_CREATE_REQUEST } from "../../test/testcontainers-create-request.js";
 import { CogmoSocketProxy } from "./index.js";
-import type { TaskScope } from "./types.js";
+import type { ContainerRows, TaskScope } from "./types.js";
 
 const GIB = 1024 ** 3;
 const ALPINE_ID = `sha256:${"a".repeat(64)}`;
@@ -53,12 +55,18 @@ const ForwardedSchema = z.looseObject({
 
 const ErrorSchema = z.object({ message: z.string() });
 
-const AMD64_API = dockerApi({
-  images: IMAGES,
-  arch: "amd64",
-  bridgeGateway: GATEWAY,
-  rootless: false,
-});
+/** The fake daemon with these images, no containers and only `bridge`. */
+function createApi(daemon: { arch: string; rootless: boolean }): FakeDaemonResponder {
+  return dockerApi({
+    images: IMAGES,
+    containers: [],
+    networks: [BRIDGE_NETWORK],
+    bridgeGateway: GATEWAY,
+    ...daemon,
+  });
+}
+
+const AMD64_API = createApi({ arch: "amd64", rootless: false });
 
 let baseDir: string;
 let daemon: FakeDockerDaemon;
@@ -68,7 +76,7 @@ let socket: string;
 async function startDaemon(arch: string): Promise<void> {
   daemon = await startFakeDockerDaemon(
     join(baseDir, "docker.sock"),
-    dockerApi({ images: IMAGES, arch, bridgeGateway: GATEWAY, rootless: false }),
+    createApi({ arch, rootless: false }),
   );
 }
 
@@ -78,6 +86,8 @@ beforeEach(async () => {
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
     hostDockerSocket: daemon.socketPath,
+    // A create names no existing container, so it reads no rows.
+    containerRows: mock<ContainerRows>(),
   });
   socket = await proxy.registerTask(SCOPE);
 });
@@ -897,9 +907,7 @@ describe("create policy: networks", () => {
   it("binds published ports to loopback on a rootless daemon, without reading the bridge", async () => {
     // RootlessKit listens in the host's network namespace, where the bridge
     // gateway is not an address.
-    daemon.setResponder(
-      dockerApi({ images: IMAGES, arch: "amd64", bridgeGateway: GATEWAY, rootless: true }),
-    );
+    daemon.setResponder(createApi({ arch: "amd64", rootless: true }));
 
     const r = await create(
       {
@@ -938,6 +946,19 @@ describe("create policy: networks", () => {
 });
 
 describe("create policy: values kept as sent", () => {
+  it("forwards the rebuilt body as JSON whatever content type the client sent", async () => {
+    const r = await requestOverSocket(socket, {
+      method: "POST",
+      path: "/containers/create",
+      body: JSON.stringify({ Image: "alpine" }),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+    });
+
+    expect(r.status, r.body).toBe(201);
+    const [only] = creates();
+    expect(expectDefined(only, "create").headers["content-type"]).toBe("application/json");
+  });
+
   it("forwards data-keyed maps, empty values and an empty Entrypoint unchanged", async () => {
     const body = {
       Image: "alpine",
@@ -1333,9 +1354,7 @@ describe("create policy: daemon lookups", () => {
   ])(
     "reads GET /info once, rootless %s, with %d bridge reads over two publishing creates",
     async (rootless, bridgeReads) => {
-      daemon.setResponder(
-        dockerApi({ images: IMAGES, arch: "amd64", bridgeGateway: GATEWAY, rootless }),
-      );
+      daemon.setResponder(createApi({ arch: "amd64", rootless }));
       const publishing = {
         Image: "alpine",
         HostConfig: { PortBindings: { "80/tcp": [{ HostPort: "0" }] } },

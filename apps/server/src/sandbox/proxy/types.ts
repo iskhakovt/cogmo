@@ -1,4 +1,4 @@
-import type { Result } from "neverthrow";
+import type { Result, ResultAsync } from "neverthrow";
 import type { ResourceLimits } from "../types.js";
 import type { ProxyRejection } from "./rejection.js";
 
@@ -11,7 +11,10 @@ import type { ProxyRejection } from "./rejection.js";
 export interface TaskScope {
   /** Cogmo `coding_tasks.id` — denormalized into `cogmo.root_task` label. */
   taskId: string;
-  /** Cogmo `coding_tasks.id` for the supervisor-created depth-0 container. */
+  /**
+   * The `containers` row id of the supervisor-created depth-0 container,
+   * which the task's ownership is anchored to; `""` until that row exists.
+   */
   parentContainerRowId: string;
   /** Docker id of the depth-0 task container — written into `cogmo.parent`. */
   parentDockerId: string;
@@ -32,6 +35,32 @@ export interface ProxyOptions {
   hostDockerSocket?: string;
   /** Directory holding per-task sockets. Created at `create()` if missing. */
   socketDir: string;
+  /** The store's `containers` rows, which decide what a task owns. */
+  containerRows: ContainerRows;
+}
+
+/** A `containers` row that carries a task's `root_task_id` and is not `reaped`. */
+export interface TaskContainerRow {
+  /** The row's id, which a child's `parentId` names. */
+  readonly id: string;
+  readonly dockerId: string;
+  /** `null` for a depth-0 row. */
+  readonly parentId: string | null;
+}
+
+/** The store read failed; the proxy answers `unavailable`. */
+export interface StoreFailed {
+  kind: "store_failed";
+  cause: unknown;
+}
+
+/**
+ * Read access to the `containers` rows, read on every request that checks
+ * ownership. A task owns only its scope's depth-0 row and that row's
+ * children among them (`ownership.ts`).
+ */
+export interface ContainerRows {
+  forTask(taskId: string): ResultAsync<ReadonlyArray<TaskContainerRow>, StoreFailed>;
 }
 
 /** What the create policy reads from an image inspect. */
@@ -67,4 +96,15 @@ export interface DaemonLookups {
    * gateway on a rootful daemon, loopback on a rootless one.
    */
   publishAddress(): Promise<Result<string, LookupFailure>>;
+}
+
+/** How a ref lookup fails: `not_found` for a ref the daemon cannot resolve, `unavailable` otherwise. */
+export type ResolveFailure = Extract<ProxyRejection, { kind: "not_found" | "unavailable" }>;
+
+/** The daemon lookups that resolve a ref in a path or body to the object's full id. */
+export interface RefLookups {
+  /** `GET /containers/{ref}/json`: a full id, a unique id prefix or a name. */
+  resolveContainer(ref: string): Promise<Result<string, ResolveFailure>>;
+  /** `GET /networks/{ref}`: a full id, a name or a unique id prefix. */
+  resolveNetwork(ref: string): Promise<Result<string, ResolveFailure>>;
 }

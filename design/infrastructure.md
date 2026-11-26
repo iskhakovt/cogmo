@@ -10,7 +10,7 @@
 | Redis | 7+ | Inngest queue + state store (production); not needed in dev mode |
 | Inngest | latest | Event-driven orchestration — `inngest dev` locally, `inngest start` in production |
 | Node.js | 26+ (LTS Lithium) | Runtime |
-| Docker Engine | 25+ (API 1.44) | Local-Docker sandbox backend. The Docker API proxy reads create and exec bodies with API 1.44 semantics, and a request with no version prefix gets the daemon's own ([sandbox.md → Proxy Design](sandbox.md#proxy-design)) |
+| Docker Engine | 25+ (API 1.44) | Local-Docker sandbox backend. The Docker API proxy reads every route with API 1.44 semantics and denies an older version prefix, and a request with no version prefix gets the daemon's own ([sandbox.md → Proxy Design](sandbox.md#proxy-design)) |
 
 ## Local Development `[confirmed]`
 

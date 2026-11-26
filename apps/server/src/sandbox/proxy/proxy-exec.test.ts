@@ -2,19 +2,23 @@ import { mkdtemp, rm } from "node:fs/promises";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { okAsync } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
 import { DOCKER_CLI_EXEC_REQUEST } from "../../test/docker-cli-exec-request.js";
 import {
+  BRIDGE_NETWORK,
   dockerApi,
+  type FakeContainer,
   type FakeDockerDaemon,
   requestOverSocket,
   type SocketResponse,
   startFakeDockerDaemon,
 } from "../../test/fake-docker-daemon.js";
 import { CogmoSocketProxy } from "./index.js";
-import type { TaskScope } from "./types.js";
+import type { ContainerRows, TaskScope } from "./types.js";
 
 const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
 vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
@@ -22,7 +26,7 @@ vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
 const SCOPE: TaskScope = {
   taskId: "019d0000-0000-7000-8000-00000000aaaa",
   parentContainerRowId: "019d0000-0000-7000-8000-00000000bbbb",
-  parentDockerId: "docker-parent-abc",
+  parentDockerId: `ab${"0".repeat(62)}`,
   parentDepth: 0,
   runtime: "sysbox-runc",
   cgroupParent: "cogmo-task-abc.slice",
@@ -31,6 +35,14 @@ const SCOPE: TaskScope = {
 };
 
 const ErrorSchema = z.object({ message: z.string() });
+
+/** The task's own container, which an exec create may name. */
+const TASK_CONTAINER: FakeContainer = { id: `ab${"0".repeat(62)}`, name: "abc", labels: {} };
+/** A child under a legacy link name, which spans path segments. */
+const LINKED_CHILD: FakeContainer = { id: `ac${"0".repeat(62)}`, name: "parent/alias", labels: {} };
+/** The container the recorded Docker CLI exec names. */
+const CLI_CHILD: FakeContainer = { id: `c1${"0".repeat(62)}`, name: "c1", labels: {} };
+const CONTAINERS = [TASK_CONTAINER, LINKED_CHILD, CLI_CHILD];
 
 let baseDir: string;
 let daemon: FakeDockerDaemon;
@@ -41,11 +53,28 @@ beforeEach(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "cogmo-proxy-exec-"));
   daemon = await startFakeDockerDaemon(
     join(baseDir, "docker.sock"),
-    dockerApi({ images: new Map(), arch: "amd64", bridgeGateway: "172.17.0.1", rootless: false }),
+    dockerApi({
+      images: new Map(),
+      containers: CONTAINERS,
+      networks: [BRIDGE_NETWORK],
+      arch: "amd64",
+      bridgeGateway: "172.17.0.1",
+      rootless: false,
+    }),
+  );
+  const containerRows = mock<ContainerRows>();
+  const taskRow = SCOPE.parentContainerRowId;
+  containerRows.forTask.mockReturnValue(
+    okAsync([
+      { id: taskRow, dockerId: TASK_CONTAINER.id, parentId: null },
+      { id: "019d0000-0000-7000-8000-00000000c001", dockerId: LINKED_CHILD.id, parentId: taskRow },
+      { id: "019d0000-0000-7000-8000-00000000c002", dockerId: CLI_CHILD.id, parentId: taskRow },
+    ]),
   );
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
     hostDockerSocket: daemon.socketPath,
+    containerRows,
   });
   socket = await proxy.registerTask(SCOPE);
 });
@@ -64,10 +93,17 @@ function execRaw(body: string, path: string): Promise<SocketResponse> {
   return requestOverSocket(socket, { method: "POST", path, body });
 }
 
-function forwardedBody(): unknown {
-  const [only, ...rest] = daemon.requests();
+/** The exec create that reached the daemon, after the lookup that resolved its container. */
+function forwardedExec(): { url: string; body: unknown } {
+  const [resolve, only, ...rest] = daemon.requests();
+  expect(expectDefined(resolve, "container resolve").url).toMatch(/^\/containers\/.+\/json$/);
   expect(rest).toEqual([]);
-  return JSON.parse(expectDefined(only, "forwarded exec").body);
+  const exec = expectDefined(only, "forwarded exec");
+  return { url: exec.url, body: JSON.parse(exec.body) };
+}
+
+function forwardedBody(): unknown {
+  return forwardedExec().body;
 }
 
 async function expectRejected(r: SocketResponse, status: number): Promise<void> {
@@ -80,6 +116,19 @@ function message(r: SocketResponse): string {
 }
 
 describe("exec policy", () => {
+  it("forwards the rebuilt body as JSON whatever content type the client sent", async () => {
+    const r = await requestOverSocket(socket, {
+      method: "POST",
+      path: "/containers/abc/exec",
+      body: JSON.stringify({ Cmd: ["id"] }),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+    });
+
+    expect(r.status, r.body).toBe(201);
+    const exec = expectDefined(daemon.requests()[1], "exec");
+    expect(exec.headers["content-type"]).toBe("application/json");
+  });
+
   it("forwards every allowed field as sent", async () => {
     const body = {
       Cmd: ["sh", "-c", "true"],
@@ -97,8 +146,7 @@ describe("exec policy", () => {
     const r = await exec(body, "/containers/abc/exec");
 
     expect(r.status, r.body).toBe(201);
-    expect(forwardedBody()).toEqual(body);
-    expect(expectDefined(daemon.requests()[0], "exec").url).toBe("/containers/abc/exec");
+    expect(forwardedExec()).toEqual({ url: `/containers/${TASK_CONTAINER.id}/exec`, body });
   });
 
   it.each([
@@ -124,7 +172,7 @@ describe("exec policy", () => {
     });
 
     expect(r.status, r.body).toBe(201);
-    expect(expectDefined(daemon.requests()[0], "exec").url).toBe("/v1.51/containers/c1/exec");
+    expect(forwardedExec().url).toBe(`/v1.51/containers/${CLI_CHILD.id}/exec`);
     expect(forwardedBody()).toEqual({
       User: "",
       Tty: false,
@@ -182,6 +230,16 @@ describe("exec policy", () => {
     await expectRejected(r, 403);
   });
 
+  it("forwards an exec create on a name with a slash under the container's full id", async () => {
+    const r = await exec({ Cmd: ["id"] }, "/containers/parent/alias/exec");
+
+    expect(r.status, r.body).toBe(201);
+    expect(expectDefined(daemon.requests()[0], "resolve").url).toBe(
+      "/containers/parent/alias/json",
+    );
+    expect(forwardedExec().url).toBe(`/containers/${LINKED_CHILD.id}/exec`);
+  });
+
   it("forwards a case variant under its canonical name", async () => {
     const r = await exec({ cmd: ["id"], workingdir: "/" }, "/containers/abc/exec");
 
@@ -226,7 +284,7 @@ describe("exec policy", () => {
     const r = await exec({ Cmd: ["id"] }, "/v1.44/containers/abc/exec");
 
     expect(r.status, r.body).toBe(201);
-    expect(expectDefined(daemon.requests()[0], "exec").url).toBe("/v1.44/containers/abc/exec");
+    expect(forwardedExec().url).toBe(`/v1.44/containers/${TASK_CONTAINER.id}/exec`);
   });
 });
 
