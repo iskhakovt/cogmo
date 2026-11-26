@@ -1,9 +1,11 @@
 import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
-import { logExit } from "./mark-container-exited.js";
+import { logger } from "../logger.js";
 import type { ChildExitCause, StoreFailed, TaskContainerRow } from "./proxy/index.js";
 import type { ContainerTransitionResult, SandboxStore } from "./store/index.js";
+
+const log = logger.child({ component: "sandbox" });
 
 interface MarkChildExitedDeps {
   store: SandboxStore;
@@ -64,5 +66,27 @@ function movedToRunning(result: ContainerTransitionResult): boolean {
     .with({ kind: "stale", status: "running" }, () => true)
     .with({ kind: "stale", status: P.union("starting", "exited", "reaped") }, () => false)
     .with({ kind: "transitioned" }, () => false)
+    .exhaustive();
+}
+
+/** Log a child's `exited` transition by why its container went; `stale` at debug. */
+function logExit(
+  args: { dockerId: string; cause: ChildExitCause },
+  result: ContainerTransitionResult,
+): void {
+  match(result)
+    .with({ kind: "transitioned" }, () =>
+      match(args.cause)
+        .with("missing_from_daemon", () =>
+          log.info({ dockerId: args.dockerId }, "child missing from the daemon, marked exited"),
+        )
+        .with("removed_by_task", () =>
+          log.debug({ dockerId: args.dockerId }, "child removed by its task, marked exited"),
+        )
+        .exhaustive(),
+    )
+    .with({ kind: "stale" }, ({ status }) =>
+      log.debug({ dockerId: args.dockerId, status }, "child row already finished by another path"),
+    )
     .exhaustive();
 }

@@ -51,7 +51,7 @@ export interface ChildContext extends OwnershipLookups, ChildCapContext {
   createLookups: DaemonLookups;
   /** The request body, bounded; read only by a route with a body policy. */
   readBody(): Promise<Result<Buffer, ProxyRejection>>;
-  /** Insert a created child's row unless `cutOff` aborts first; a rejection once its container is gone. */
+  /** Insert a created child's row unless `cutOff` aborts first; a rejection once it failed or was cut off. */
   recordChild(child: ChildRecord, cutOff: AbortSignal): Promise<Result<void, ProxyRejection>>;
   /**
    * Follow a child's start in its row. `not_found`, naming `ref`, when a
@@ -65,9 +65,22 @@ export interface ChildContext extends OwnershipLookups, ChildCapContext {
 /**
  * A create, under its policy and the child cap, with the row its 201 gets:
  * the task's depth-0 row as parent, the task's lineage and TTL, and the
- * limits the policy injected or capped.
+ * limits the policy injected or capped. Once the socket's teardown has
+ * begun, a create its checks refuse is `unavailable`, as one they pass is
+ * (design/sandbox.md → Teardown order).
  */
 export async function planContainerCreate(
+  versionPrefix: string,
+  query: URLSearchParams,
+  ctx: ChildContext,
+): Promise<Result<CreateForward, ProxyRejection>> {
+  const planned = await planCreate(versionPrefix, query, ctx);
+  return planned.orElse((rejection) =>
+    ctx.creates.admitting().andThen(() => err<CreateForward, ProxyRejection>(rejection)),
+  );
+}
+
+async function planCreate(
   versionPrefix: string,
   query: URLSearchParams,
   ctx: ChildContext,

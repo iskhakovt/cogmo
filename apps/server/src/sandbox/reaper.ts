@@ -177,7 +177,6 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
         dockerId: row.dockerId,
         from: row.status,
         at: now,
-        cause: "missing_from_daemon",
       });
       result.staleMarked += counted(outcome);
     }

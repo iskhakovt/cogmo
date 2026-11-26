@@ -248,8 +248,8 @@ function relay(
       ),
     )
     .with({ kind: "child_transition" }, ({ settle }) =>
-      // The row follows the status line, before the body is read, so a
-      // reply cut off after it still moves the row.
+      // The row write follows the status line and does not wait for the
+      // body, so a reply cut short after it still moves the row.
       relayBuffered(reply, res, (read) => new ResultAsync(settle(status)).andThen(() => read)),
     )
     .exhaustive();

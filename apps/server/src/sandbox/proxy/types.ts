@@ -102,8 +102,8 @@ export interface ChildRecord {
 /**
  * The child's row was not written: the insert failed, or the create was
  * cut off first, by its deadline or its socket's teardown. Either way its
- * container is removed, or left to the orphan pass; the use case has
- * logged why.
+ * container's removal is under way in the background, and what the daemon
+ * refuses is left to the orphan pass; the use case has logged why.
  */
 export type ChildRecordFailed = { kind: "record_failed" } | { kind: "cut_off" };
 
@@ -131,7 +131,8 @@ export interface ChildContainers {
   /**
    * Insert the child's row unless `cutOff` aborts first: the create's
    * deadline, or its socket's teardown. A failed insert, or one cut off,
-   * removes the container, with its anonymous volumes.
+   * answers at once and removes the container in the background, with its
+   * anonymous volumes.
    */
   record(child: ChildRecord, cutOff: AbortSignal): ResultAsync<void, ChildRecordFailed>;
   /** `starting → running` once the daemon has started or restarted the child. */

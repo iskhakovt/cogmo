@@ -427,7 +427,10 @@ describe("child rows", () => {
 
     expect(r.status, r.body).toBe(500);
     const child = expectDefined(createdIds.at(-1), "the created child");
-    expect(received()).toContain(`DELETE /containers/${child}?force=true&v=true`);
+    // Answered at once; the removal finishes in the background.
+    await vi.waitFor(() =>
+      expect(received()).toContain(`DELETE /containers/${child}?force=true&v=true`),
+    );
     expect(await rowOf(child)).toBeUndefined();
   });
 
@@ -556,9 +559,9 @@ describe("child rows", () => {
     } finally {
       inserted.resolve();
     }
-    // The insert lands late, over a container already removed: the stale pass's case.
+    // The insert lands late, over a container already removed, and goes to exited.
     const child = expectDefined(createdIds.at(-1), "the created child");
-    await vi.waitFor(async () => expect((await rowOf(child))?.status).toBe("starting"));
+    await vi.waitFor(async () => expect((await rowOf(child))?.status).toBe("exited"));
   });
 
   it("answers 502 to a create the daemon never answers before its deadline, recording nothing and releasing its admission", async () => {
@@ -790,7 +793,7 @@ describe("two teardowns of one task", () => {
 });
 
 describe("a create outliving the teardown's wait", () => {
-  it("removes its child once the teardown aborts the held insert, leaving any late row to the stale pass", async () => {
+  it("removes its child once the teardown aborts the held insert, and takes the late row exited", async () => {
     const sandbox = await LocalDockerSandboxClient.create({
       docker: new Docker({ socketPath: daemon.socketPath }),
       store,
@@ -829,8 +832,8 @@ describe("a create outliving the teardown's wait", () => {
       inserted.resolve();
     }
     await creating;
-    // The insert commits late, over a container already gone.
-    await vi.waitFor(async () => expect((await rowOf(child))?.status).toBe("starting"));
+    // The insert commits late, over a container already gone: not live, so no reap needs it.
+    await vi.waitFor(async () => expect((await rowOf(child))?.status).toBe("exited"));
 
     const tick = await runReap({
       docker: new Docker({ socketPath: daemon.socketPath }),
@@ -840,7 +843,6 @@ describe("a create outliving the teardown's wait", () => {
       now: () => new Date(),
     });
 
-    expect(tick.staleMarked).toBe(1);
-    expect((await rowOf(child))?.status).toBe("exited");
+    expect(tick.staleMarked).toBe(0);
   });
 });

@@ -2,7 +2,7 @@
  * The writes a child's create, start and removal bring, as the plans in
  * `child-plan.ts` call them, over the boot stage's `ChildContainers`
  * (design/sandbox.md → Proxy Design → Child containers). A failed insert is
- * `record_failed`, since its container is gone; a failed transition is
+ * `record_failed`, since its container is being removed; a failed transition is
  * logged and the daemon's own answer stands, since every reap covers the
  * state the row is left in; a failed reconcile is `unavailable`, since the
  * cap cannot be decided.

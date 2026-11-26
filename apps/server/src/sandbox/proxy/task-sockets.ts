@@ -5,8 +5,10 @@
  * keeps. A registration of a task after its unregister gets a new path,
  * since closing a listener unlinks its path, and an old registration's
  * close must not unlink a new one's file. An upsert of a live registration
- * keeps its path, and an anchor update reaches only a live registration:
- * a task torn down meanwhile gets no new socket that nothing would mount.
+ * keeps its path. An anchor update, and a release, reach only the
+ * registration whose path they name, while it serves: a task torn down
+ * meanwhile gets no new socket that nothing would mount, and a newer
+ * registration of the task is left alone.
  *
  * A socket serves its scope until its teardown begins, and from then on its
  * connections are `unavailable`, whatever registration the task has since.
@@ -85,6 +87,8 @@ export interface TaskSocketRegistry {
   anchor(taskId: string, socketPath: string, anchor: TaskAnchor): Result<void, NotServing>;
   /** Tear the task's live registration down in the teardown order, joining a teardown under way. */
   unregister(taskId: string): Promise<void>;
+  /** Tear down the registration `register` answered `socketPath` for, if it still serves; nothing otherwise. */
+  release(taskId: string, socketPath: string): Promise<void>;
   /** The creates admitted on any of the task's sockets whose child is not among `counted`. */
   admittedBeyond(taskId: string, counted: ReadonlySet<string>): number;
   /** Tear every socket down at once; a second call resolves with the first. */
@@ -174,6 +178,18 @@ export class TaskSockets implements TaskSocketRegistry {
     const retiring = [...this.#retiring.keys()].filter((task) => task.taskId === taskId);
     const registrations = serving === undefined ? retiring : [serving, ...retiring];
     return R.sumBy(registrations, (task) => task.creates.admittedBeyond(counted));
+  }
+
+  /**
+   * Tear down the task's serving registration as `unregister` does, if it
+   * is the one `register` answered `socketPath` for. A registration torn
+   * down already, or replaced by a newer one, is left as it is: a failed
+   * create releases only what it registered.
+   */
+  release(taskId: string, socketPath: string): Promise<void> {
+    const task = this.#tasks.get(taskId);
+    if (task === undefined || task.socketPath !== socketPath) return Promise.resolve();
+    return this.unregister(taskId);
   }
 
   /**

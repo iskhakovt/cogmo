@@ -228,6 +228,17 @@ export class CogmoSocketProxy {
   }
 
   /**
+   * Release the registration `registerTask` answered `socketPath` for, as
+   * `unregisterTask` would, if it still serves the task; a registration
+   * torn down already, or replaced by a newer one, is left as it is. A
+   * failed `create` releases this way, so it never tears down a newer
+   * create's socket.
+   */
+  releaseTask(taskId: string, socketPath: string): Promise<void> {
+    return this.#sockets.release(taskId, socketPath);
+  }
+
+  /**
    * Tear down every task socket at once, aborting every create in flight
    * with no wait for it, and then the shared HTTP server.
    */

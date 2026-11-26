@@ -57,7 +57,8 @@ export interface CreateForward {
   body: Buffer;
   /**
    * Insert the row of the child a 201 names unless `cutOff` aborts first.
-   * A rejection once the container is removed, or left to the orphan pass.
+   * A rejection once the insert failed or was cut off, its container's
+   * removal under way in the background.
    */
   record(dockerId: string, cutOff: AbortSignal): Promise<Result<void, ProxyRejection>>;
   /** The create's admission, held from its checks to its answer. */
@@ -82,10 +83,6 @@ export function forwardCreate(
 ): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   const deadline = new AbortController();
-  const timer = setTimeout(
-    () => deadline.abort(new Error("the daemon did not answer the create in time")),
-    CREATE_DEADLINE_MS,
-  );
   let answered = false;
   const answer = (outcome: CreateAnswer) => {
     if (answered) return;
@@ -115,6 +112,12 @@ export function forwardCreate(
         answer({ kind: "internal_error", message: `Cogmo proxy: ${describeError(cause)}` });
       });
     },
+  );
+  // Armed once the request is built, so one Node refuses as it builds it
+  // (a throw the admission's caller answers 500) leaves no timer behind.
+  const timer = setTimeout(
+    () => deadline.abort(new Error("the daemon did not answer the create in time")),
+    CREATE_DEADLINE_MS,
   );
   outgoing.on("error", (cause) => {
     if (replied) return;

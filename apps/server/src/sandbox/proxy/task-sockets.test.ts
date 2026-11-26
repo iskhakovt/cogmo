@@ -122,8 +122,21 @@ describe("TaskSockets", () => {
 
     const anchored = sockets.anchor(SCOPE.taskId, old, { rowId: "r", dockerId: "d" });
 
-    expect(anchored.isErr()).toBe(true);
+    expect(anchored._unsafeUnwrapErr()).toEqual({ kind: "not_serving" });
     expect(task.state).toEqual({ kind: "serving", scope: SCOPE });
+  });
+
+  it("releases the registration a path names, and leaves a newer registration of the task serving", async () => {
+    const old = await sockets.register(SCOPE);
+    await sockets.unregister(SCOPE.taskId);
+    const current = await sockets.register(SCOPE);
+    const task = await connect(current);
+
+    await sockets.release(SCOPE.taskId, old);
+    expect(task.state).toEqual({ kind: "serving", scope: SCOPE });
+
+    await sockets.release(SCOPE.taskId, current);
+    expect(task.state).toEqual({ kind: "retiring" });
   });
 
   it("keeps a new registration's socket file when the old one's listener closes after it bound", async () => {

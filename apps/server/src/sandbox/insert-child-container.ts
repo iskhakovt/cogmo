@@ -1,5 +1,5 @@
 import { DrizzleQueryError } from "drizzle-orm";
-import { err, ok, type Result } from "neverthrow";
+import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
@@ -23,17 +23,20 @@ interface InsertChildContainerDeps {
  * deadline, or its socket's teardown.
  *
  * An insert the store or its driver fails leaves the daemon holding a
- * container no row records, so it is removed here, with its anonymous
- * volumes, before the failure is answered. One cut off is answered at
- * once, and its container is removed in the background: a create past its
- * deadline would otherwise answer 201 for a container the orphan pass may
- * remove as rowless, and one cut off by teardown would leave the cascade a
- * row it never listed. A removal the daemon refuses is logged, and the
- * orphan pass removes the rowless container once its grace window has
- * passed. An insert that commits after the cut-off leaves a `starting` row
- * over a removed container, which the stale pass marks `exited`. Any other
- * throw, a column's schema refusing the row among them, is a bug and is
- * rethrown.
+ * container no row records, so the container is removed, with its
+ * anonymous volumes. So is one cut off: a create past its deadline would
+ * otherwise answer 201 for a container the orphan pass may remove as
+ * rowless, and one cut off by teardown would leave the cascade a row it
+ * never listed. Either is answered at once, and the removal finishes in the
+ * background, so a wedged daemon holds neither the answer nor the
+ * admission. A removal the daemon refuses is logged, and the orphan pass
+ * removes the rowless container once its grace window has passed.
+ *
+ * A cut-off insert that commits later is taken out of the live states: its
+ * row moves to `exited` once the container is gone, the removal retried if
+ * the daemon refused it, so the row holds no place under the child cap.
+ * Any other throw, a column's schema refusing the row among them, is a bug
+ * and is rethrown.
  */
 export async function insertChildContainer(
   deps: InsertChildContainerDeps,
@@ -58,26 +61,12 @@ export async function insertChildContainer(
         { err: cause, dockerId: child.dockerId },
         "child container row insert failed, removing",
       );
-      await removeRowless(deps.docker, child.dockerId);
+      inBackground(child, removeRowless(deps.docker, child.dockerId));
       return err<ContainerRow, ChildRecordFailed>({ kind: "record_failed" });
     })
     .with({ kind: "cut_off" }, async () => {
       log.warn({ dockerId: child.dockerId }, "child container row cut off, removing");
-      // The insert may still commit, over the container removed here.
-      inserting.then(
-        () =>
-          log.warn(
-            { dockerId: child.dockerId },
-            "a child row committed after its create was cut off; the stale pass marks it exited",
-          ),
-        (cause: unknown) =>
-          log.debug({ err: cause, dockerId: child.dockerId }, "a late child row insert failed"),
-      );
-      // Answered now; the removal finishes in the background. It settles
-      // its daemon failures itself, so a rejection is a bug.
-      removeRowless(deps.docker, child.dockerId).catch((cause: unknown) =>
-        log.error({ err: cause, dockerId: child.dockerId }, "removing a cut-off child threw"),
-      );
+      inBackground(child, settleCutOff(deps, child, inserting));
       return err<ContainerRow, ChildRecordFailed>({ kind: "cut_off" });
     })
     .exhaustive();
@@ -110,24 +99,115 @@ async function raceCutOff(
   }
 }
 
-/** Remove a container no row records; a removal the daemon refuses is logged for the orphan pass. */
-async function removeRowless(docker: DockerFacade, dockerId: string): Promise<void> {
+/** Work left to finish after the answer; it settles its expected failures itself, so a rejection is a bug. */
+function inBackground(child: ChildRecord, work: Promise<unknown>): void {
+  work.catch((cause: unknown) =>
+    log.error({ err: cause, dockerId: child.dockerId }, "finishing a child's rollback threw"),
+  );
+}
+
+/**
+ * Remove a cut-off create's container, and take a row its insert commits
+ * after the cut-off out of the live states: `exited` once the container is
+ * gone, the removal retried first if the daemon refused it. A row whose
+ * container the daemon still refuses to remove stays `starting`, logged,
+ * until the cascade or the TTL pass reaps it.
+ */
+async function settleCutOff(
+  deps: InsertChildContainerDeps,
+  child: ChildRecord,
+  inserting: Promise<ContainerRow>,
+): Promise<void> {
+  const [late, removed] = await Promise.all([
+    inserting.then(
+      (row): LateInsert => ({ kind: "committed", row }),
+      (cause: unknown): LateInsert => ({ kind: "failed", cause }),
+    ),
+    removeRowless(deps.docker, child.dockerId),
+  ]);
+  await match(late)
+    .with({ kind: "failed" }, async ({ cause }) =>
+      log.debug({ err: cause, dockerId: child.dockerId }, "a late child row insert failed"),
+    )
+    .with({ kind: "committed" }, async ({ row }) => {
+      log.warn(
+        { dockerId: child.dockerId, rowId: row.id },
+        "a child row committed after its create was cut off",
+      );
+      const gone = removed || (await removeRowless(deps.docker, child.dockerId));
+      if (!gone) {
+        log.error(
+          { dockerId: child.dockerId, rowId: row.id },
+          "a cut-off child's container could not be removed; its row stays starting until it is reaped",
+        );
+        return;
+      }
+      await exitLateRow(deps, row);
+    })
+    .exhaustive();
+}
+
+type LateInsert = { kind: "committed"; row: ContainerRow } | { kind: "failed"; cause: unknown };
+
+/** `starting → exited` for a late row whose container is gone; a failed write leaves it to the stale pass. */
+async function exitLateRow(deps: InsertChildContainerDeps, row: ContainerRow): Promise<void> {
+  const written = await ResultAsync.fromPromise(
+    deps.runInTx((tx) =>
+      deps.store.transitionContainerStatus(tx, {
+        id: row.id,
+        from: "starting",
+        to: "exited",
+        at: new Date(),
+      }),
+    ),
+    (cause) => cause,
+  );
+  written.match(
+    (result) =>
+      match(result)
+        .with({ kind: "transitioned" }, () =>
+          log.info({ dockerId: row.dockerId }, "a cut-off child's late row marked exited"),
+        )
+        .with({ kind: "stale" }, ({ status }) =>
+          log.debug(
+            { dockerId: row.dockerId, status },
+            "a cut-off child's late row already finished by another path",
+          ),
+        )
+        .exhaustive(),
+    (cause) =>
+      log.warn(
+        { err: cause, dockerId: row.dockerId },
+        "a cut-off child's late row could not be marked exited; the stale pass marks it",
+      ),
+  );
+}
+
+/** Remove a container no row records, answering whether it went; a removal the daemon refuses is logged. */
+async function removeRowless(docker: DockerFacade, dockerId: string): Promise<boolean> {
   const removed = await killAndRemoveContainer(docker, dockerId);
-  removed.match(
-    () => undefined,
-    (e) =>
+  return removed.match(
+    () => true,
+    (e) => {
       log.warn(
         { err: e.error, op: e.op, dockerId },
         "removing the rowless child failed; the orphan pass removes it",
-      ),
+      );
+      return false;
+    },
   );
 }
 
 /** How far down the `cause` chain a driver's error is worth looking for. */
 const MAX_CAUSE_DEPTH = 4;
 
-/** A five-character SQLSTATE, which every Postgres error carries. */
-const SQLSTATE = /^[0-9A-Z]{5}$/;
+/**
+ * A five-character SQLSTATE, which every Postgres error carries: its class,
+ * the first two characters, starts with a digit or is one of the four
+ * lettered classes (`F0`, `HV`, `P0`, `XX`), so a five-letter errno code
+ * such as `EPERM` is not one.
+ */
+const SQLSTATE = /^(?:[0-9][0-9A-Z]|F0|HV|P0|XX)[0-9A-Z]{3}$/;
 
 /**
  * The connection failures raised under these codes: postgres-js's

@@ -582,6 +582,44 @@ describe("teardown", () => {
     expect(createsReached()).toBe(1);
   });
 
+  it("answers a create whose image lookup is refused after the teardown began unavailable, not with the policy's rejection", async () => {
+    let inspects = 0;
+    const failHeld = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    h.daemon.setResponder((req, res, raw) => {
+      // The first create is admitted and held, which keeps the teardown waiting.
+      if (req.url.startsWith("/containers/create")) {
+        held.resolve();
+        return;
+      }
+      if (req.url.startsWith("/images/")) {
+        inspects += 1;
+        if (inspects >= 2) {
+          // A 404, which the policy answers `not_found` while the socket serves.
+          void failHeld.promise.then(() =>
+            respondJson(res, 404, { message: "No such image: alpine:3" }),
+          );
+          return;
+        }
+      }
+      API(req, res, raw);
+    });
+    void h
+      .send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }))
+      .catch(() => {});
+    await held.promise;
+    const second = h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+    await vi.waitFor(() => expect(inspects).toBe(2));
+
+    void h.proxy.unregisterTask(SCOPE.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    failHeld.resolve();
+
+    const r = await second;
+    expect(r.status, r.body).toBe(503);
+    expect(createsReached()).toBe(1);
+  });
+
   it("answers a create whose cap reconcile finishes after the teardown began unavailable, forwarding nothing", async () => {
     const fifteen = Array.from({ length: 15 }, (_, n) => ({
       ...CHILD_ROW,

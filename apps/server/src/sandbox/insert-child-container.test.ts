@@ -2,11 +2,15 @@ import { getEventListeners } from "node:events";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
+import { resolvesWithin } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { DockerContainer, DockerFacade } from "./docker-facade.js";
 import { insertChildContainer } from "./insert-child-container.js";
 import type { ChildRecord } from "./proxy/index.js";
 import { DrizzleSandboxStore } from "./store/index.js";
+
+const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
+vi.mock("../logger.js", () => ({ logger: { child: () => log } }));
 
 const TASK_ID = "019d0000-0000-7000-8000-000000000001";
 const TTL = new Date("2026-12-01T00:00:00.000Z");
@@ -118,6 +122,24 @@ describe("insertChildContainer", () => {
     expect(await tx((trx) => store.getContainerByDockerId(trx, "child-container"))).toBeUndefined();
   });
 
+  it("answers record_failed before the rollback's removal finishes", async () => {
+    const { docker, container } = stubDocker();
+    const kill = Promise.withResolvers<void>();
+    container.kill.mockReturnValue(kill.promise);
+    const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
+
+    const inserted = await resolvesWithin(
+      insertChildContainer({ store, runInTx: tx, docker }, child, NO_CUT_OFF),
+      2_500,
+      "the insert's answer",
+    );
+
+    expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
+    expect(container.remove).not.toHaveBeenCalled();
+    kill.resolve();
+    await vi.waitFor(() => expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }));
+  });
+
   it("rethrows a failure that is not the store's, such as a column's schema refusing the row", async () => {
     const { docker, container } = stubDocker();
     const child = { ...(await childOf()), resourceLimits: { cpus: -1, memory_bytes: 1, pids: 1 } };
@@ -173,6 +195,39 @@ describe("insertChildContainer", () => {
 
       expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
       expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+    },
+  );
+
+  it.each(["EPERM", "EBADF", "EXDEV"])(
+    "rethrows a %s, an errno code shaped like a SQLSTATE but not the store's",
+    async (code) => {
+      const { docker, container } = stubDocker();
+      const child = await childOf();
+      const misuse: Transactor = () =>
+        Promise.reject(Object.assign(new Error(`${code}: operation failed`), { code }));
+
+      await expect(
+        insertChildContainer({ store, runInTx: misuse, docker }, child, NO_CUT_OFF),
+      ).rejects.toThrow(code);
+      expect(container.remove).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["23503", "42P01", "P0001", "XX000", "HV000", "F0000"])(
+    "is record_failed for the SQLSTATE %s",
+    async (code) => {
+      const { docker } = stubDocker();
+      const child = await childOf();
+      const refusing: Transactor = () =>
+        Promise.reject(Object.assign(new Error(`postgres ${code}`), { code }));
+
+      const inserted = await insertChildContainer(
+        { store, runInTx: refusing, docker },
+        child,
+        NO_CUT_OFF,
+      );
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
     },
   );
 
@@ -252,13 +307,14 @@ describe("insertChildContainer", () => {
       await vi.waitFor(() =>
         expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }),
       );
-      // The insert commits late, leaving a starting row over a removed container.
+      // The insert commits late, over a container already removed: the row goes to exited.
       held.resolve();
       await vi.waitFor(async () =>
         expect(
           (await tx((trx) => store.getContainerByDockerId(trx, "child-container")))?.status,
-        ).toBe("starting"),
+        ).toBe("exited"),
       );
+      expect(container.remove).toHaveBeenCalledTimes(1);
     });
 
     it("answers before the container's removal finishes", async () => {
@@ -282,6 +338,141 @@ describe("insertChildContainer", () => {
       kill.resolve();
       await vi.waitFor(() =>
         expect(container.remove).toHaveBeenCalledWith({ force: true, v: true }),
+      );
+    });
+
+    it("takes a row that commits late exited, retrying the removal the daemon refused first", async () => {
+      const { docker, container } = stubDocker();
+      container.kill.mockRejectedValueOnce(
+        Object.assign(new Error("daemon i/o"), { statusCode: 500 }),
+      );
+      const child = await childOf();
+      const cutOff = new AbortController();
+      const held = Promise.withResolvers<void>();
+      const slow: Transactor = async (cb) => {
+        await held.promise;
+        return tx(cb);
+      };
+
+      const inserting = insertChildContainer(
+        { store, runInTx: slow, docker },
+        child,
+        cutOff.signal,
+      );
+      cutOff.abort(new Error("the create's deadline passed"));
+      expect((await inserting)._unsafeUnwrapErr()).toEqual({ kind: "cut_off" });
+      await vi.waitFor(() => expect(container.kill).toHaveBeenCalledTimes(1));
+      expect(container.remove).not.toHaveBeenCalled();
+      held.resolve();
+
+      // Not live, so it holds no place under the child cap.
+      await vi.waitFor(async () =>
+        expect(
+          (await tx((trx) => store.getContainerByDockerId(trx, "child-container")))?.status,
+        ).toBe("exited"),
+      );
+      expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+    });
+
+    it("leaves a late row starting, and logs it, when the daemon refuses the retried removal too", async () => {
+      const { docker, container } = stubDocker();
+      container.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
+      const child = await childOf();
+      const cutOff = new AbortController();
+      cutOff.abort(new Error("the socket was torn down"));
+
+      const inserted = await insertChildContainer(
+        { store, runInTx: tx, docker },
+        child,
+        cutOff.signal,
+      );
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "cut_off" });
+      await vi.waitFor(() =>
+        expect(log.error).toHaveBeenCalledWith(
+          expect.objectContaining({ dockerId: "child-container" }),
+          expect.stringContaining("could not be removed"),
+        ),
+      );
+      expect(container.kill).toHaveBeenCalledTimes(2);
+      expect(
+        (await tx((trx) => store.getContainerByDockerId(trx, "child-container")))?.status,
+      ).toBe("starting");
+    });
+
+    it("leaves a late row to the stale pass, and logs it, when its exited write fails", async () => {
+      const { docker } = stubDocker();
+      const child = await childOf();
+      const cutOff = new AbortController();
+      cutOff.abort(new Error("the socket was torn down"));
+      let calls = 0;
+      // The insert commits; the exited write after it fails.
+      const flaky: Transactor = async (cb) => {
+        calls += 1;
+        if (calls === 1) return tx(cb);
+        throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+      };
+
+      await insertChildContainer({ store, runInTx: flaky, docker }, child, cutOff.signal);
+
+      await vi.waitFor(() =>
+        expect(log.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ dockerId: "child-container" }),
+          expect.stringContaining("could not be marked exited"),
+        ),
+      );
+      expect(
+        (await tx((trx) => store.getContainerByDockerId(trx, "child-container")))?.status,
+      ).toBe("starting");
+    });
+
+    it("logs a late insert that fails after the cut-off at debug", async () => {
+      const { docker } = stubDocker();
+      const child = await childOf();
+      const cutOff = new AbortController();
+      const held = Promise.withResolvers<void>();
+      const lost: Transactor = async () => {
+        await held.promise;
+        throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+      };
+
+      const inserting = insertChildContainer(
+        { store, runInTx: lost, docker },
+        child,
+        cutOff.signal,
+      );
+      cutOff.abort(new Error("the create's deadline passed"));
+      expect((await inserting)._unsafeUnwrapErr()).toEqual({ kind: "cut_off" });
+      held.resolve();
+
+      await vi.waitFor(() =>
+        expect(log.debug).toHaveBeenCalledWith(
+          expect.objectContaining({ dockerId: "child-container" }),
+          "a late child row insert failed",
+        ),
+      );
+    });
+
+    it("logs a background removal that throws as an error", async () => {
+      const { docker } = stubDocker();
+      const bug = new Error("getContainer is broken");
+      vi.mocked(docker.getContainer).mockImplementation(() => {
+        throw bug;
+      });
+      const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
+
+      const inserted = await insertChildContainer(
+        { store, runInTx: tx, docker },
+        child,
+        NO_CUT_OFF,
+      );
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
+      await vi.waitFor(() =>
+        expect(log.error).toHaveBeenCalledWith(
+          { err: bug, dockerId: "child-container" },
+          "finishing a child's rollback threw",
+        ),
       );
     });
 

@@ -227,25 +227,29 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     const cgroupParent = taskSliceName(spec.taskId);
 
     // A session without `dockerSocket` gets no proxy scope. A failed create
-    // releases only the scope it registered: scopes are keyed by task id,
-    // which a salvage session shares with its coding task.
+    // releases only the registration it got, by its socket path: scopes are
+    // keyed by task id, which a salvage session shares with its coding task,
+    // and the task may have registered again on a newer socket meanwhile.
     const proxy = spec.dockerSocket ? this.#proxy : undefined;
 
     // Pre-allocate the proxy socket so the task container can mount it at
     // `/var/run/docker.sock` from the moment it starts. The task container
     // has no row yet — register with no anchor, then `anchorTask` below once
     // the row exists.
-    const proxySocketPath = proxy
-      ? await proxy.registerTask({
-          taskId: spec.taskId,
-          anchor: null,
-          parentDepth: 0,
-          runtime,
-          cgroupParent,
-          instanceId: this.#instanceId,
-          resourceLimits: spec.resourceLimits,
-          ttlExpiresAt: spec.expiresAt,
-        })
+    const registration: ProxyRegistration | null = proxy
+      ? {
+          proxy,
+          socketPath: await proxy.registerTask({
+            taskId: spec.taskId,
+            anchor: null,
+            parentDepth: 0,
+            runtime,
+            cgroupParent,
+            instanceId: this.#instanceId,
+            resourceLimits: spec.resourceLimits,
+            ttlExpiresAt: spec.expiresAt,
+          }),
+        }
       : null;
 
     const binds: string[] = [];
@@ -259,8 +263,8 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       }
       binds.push(`${spec.worktree.hostPath}:/workspace`);
     }
-    if (proxySocketPath) {
-      binds.push(`${proxySocketPath}:/var/run/docker.sock`);
+    if (registration) {
+      binds.push(`${registration.socketPath}:/var/run/docker.sock`);
     }
     if (spec.askpass) {
       // Read-only — the in-container helper only `cat`s the secret file.
@@ -332,7 +336,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         },
       });
     } catch (err) {
-      await releaseProxyScope(proxy, spec.taskId);
+      await releaseProxyScope(registration, spec.taskId);
       throw err;
     }
 
@@ -366,14 +370,14 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
             "removing the rowless container failed",
           ),
       );
-      await releaseProxyScope(proxy, spec.taskId);
+      await releaseProxyScope(registration, spec.taskId);
       throw err;
     }
 
-    if (proxy && proxySocketPath !== null) {
+    if (registration) {
       // The anchor reaches only the registration this create mounted, so a
       // newer registration of the task is never anchored to this container.
-      const anchored = proxy.anchorTask(spec.taskId, proxySocketPath, {
+      const anchored = registration.proxy.anchorTask(spec.taskId, registration.socketPath, {
         rowId: containerRow.id,
         dockerId: container.id,
       });
@@ -415,7 +419,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
           "reaping the unstarted container failed",
         );
       }
-      await releaseProxyScope(proxy, spec.taskId);
+      await releaseProxyScope(registration, spec.taskId);
       throw err;
     }
 
@@ -441,7 +445,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
               "removing the container of a finished row failed",
             ),
         );
-        await releaseProxyScope(proxy, spec.taskId);
+        await releaseProxyScope(registration, spec.taskId);
         throw new Error(`container ${container.id} was ${status} before it finished starting`);
       })
       .exhaustive();
@@ -841,16 +845,23 @@ function sinkWritable(sink: ExecSink, stream: ExecStreamName): Writable {
   });
 }
 
+/** The proxy registration a `create` got: the socket path it mounts, and so releases. */
+interface ProxyRegistration {
+  proxy: CogmoSocketProxy;
+  socketPath: string;
+}
+
 /**
- * Drop the proxy scope a failed `create` registered, if it registered one; a
- * failure here is logged, not raised over the original error.
+ * Release the proxy registration a failed `create` got, if it got one and
+ * it still serves the task; a failure here is logged, not raised over the
+ * original error.
  */
 async function releaseProxyScope(
-  proxy: CogmoSocketProxy | undefined,
+  registration: ProxyRegistration | null,
   taskId: string,
 ): Promise<void> {
-  if (!proxy) return;
-  await proxy.unregisterTask(taskId).catch((err: unknown) => {
-    log.warn({ err, taskId }, "proxy unregisterTask failed during create rollback");
+  if (!registration) return;
+  await registration.proxy.releaseTask(taskId, registration.socketPath).catch((err: unknown) => {
+    log.warn({ err, taskId }, "proxy release failed during create rollback");
   });
 }
