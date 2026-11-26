@@ -105,7 +105,7 @@
   },
   "devDependencies": {
     "@copilotkit/aimock": "^1.48.0",
-    "@electric-sql/pglite": "^0.5.16",
+    "@electric-sql/pglite": "^0.5.17",
     "@inngest/test": "^1.0.0",
     "@modelcontextprotocol/server-everything": "^2026.8.31",
     "@noble/curves": "^2.4.0",
