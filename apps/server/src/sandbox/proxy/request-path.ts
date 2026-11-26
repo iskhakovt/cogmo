@@ -61,6 +61,11 @@ export function parseTarget(raw: string): Result<RequestTarget, ProxyRejection> 
 }
 
 /** `path` with `query` appended, when it has any key. */
+/** `query` with only the keys in `keys`, each with every value it came with, in order. */
+export function onlyKeys(query: URLSearchParams, keys: ReadonlySet<string>): URLSearchParams {
+  return new URLSearchParams([...query].filter(([key]) => keys.has(key)));
+}
+
 export function withQuery(path: string, query: URLSearchParams): string {
   const serialised = query.toString();
   return serialised === "" ? path : `${path}?${serialised}`;

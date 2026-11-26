@@ -96,6 +96,8 @@ let createGate: Promise<void>;
 let childWriteGate: Promise<void>;
 /** Holds each insert's result once the insert has committed, until it resolves. */
 let recordGate: Promise<void>;
+/** How many of the next child writes fail as a lost connection would. */
+let failingWrites: number;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
@@ -146,6 +148,7 @@ beforeEach(async () => {
   createGate = Promise.resolve();
   childWriteGate = Promise.resolve();
   recordGate = Promise.resolve();
+  failingWrites = 0;
   baseDir = await mkdtemp(join(tmpdir(), "cogmo-proxy-child-rows-"));
   daemon = await startFakeDockerDaemon(join(baseDir, "docker.sock"), childDaemon());
   proxy = await CogmoSocketProxy.create({
@@ -157,6 +160,10 @@ beforeEach(async () => {
         store,
         runInTx: async (cb) => {
           await childWriteGate;
+          if (failingWrites > 0) {
+            failingWrites -= 1;
+            throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+          }
           return tx(cb);
         },
         docker: new Docker({ socketPath: daemon.socketPath }),
@@ -263,6 +270,24 @@ async function rowOf(dockerId: string) {
 
 function received(): string[] {
   return daemon.requests().map((r) => `${r.method} ${r.url}`);
+}
+
+/**
+ * Send a create on a fresh connection and collect every byte the proxy
+ * writes back, until the connection closes.
+ */
+function rawCreate(): Promise<string> {
+  const body = JSON.stringify({ Image: IMAGE });
+  const client = net.createConnection({ path: socket });
+  client.on("error", () => {});
+  let received = "";
+  client.on("data", (chunk: Buffer) => {
+    received += chunk.toString("latin1");
+  });
+  client.write(
+    `POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`,
+  );
+  return new Promise((resolve) => client.once("close", () => resolve(received)));
 }
 
 /** Send `method path` on a fresh connection, to be hung up once the daemon has it. */
@@ -753,6 +778,60 @@ describe("a client that hangs up once the daemon has its request", () => {
     answer.resolve();
 
     await vi.waitFor(async () => expect((await rowOf(id))?.status).toBe("exited"));
+  });
+});
+
+describe("a create its socket's teardown cuts off", () => {
+  it("closes the client's connection with no answer once the teardown's wait runs out", async () => {
+    createGate = new Promise(() => {});
+    const answered = rawCreate();
+    await vi.waitFor(() => expect(creates()).toHaveLength(1));
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let tearingDown: Promise<void>;
+    try {
+      tearingDown = proxy.unregisterTask(TASK_ID);
+      await vi.advanceTimersByTimeAsync(30_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    await tearingDown;
+
+    expect(await resolvesWithin(answered, 2_500, "the client's connection to close")).toBe("");
+  });
+
+  it("closes the client's connection with no answer when the proxy closes", async () => {
+    createGate = new Promise(() => {});
+    const answered = rawCreate();
+    await vi.waitFor(() => expect(creates()).toHaveLength(1));
+
+    await proxy.close();
+
+    expect(await resolvesWithin(answered, 2_500, "the client's connection to close")).toBe("");
+  });
+});
+
+describe("a failed insert at the cap", () => {
+  it("frees its place at once, while its container's removal is still held", async () => {
+    for (let n = 0; n < 15; n += 1) await insertChildRow(n, "running", "present");
+    const killed = Promise.withResolvers<void>();
+    onKill = () => killed.promise;
+    failingWrites = 1;
+    try {
+      const failed = await send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+      expect(failed.status, failed.body).toBe(500);
+      const rolledBack = expectDefined(createdIds.at(-1), "the failed create's child");
+      await vi.waitFor(() =>
+        expect(received()).toContain(`POST /containers/${rolledBack}/kill?signal=SIGTERM`),
+      );
+
+      const second = await send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+
+      expect(second.status, second.body).toBe(201);
+      expect(received()).not.toContain(`DELETE /containers/${rolledBack}?force=true&v=true`);
+    } finally {
+      killed.resolve();
+    }
   });
 });
 

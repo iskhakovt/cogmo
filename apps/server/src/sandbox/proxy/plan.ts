@@ -22,7 +22,7 @@ import { imageCreateQuery } from "./image-create-query.js";
 import { applyNetworkEndpointPolicy, type NetworkEndpoint } from "./network-endpoint.js";
 import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
 import { notFound, type ProxyRejection } from "./rejection.js";
-import { withQuery } from "./request-path.js";
+import { onlyKeys, withQuery } from "./request-path.js";
 import type { ContainerTarget, ExecTarget, RequestRoute, StreamRoute } from "./router.js";
 
 export interface StreamContext extends OwnershipLookups {
@@ -47,6 +47,9 @@ export function planRequest(
     )
     .with({ kind: "container" }, async ({ target }) =>
       (await containerPath(target, query, ctx)).map(piped),
+    )
+    .with({ kind: "child_signal" }, async ({ target, keys }) =>
+      (await containerPath(target, onlyKeys(query, keys), ctx)).map(piped),
     )
     .with({ kind: "exec" }, async ({ target }) => execPath(target, query, ctx.execIds).map(piped))
     .with({ kind: "container_list" }, async ({ path }) =>

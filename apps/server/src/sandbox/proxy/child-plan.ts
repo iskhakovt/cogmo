@@ -15,7 +15,7 @@ import type { Forward } from "./forward.js";
 import { parseJson } from "./key-rules.js";
 import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
 import { denied, type ProxyRejection, unavailable } from "./rejection.js";
-import { withQuery } from "./request-path.js";
+import { onlyKeys, withQuery } from "./request-path.js";
 import type { ContainerTarget } from "./router.js";
 import type {
   ChildExitCause,
@@ -29,6 +29,15 @@ import type {
 /** The daemon's answers to a start that leaves the container running: started, or already running. */
 const STARTED_STATUSES: ReadonlySet<number> = new Set([204, 304]);
 const RESTARTED_STATUS = 204;
+
+/**
+ * The query keys the daemon documents for a start and a restart; no other
+ * key is forwarded. A start's undocumented `checkpoint` and
+ * `checkpoint-dir` would restore the container from a checkpoint under a
+ * host path.
+ */
+const START_KEYS: ReadonlySet<string> = new Set(["detachKeys"]);
+const RESTART_KEYS: ReadonlySet<string> = new Set(["t", "signal"]);
 /** The daemon's answers to a removal that leave no container: removed, or already gone. */
 const REMOVAL_CAUSES: ReadonlyMap<number, ChildExitCause> = new Map([
   [204, "removed_by_task"],
@@ -140,8 +149,8 @@ function anchorOf(scope: TaskScope): Result<TaskAnchor, ProxyRejection> {
  * A child's start, sent with no body. A body is the `HostConfig` of API
  * versions before 1.24, which the daemon refuses past seven bytes: `null`
  * and `{}` mean nothing and are accepted, and anything else, whitespace
- * alone included, is denied. Once the daemon has started the child, its
- * row moves to `running`.
+ * alone included, is denied. Only `detachKeys` goes in the query. Once the
+ * daemon has started the child, its row moves to `running`.
  */
 export async function planChildStart(
   target: ContainerTarget,
@@ -156,7 +165,7 @@ export async function planChildStart(
     (child): Forward => ({
       path: withQuery(
         `${target.versionPrefix}/containers/${child.dockerId}${target.suffix}`,
-        query,
+        onlyKeys(query, START_KEYS),
       ),
       body: { kind: "none" },
       response: {
@@ -169,9 +178,9 @@ export async function planChildStart(
 }
 
 /**
- * A child's restart, forwarded with no body: the daemon reads only its
- * query (`t`, `signal`), and a half-sent body could otherwise hold the
- * daemon request open. A restart the daemon answers 204 has left the child
+ * A child's restart, forwarded with no body and only `t` and `signal` in
+ * its query, which is all the daemon reads: a half-sent body could
+ * otherwise hold the daemon request open. A restart the daemon answers 204 has left the child
  * running, so its row moves as a start's.
  */
 export async function planChildRestart(
@@ -184,7 +193,7 @@ export async function planChildRestart(
     (child): Forward => ({
       path: withQuery(
         `${target.versionPrefix}/containers/${child.dockerId}${target.suffix}`,
-        query,
+        onlyKeys(query, RESTART_KEYS),
       ),
       body: { kind: "none" },
       response: {

@@ -1,10 +1,11 @@
 import { DrizzleQueryError } from "drizzle-orm";
-import { err, ok, type Result, ResultAsync } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { DockerFacade } from "./docker-facade.js";
 import { killAndRemoveContainer } from "./kill-and-remove-container.js";
+import { markChildExited } from "./mark-child-exited.js";
 import type { ChildRecord, ChildRecordFailed } from "./proxy/index.js";
 import type { ContainerRow, SandboxStore } from "./store/index.js";
 
@@ -32,7 +33,8 @@ interface InsertChildContainerDeps {
  * admission. A removal the daemon refuses is logged, and the orphan pass
  * removes the rowless container once its grace window has passed.
  *
- * A cut-off insert that commits later is taken out of the live states: its
+ * A create already cut off when this runs inserts nothing. A cut-off
+ * insert that commits later is taken out of the live states: its
  * row moves to `exited` once the container is gone, the removal retried if
  * the daemon refused it, so the row holds no place under the child cap.
  * Any other throw, a column's schema refusing the row among them, is a bug
@@ -43,6 +45,11 @@ export async function insertChildContainer(
   child: ChildRecord,
   cutOff: AbortSignal,
 ): Promise<Result<ContainerRow, ChildRecordFailed>> {
+  if (cutOff.aborted) {
+    log.warn({ dockerId: child.dockerId }, "child create cut off before its row insert, removing");
+    inBackground(child, removeRowless(deps.docker, child.dockerId));
+    return err({ kind: "cut_off" });
+  }
   const inserting = deps.runInTx((tx) =>
     deps.store.insertContainer(tx, { ...child, labels: { ...child.labels } }),
   );
@@ -149,33 +156,26 @@ async function settleCutOff(
 
 type LateInsert = { kind: "committed"; row: ContainerRow } | { kind: "failed"; cause: unknown };
 
-/** `starting → exited` for a late row whose container is gone; a failed write leaves it to the stale pass. */
+/**
+ * `→ exited` for a late row whose container is gone, from `starting`, and
+ * from `running` should a start have moved it first; a failed write leaves
+ * it to the stale pass.
+ */
 async function exitLateRow(deps: InsertChildContainerDeps, row: ContainerRow): Promise<void> {
-  const written = await ResultAsync.fromPromise(
-    deps.runInTx((tx) =>
-      deps.store.transitionContainerStatus(tx, {
-        id: row.id,
-        from: "starting",
-        to: "exited",
-        at: new Date(),
-      }),
-    ),
-    (cause) => cause,
-  );
-  written.match(
-    (result) =>
-      match(result)
-        .with({ kind: "transitioned" }, () =>
-          log.info({ dockerId: row.dockerId }, "a cut-off child's late row marked exited"),
-        )
-        .with({ kind: "stale" }, ({ status }) =>
-          log.debug(
-            { dockerId: row.dockerId, status },
-            "a cut-off child's late row already finished by another path",
-          ),
-        )
-        .exhaustive(),
-    (cause) =>
+  const exited = await markChildExited(deps, {
+    child: {
+      id: row.id,
+      dockerId: row.dockerId,
+      parentId: row.parentId,
+      depth: row.depth,
+      status: "starting",
+    },
+    cause: "cut_off_create",
+    at: new Date(),
+  });
+  exited.match(
+    () => undefined,
+    ({ cause }) =>
       log.warn(
         { err: cause, dockerId: row.dockerId },
         "a cut-off child's late row could not be marked exited; the stale pass marks it",

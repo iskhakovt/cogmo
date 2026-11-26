@@ -500,13 +500,12 @@ describe("LocalDockerSandboxClient with the socket proxy (real Docker, runc runt
       network: "bridge",
       dockerSocket: true,
     });
-    // The task socket, as the supervisor bound it into the task container.
-    const binds = (await docker.getContainer(session.state.dockerId).inspect()).HostConfig.Binds;
-    const bind = expectDefined(
-      binds?.find((b) => b.endsWith(":/var/run/docker.sock")),
-      "the task socket's bind",
-    );
-    const socket = bind.slice(0, -":/var/run/docker.sock".length);
+    // The task socket, as the supervisor bind-mounted it into the task container.
+    const mounts = (await docker.getContainer(session.state.dockerId).inspect()).Mounts;
+    const socket = expectDefined(
+      mounts.find((m) => m.Type === "bind" && m.Destination === "/var/run/docker.sock"),
+      "the task socket's mount",
+    ).Source;
     try {
       const created = await requestOverSocket(socket, {
         method: "POST",

@@ -95,6 +95,8 @@ export const LOCAL_DOCKER_CAPABILITIES: Readonly<SandboxCapabilities> = Object.f
 });
 
 const HOME_VOLUME_TARGET = "/home/vscode";
+/** Where a task container sees its proxy socket, the path Docker clients dial by default. */
+const DOCKER_SOCKET_TARGET = "/var/run/docker.sock";
 
 /**
  * Local-Docker backend. Spawns task containers as siblings on the host
@@ -263,9 +265,6 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       }
       binds.push(`${spec.worktree.hostPath}:/workspace`);
     }
-    if (registration) {
-      binds.push(`${registration.socketPath}:/var/run/docker.sock`);
-    }
     if (spec.askpass) {
       // Read-only — the in-container helper only `cat`s the secret file.
       binds.push(`${spec.askpass.hostDir}:${spec.askpass.containerDir}:ro`);
@@ -277,6 +276,13 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // omits the home volume entirely. When custom devcontainer support
     // grows, the mount target needs to become image-declared.
     const mounts: DockerodeMountSettings[] = [];
+    if (registration) {
+      // A mount, not a `Binds` entry: the daemon refuses the create when the
+      // socket is gone, a registration torn down since `registerTask`,
+      // where a bind would have it create a directory at the socket's path
+      // when the container starts (checked on Docker 29.9.3).
+      mounts.push({ Type: "bind", Source: registration.socketPath, Target: DOCKER_SOCKET_TARGET });
+    }
     if (spec.homeVolume) {
       mounts.push({
         Type: "volume",

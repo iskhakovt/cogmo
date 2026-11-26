@@ -59,6 +59,8 @@ export type RequestRoute =
   | { kind: "child_restart"; target: ContainerTarget }
   /** A child's `DELETE`, whose row follows the daemon's answer. */
   | { kind: "child_remove"; target: ContainerTarget }
+  /** A child's `stop` or `kill`, forwarded with only the query keys the daemon documents for it. */
+  | { kind: "child_signal"; target: ContainerTarget; keys: ReadonlySet<string> }
   /** `POST /images/create`, under its query policy. */
   | { kind: "image_create"; versionPrefix: string }
   | { kind: "exec_create"; ref: string; versionPrefix: string }
@@ -95,7 +97,11 @@ interface Row {
   outcome: (groups: ReadonlyArray<string>, versionPrefix: string, route: string) => Outcome;
 }
 
-const LIFECYCLE_ACTIONS = "kill|pause|unpause|stop|rename";
+const LIFECYCLE_ACTIONS = "pause|unpause|rename";
+
+/** The query keys the daemon reads on a `stop` and on a `kill`; no other key is forwarded. */
+const STOP_KEYS: ReadonlySet<string> = new Set(["t", "signal"]);
+const KILL_KEYS: ReadonlySet<string> = new Set(["signal"]);
 
 /** A row forwarded under its canonical path with no ownership check. */
 function plainRow(method: string, pattern: RegExp): Row {
@@ -159,6 +165,18 @@ const ROWS: ReadonlyArray<Row> = [
     method: "POST",
     pattern: /^\/containers\/(.+)\/(restart)$/,
     outcome: (g, v) => request({ kind: "child_restart", target: container("POST", "child", g, v) }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/(stop)$/,
+    outcome: (g, v) =>
+      request({ kind: "child_signal", target: container("POST", "child", g, v), keys: STOP_KEYS }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/(kill)$/,
+    outcome: (g, v) =>
+      request({ kind: "child_signal", target: container("POST", "child", g, v), keys: KILL_KEYS }),
   },
   {
     method: "POST",

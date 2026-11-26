@@ -13,9 +13,10 @@ interface MarkChildExitedDeps {
 }
 
 /**
- * Mark a child's row `exited` once its container is gone without Cogmo
- * removing it: the task removed it through the proxy, or the daemon no
- * longer has it (design/sandbox.md → Container state machine). The
+ * Mark a child's row `exited` once its container is gone with no reap: the
+ * task removed it through the proxy, the daemon no longer has it, or the
+ * proxy removed it for a create cut off before its row insert committed
+ * (design/sandbox.md → Container state machine). The
  * transition is from the status the caller read. A start that moved the
  * row `starting → running` after that read leaves it stale at `running`,
  * so the transition runs once more from there; any other stale status
@@ -82,6 +83,9 @@ function logExit(
         )
         .with("removed_by_task", () =>
           log.debug({ dockerId: args.dockerId }, "child removed by its task, marked exited"),
+        )
+        .with("cut_off_create", () =>
+          log.info({ dockerId: args.dockerId }, "a cut-off create's late row marked exited"),
         )
         .exhaustive(),
     )

@@ -4,6 +4,7 @@ import { match } from "ts-pattern";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import { markChildExited } from "./mark-child-exited.js";
 import { runReap } from "./reaper.js";
 import { type ContainerTransition, DrizzleSandboxStore } from "./store/index.js";
 import type { ContainerLabels, ResourceLimits } from "./types.js";
@@ -506,6 +507,43 @@ describe("runReap — a row another path already finished", () => {
         await db.execute(
           sql`UPDATE containers SET status = 'exited', exited_at = ${EARLIER}::timestamptz WHERE id = ${cogmoId}`,
         );
+      },
+    });
+
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+
+    expect(result.ttlReaped).toBe(1);
+    const row = await tx((trx) => store.getContainer(trx, cogmoId));
+    expect(row).toMatchObject({ status: "reaped", reapedReason: "ttl_expired" });
+    expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
+  });
+
+  it("TTL pass: a cut-off create's late row moved to exited during its kill is reaped once, keeping its exit time", async () => {
+    const cogmoId = await insertContainer({
+      dockerId: "c-late",
+      ttlMs: -1000,
+      status: "starting",
+      depth: 1,
+    });
+    const { docker } = fakeDocker({
+      containers: [{ Id: "c-late", Created: LONG_AGO, Labels: labels() }],
+      // The cut-off rollback's late-row write commits while the TTL pass kills.
+      onKill: async () => {
+        const exited = await markChildExited(
+          { store, runInTx: tx },
+          {
+            child: {
+              id: cogmoId,
+              dockerId: "c-late",
+              parentId: null,
+              depth: 1,
+              status: "starting",
+            },
+            cause: "cut_off_create",
+            at: new Date(EARLIER),
+          },
+        );
+        expect(exited.isOk()).toBe(true);
       },
     });
 

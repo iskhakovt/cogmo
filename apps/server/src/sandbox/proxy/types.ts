@@ -117,10 +117,11 @@ export type ChildRecordFailed = { kind: "record_failed" } | { kind: "cut_off" };
 export type ChildStartOutcome = { kind: "started" } | { kind: "reaped" };
 
 /**
- * Why a child's container is gone without Cogmo removing it: the daemon
- * removed it at the task's request, or no longer has it.
+ * Why a child's container is gone with no reap: the daemon removed it at
+ * the task's request, no longer has it, or the proxy removed it for a
+ * create cut off before its row insert committed.
  */
-export type ChildExitCause = "removed_by_task" | "missing_from_daemon";
+export type ChildExitCause = "removed_by_task" | "missing_from_daemon" | "cut_off_create";
 
 /**
  * The store writes that follow the daemon's answers to a task's child

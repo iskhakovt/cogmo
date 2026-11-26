@@ -119,8 +119,6 @@ describe("router.classify", () => {
       ["POST", "/containers/abc/wait", "/wait", "any"],
       ["POST", "/containers/abc/resize", "/resize", "any"],
       ["PUT", "/containers/abc/archive", "/archive", "child"],
-      ["POST", "/containers/abc/stop", "/stop", "child"],
-      ["POST", "/containers/abc/kill", "/kill", "child"],
       ["POST", "/containers/abc/pause", "/pause", "child"],
       ["POST", "/containers/abc/unpause", "/unpause", "child"],
       ["POST", "/containers/abc/rename", "/rename", "child"],
@@ -136,6 +134,25 @@ describe("router.classify", () => {
           depth,
           route: `${method} /containers/{id}${suffix}`,
         },
+      });
+    });
+
+    it.each([
+      ["/stop", ["t", "signal"]],
+      ["/kill", ["signal"]],
+    ])("POST /containers/abc%s is a child_signal, of a child only, keeping %j", (suffix, keys) => {
+      const r = classify("POST", `/containers/abc${suffix}`);
+      assertKind(r, "request");
+      expect(r.route).toEqual({
+        kind: "child_signal",
+        target: {
+          ref: "abc",
+          versionPrefix: "",
+          suffix,
+          depth: "child",
+          route: `POST /containers/{id}${suffix}`,
+        },
+        keys: new Set(keys),
       });
     });
 

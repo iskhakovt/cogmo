@@ -240,14 +240,19 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const expectedSlice = "cogmo-task-019d0000000070008000000000000aaa.slice";
     expect(reg0.cgroupParent).toBe(expectedSlice);
 
-    // Container created with the proxy socket bind-mounted at /var/run/docker.sock.
+    // Container created with the proxy socket bind-mounted at
+    // /var/run/docker.sock, as a mount, which the daemon refuses when its
+    // source is gone rather than creating a directory there.
     expect(calls.create).toHaveLength(1);
     const create0 = expectDefined(calls.create[0], "first create call");
     const binds = create0.HostConfig?.Binds ?? [];
     expect(binds).toContain("/tmp/wt:/workspace");
-    expect(binds).toContain(
-      "/var/lib/cogmo/sockets/019d0000-0000-7000-8000-000000000aaa.sock:/var/run/docker.sock",
-    );
+    expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
+    expect(create0.HostConfig?.Mounts).toContainEqual({
+      Type: "bind",
+      Source: "/var/lib/cogmo/sockets/019d0000-0000-7000-8000-000000000aaa.sock",
+      Target: "/var/run/docker.sock",
+    });
     // Task container itself pinned to the slice — Docker creates the
     // slice on demand and aborts here if systemd refuses (e.g. on a
     // non-systemd host).
@@ -435,7 +440,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       }),
     ).rejects.toThrow("daemon refused");
 
-    expect(registers).toHaveLength(1); // only the placeholder
+    expect(registers).toHaveLength(1); // only the unanchored register
     expect(unregisters).toEqual([]);
     expect(releases).toEqual([
       {
@@ -472,7 +477,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     ).rejects.toThrow("boom");
 
     // The register and the anchor fired (the container was created; only
-    // start failed); the unregister rolls the registration back.
+    // start failed); the release rolls the registration back.
     expect(registers).toHaveLength(1);
     expect(anchors).toHaveLength(1);
     expect(unregisters).toEqual([]);
@@ -511,9 +516,12 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       dockerSocket: true,
     });
 
-    const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
-    expect(binds).toContain("/tmp/wt:/workspace");
-    expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
+    const hostConfig = expectDefined(calls.create[0], "first create call").HostConfig;
+    expect(hostConfig?.Binds ?? []).toContain("/tmp/wt:/workspace");
+    expect(
+      (hostConfig?.Binds ?? []).find((b) => b.includes("/var/run/docker.sock")),
+    ).toBeUndefined();
+    expect((hostConfig?.Mounts ?? []).map((m) => m.Target)).not.toContain("/var/run/docker.sock");
   });
 
   it("mounts no socket and registers no scope for a session without dockerSocket", async () => {
@@ -539,8 +547,11 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     });
 
     expect(registers).toEqual([]);
-    const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
-    expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
+    const hostConfig = expectDefined(calls.create[0], "first create call").HostConfig;
+    expect(
+      (hostConfig?.Binds ?? []).find((b) => b.includes("/var/run/docker.sock")),
+    ).toBeUndefined();
+    expect((hostConfig?.Mounts ?? []).map((m) => m.Target)).not.toContain("/var/run/docker.sock");
   });
 
   /** The salvage create's failure, arranged on its own container. */

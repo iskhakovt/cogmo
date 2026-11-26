@@ -498,6 +498,16 @@ describe("the task's own row", () => {
     expect(r.status, r.body).toBe(503);
     expect(h.received()).toEqual([]);
   });
+
+  it("still forwards a plain route, reading no rows, once its own row is reaped", async () => {
+    h.rows.forTask.mockReturnValue(okAsync([CHILD_ROW]));
+
+    const r = await h.send("GET", "/version");
+
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual(["GET /version"]);
+    expect(h.rows.forTask).not.toHaveBeenCalled();
+  });
 });
 
 describe("teardown", () => {
@@ -701,6 +711,30 @@ describe("a child's restart body", () => {
       url: `/containers/${CHILD.id}/restart?t=1`,
       body: "",
     });
+  });
+});
+
+describe("a child lifecycle request's query", () => {
+  it.each([
+    [
+      "start",
+      "detachKeys=ctrl-x&checkpoint=c1&checkpoint-dir=%2Fhost%2Fcheckpoints",
+      "detachKeys=ctrl-x",
+    ],
+    ["restart", "t=3&signal=SIGINT&checkpoint=c1", "t=3&signal=SIGINT"],
+    ["stop", "t=5&signal=SIGTERM&checkpoint-dir=%2Fhost", "t=5&signal=SIGTERM"],
+    ["kill", "signal=SIGKILL&t=1", "signal=SIGKILL"],
+  ])("forwards only the keys the daemon documents for %s", async (action, sent, forwarded) => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.includes(`/${action}`)) return API(req, res, raw);
+      res.writeHead(204);
+      res.end();
+    });
+
+    const r = await h.send("POST", `/containers/${CHILD.name}/${action}?${sent}`);
+
+    expect(r.status, r.body).toBe(204);
+    expect(h.daemon.requests().at(-1)?.url).toBe(`/containers/${CHILD.id}/${action}?${forwarded}`);
   });
 });
 
