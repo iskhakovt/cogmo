@@ -6,7 +6,6 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import Docker from "dockerode";
-import { ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
@@ -19,7 +18,7 @@ import {
   type SandboxClient,
   type SessionSandbox,
 } from "../sandbox/index.js";
-import { listTaskContainers } from "../sandbox/list-task-containers.js";
+import { storeContainerRows } from "../sandbox/list-task-containers.js";
 import type { SandboxRuntime } from "../sandbox/runtime.js";
 import { LOCAL_DOCKER_CAPABILITIES } from "../sandbox/supervisor.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "../skills/worker-sysbox/host.js";
@@ -186,13 +185,7 @@ async function bootstrapLocalDocker(core: CoreDeps, runtime: SandboxRuntime): Pr
   const proxy = await CogmoSocketProxy.create({
     socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
     hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
-    containerRows: {
-      forTask: (taskId) =>
-        ResultAsync.fromPromise(
-          listTaskContainers({ store: core.sandboxStore, runInTx: core.runInTx }, taskId),
-          (cause) => ({ kind: "store_failed" as const, cause }),
-        ),
-    },
+    containerRows: storeContainerRows({ store: core.sandboxStore, runInTx: core.runInTx }),
   });
   const localDocker = await createSandboxBackend({
     backend: "local-docker",

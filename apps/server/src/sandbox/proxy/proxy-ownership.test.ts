@@ -16,6 +16,7 @@ import {
   SALVAGE_ROW,
   SIBLING,
   SIBLING_SCOPE,
+  TASK_ROWS,
   UNKNOWN_ID,
   upgradeRequest,
   useProxyHarness,
@@ -203,6 +204,15 @@ describe("container ownership", () => {
     h.expectRejected(r, 503, []);
   });
 
+  it("answers 404 to a child the daemon still has whose row is reaped", async () => {
+    h.rows.forTask.mockReturnValue(okAsync(TASK_ROWS.filter((row) => row.id !== CHILD_ROW.id)));
+
+    const r = await h.send("GET", `/containers/${CHILD.name}/json`);
+
+    h.expectRejected(r, 404, [resolveOf(CHILD.name)]);
+    expect(message(r)).toBe(`No such container: ${CHILD.name}`);
+  });
+
   it("anchors ownership to the scope's own row, not to the task id a salvage row shares", async () => {
     const r = await h.send("GET", `/containers/${SALVAGE.name}/json`);
 
@@ -331,8 +341,7 @@ describe("exec ownership", () => {
     h.daemon.setResponder((req, res, raw) => {
       if (!(req.method === "POST" && req.url.endsWith("/exec"))) return API(req, res, raw);
       res.writeHead(201, { "content-type": "application/json", "content-length": "100" });
-      res.write('{"Id":');
-      res.destroy();
+      res.write('{"Id":', () => res.destroy());
     });
 
     const r = await h.send(
@@ -342,6 +351,24 @@ describe("exec ownership", () => {
     );
 
     expect(r.status, r.body).toBe(502);
+    expect(message(r)).toContain("ended early");
+  });
+
+  it("answers daemon_failed to an exec create reply over 16 MiB", async () => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (!(req.method === "POST" && req.url.endsWith("/exec"))) return API(req, res, raw);
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end(`{"Id":"${"e".repeat(64)}","pad":"${"x".repeat(16 * 1024 * 1024)}"}`);
+    });
+
+    const r = await h.send(
+      "POST",
+      "/containers/cogmo-task-own/exec",
+      JSON.stringify({ Cmd: ["id"] }),
+    );
+
+    expect(r.status, r.body).toBe(502);
+    expect(message(r)).toContain("exceeds");
   });
 
   it("keeps each task's exec ids to its own socket", async () => {

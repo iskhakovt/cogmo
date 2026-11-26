@@ -142,6 +142,12 @@ describe("router.classify", () => {
       });
     });
 
+    it("forwards GET /containers/{id}/logs as a request, its response streaming", () => {
+      const r = classify("GET", "/containers/abc/logs?follow=1&stdout=1");
+      assertKind(r, "request");
+      expect(r.route).toMatchObject({ kind: "container", target: { ref: "abc", suffix: "/logs" } });
+    });
+
     it("reads a ref that spans segments, as the daemon's {name:.*} does", () => {
       const r = classify("GET", "/v1.44/containers/parent/alias/json?size=1");
       assertKind(r, "request");
@@ -176,9 +182,7 @@ describe("router.classify", () => {
       ["POST", "/v1.44/exec/abc/start"],
       ["POST", "/containers/abc/attach"],
       ["GET", "/containers/abc/attach/ws"],
-      ["GET", "/containers/abc/logs?follow=1&stdout=1"],
-      ["GET", "/distribution/alpine/json"],
-    ])("pipes %s %s", (method, path) => {
+    ])("may upgrade %s %s", (method, path) => {
       expect(classify(method, path).kind).toBe("stream");
     });
 
@@ -201,7 +205,7 @@ describe("router.classify", () => {
       ["GET", "/images/json", "/images/json"],
       ["GET", "/images/alpine:3/json", "/images/alpine:3/json"],
       ["GET", "/images/a%3Fb/history", "/images/a%3Fb/history"],
-      ["POST", "/images/create", "/images/create"],
+      ["GET", "/distribution/alpine/json", "/distribution/alpine/json"],
       ["GET", "/networks", "/networks"],
       ["GET", "/networks/", "/networks"],
       ["GET", "/networks/abc", "/networks/abc"],
@@ -214,6 +218,12 @@ describe("router.classify", () => {
       const r = classify(method, path);
       assertKind(r, "request");
       expect(r.route).toEqual({ kind: "plain", path: forwarded });
+    });
+
+    it("POST /images/create goes to its query policy", () => {
+      const r = classify("POST", "/v1.44/images/create?fromImage=alpine");
+      assertKind(r, "request");
+      expect(r.route).toEqual({ kind: "image_create", versionPrefix: "/v1.44" });
     });
 
     it("GET /events is the filtered event stream", () => {

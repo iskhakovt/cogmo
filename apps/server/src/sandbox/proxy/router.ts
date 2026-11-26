@@ -11,9 +11,10 @@
  * name may hold a `/`.
  *
  * A **request** route goes through `http.request`, its response streaming
- * back. A **stream** route is raw-piped once its checks pass: exec start,
- * attach, logs and the distribution lookup, the routes a client may
- * upgrade.
+ * back. A **stream** route, exec start or attach, may be upgraded: an
+ * upgrade is raw-piped once its checks pass, and a request without
+ * `Upgrade` goes through `http.request` as any other route does, so a
+ * request pipelined after it is classified on its own.
  */
 
 import { match } from "ts-pattern";
@@ -51,6 +52,8 @@ export type RequestRoute =
   | { kind: "plain"; path: string }
   | { kind: "container"; target: ContainerTarget }
   | { kind: "container_create"; versionPrefix: string }
+  /** `POST /images/create`, under its query policy. */
+  | { kind: "image_create"; versionPrefix: string }
   | { kind: "exec_create"; ref: string; versionPrefix: string }
   | { kind: "exec"; target: ExecTarget }
   | { kind: "container_list"; path: string }
@@ -63,7 +66,6 @@ export type RequestRoute =
     };
 
 export type StreamRoute =
-  | { kind: "plain"; path: string }
   | { kind: "container"; target: ContainerTarget }
   | { kind: "exec"; target: ExecTarget };
 
@@ -125,7 +127,12 @@ const ROWS: ReadonlyArray<Row> = [
   readRow("GET", /^\/containers\/(.+)\/(export|changes|json|top|stats|archive)$/),
   {
     method: "GET",
-    pattern: /^\/containers\/(.+)\/(logs|attach\/ws)$/,
+    pattern: /^\/containers\/(.+)\/(logs)$/,
+    outcome: (g, v) => request({ kind: "container", target: container("GET", "any", g, v) }),
+  },
+  {
+    method: "GET",
+    pattern: /^\/containers\/(.+)\/(attach\/ws)$/,
     outcome: (g, v) => stream({ kind: "container", target: container("GET", "any", g, v) }),
   },
   {
@@ -187,12 +194,12 @@ const ROWS: ReadonlyArray<Row> = [
   // Images
   plainRow("GET", /^\/images\/json$/),
   plainRow("GET", /^\/images\/(.+)\/(history|json)$/),
-  plainRow("POST", /^\/images\/create$/),
   {
-    method: "GET",
-    pattern: /^\/distribution\/(.+)\/json$/,
-    outcome: (_, v, r) => stream({ kind: "plain", path: canonical(v, r) }),
+    method: "POST",
+    pattern: /^\/images\/create$/,
+    outcome: (_, v) => request({ kind: "image_create", versionPrefix: v }),
   },
+  plainRow("GET", /^\/distribution\/(.+)\/json$/),
   // Networks
   plainRow("GET", /^\/networks$/),
   plainRow("GET", /^\/networks\/(.+)$/),

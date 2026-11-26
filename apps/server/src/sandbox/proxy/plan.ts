@@ -11,6 +11,7 @@ import { match } from "ts-pattern";
 import { applyContainerCreatePolicy } from "./create-policy.js";
 import { applyExecPolicy } from "./exec-policy.js";
 import type { Forward } from "./forward.js";
+import { imageCreateQuery } from "./image-create-query.js";
 import { applyNetworkEndpointPolicy, type NetworkEndpoint } from "./network-endpoint.js";
 import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
 import { notFound, type ProxyRejection } from "./rejection.js";
@@ -40,6 +41,11 @@ export function planRequest(
 ): Promise<Result<Forward, ProxyRejection>> {
   return match(route)
     .with({ kind: "plain" }, async ({ path }) => ok(piped(withQuery(path, query))))
+    .with({ kind: "image_create" }, async ({ versionPrefix }) =>
+      imageCreateQuery(query).map((forwarded) =>
+        piped(withQuery(`${versionPrefix}/images/create`, forwarded)),
+      ),
+    )
     .with({ kind: "container" }, async ({ target }) =>
       (await containerPath(target, query, ctx)).map(piped),
     )
@@ -50,6 +56,7 @@ export function planRequest(
           path: withQuery(path, query),
           body: { kind: "piped" },
           response: { kind: "container_list", owned: new Set(all.map((r) => r.dockerId)) },
+          whenClientGone: "drop",
         }),
       ),
     )
@@ -59,6 +66,7 @@ export function planRequest(
           path: withQuery(path, query),
           body: { kind: "piped" },
           response: { kind: "events", taskContainerId: task.dockerId },
+          whenClientGone: "drop",
         }),
       ),
     )
@@ -72,14 +80,17 @@ export function planRequest(
     .exhaustive();
 }
 
-/** The path a stream route replays its request line under. */
+/**
+ * The path a stream route's request goes to: the request line an upgrade
+ * replays, or the path of a request without `Upgrade`, which is forwarded
+ * as any other route is (`streamForward`).
+ */
 export function planStream(
   route: StreamRoute,
   query: URLSearchParams,
   ctx: StreamContext,
 ): Promise<Result<string, ProxyRejection>> {
   return match(route)
-    .with({ kind: "plain" }, async ({ path }) => ok(withQuery(path, query)))
     .with({ kind: "container" }, ({ target }) => containerPath(target, query, ctx))
     .with({ kind: "exec" }, async ({ target }) => execPath(target, query, ctx.execIds))
     .exhaustive();
@@ -97,8 +108,13 @@ async function planContainerCreate(
     ctx.scope,
     ctx.createLookups,
   );
-  return created.map((forward) =>
-    rebuilt(withQuery(`${versionPrefix}/containers/create`, forward.query), forward.body),
+  return created.map(
+    (forward): Forward => ({
+      ...rebuilt(withQuery(`${versionPrefix}/containers/create`, forward.query), forward.body),
+      // A create is not bound to the client: a task that hangs up still
+      // gets its container (Child containers).
+      whenClientGone: "send",
+    }),
   );
 }
 
@@ -120,6 +136,7 @@ async function planExecCreate(
       path: withQuery(`${target.versionPrefix}/containers/${container.dockerId}/exec`, query),
       body: { kind: "rebuilt", bytes: body.value },
       response: { kind: "exec_created", record: ctx.recordExec },
+      whenClientGone: "drop",
     }),
   );
 }
@@ -160,10 +177,20 @@ function execPath(
     : err(notFound(`No such exec instance: ${target.id}`));
 }
 
+/** A stream route's request without `Upgrade`, forwarded under the path `planStream` gave. */
+export function streamForward(path: string): Forward {
+  return piped(path);
+}
+
 function piped(path: string): Forward {
-  return { path, body: { kind: "piped" }, response: { kind: "piped" } };
+  return { path, body: { kind: "piped" }, response: { kind: "piped" }, whenClientGone: "drop" };
 }
 
 function rebuilt(path: string, bytes: Buffer): Forward {
-  return { path, body: { kind: "rebuilt", bytes }, response: { kind: "piped" } };
+  return {
+    path,
+    body: { kind: "rebuilt", bytes },
+    response: { kind: "piped" },
+    whenClientGone: "drop",
+  };
 }

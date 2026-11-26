@@ -1,12 +1,12 @@
-import * as net from "node:net";
 import { errAsync, okAsync } from "neverthrow";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { expectDefined, resolvesWithin } from "../../test/assertions.js";
+import { expectDefined } from "../../test/assertions.js";
 import { BRIDGE_NETWORK, respondJson } from "../../test/fake-docker-daemon.js";
 import {
   API,
   CHILD,
+  CHILD_ROW,
   COGMO_OWN,
   containerId,
   message,
@@ -18,14 +18,10 @@ import {
   SIBLING,
   SIBLING_TASK_ID,
   TASK_ID,
-  upgradeRequest,
   useProxyHarness,
 } from "../../test/proxy-harness.js";
 
 const ListSchema = z.array(z.looseObject({ Id: z.string() }));
-
-/** Budget for each wait on a connection; ample headroom over the milliseconds they take. */
-const SETTLE_MS = 2_500;
 
 const h = useProxyHarness();
 
@@ -188,13 +184,31 @@ describe("lists and events", () => {
     h.daemon.setResponder((req, res, raw) => {
       if (!req.url.startsWith("/containers/json")) return API(req, res, raw);
       res.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
-      res.write("[");
-      res.destroy();
+      res.write("[", () => res.destroy());
     });
 
     const r = await h.send("GET", "/containers/json");
 
     expect(r.status, r.body).toBe(502);
+    expect(message(r)).toContain("ended early");
+  });
+
+  it("forwards a list's filters as they came and keeps only owned containers", async () => {
+    const r = await h.send("GET", "/containers/json?filters=%7B%7D");
+
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual(["GET /containers/json?filters=%7B%7D"]);
+    expect(ListSchema.parse(JSON.parse(r.body)).map((c) => c.Id)).toEqual([
+      OWN.id,
+      CHILD.id,
+      RECORDED.id,
+    ]);
+  });
+
+  it("answers unavailable to a list while the task's own row is missing", async () => {
+    h.rows.forTask.mockReturnValue(okAsync([SALVAGE_ROW, CHILD_ROW]));
+
+    h.expectRejected(await h.send("GET", "/containers/json"), 503, []);
   });
 
   it("relays an event stream the daemon refused as it is", async () => {
@@ -332,51 +346,30 @@ describe("hop-by-hop headers", () => {
   });
 });
 
-describe("streams and relays", () => {
+describe("image pulls", () => {
   it.each([
-    ["a stats stream", "GET", "stats", true],
-    ["a wait the daemon has not answered", "POST", "wait", false],
-  ])(
-    "closes the daemon request when the client hangs up on %s",
-    async (_label, method, action, answered) => {
-      const closed = Promise.withResolvers<void>();
-      const held = Promise.withResolvers<void>();
-      h.daemon.setResponder((req, res, raw) => {
-        if (!req.url.startsWith(`/containers/${OWN.id}/${action}`)) return API(req, res, raw);
-        raw.socket.once("close", () => closed.resolve());
-        if (answered) {
-          res.writeHead(200, { "content-type": "application/json" });
-          res.write("{}\n");
-        }
-        held.resolve();
-      });
-      const client = net.createConnection({ path: h.socket });
-      client.on("error", () => {});
-      await new Promise<void>((resolve) => client.once("connect", () => resolve()));
-      client.write(
-        `${method} /containers/cogmo-task-own/${action} HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n`,
-      );
-      await resolvesWithin(held.promise, SETTLE_MS, "the request to reach the daemon");
-
-      client.destroy();
-
-      await resolvesWithin(closed.promise, SETTLE_MS, "the daemon connection to close");
-    },
-  );
-
-  it("answers 502 to a stream route whose daemon connection fails", async () => {
-    await h.daemon.close();
-
-    const r = await h.send("GET", "/distribution/alpine/json");
-
-    expect(r.status, r.body).toBe(502);
+    ["an import", "?fromSrc=-&repo=cogmo-devbase&tag=latest"],
+    ["a pull that also names repo", "?fromImage=alpine&repo=cogmo-devbase"],
+    ["a pull that also names message", "?fromImage=alpine&message=m"],
+    ["a pull that also names changes", "?fromImage=alpine&changes=CMD%20sh"],
+    ["a pull that also names fromSrc", "?fromImage=alpine&fromSrc=http%3A%2F%2Fhost%2Fx.tar"],
+    ["an empty fromSrc", "?fromImage=alpine&fromSrc="],
+    ["no fromImage", "?tag=3"],
+    ["an empty fromImage", "?fromImage="],
+    ["no query", ""],
+  ])("denies %s, reaching nothing", async (_label, query) => {
+    h.expectRejected(await h.send("POST", `/images/create${query}`), 403, []);
   });
 
-  it("answers 502 to an upgrade whose daemon connection fails", async () => {
-    await h.daemon.close();
+  it("forwards a pull with only fromImage, tag and platform", async () => {
+    const r = await h.send(
+      "POST",
+      "/v1.44/images/create?fromImage=alpine&tag=3&platform=linux%2Famd64&Image=x&fromImage=other",
+    );
 
-    const reply = await h.rawExchange(upgradeRequest("GET", "/distribution/alpine/json"));
-
-    expect(reply).toMatch(/^HTTP\/1\.1 502 /);
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual([
+      "POST /v1.44/images/create?fromImage=alpine&tag=3&platform=linux%2Famd64",
+    ]);
   });
 });

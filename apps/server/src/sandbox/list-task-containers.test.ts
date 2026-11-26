@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
+import { expectOk } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { listTaskContainers } from "./list-task-containers.js";
+import { storeContainerRows } from "./list-task-containers.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 
 const TASK_ID = "019d0000-0000-7000-8000-000000000001";
@@ -44,7 +45,7 @@ async function insert(row: {
   return inserted.id;
 }
 
-describe("listTaskContainers", () => {
+describe("storeContainerRows", () => {
   it("lists the task's rows in every state but reaped, with their lineage", async () => {
     const instance = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const instanceId = instance.id;
@@ -77,7 +78,7 @@ describe("listTaskContainers", () => {
       });
     });
 
-    const rows = await listTaskContainers({ store, runInTx: tx }, TASK_ID);
+    const rows = expectOk(await storeContainerRows({ store, runInTx: tx }).forTask(TASK_ID));
 
     expect([...rows].sort((a, b) => a.dockerId.localeCompare(b.dockerId))).toEqual([
       { id: exited, dockerId: "exited", parentId: task },
@@ -88,6 +89,15 @@ describe("listTaskContainers", () => {
   });
 
   it("lists nothing for a task with no rows", async () => {
-    expect(await listTaskContainers({ store, runInTx: tx }, TASK_ID)).toEqual([]);
+    expect(expectOk(await storeContainerRows({ store, runInTx: tx }).forTask(TASK_ID))).toEqual([]);
+  });
+
+  it("answers store_failed, with the cause, when the store read rejects", async () => {
+    const cause = new Error("connection refused");
+    const failing: Transactor = () => Promise.reject(cause);
+
+    const rows = await storeContainerRows({ store, runInTx: failing }).forTask(TASK_ID);
+
+    expect(rows._unsafeUnwrapErr()).toEqual({ kind: "store_failed", cause });
   });
 });

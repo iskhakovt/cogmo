@@ -6,9 +6,11 @@
  *
  * A normal forward goes through `http.request` without the hop-by-hop
  * headers, and its response streams back: whole, filtered to the task's
- * objects, or read for the exec id it creates. A stream route is
- * raw-piped: the request line and headers are replayed under the
- * canonical path, then both sockets are piped.
+ * objects, or read for the exec id it creates. Every request but an
+ * upgrade is a normal forward, so the client connection stays under Node's
+ * parser and a request pipelined after one is classified on its own. An
+ * upgrade is raw-piped: its request line and headers are replayed under
+ * the canonical path, then both sockets are piped.
  */
 
 import * as http from "node:http";
@@ -54,6 +56,12 @@ export interface Forward {
   path: string;
   body: { kind: "piped" } | { kind: "rebuilt"; bytes: Buffer };
   response: ResponseRelay;
+  /**
+   * What happens when the client is gone before the request is sent, or
+   * goes before its answer is complete: `drop` sends nothing or closes the
+   * daemon request, `send` sends it all the same (a container create).
+   */
+  whenClientGone: "drop" | "send";
 }
 
 export type ResponseRelay =
@@ -71,6 +79,8 @@ export function forward(
   upstream: Upstream,
   plan: Forward,
 ): void {
+  const gone = res.destroyed || req.socket.destroyed;
+  if (gone && plan.whenClientGone === "drop") return;
   const headers = match(plan.body)
     .with({ kind: "piped" }, () => pipedRequestHeaders(req))
     .with({ kind: "rebuilt" }, ({ bytes }) => rebuiltRequestHeaders(req, bytes))
@@ -91,29 +101,18 @@ export function forward(
   });
   // A client that hangs up before its answer is complete, even before the
   // daemon has answered at all (a `wait`), closes the daemon request with it.
-  res.once("close", () => {
-    if (!res.writableFinished) outgoing.destroy();
-  });
+  match(plan.whenClientGone)
+    .with("drop", () =>
+      res.once("close", () => {
+        if (!res.writableFinished) outgoing.destroy();
+      }),
+    )
+    .with("send", () => undefined)
+    .exhaustive();
   match(plan.body)
     .with({ kind: "piped" }, () => req.pipe(outgoing))
     .with({ kind: "rebuilt" }, ({ bytes }) => outgoing.end(bytes))
     .exhaustive();
-}
-
-/**
- * A stream route that arrived as a normal request: replay its preamble
- * under `path` on a fresh daemon connection and pipe both sockets. Covers
- * exec start, attach, logs and the distribution lookup.
- */
-export function pipeRaw(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  upstream: Upstream,
-  path: string,
-): void {
-  const clientSocket = req.socket;
-  res.detachSocket(clientSocket);
-  pipeUpgrade(req, clientSocket, Buffer.alloc(0), upstream, path);
 }
 
 /** An upgraded stream route: replay the preamble and `head` under `path`, then pipe. */
@@ -132,28 +131,30 @@ export function pipeUpgrade(
       log.warn({ err: cause.message, path: pathOf(req) }, "upstream stream error");
     }
   };
-  // Before the connection opens nothing has reached the client, which gets
-  // a 502; after it, the stream just ends.
-  const dialFailed = (cause: Error) => {
+  // Until the daemon's first byte nothing has reached the client, which gets
+  // a 502 for a failed dial or a reset; after it, the stream just ends.
+  const failedUnanswered = (cause: Error) => {
     warn(cause);
     writeRawRejectionAndDestroy(
       clientSocket,
       daemonFailed(`Cogmo proxy upstream error: ${cause.message}`),
     );
   };
-  daemon.once("error", dialFailed);
+  daemon.once("error", failedUnanswered);
   daemon.once("connect", () => {
-    daemon.removeListener("error", dialFailed);
-    daemon.on("error", (cause) => {
-      warn(cause);
-      clientSocket.destroy(cause);
-    });
     daemon.write(buildHttpRequestPreamble(req, path));
     if (head.length > 0) daemon.write(head);
     // `pipe` carries a half-close each way: a client that ends its write
     // side after sending stdin lets the daemon flush.
     clientSocket.pipe(daemon);
     daemon.pipe(clientSocket);
+    daemon.once("data", () => {
+      daemon.removeListener("error", failedUnanswered);
+      daemon.on("error", (cause) => {
+        warn(cause);
+        clientSocket.destroy(cause);
+      });
+    });
   });
   clientSocket.on("error", () => daemon.destroy());
 }
@@ -164,6 +165,11 @@ function relay(
   res: http.ServerResponse,
   how: ResponseRelay,
 ): void {
+  // A client that is gone (a container create sent all the same) gets nothing.
+  if (res.destroyed) {
+    reply.resume();
+    return;
+  }
   const status = reply.statusCode ?? 502;
   match(how)
     .with({ kind: "piped" }, () => {

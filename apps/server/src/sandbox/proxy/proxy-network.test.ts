@@ -194,6 +194,24 @@ describe("network connect and disconnect", () => {
     expect(h.received().filter((line) => line.startsWith("POST"))).toEqual([]);
   });
 
+  it("answers unavailable when the network resolve fails while bridge resolves", async () => {
+    h.daemon.setResponder((req, res, raw) =>
+      req.method === "GET" && req.url === "/networks/task-net"
+        ? respondJson(res, 500, { message: "boom" })
+        : API(req, res, raw),
+    );
+
+    const r = await h.send(
+      "POST",
+      "/networks/task-net/connect",
+      JSON.stringify({ Container: "cogmo-task-own" }),
+    );
+
+    expect(r.status, r.body).toBe(503);
+    expect(h.received()).toContain("GET /networks/bridge");
+    expect(h.received().filter((line) => line.startsWith("POST"))).toEqual([]);
+  });
+
   it("answers 400 to a connect body without a Container", async () => {
     const r = await h.send("POST", "/networks/bridge/connect", JSON.stringify({}));
 

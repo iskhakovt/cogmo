@@ -111,4 +111,41 @@ describe("taskEventFilter", () => {
 
     expect(out).toBe(`${own}\n`);
   });
+
+  it("measures the bound in bytes: a multibyte line over 4 MiB in fewer characters is dropped", async () => {
+    const own = event(TASK_CONTAINER, null);
+    // 1.5 Mi three-byte characters: 4.5 MiB of UTF-8 in 1.5 Mi UTF-16 units.
+    const huge = event(TASK_CONTAINER, { x: "€".repeat(1.5 * 1024 * 1024) });
+    const bytes = Buffer.from(`${huge}\n${own}\n`);
+    const cuts = [1024 * 1024, 2 * 1024 * 1024, 3 * 1024 * 1024];
+
+    const out = await filtered([
+      bytes.subarray(0, cuts[0]),
+      bytes.subarray(cuts[0], cuts[1]),
+      bytes.subarray(cuts[1], cuts[2]),
+      bytes.subarray(cuts[2]),
+    ]);
+
+    expect(out).toBe(`${own}\n`);
+  });
+
+  it("drops a line that crosses the bound in the chunk that also holds its newline", async () => {
+    const own = event(TASK_CONTAINER, null);
+    const huge = Buffer.from(event(TASK_CONTAINER, { x: "y".repeat(5 * 1024 * 1024) }));
+    const start = 3 * 1024 * 1024;
+
+    const out = await filtered([
+      huge.subarray(0, start),
+      Buffer.concat([huge.subarray(start), Buffer.from(`\n${own}\n`)]),
+    ]);
+
+    expect(out).toBe(`${own}\n`);
+  });
+
+  it("drops a line over the bound that arrives whole in one chunk", async () => {
+    const own = event(TASK_CONTAINER, null);
+    const huge = event(TASK_CONTAINER, { x: "y".repeat(5 * 1024 * 1024) });
+
+    expect(await filtered([`${huge}\n${own}\n`])).toBe(`${own}\n`);
+  });
 });

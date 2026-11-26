@@ -14,7 +14,7 @@ import {
   fetchRootless,
   refLookups,
 } from "./daemon-lookups.js";
-import { forward, pipeRaw, pipeUpgrade, respondInternalError, type Upstream } from "./forward.js";
+import { forward, pipeUpgrade, respondInternalError, type Upstream } from "./forward.js";
 import {
   isAbortError,
   pathOf,
@@ -24,7 +24,13 @@ import {
   writeRawRejectionAndDestroy,
   writeRawStatusAndDestroy,
 } from "./http-io.js";
-import { planRequest, planStream, type RequestContext, type StreamContext } from "./plan.js";
+import {
+  planRequest,
+  planStream,
+  type RequestContext,
+  type StreamContext,
+  streamForward,
+} from "./plan.js";
 import { malformed, type ProxyRejection, unavailable } from "./rejection.js";
 import { classify } from "./router.js";
 import type {
@@ -35,7 +41,13 @@ import type {
   TaskScope,
 } from "./types.js";
 
-export type { ProxyOptions, TaskContainerRow, TaskScope } from "./types.js";
+export type {
+  ContainerRows,
+  ProxyOptions,
+  StoreFailed,
+  TaskContainerRow,
+  TaskScope,
+} from "./types.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
 
@@ -91,8 +103,8 @@ interface TaskSocket {
  * path itself is the identity. Each request is classified against the
  * route table, checked (ownership of the container or exec it names, or a
  * body policy) and forwarded to the host `/var/run/docker.sock` under the
- * canonical path it was classified by; stream endpoints get raw
- * bidirectional piping once their checks pass. The supervisor allocates a
+ * canonical path it was classified by; an upgrade on a stream endpoint
+ * gets raw bidirectional piping once its checks pass. The supervisor allocates a
  * task's socket on `create` and binds it into the task container at
  * `/var/run/docker.sock`.
  *
@@ -268,7 +280,7 @@ export class CogmoSocketProxy {
       .with({ kind: "stream" }, ({ route, query }) =>
         this.#serve(req, res, scope, upstream.signal, async () =>
           (await planStream(route, query, this.#streamContext(connection, scope))).map(
-            (path) => () => pipeRaw(req, res, upstream, path),
+            (path) => () => forward(req, res, upstream, streamForward(path)),
           ),
         ),
       )

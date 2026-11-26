@@ -13,17 +13,21 @@
  */
 
 import { Transform } from "node:stream";
-import { StringDecoder } from "node:string_decoder";
 import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 import { type ProxyRejection, unavailable } from "./rejection.js";
 
 /**
- * Bound on one event line. A container event carries the container's
- * labels, which the task chose but could not make larger than its create
- * body's 1 MiB; a line past this is dropped up to its newline.
+ * Bound on one event line, in bytes. A container event carries the
+ * container's labels, which the task chose but could not make larger than
+ * its create body's 1 MiB. A line past this is dropped up to its newline,
+ * whether it ends in the chunk that crossed the bound or a later one. The
+ * stream is split on the newline byte, which no UTF-8 sequence contains.
  */
-const MAX_EVENT_LINE_CHARS = 4 * 1024 * 1024;
+const MAX_EVENT_LINE_BYTES = 4 * 1024 * 1024;
+
+const NEWLINE = 0x0a;
+const NEWLINE_BYTES = Buffer.from([NEWLINE]);
 
 const PARENT_ATTRIBUTE = "cogmo.parent";
 
@@ -61,34 +65,56 @@ export function createdExecId(body: Buffer): string | null {
  * or of one of its children. A line that is not an event is dropped.
  */
 export function taskEventFilter(taskContainerId: string): Transform {
-  const decoder = new StringDecoder("utf8");
-  let pending = "";
-  let overlong = false;
-  const keep = (line: string): boolean => {
-    const parsed = EventSchema.safeParse(parseJson(line));
+  const keep = (line: Buffer): boolean => {
+    const parsed = EventSchema.safeParse(parseJson(line.toString("utf8")));
     if (!parsed.success) return false;
     const { ID, Attributes } = parsed.data.Actor;
     return ID === taskContainerId || Attributes?.[PARENT_ATTRIBUTE] === taskContainerId;
   };
-  const drain = (text: string): string => {
-    const lines = `${pending}${text}`.split("\n");
-    const tail = lines.pop() ?? "";
-    // The rest of a line already past the bound ends at the first newline.
-    const complete = lines
-      .filter((line, i) => !(i === 0 && overlong) && keep(line))
-      .map((line) => `${line}\n`);
-    if (lines.length > 0) overlong = false;
-    overlong ||= tail.length > MAX_EVENT_LINE_CHARS;
-    pending = overlong ? "" : tail;
-    return complete.join("");
+  // The partial line after the last newline, held as the chunks it came in
+  // so that each line is copied once; `overlong` once it passed the bound,
+  // until its newline.
+  let pending: Buffer[] = [];
+  let pendingBytes = 0;
+  let overlong = false;
+  /** The line that ends with `last`, with its newline, if it is kept. */
+  const endLine = (last: Buffer): Buffer[] => {
+    const parts = [...pending, last];
+    const bytes = pendingBytes + last.length;
+    const skipped = overlong;
+    pending = [];
+    pendingBytes = 0;
+    overlong = false;
+    if (skipped || bytes > MAX_EVENT_LINE_BYTES) return [];
+    const line = Buffer.concat(parts, bytes);
+    return keep(line) ? [line] : [];
+  };
+  const hold = (tail: Buffer): void => {
+    if (overlong || tail.length === 0) return;
+    pendingBytes += tail.length;
+    if (pendingBytes <= MAX_EVENT_LINE_BYTES) {
+      pending.push(tail);
+      return;
+    }
+    pending = [];
+    pendingBytes = 0;
+    overlong = true;
   };
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      callback(null, drain(decoder.write(chunk)));
+      const kept: Buffer[] = [];
+      let start = 0;
+      // A stateful scan: each newline ends the line the chunks before it began.
+      for (let nl = chunk.indexOf(NEWLINE); nl !== -1; nl = chunk.indexOf(NEWLINE, start)) {
+        kept.push(...endLine(chunk.subarray(start, nl)).flatMap((line) => [line, NEWLINE_BYTES]));
+        start = nl + 1;
+      }
+      hold(chunk.subarray(start));
+      callback(null, Buffer.concat(kept));
     },
     flush(callback) {
-      const rest = drain(decoder.end());
-      callback(null, overlong || pending === "" || !keep(pending) ? rest : `${rest}${pending}`);
+      // A last line the stream ends without a newline is passed as it came.
+      callback(null, Buffer.concat(pendingBytes === 0 ? [] : endLine(Buffer.alloc(0))));
     },
   });
 }

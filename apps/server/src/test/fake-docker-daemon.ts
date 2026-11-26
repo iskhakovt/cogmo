@@ -26,8 +26,12 @@ export type FakeDaemonResponder = (
 
 export interface FakeDockerDaemon {
   readonly socketPath: string;
-  /** Every request received so far, in arrival order. */
+  /** Every request received so far, in arrival order, recorded once its body ended. */
   requests(): ReadonlyArray<FakeDaemonRequest>;
+  /** Every request line whose headers arrived, as `METHOD url`, whether or not its body ended. */
+  started(): ReadonlyArray<string>;
+  /** Connections accepted so far. */
+  connections(): number;
   setResponder(responder: FakeDaemonResponder): void;
   close(): Promise<void>;
 }
@@ -37,8 +41,11 @@ export async function startFakeDockerDaemon(
   responder: FakeDaemonResponder,
 ): Promise<FakeDockerDaemon> {
   const received: FakeDaemonRequest[] = [];
+  const started: string[] = [];
+  let connections = 0;
   let current = responder;
   const server = http.createServer((raw, res) => {
+    started.push(`${raw.method} ${raw.url}`);
     const chunks: Buffer[] = [];
     raw.on("data", (c: Buffer) => chunks.push(c));
     raw.on("end", () => {
@@ -53,7 +60,11 @@ export async function startFakeDockerDaemon(
     });
   });
   // An upgrade is recorded and answered `101`, then the stream ends.
+  server.on("connection", () => {
+    connections += 1;
+  });
   server.on("upgrade", (raw: http.IncomingMessage, socket: Duplex) => {
+    started.push(`${raw.method} ${raw.url}`);
     received.push({ method: raw.method ?? "", url: raw.url ?? "", headers: raw.headers, body: "" });
     socket.end("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
   });
@@ -61,6 +72,8 @@ export async function startFakeDockerDaemon(
   return {
     socketPath,
     requests: () => [...received],
+    started: () => [...started],
+    connections: () => connections,
     setResponder: (next) => {
       current = next;
     },

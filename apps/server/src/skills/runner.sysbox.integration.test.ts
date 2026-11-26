@@ -5,7 +5,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import Docker from "dockerode";
-import { ResultAsync } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -16,7 +15,7 @@ import {
   LocalDockerSandboxClient,
   type SandboxClient,
 } from "../sandbox/index.js";
-import { listTaskContainers } from "../sandbox/list-task-containers.js";
+import { storeContainerRows } from "../sandbox/list-task-containers.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -118,13 +117,7 @@ beforeAll(async () => {
   proxy = await CogmoSocketProxy.create({
     socketDir: "/tmp/cogmo-test-skills-proxy",
     hostDockerSocket: "/var/run/docker.sock",
-    containerRows: {
-      forTask: (taskId) =>
-        ResultAsync.fromPromise(
-          listTaskContainers({ store: agentStore, runInTx: tx }, taskId),
-          (cause) => ({ kind: "store_failed" as const, cause }),
-        ),
-    },
+    containerRows: storeContainerRows({ store: agentStore, runInTx: tx }),
   });
 
   // Sweep any `cogmo-skills-test-deps-*` volumes left behind by prior

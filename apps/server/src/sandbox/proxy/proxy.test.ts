@@ -312,7 +312,7 @@ describe("CogmoSocketProxy", () => {
     expect(err.message).toMatch(/ENOENT|connect/);
   });
 
-  it("unregisterTask ends a raw-piped stream instead of waiting on it", {
+  it("unregisterTask ends a followed log stream instead of waiting on it", {
     timeout: STREAM_TEST_TIMEOUT_MS,
   }, async () => {
     const daemon = holdUpstreamOpen();

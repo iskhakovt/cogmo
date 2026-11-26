@@ -1,5 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import type * as http from "node:http";
+import type * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -33,11 +34,13 @@ afterEach(async () => {
 
 describe("forward: a reply read whole", () => {
   it("logs and destroys the client response when answering throws", async () => {
-    const req = mock<http.IncomingMessage>();
-    req.method = "POST";
-    req.url = "/containers/abc/exec";
-    req.headers = { "content-type": "application/json" };
-    const res = mock<http.ServerResponse>();
+    const req = mock<http.IncomingMessage>({
+      method: "POST",
+      url: "/containers/abc/exec",
+      headers: { "content-type": "application/json" },
+      socket: mock<net.Socket>({ destroyed: false }),
+    });
+    const res = mock<http.ServerResponse>({ destroyed: false });
     res.writeHead.mockImplementation(() => {
       throw new Error("a bug in the relay");
     });
@@ -51,6 +54,7 @@ describe("forward: a reply read whole", () => {
         path: "/containers/abc/exec",
         body: { kind: "rebuilt", bytes: Buffer.from('{"Cmd":["id"]}') },
         response: { kind: "exec_created", record },
+        whenClientGone: "drop",
       },
     );
 
