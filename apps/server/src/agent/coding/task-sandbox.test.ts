@@ -154,7 +154,11 @@ describe("taskSessionSpec", () => {
       baseSha: BASE_SHA,
     });
 
-    expect(spec.env).toEqual({ ...AUTH_ENV, COGMO_VERIFY_BASE: BASE_SHA });
+    expect(spec.env).toEqual({
+      ...AUTH_ENV,
+      COGMO_VERIFY_BASE: BASE_SHA,
+      TESTCONTAINERS_RYUK_DISABLED: "true",
+    });
   });
 
   it("sets no COGMO_VERIFY_BASE for an assignment saved before the base was recorded", () => {
@@ -164,7 +168,7 @@ describe("taskSessionSpec", () => {
       worktreePath: "/srv/cogmo/worktrees/cogmo/abc12345",
     });
 
-    expect(spec.env).toEqual(AUTH_ENV);
+    expect(spec.env).toEqual({ ...AUTH_ENV, TESTCONTAINERS_RYUK_DISABLED: "true" });
   });
 
   it("gives the coding session the Docker socket", () => {

@@ -1,8 +1,12 @@
+import type { Result } from "neverthrow";
+import type { ResourceLimits } from "../types.js";
+import type { ProxyRejection } from "./rejection.js";
+
 /**
  * Shared types for the Docker socket proxy. The proxy maintains a Map<task
  * socket path → TaskScope> in memory; on connection, the scope is looked up
- * by which socket received it. The scope drives label injection on
- * `POST /containers/create` and ownership checks on destructive endpoints.
+ * by which socket received it. The scope drives label injection and the
+ * resource caps on `POST /containers/create`.
  */
 export interface TaskScope {
   /** Cogmo `coding_tasks.id` — denormalized into `cogmo.root_task` label. */
@@ -19,6 +23,8 @@ export interface TaskScope {
   cgroupParent: string;
   /** Cogmo instance id — written into `cogmo.instance`. */
   instanceId: string;
+  /** The task's limits: injected into a child create that sets none, and its cap. */
+  resourceLimits: ResourceLimits;
 }
 
 export interface ProxyOptions {
@@ -26,4 +32,32 @@ export interface ProxyOptions {
   hostDockerSocket?: string;
   /** Directory holding per-task sockets. Created at `create()` if missing. */
   socketDir: string;
+}
+
+/** What the create policy reads from an image inspect. */
+export interface ImageFacts {
+  /** The image's content-addressed id, forwarded in place of the name asked for. */
+  id: string;
+  /** `Config.Env`: image `ENV` merges into the container's OCI env. */
+  env: ReadonlyArray<string>;
+}
+
+/** The daemon's own platform, from `GET /version`. */
+export interface HostPlatform {
+  readonly os: string;
+  readonly arch: string;
+}
+
+/**
+ * How a daemon lookup fails: `not_found` for an image the daemon does not
+ * have, `unavailable` for a lookup that failed.
+ */
+export type LookupFailure = Extract<ProxyRejection, { kind: "not_found" | "unavailable" }>;
+
+/** The daemon reads the create policy needs. A failure is a value. */
+export interface DaemonLookups {
+  inspectImage(ref: string): Promise<Result<ImageFacts, LookupFailure>>;
+  hostPlatform(): Promise<Result<HostPlatform, LookupFailure>>;
+  /** The IPv4 gateway of the default `bridge` network. */
+  bridgeGateway(): Promise<Result<string, LookupFailure>>;
 }

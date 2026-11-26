@@ -244,6 +244,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
           runtime,
           cgroupParent,
           instanceId: this.#instanceId,
+          resourceLimits: spec.resourceLimits,
         })
       : null;
 
@@ -375,6 +376,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         runtime,
         cgroupParent,
         instanceId: this.#instanceId,
+        resourceLimits: spec.resourceLimits,
       });
     }
 

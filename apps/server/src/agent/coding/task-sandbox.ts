@@ -30,6 +30,13 @@ export const WORKTREE_DIR_IN_CONTAINER = "/workspace";
 const VERIFY_BASE_ENV = "COGMO_VERIFY_BASE";
 
 /**
+ * testcontainers' Ryuk reaper needs a host-path bind of the Docker socket,
+ * which the proxy denies. The sandbox reaper removes the containers the task
+ * starts in its place.
+ */
+const RYUK_DISABLED_ENV = { TESTCONTAINERS_RYUK_DISABLED: "true" } as const;
+
+/**
  * Build the `WorktreeSpec` the sandbox backend wants. Bind-mount backends
  * get `host-path` pointing at the previously-allocated host worktree;
  * git-remote backends get `cogmo/run/<task-id>` (already pushed to origin
@@ -144,8 +151,9 @@ export function taskImage(repo: CodingRepoRow, devbaseImage: string): string {
  * The `sandbox.create` spec for a task container. Call it inside the
  * `create-container` step body: `expiresAt` is stamped from the clock, and
  * the PAT inside the worktree spec must never reach a step's return value.
- * Its env adds `COGMO_VERIFY_BASE` when the assignment has a base; every exec
- * in the session inherits it, as the Claude token does.
+ * Its env adds `COGMO_VERIFY_BASE` when the assignment has a base, and
+ * disables testcontainers' Ryuk; every exec in the session inherits both, as
+ * it does the Claude token.
  */
 export function taskSessionSpec(args: {
   sandbox: Pick<SandboxClient, "capabilities">;
@@ -186,6 +194,7 @@ export function taskSessionSpec(args: {
       ...(args.assignment.baseSha !== undefined && {
         [VERIFY_BASE_ENV]: args.assignment.baseSha,
       }),
+      ...RYUK_DISABLED_ENV,
     },
     // The coding CLI reaches its provider, the git remote and package indexes.
     network: "bridge",
