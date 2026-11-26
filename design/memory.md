@@ -662,7 +662,7 @@ Apply as a lightweight filter in the extraction prompt, not a separate system.
 
 ## Metadata Schema `[proposed]`
 
-Shipped: `source` (`conversation` for transcript extraction, else the staging row's `pending_memory_source`) and `skill` on a skill's write — see [Live Retains via Staging](#live-retains-via-staging-confirmed).
+Shipped: `source` (`conversation` for turn extraction, else the staging row's `pending_memory_source`) and `skill` on a skill's write — see [Live Retains via Staging](#live-retains-via-staging-confirmed).
 
 Each memory should carry:
 

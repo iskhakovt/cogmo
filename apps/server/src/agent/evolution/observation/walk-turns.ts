@@ -34,7 +34,9 @@ type OutcomeKind = TurnOutcome["kind"] | MemoryTurnOutcome["kind"];
  * A planned turn as a plan's memo holds it. A corrections plan memoized
  * before plans carried a status holds `pending` turns only.
  */
-type PlannedTurn = Omit<OpenTurn, "status"> & { status?: OpenStatus };
+interface PlannedTurn extends Omit<OpenTurn, "status"> {
+  status?: OpenStatus;
+}
 
 /** A plan a phase walks: its turns, and how many wait beyond them. */
 export interface WalkablePlan {

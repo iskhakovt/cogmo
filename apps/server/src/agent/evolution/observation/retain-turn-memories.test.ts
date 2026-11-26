@@ -197,7 +197,7 @@ describe("retainTurnMemories", () => {
   });
 
   it("applies a bound extraction with no facts, since nothing in it can be forbidden", async () => {
-    const { store, run } = setup({
+    const { store, memory, run } = setup({
       extraction: {
         ...EXTRACTION,
         profileId: "profile-third-party",
@@ -208,6 +208,7 @@ describe("retainTurnMemories", () => {
     });
 
     expect(await run()).toMatchObject({ kind: "applied" });
+    expect(memory.retainBatch).not.toHaveBeenCalled();
     expect(store.transitionExtractedTurn).toHaveBeenCalledWith(FAKE_TX, {
       id: "obs-1",
       to: "applied",

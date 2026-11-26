@@ -16,7 +16,7 @@ export type EvolutionTriggerValue = (typeof evolutionTrigger.enumValues)[number]
 /**
  * Append-only audit log — one row per processed Observer fire. Source of
  * truth for the `/learned` digest and the `/reflect` reply. `skipped` fires
- * (conversation not found, profile not found, too_short) earn no row — there
+ * (conversation not found, profile not found, nothing new) earn no row — there
  * is nothing to surface for those.
  *
  * `user_id` is denormalised from `conversations.user_id`. The `/learned`

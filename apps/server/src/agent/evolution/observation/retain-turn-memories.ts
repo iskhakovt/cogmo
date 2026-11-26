@@ -26,11 +26,11 @@ export interface RetainTurnMemoriesArgs {
   fire: ObserverFire;
 }
 
-/** The row as the retain finds it: moved by another run, or extracted and bound or not. */
+/** What the retain finds to do: nothing (another run moved the row), hold it, or retain it. */
 type RetainRead =
   | { kind: "moved"; status: ObservationStatusValue }
-  | { kind: "bound" }
-  | { kind: "unbound"; extraction: TurnExtraction };
+  | { kind: "hold" }
+  | { kind: "retain"; extraction: TurnExtraction };
 
 export async function retainTurnMemories(
   deps: RetainTurnMemoriesDeps,
@@ -52,16 +52,16 @@ export async function retainTurnMemories(
     });
     // An extraction with no facts has nothing a rule could forbid.
     return extraction.items.length > 0 && bindsUnseenUserRule(rules, extraction.seesUserRules)
-      ? { kind: "bound" }
-      : { kind: "unbound", extraction };
+      ? { kind: "hold" }
+      : { kind: "retain", extraction };
   });
   return match(read)
     .returnType<Promise<MemoryTurnOutcome>>()
     .with({ kind: "moved" }, async ({ status }) => ({ kind: "taken", status }))
-    .with({ kind: "bound" }, () =>
+    .with({ kind: "hold" }, () =>
       moveExtracted(deps, observationId, "held_extracted", () => ({ kind: "held" })),
     )
-    .with({ kind: "unbound" }, ({ extraction }) => retain(deps, args, extraction))
+    .with({ kind: "retain" }, ({ extraction }) => retain(deps, args, extraction))
     .exhaustive();
 }
 
