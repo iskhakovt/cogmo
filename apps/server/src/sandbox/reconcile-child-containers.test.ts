@@ -1,7 +1,7 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
-import { expectOk } from "../test/assertions.js";
+import { expectOk, resolvesWithin } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { DockerContainer, DockerFacade } from "./docker-facade.js";
 import type { TaskContainerRow } from "./proxy/index.js";
@@ -29,14 +29,25 @@ afterAll(async () => {
 
 /**
  * A daemon whose inspect of each id answers as `answers` says: an HTTP
- * error status, or the container's state; any other id is running.
+ * error status, the container's state, or `never`, until the inspect's
+ * signal aborts it; any other id is running.
  */
-function daemonAnswering(answers: Readonly<Record<string, number | "exited">>): DockerFacade {
+function daemonAnswering(
+  answers: Readonly<Record<string, number | "exited" | "never">>,
+): DockerFacade {
   const docker = mock<DockerFacade>();
   docker.getContainer.mockImplementation((id) => {
     const container = mock<DockerContainer>();
     const status = answers[id];
-    if (typeof status === "number") {
+    if (status === "never") {
+      container.inspect.mockImplementation(
+        (opts) =>
+          new Promise((_, reject) => {
+            const signal = opts?.abortSignal;
+            signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+          }),
+      );
+    } else if (typeof status === "number") {
       container.inspect.mockRejectedValue(
         Object.assign(new Error(`daemon ${status}`), { statusCode: status }),
       );
@@ -67,6 +78,9 @@ async function child(dockerId: string): Promise<TaskContainerRow> {
   return { id: row.id, dockerId, parentId: row.parentId, depth: 1, status: "starting" };
 }
 
+/** A task signal that never aborts. */
+const NO_ABORT = new AbortController().signal;
+
 /** The time the adapter hands the reconcile, which its exit writes record. */
 const AT = new Date("2026-11-20T10:00:00.000Z");
 
@@ -79,7 +93,7 @@ describe("reconcileChildContainers", () => {
     const live = expectOk(
       await reconcileChildContainers(
         { store, runInTx: tx, docker },
-        { children: [present, removed], at: AT },
+        { children: [present, removed], at: AT, signal: NO_ABORT },
       ),
     );
 
@@ -103,7 +117,10 @@ describe("reconcileChildContainers", () => {
     const docker = daemonAnswering({ "auto-removed": 404 });
 
     const live = expectOk(
-      await reconcileChildContainers({ store, runInTx: tx, docker }, { children: [read], at: AT }),
+      await reconcileChildContainers(
+        { store, runInTx: tx, docker },
+        { children: [read], at: AT, signal: NO_ABORT },
+      ),
     );
 
     expect(live).toEqual([]);
@@ -117,7 +134,7 @@ describe("reconcileChildContainers", () => {
     const live = expectOk(
       await reconcileChildContainers(
         { store, runInTx: tx, docker },
-        { children: [stopped], at: AT },
+        { children: [stopped], at: AT, signal: NO_ABORT },
       ),
     );
 
@@ -132,12 +149,49 @@ describe("reconcileChildContainers", () => {
     const live = expectOk(
       await reconcileChildContainers(
         { store, runInTx: tx, docker },
-        { children: [unsure], at: AT },
+        { children: [unsure], at: AT, signal: NO_ABORT },
       ),
     );
 
     expect(live).toEqual([unsure]);
     expect((await tx((trx) => store.getContainer(trx, unsure.id)))?.status).toBe("starting");
+  });
+
+  it("counts a child whose inspect does not answer within 5 seconds as live, writing nothing", async () => {
+    const wedged = await child("wedged");
+    const removed = await child("auto-removed");
+    const docker = daemonAnswering({ wedged: "never", "auto-removed": 404 });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let reconciling: ReturnType<typeof reconcileChildContainers>;
+    try {
+      reconciling = reconcileChildContainers(
+        { store, runInTx: tx, docker },
+        { children: [wedged, removed], at: AT, signal: NO_ABORT },
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const live = expectOk(await resolvesWithin(reconciling, 2_500, "the reconcile"));
+
+    expect(live).toEqual([wedged]);
+    expect((await tx((trx) => store.getContainer(trx, wedged.id)))?.status).toBe("starting");
+    expect((await tx((trx) => store.getContainer(trx, removed.id)))?.status).toBe("exited");
+  });
+
+  it("counts a child whose inspect the task's signal aborts as live", async () => {
+    const wedged = await child("wedged");
+    const docker = daemonAnswering({ wedged: "never" });
+    const task = new AbortController();
+
+    const reconciling = reconcileChildContainers(
+      { store, runInTx: tx, docker },
+      { children: [wedged], at: AT, signal: task.signal },
+    );
+    task.abort(new Error("task socket unregistered"));
+
+    expect(expectOk(await resolvesWithin(reconciling, 2_500, "the reconcile"))).toEqual([wedged]);
   });
 
   it("is store_failed when the exited write throws", async () => {
@@ -147,7 +201,7 @@ describe("reconcileChildContainers", () => {
 
     const live = await reconcileChildContainers(
       { store, runInTx: failing, docker: daemonAnswering({ "auto-removed": 404 }) },
-      { children: [removed], at: AT },
+      { children: [removed], at: AT, signal: NO_ABORT },
     );
 
     expect(live._unsafeUnwrapErr()).toEqual({ kind: "store_failed", cause });

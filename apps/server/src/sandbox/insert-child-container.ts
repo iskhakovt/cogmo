@@ -88,17 +88,26 @@ type InsertOutcome =
   | { kind: "failed"; cause: unknown }
   | { kind: "cut_off" };
 
-/** The insert's outcome, or the cut-off's, whichever comes first. */
-function raceCutOff(inserting: Promise<ContainerRow>, cutOff: AbortSignal): Promise<InsertOutcome> {
+/** The insert's outcome, or the cut-off's, whichever comes first; the abort listener goes with the race. */
+async function raceCutOff(
+  inserting: Promise<ContainerRow>,
+  cutOff: AbortSignal,
+): Promise<InsertOutcome> {
   const settled = inserting.then(
     (row): InsertOutcome => ({ kind: "inserted", row }),
     (cause: unknown): InsertOutcome => ({ kind: "failed", cause }),
   );
-  if (cutOff.aborted) return Promise.resolve({ kind: "cut_off" });
+  if (cutOff.aborted) return { kind: "cut_off" };
+  let onAbort = () => {};
   const passed = new Promise<InsertOutcome>((resolve) => {
-    cutOff.addEventListener("abort", () => resolve({ kind: "cut_off" }), { once: true });
+    onAbort = () => resolve({ kind: "cut_off" });
+    cutOff.addEventListener("abort", onAbort, { once: true });
   });
-  return Promise.race([settled, passed]);
+  try {
+    return await Promise.race([settled, passed]);
+  } finally {
+    cutOff.removeEventListener("abort", onAbort);
+  }
 }
 
 /** Remove a container no row records; a removal the daemon refuses is logged for the orphan pass. */
@@ -120,13 +129,21 @@ const MAX_CAUSE_DEPTH = 4;
 /** A five-character SQLSTATE, which every Postgres error carries. */
 const SQLSTATE = /^[0-9A-Z]{5}$/;
 
-/** The connection failures postgres-js and Node's sockets raise under these codes. */
+/**
+ * The connection failures raised under these codes: postgres-js's
+ * `CONNECT_TIMEOUT` (its `CONNECTION_*` codes are matched by prefix), and
+ * those of Node's sockets and resolver under it.
+ */
 const CONNECTION_CODES: ReadonlySet<string> = new Set([
+  "CONNECT_TIMEOUT",
   "ECONNREFUSED",
   "ECONNRESET",
   "ETIMEDOUT",
   "EPIPE",
   "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EAI_AGAIN",
 ]);
 
 /**

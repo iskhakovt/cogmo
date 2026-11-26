@@ -1,6 +1,7 @@
 import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
+import type { ChildExitCause } from "./proxy/index.js";
 import type { ContainerTransitionResult, SandboxStore } from "./store/index.js";
 
 const log = logger.child({ component: "sandbox" });
@@ -20,7 +21,7 @@ export async function markContainerExited(
     dockerId: string;
     from: "starting" | "running";
     at: Date;
-    cause: "missing_from_daemon" | "removed_by_task";
+    cause: ChildExitCause;
   },
 ): Promise<ContainerTransitionResult> {
   const result = await deps.runInTx((tx) =>
@@ -31,6 +32,15 @@ export async function markContainerExited(
       at: args.at,
     }),
   );
+  logExit(args, result);
+  return result;
+}
+
+/** Log an `exited` transition's outcome, `stale` at debug. */
+export function logExit(
+  args: { dockerId: string; cause: ChildExitCause },
+  result: ContainerTransitionResult,
+): void {
   match(result)
     .with({ kind: "transitioned" }, () =>
       match(args.cause)
@@ -49,5 +59,4 @@ export async function markContainerExited(
       ),
     )
     .exhaustive();
-  return result;
 }

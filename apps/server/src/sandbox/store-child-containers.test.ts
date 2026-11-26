@@ -107,7 +107,9 @@ describe("storeChildContainers", () => {
     const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
     const { row } = await startingChild();
 
-    expect((await children.reconcile([row]))._unsafeUnwrap()).toEqual([row]);
+    expect((await children.reconcile([row], new AbortController().signal))._unsafeUnwrap()).toEqual(
+      [row],
+    );
     expect((await children.removed(row, "removed_by_task")).isOk()).toBe(true);
     expect((await tx((trx) => store.getContainer(trx, row.id)))?.status).toBe("exited");
   });

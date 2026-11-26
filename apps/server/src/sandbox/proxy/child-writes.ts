@@ -23,9 +23,11 @@ import type { ChildContainers } from "./types.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
 
+/** The child writes of one task socket's requests; `signal` cuts off its cap reconciles. */
 export function childWrites(
   children: ChildContainers,
   taskId: string,
+  signal: AbortSignal,
 ): Pick<ChildContext, "recordChild" | "childStarted" | "childRemoved" | "reconcileChildren"> {
   return {
     recordChild: async (child, cutOff) =>
@@ -53,7 +55,7 @@ export function childWrites(
         },
       ),
     reconcileChildren: async (live) =>
-      children.reconcile(live).mapErr(({ cause }): ProxyRejection => {
+      children.reconcile(live, signal).mapErr(({ cause }): ProxyRejection => {
         log.warn({ err: cause, taskId }, "child reconcile write failed");
         return unavailable("the child reconcile failed");
       }),

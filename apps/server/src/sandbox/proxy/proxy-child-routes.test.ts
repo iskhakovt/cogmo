@@ -305,6 +305,24 @@ describe("a cut-off answer to a child's start or removal", () => {
       expect(h.children[write]).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("moves the row on a 404 to a DELETE whose body is cut short, and answers 502", async () => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (req.method === "DELETE") {
+        raw.socket.write(
+          'HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"message":',
+        );
+        setTimeout(() => raw.socket.destroy(), 20);
+        return;
+      }
+      API(req, res, raw);
+    });
+
+    const r = await h.send("DELETE", `/containers/${CHILD.name}`);
+
+    expect(r.status, r.body).toBe(502);
+    expect(h.children.removed).toHaveBeenCalledWith(CHILD_ROW, "missing_from_daemon");
+  });
 });
 
 describe("a child's removal", () => {
@@ -375,8 +393,30 @@ describe("the child cap", () => {
 
     expect(r.status, r.body).toBe(403);
     expect(message(r)).toContain("16 live children");
-    expect(h.children.reconcile).toHaveBeenCalledWith(SIXTEEN);
+    expect(h.children.reconcile).toHaveBeenCalledWith(SIXTEEN, expect.any(AbortSignal));
     expect(reachedCreate()).toBe(false);
+  });
+
+  it("cuts the reconcile off with the socket's teardown", async () => {
+    const reconciled = Promise.withResolvers<ReadonlyArray<TaskContainerRow>>();
+    h.children.reconcile.mockReturnValue(
+      new ResultAsync(
+        reconciled.promise.then((live) => ok<ReadonlyArray<TaskContainerRow>, never>(live)),
+      ),
+    );
+    // The teardown ends the create's connection with it.
+    const creating = h
+      .send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }))
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(h.children.reconcile).toHaveBeenCalledTimes(1));
+    const signal = expectDefined(h.children.reconcile.mock.calls[0]?.[1], "the reconcile's signal");
+    expect(signal.aborted).toBe(false);
+
+    await h.proxy.unregisterTask(SCOPE.taskId);
+
+    expect(signal.aborted).toBe(true);
+    reconciled.resolve(SIXTEEN);
+    await creating;
   });
 
   it("forwards a create once the reconcile finds a child the daemon no longer has", async () => {
@@ -431,7 +471,10 @@ describe("children under another depth-0 row of the task", () => {
     const inspected = await h.send("GET", `/containers/${COGMO_OWN.name}/json`);
 
     expect(created.status, created.body).toBe(403);
-    expect(h.children.reconcile).toHaveBeenCalledWith([...underAnchor, elsewhere]);
+    expect(h.children.reconcile).toHaveBeenCalledWith(
+      [...underAnchor, elsewhere],
+      expect.any(AbortSignal),
+    );
     expect(inspected.status, inspected.body).toBe(404);
     expect(h.received().some((l) => l.startsWith("POST /containers/create"))).toBe(false);
   });

@@ -144,10 +144,13 @@ export interface ChildContainers {
   /**
    * The live children the daemon still has. One it no longer has (a
    * `docker run --rm` child removes itself, with no `DELETE` through the
-   * proxy) moves to `exited`, as the reaper's stale pass would move it.
+   * proxy) moves to `exited`, as the reaper's stale pass would move it. One
+   * whose inspect fails, times out, or is cut off by `signal`, the task
+   * socket's, counts as live.
    */
   reconcile(
     children: ReadonlyArray<TaskContainerRow>,
+    signal: AbortSignal,
   ): ResultAsync<ReadonlyArray<TaskContainerRow>, StoreFailed>;
 }
 

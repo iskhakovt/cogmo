@@ -205,13 +205,14 @@ export class CogmoSocketProxy {
   }
 
   /**
-   * Set the anchor of the task's live registration once the supervisor has
-   * the task container's row, keeping its socket path. `not_serving` when
-   * the task was torn down meanwhile: no socket is opened, since nothing
-   * would mount or unregister it.
+   * Set the anchor of the registration `registerTask` answered `socketPath`
+   * for, once the supervisor has the task container's row, keeping that
+   * path. `not_serving` when the registration was torn down meanwhile, even
+   * if the task has registered again since: no socket is opened, since
+   * nothing would mount or unregister it.
    */
-  anchorTask(taskId: string, anchor: TaskAnchor): Result<void, NotServing> {
-    return this.#sockets.anchor(taskId, anchor);
+  anchorTask(taskId: string, socketPath: string, anchor: TaskAnchor): Result<void, NotServing> {
+    return this.#sockets.anchor(taskId, socketPath, anchor);
   }
 
   /**
@@ -506,7 +507,7 @@ export class CogmoSocketProxy {
         admitting: () => connection.task.creates.admitting(),
         admittedBeyond: (counted) => this.#sockets.admittedBeyond(scope.taskId, counted),
       },
-      ...childWrites(this.#children, scope.taskId),
+      ...childWrites(this.#children, scope.taskId, connection.task.signal),
     };
   }
 }

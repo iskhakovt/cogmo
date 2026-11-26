@@ -29,7 +29,7 @@ export interface CreateAdmission {
 }
 
 export interface CreateTracker {
-  /** What an admitted create's daemon request is bound to. */
+  /** What an admitted create's daemon request and row insert are bound to. */
   readonly signal: AbortSignal;
   /**
    * The creates admitted and not yet settled whose child is not among

@@ -979,6 +979,20 @@ describe("streams and relays", () => {
     client.socket.destroy();
   });
 
+  it("ends and releases a client's connection when the daemon cuts a relayed stream short", async () => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.startsWith("/distribution/")) return API(req, res, raw);
+      res.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
+      res.write('{"Descriptor":', () => res.destroy());
+    });
+    const client = await halfOpenClient();
+
+    client.socket.write("GET /distribution/alpine/json HTTP/1.1\r\nHost: docker\r\n\r\n");
+
+    await resolvesWithin(client.ended, SETTLE_MS, "the proxy to end the connection");
+    await expectReleasedAfter(client, /^HTTP\/1\.1 200 OK\r\n[\s\S]*\r\n\r\n\{"Descriptor":$/);
+  });
+
   it("answers 502 to a forwarded stream whose daemon connection fails", async () => {
     await h.daemon.close();
 

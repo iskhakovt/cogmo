@@ -153,20 +153,20 @@ function stubContainerExec<E>(exec: E) {
 function fakeProxy(): {
   proxy: CogmoSocketProxy;
   registers: TaskScope[];
-  anchors: Array<{ taskId: string; anchor: TaskAnchor }>;
+  anchors: Array<{ taskId: string; socketPath: string; anchor: TaskAnchor }>;
   unregisters: string[];
   socketDirAt: (taskId: string) => string;
 } {
   const registers: TaskScope[] = [];
-  const anchors: Array<{ taskId: string; anchor: TaskAnchor }> = [];
+  const anchors: Array<{ taskId: string; socketPath: string; anchor: TaskAnchor }> = [];
   const unregisters: string[] = [];
   const proxy = {
     registerTask: vi.fn(async (scope: TaskScope) => {
       registers.push(scope);
       return `/var/lib/cogmo/sockets/${scope.taskId}.sock`;
     }),
-    anchorTask: vi.fn((taskId: string, anchor: TaskAnchor) => {
-      anchors.push({ taskId, anchor });
+    anchorTask: vi.fn((taskId: string, socketPath: string, anchor: TaskAnchor) => {
+      anchors.push({ taskId, socketPath, anchor });
       return ok(undefined);
     }),
     unregisterTask: vi.fn(async (taskId: string) => {
@@ -215,8 +215,13 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const reg0 = expectDefined(registers[0], "the register");
     expect(reg0.anchor).toBeNull();
     expect(reg0.runtime).toBe("runc");
+    // The anchor names the registration the register answered for.
     expect(anchors).toEqual([
-      { taskId, anchor: { rowId: handle.state.containerRowId, dockerId: "docker-task-xyz" } },
+      {
+        taskId,
+        socketPath: `/var/lib/cogmo/sockets/${taskId}.sock`,
+        anchor: { rowId: handle.state.containerRowId, dockerId: "docker-task-xyz" },
+      },
     ]);
 
     // Cgroup parent: the scope carries the task's slice name; the proxy
@@ -986,10 +991,11 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     await expect(sandbox.create(SPEC)).rejects.toThrow(/torn down/);
 
     expect(registers).toHaveLength(1);
-    expect(proxy.anchorTask).toHaveBeenCalledWith(TASK_ID, {
-      rowId: expect.any(String),
-      dockerId: "docker-torn-down",
-    });
+    expect(proxy.anchorTask).toHaveBeenCalledWith(
+      TASK_ID,
+      `/var/lib/cogmo/sockets/${TASK_ID}.sock`,
+      { rowId: expect.any(String), dockerId: "docker-torn-down" },
+    );
     expect(calls.start).toBe(0);
     expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
     // The teardown that dropped the registration owns its socket.

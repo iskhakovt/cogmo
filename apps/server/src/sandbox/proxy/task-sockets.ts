@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { addAbortSignal } from "node:stream";
 import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { type ExecIdRegistry, ExecIds } from "./exec-ids.js";
 import { type CreateTracker, InFlightCreates } from "./in-flight-creates.js";
@@ -78,8 +78,11 @@ export interface TaskSocketRegistry {
    * live registration; a live one keeps its anchor unless `scope` names one.
    */
   register(scope: TaskScope): Promise<string>;
-  /** Set the anchor of the task's live registration; `not_serving` when it has none. */
-  anchor(taskId: string, anchor: TaskAnchor): Result<void, NotServing>;
+  /**
+   * Set the anchor of the task's live registration, the one `register`
+   * answered `socketPath` for; `not_serving` when it has none, or another.
+   */
+  anchor(taskId: string, socketPath: string, anchor: TaskAnchor): Result<void, NotServing>;
   /** Tear the task's live registration down in the teardown order, joining a teardown under way. */
   unregister(taskId: string): Promise<void>;
   /** The creates admitted on any of the task's sockets whose child is not among `counted`. */
@@ -149,12 +152,14 @@ export class TaskSockets implements TaskSocketRegistry {
 
   /**
    * Set the anchor of the task's serving registration, keeping its path.
-   * `not_serving` when it has none, because it was torn down meanwhile: no
-   * socket is opened for it, since nothing would mount or unregister one.
+   * `not_serving` when that registration was torn down meanwhile, whether
+   * or not the task registered again since: no socket is opened for it,
+   * since nothing would mount or unregister one, and a newer registration
+   * belongs to another caller's container.
    */
-  anchor(taskId: string, anchor: TaskAnchor): Result<void, NotServing> {
+  anchor(taskId: string, socketPath: string, anchor: TaskAnchor): Result<void, NotServing> {
     const task = this.#tasks.get(taskId);
-    if (task === undefined) return err({ kind: "not_serving" });
+    if (task === undefined || task.socketPath !== socketPath) return err({ kind: "not_serving" });
     return match(task.state)
       .with({ kind: "serving" }, ({ scope }): Result<void, NotServing> => {
         task.state = { kind: "serving", scope: { ...scope, anchor } };
@@ -310,7 +315,9 @@ function servedPath(task: Registration): string {
 function keepingAnchor(state: TaskSocketState, scope: TaskScope): TaskScope {
   return match([state, scope.anchor])
     .with([{ kind: "serving" }, null], ([serving]) => ({ ...scope, anchor: serving.scope.anchor }))
-    .otherwise(() => scope);
+    .with([{ kind: "serving" }, P.nonNullable], () => scope)
+    .with([{ kind: "retiring" }, P._], () => scope)
+    .exhaustive();
 }
 
 /** End every connection of a registration, and the creates in flight on it. A second abort is a no-op. */

@@ -370,15 +370,17 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       throw err;
     }
 
-    if (proxy) {
-      const anchored = proxy.anchorTask(spec.taskId, {
+    if (proxy && proxySocketPath !== null) {
+      // The anchor reaches only the registration this create mounted, so a
+      // newer registration of the task is never anchored to this container.
+      const anchored = proxy.anchorTask(spec.taskId, proxySocketPath, {
         rowId: containerRow.id,
         dockerId: container.id,
       });
       if (anchored.isErr()) {
-        // The task was torn down between the insert and here: its socket is
-        // gone, and no other one would be mounted. The container goes, and
-        // there is no session to hand back.
+        // The registration was torn down between the insert and here: its
+        // socket is gone, and no other one would be mounted. The container
+        // goes, and there is no session to hand back.
         await this.#reapAbandoned(containerRow.id, container.id);
         throw new Error(`task ${spec.taskId} was torn down while its container was created`);
       }

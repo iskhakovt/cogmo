@@ -1,7 +1,7 @@
-import { ok, type Result, ResultAsync } from "neverthrow";
+import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
-import { markContainerExited } from "./mark-container-exited.js";
+import { logExit } from "./mark-container-exited.js";
 import type { ChildExitCause, StoreFailed, TaskContainerRow } from "./proxy/index.js";
 import type { ContainerTransitionResult, SandboxStore } from "./store/index.js";
 
@@ -19,6 +19,9 @@ interface MarkChildExitedDeps {
  * so the transition runs once more from there; any other stale status
  * belongs to a path that finished the row first. A row read as `exited`
  * needs nothing.
+ *
+ * A failed store write is `store_failed`; only the transition is caught, so
+ * a bug after it stays a bug and rejects.
  */
 export async function markChildExited(
   deps: MarkChildExitedDeps,
@@ -29,11 +32,19 @@ export async function markChildExited(
   },
 ): Promise<Result<void, StoreFailed>> {
   const { child, cause, at } = args;
-  const exit = (from: "starting" | "running") =>
-    ResultAsync.fromPromise(
-      markContainerExited(deps, { id: child.id, dockerId: child.dockerId, from, at, cause }),
+  const exit = async (
+    from: "starting" | "running",
+  ): Promise<Result<ContainerTransitionResult, StoreFailed>> => {
+    const written = await ResultAsync.fromPromise(
+      deps.runInTx((tx) =>
+        deps.store.transitionContainerStatus(tx, { id: child.id, from, to: "exited", at }),
+      ),
       (failure): StoreFailed => ({ kind: "store_failed", cause: failure }),
     );
+    if (written.isErr()) return err(written.error);
+    logExit({ dockerId: child.dockerId, cause }, written.value);
+    return ok(written.value);
+  };
   return match(child.status)
     .with("exited", async (): Promise<Result<void, StoreFailed>> => ok(undefined))
     .with(

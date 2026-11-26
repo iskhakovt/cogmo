@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
@@ -90,6 +91,21 @@ describe("insertChildContainer", () => {
     expect(container.remove).not.toHaveBeenCalled();
   });
 
+  it("leaves no listener on the cut-off once the insert wins", async () => {
+    const { docker } = stubDocker();
+    const child = await childOf();
+    const cutOff = new AbortController();
+
+    const inserted = await insertChildContainer(
+      { store, runInTx: tx, docker },
+      child,
+      cutOff.signal,
+    );
+
+    expect(inserted.isOk()).toBe(true);
+    expect(getEventListeners(cutOff.signal, "abort")).toEqual([]);
+  });
+
   it("removes the container with its anonymous volumes when the insert fails", async () => {
     const { docker, container } = stubDocker();
     const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
@@ -127,6 +143,38 @@ describe("insertChildContainer", () => {
     ).rejects.toThrow("must be of type string");
     expect(container.remove).not.toHaveBeenCalled();
   });
+
+  it.each([
+    // postgres-js's own connection failures (`Errors.connection`).
+    "CONNECT_TIMEOUT",
+    "CONNECTION_CLOSED",
+    "CONNECTION_DESTROYED",
+    "CONNECTION_ENDED",
+    // Node's, from the driver's socket.
+    "ECONNREFUSED",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "EAI_AGAIN",
+  ])(
+    "is record_failed, removing the container, when the connection fails with %s",
+    async (code) => {
+      const { docker, container } = stubDocker();
+      const child = await childOf();
+      const unreachable: Transactor = () =>
+        Promise.reject(
+          Object.assign(new Error(`write ${code} db:5432`), { code, errno: code, address: "db" }),
+        );
+
+      const inserted = await insertChildContainer(
+        { store, runInTx: unreachable, docker },
+        child,
+        NO_CUT_OFF,
+      );
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
+      expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+    },
+  );
 
   it("is record_failed when the removal is refused too", async () => {
     const { docker, container } = stubDocker();

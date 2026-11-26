@@ -4,7 +4,11 @@ import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { markChildExited } from "./mark-child-exited.js";
 import type { TaskContainerRow } from "./proxy/index.js";
-import { DrizzleSandboxStore, type SandboxStore } from "./store/index.js";
+import {
+  type ContainerTransitionResult,
+  DrizzleSandboxStore,
+  type SandboxStore,
+} from "./store/index.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -91,6 +95,20 @@ describe("markChildExited", () => {
     );
 
     expect(exited._unsafeUnwrapErr()).toEqual({ kind: "store_failed", cause });
+  });
+
+  it("rejects, as the bug it is, a transition outcome the store never returns", async () => {
+    const store = mock<SandboxStore>();
+    store.transitionContainerStatus.mockResolvedValue({
+      kind: "unexpected",
+    } as unknown as ContainerTransitionResult);
+
+    await expect(
+      markChildExited(
+        { store, runInTx: fakeRunInTx },
+        { child: childIn("running"), cause: "removed_by_task", at: AT },
+      ),
+    ).rejects.toThrow();
   });
 });
 

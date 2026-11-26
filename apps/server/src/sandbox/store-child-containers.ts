@@ -30,7 +30,7 @@ export function storeChildContainers(deps: {
       ),
     removed: (child, cause) =>
       new ResultAsync(markChildExited(deps, { child, cause, at: new Date() })),
-    reconcile: (children) =>
-      new ResultAsync(reconcileChildContainers(deps, { children, at: new Date() })),
+    reconcile: (children, signal) =>
+      new ResultAsync(reconcileChildContainers(deps, { children, at: new Date(), signal })),
   };
 }
