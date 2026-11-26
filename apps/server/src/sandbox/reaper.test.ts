@@ -53,6 +53,8 @@ function labels(extra: Partial<ContainerLabels> = {}): ContainerLabels {
 
 interface DockerSideContainer {
   Id: string;
+  /** The daemon's create time, in Unix seconds. */
+  Created: number;
   Labels?: Record<string, string>;
 }
 
@@ -126,6 +128,14 @@ function fakeDocker(
 
 const NOW = () => new Date("2026-04-27T12:00:00Z");
 
+/** A daemon `Created` time, in Unix seconds, `ms` before the fake `NOW`. */
+function createdAgo(ms: number): number {
+  return Math.floor((NOW().getTime() - ms) / 1000);
+}
+
+/** Created an hour before the fake `NOW`: past any grace window. */
+const LONG_AGO = createdAgo(60 * 60_000);
+
 async function insertContainer(opts: {
   dockerId: string;
   /** TTL offset relative to the fake `NOW` — negative = expired. */
@@ -171,7 +181,7 @@ async function insertContainer(opts: {
 
 describe("runReap — TTL pass", () => {
   it("reaps containers whose TTL has expired and were running", async () => {
-    const dockerSide: DockerSideContainer[] = [{ Id: "c1", Labels: labels() }];
+    const dockerSide: DockerSideContainer[] = [{ Id: "c1", Created: LONG_AGO, Labels: labels() }];
     const { docker, killCalls, removeCalls } = fakeDocker({ containers: dockerSide });
     const cogmoId = await insertContainer({
       dockerId: "c1",
@@ -194,7 +204,7 @@ describe("runReap — TTL pass", () => {
     { code: 404, label: "404 ('no such container')" },
   ])("swallows kill rejection with statusCode $label", async ({ code }) => {
     const { docker, removeCalls } = fakeDocker({
-      containers: [{ Id: "c-gone", Labels: labels() }],
+      containers: [{ Id: "c-gone", Created: LONG_AGO, Labels: labels() }],
       failKill: new Map([["c-gone", code]]),
     });
     const cogmoId = await insertContainer({
@@ -215,7 +225,7 @@ describe("runReap — TTL pass", () => {
     // 409 is moby's `SetRemovalInProgress` race-protection (daemon/delete.go);
     // fires when reaper + `deleteByTaskId` hit the same container.
     const { docker, killCalls } = fakeDocker({
-      containers: [{ Id: "c-rm-race", Labels: labels() }],
+      containers: [{ Id: "c-rm-race", Created: LONG_AGO, Labels: labels() }],
       failRemove: new Map([["c-rm-race", code]]),
     });
     const cogmoId = await insertContainer({
@@ -231,7 +241,7 @@ describe("runReap — TTL pass", () => {
 
   it("does not reap containers with future TTL", async () => {
     const { docker, killCalls } = fakeDocker({
-      containers: [{ Id: "c-fresh", Labels: labels() }],
+      containers: [{ Id: "c-fresh", Created: LONG_AGO, Labels: labels() }],
     });
     await insertContainer({ dockerId: "c-fresh", ttlMs: 60_000, status: "running" });
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
@@ -242,8 +252,8 @@ describe("runReap — TTL pass", () => {
   it("kills children before parents (depth DESC)", async () => {
     const { docker, killCalls } = fakeDocker({
       containers: [
-        { Id: "parent", Labels: labels() },
-        { Id: "child", Labels: labels() },
+        { Id: "parent", Created: LONG_AGO, Labels: labels() },
+        { Id: "child", Created: LONG_AGO, Labels: labels() },
       ],
     });
     const parentId = await insertContainer({
@@ -266,7 +276,7 @@ describe("runReap — TTL pass", () => {
 
   it("skips already-reaped rows on re-tick (idempotent)", async () => {
     const { docker, killCalls } = fakeDocker({
-      containers: [{ Id: "c-old", Labels: labels() }],
+      containers: [{ Id: "c-old", Created: LONG_AGO, Labels: labels() }],
     });
     await insertContainer({
       dockerId: "c-old",
@@ -290,7 +300,7 @@ describe("runReap — TTL pass", () => {
       status: "running",
     });
     const { docker, killCalls } = fakeDocker({
-      containers: [{ Id: "c-boundary", Labels: labels() }],
+      containers: [{ Id: "c-boundary", Created: LONG_AGO, Labels: labels() }],
     });
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(0);
@@ -307,6 +317,7 @@ describe("runReap — orphan pass", () => {
       containers: [
         {
           Id: "c-orphan",
+          Created: LONG_AGO,
           Labels: { ...labels(), "cogmo.instance": deadInstance.id },
         },
       ],
@@ -323,6 +334,7 @@ describe("runReap — orphan pass", () => {
       containers: [
         {
           Id: "c-bare",
+          Created: LONG_AGO,
           Labels: { "cogmo.managed": "true" }, // missing cogmo.instance
         },
       ],
@@ -334,7 +346,7 @@ describe("runReap — orphan pass", () => {
 
   it("reaps a Docker container that has no DB row (orphan create)", async () => {
     const { docker, killCalls } = fakeDocker({
-      containers: [{ Id: "c-no-db", Labels: labels() }],
+      containers: [{ Id: "c-no-db", Created: LONG_AGO, Labels: labels() }],
     });
     // No insertContainer for c-no-db.
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
@@ -342,9 +354,44 @@ describe("runReap — orphan pass", () => {
     expect(killCalls).toEqual(["c-no-db"]);
   });
 
+  it("skips a rowless container labelled with the live instance while it is under 2 minutes old", async () => {
+    const { docker, killCalls } = fakeDocker({
+      containers: [{ Id: "c-inserting", Created: createdAgo(119_000), Labels: labels() }],
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.orphansReaped).toBe(0);
+    expect(killCalls).toEqual([]);
+  });
+
+  it("reaps a rowless container labelled with the live instance once 2 minutes have passed", async () => {
+    const { docker, killCalls } = fakeDocker({
+      containers: [{ Id: "c-rowless", Created: createdAgo(120_000), Labels: labels() }],
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.orphansReaped).toBe(1);
+    expect(killCalls).toEqual(["c-rowless"]);
+  });
+
+  it("reaps a fresh container labelled with a dead instance at once", async () => {
+    const deadInstance = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 99 }));
+    await tx((trx) => store.closeInstance(trx, deadInstance.id));
+    const { docker, killCalls } = fakeDocker({
+      containers: [
+        {
+          Id: "c-fresh-dead",
+          Created: createdAgo(1_000),
+          Labels: { ...labels(), "cogmo.instance": deadInstance.id },
+        },
+      ],
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.orphansReaped).toBe(1);
+    expect(killCalls).toEqual(["c-fresh-dead"]);
+  });
+
   it("does NOT reap a healthy container (live instance + DB row present)", async () => {
     const { docker, killCalls } = fakeDocker({
-      containers: [{ Id: "c-good", Labels: labels() }],
+      containers: [{ Id: "c-good", Created: LONG_AGO, Labels: labels() }],
     });
     await insertContainer({ dockerId: "c-good", ttlMs: 60_000, status: "running" });
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
@@ -365,6 +412,7 @@ describe("runReap — orphan pass", () => {
       containers: [
         {
           Id: "c-stale-row",
+          Created: LONG_AGO,
           Labels: { ...labels(), "cogmo.instance": deadInstance.id },
         },
       ],
@@ -393,7 +441,7 @@ describe("runReap — stale DB pass", () => {
   it("does not double-count rows the TTL pass just reaped", async () => {
     await insertContainer({ dockerId: "c-double", ttlMs: -1000, status: "running" });
     const { docker } = fakeDocker({
-      containers: [{ Id: "c-double", Labels: labels() }],
+      containers: [{ Id: "c-double", Created: LONG_AGO, Labels: labels() }],
     });
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(1);
@@ -417,7 +465,7 @@ describe("runReap — a row another path already finished", () => {
   it("TTL pass: a row reaped during its kill is neither re-written nor counted", async () => {
     const cogmoId = await insertContainer({ dockerId: "c-raced", ttlMs: -1000, status: "running" });
     const { docker } = fakeDocker({
-      containers: [{ Id: "c-raced", Labels: labels() }],
+      containers: [{ Id: "c-raced", Created: LONG_AGO, Labels: labels() }],
       onKill: () => reapedElsewhere(cogmoId),
     });
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
@@ -452,7 +500,7 @@ describe("runReap — a row another path moved forward", () => {
   it("TTL pass: a starting row that became running during its kill is reaped", async () => {
     const cogmoId = await insertContainer({ dockerId: "c-fwd", ttlMs: -1000, status: "starting" });
     const { docker } = fakeDocker({
-      containers: [{ Id: "c-fwd", Labels: labels() }],
+      containers: [{ Id: "c-fwd", Created: LONG_AGO, Labels: labels() }],
       onKill: async () => {
         await tx((trx) =>
           store.transitionContainerStatus(trx, {
@@ -639,8 +687,8 @@ describe("runReap — concurrent invocation", () => {
 
   it("two interleaved runReap calls reach a consistent terminal DB state", async () => {
     const dockerSide: DockerSideContainer[] = [
-      { Id: "c-a", Labels: labels() },
-      { Id: "c-b", Labels: labels() },
+      { Id: "c-a", Created: LONG_AGO, Labels: labels() },
+      { Id: "c-b", Created: LONG_AGO, Labels: labels() },
     ];
     const { docker, killCalls, removeCalls } = fakeDocker({ containers: dockerSide });
     const idA = await insertContainer({ dockerId: "c-a", ttlMs: -1000, status: "running" });
@@ -675,7 +723,7 @@ describe("runReap — concurrent invocation", () => {
     // "next cron tick" scenario — the production-realistic flow given
     // Inngest's singleton-by-name. Must be a complete no-op.
     const { docker, killCalls } = fakeDocker({
-      containers: [{ Id: "c-seq", Labels: labels() }],
+      containers: [{ Id: "c-seq", Created: LONG_AGO, Labels: labels() }],
     });
     const cogmoId = await insertContainer({
       dockerId: "c-seq",

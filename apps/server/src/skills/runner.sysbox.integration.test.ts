@@ -16,6 +16,7 @@ import {
   type SandboxClient,
 } from "../sandbox/index.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
+import { storeChildContainers } from "../sandbox/store-child-containers.js";
 import { storeContainerRows } from "../sandbox/store-container-rows.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -118,6 +119,7 @@ beforeAll(async () => {
     socketDir: "/tmp/cogmo-test-skills-proxy",
     hostDockerSocket: "/var/run/docker.sock",
     containerRows: storeContainerRows({ store: agentStore, runInTx: tx }),
+    childContainers: storeChildContainers({ store: agentStore, runInTx: tx, docker }),
   });
 
   // Sweep any `cogmo-skills-test-deps-*` volumes left behind by prior

@@ -5,17 +5,19 @@ import type { ProxyRejection } from "./rejection.js";
 /**
  * Shared types for the Docker socket proxy. The proxy maintains a Map<task
  * socket path → TaskScope> in memory; on connection, the scope is looked up
- * by which socket received it. The scope drives label injection and the
- * resource caps on `POST /containers/create`.
+ * by which socket received it. The scope drives label injection, the
+ * resource caps on `POST /containers/create` and the lineage of the child
+ * rows it inserts.
  */
 export interface TaskScope {
   /** Cogmo `coding_tasks.id` — denormalized into `cogmo.root_task` label. */
   taskId: string;
   /**
    * The `containers` row id of the supervisor-created depth-0 container,
-   * which the task's ownership is anchored to; `""` until that row exists.
+   * which the task's ownership is anchored to and a child's row names as
+   * its parent; `null` until that row exists.
    */
-  parentContainerRowId: string;
+  parentContainerRowId: string | null;
   /** Docker id of the depth-0 task container — written into `cogmo.parent`. */
   parentDockerId: string;
   /** Depth of the parent container (0 for the task container itself). */
@@ -28,6 +30,8 @@ export interface TaskScope {
   instanceId: string;
   /** The task's limits: injected into a child create that sets none, and its cap. */
   resourceLimits: ResourceLimits;
+  /** The task's TTL, which a child's row carries. */
+  ttlExpiresAt: Date;
 }
 
 export interface ProxyOptions {
@@ -37,6 +41,8 @@ export interface ProxyOptions {
   socketDir: string;
   /** The store's `containers` rows, which decide what a task owns. */
   containerRows: ContainerRows;
+  /** The writes that follow a child's create, start and removal. */
+  childContainers: ChildContainers;
 }
 
 /** A `containers` row that carries a task's `root_task_id` and is not `reaped`. */
@@ -44,8 +50,9 @@ export interface TaskContainerRow {
   /** The row's id, which a child's `parentId` names. */
   readonly id: string;
   readonly dockerId: string;
-  /** `null` for a depth-0 row. */
+  /** `null` for a depth-0 row, and only for one. */
   readonly parentId: string | null;
+  readonly status: "starting" | "running" | "exited";
 }
 
 /** The store read failed; the proxy answers `unavailable`. */
@@ -61,6 +68,57 @@ export interface StoreFailed {
  */
 export interface ContainerRows {
   forTask(taskId: string): ResultAsync<ReadonlyArray<TaskContainerRow>, StoreFailed>;
+}
+
+/**
+ * A child's `containers` row, inserted in `starting` once the daemon has
+ * answered 201 to its create (design/sandbox.md → Child containers).
+ */
+export interface ChildRecord {
+  dockerId: string;
+  /** The task's depth-0 row. */
+  parentId: string;
+  rootTaskId: string;
+  depth: number;
+  /** The image as the task named it. */
+  image: string;
+  runtime: "sysbox-runc" | "runc";
+  /** The Cogmo labels the create policy injected. */
+  labels: Readonly<Record<string, string>>;
+  /** The limits the create policy injected or capped. */
+  resourceLimits: ResourceLimits;
+  ttlExpiresAt: Date;
+  instanceId: string;
+}
+
+/**
+ * The child's row could not be inserted; its container has been removed,
+ * or left to the orphan pass. The use case has logged why.
+ */
+export interface ChildRecordFailed {
+  kind: "record_failed";
+}
+
+/**
+ * What a child's `start` left its row as. `running` covers a row that was
+ * already `running`: a child stopped and started again. `finished` is a
+ * row another path moved to `exited` or `reaped` meanwhile, whose container
+ * has been killed and removed.
+ */
+export type ChildStartOutcome = { kind: "running" } | { kind: "finished" };
+
+/**
+ * The store writes that follow the daemon's answers to a task's child
+ * requests (design/sandbox.md → Container state machine). Built at boot over
+ * the sandbox store and the daemon; the proxy never reaches either itself.
+ */
+export interface ChildContainers {
+  /** Insert the child's row. A failed insert removes the container, with its anonymous volumes. */
+  record(child: ChildRecord): ResultAsync<void, ChildRecordFailed>;
+  /** `starting → running` once the daemon has started the child. */
+  started(child: TaskContainerRow): ResultAsync<ChildStartOutcome, StoreFailed>;
+  /** `→ exited` once the daemon has removed the child at the task's request. */
+  removed(child: TaskContainerRow): ResultAsync<void, StoreFailed>;
 }
 
 /** What the create policy reads from an image inspect. */

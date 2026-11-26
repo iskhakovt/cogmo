@@ -22,8 +22,8 @@ import type { RefLookups, TaskContainerRow } from "./types.js";
 export interface OwnershipLookups {
   /** The rows that carry the task's `root_task_id` and are not `reaped`; `unavailable` when the store read failed. */
   taskRows(): ResultAsync<ReadonlyArray<TaskContainerRow>, ProxyRejection>;
-  /** The scope's own depth-0 row, `TaskScope.parentContainerRowId`. */
-  taskContainerRowId: string;
+  /** The scope's own depth-0 row, `TaskScope.parentContainerRowId`; `null` before it exists. */
+  taskContainerRowId: string | null;
   refs: RefLookups;
 }
 
@@ -32,6 +32,11 @@ export interface OwnedContainers {
   task: TaskContainerRow;
   /** That row and its children. */
   all: ReadonlyArray<TaskContainerRow>;
+  /**
+   * The task's rows at depth ≥ 1 in `starting` or `running`, whichever
+   * depth-0 row they hang from: what the child cap counts.
+   */
+  liveChildren: number;
 }
 
 /**
@@ -42,13 +47,27 @@ export interface OwnedContainers {
 export async function ownedContainers(
   lookups: OwnershipLookups,
 ): Promise<Result<OwnedContainers, ProxyRejection>> {
+  const { taskContainerRowId } = lookups;
+  if (taskContainerRowId === null) return err(noLiveRow());
   const rows = await lookups.taskRows();
   return rows.andThen((candidates) => {
-    const task = candidates.find((row) => row.id === lookups.taskContainerRowId);
-    if (task === undefined) return err(unavailable("the task container has no live row"));
+    const task = candidates.find((row) => row.id === taskContainerRowId);
+    if (task === undefined) return err(noLiveRow());
     const all = candidates.filter((row) => row.id === task.id || row.parentId === task.id);
-    return ok({ task, all });
+    const liveChildren = candidates.filter((row) => row.parentId !== null && isLive(row)).length;
+    return ok({ task, all, liveChildren });
   });
+}
+
+function noLiveRow(): ProxyRejection {
+  return unavailable("the task container has no live row");
+}
+
+function isLive(row: TaskContainerRow): boolean {
+  return match(row.status)
+    .with("starting", "running", () => true)
+    .with("exited", () => false)
+    .exhaustive();
 }
 
 /**

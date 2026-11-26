@@ -94,13 +94,46 @@ describe("container ownership", () => {
       "/containers/own-child/rename?name=other",
       `/containers/${CHILD.id}/rename?name=other`,
     ],
-    ["DELETE", "/containers/own-child?force=true", `/containers/${CHILD.id}?force=true`],
+    ["DELETE", "/containers/own-child?force=true", `/containers/${CHILD.id}?force=true&v=true`],
   ])("forwards %s %s under the full id", async (method, path, forwarded) => {
     const r = await h.send(method, path);
 
     expect(r.status, r.body).toBe(200);
     const ref = path.includes("own-child") ? "own-child" : "cogmo-task-own";
     expect(h.received()).toEqual([resolveOf(ref), `${method} ${forwarded}`]);
+  });
+
+  it.each([
+    ["no query", "", "?v=true"],
+    ["v=false", "?v=false", "?v=true"],
+    ["v=0 twice beside force", "?v=0&force=1&v=0", "?v=true&force=1"],
+  ])("forwards a child DELETE with v=true: %s", async (_label, query, forwarded) => {
+    const r = await h.send("DELETE", `/containers/own-child${query}`);
+
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual([
+      resolveOf("own-child"),
+      `DELETE /containers/${CHILD.id}${forwarded}`,
+    ]);
+  });
+
+  it.each(["?link=true", "?link=0", "?force=1&link=1"])(
+    "denies a child DELETE carrying the link query key: %s",
+    async (query) => {
+      const r = await h.send("DELETE", `/containers/own-child${query}`);
+
+      h.expectRejected(r, 403, []);
+      expect(message(r)).toContain("link");
+    },
+  );
+
+  it.each([
+    ["an empty JSON object", "{}"],
+    ["a pre-1.24 HostConfig", JSON.stringify({ HostConfig: { Privileged: true } })],
+  ])("denies a child start with a body: %s", async (_label, body) => {
+    const r = await h.send("POST", "/containers/own-child/start", body);
+
+    h.expectRejected(r, 403, []);
   });
 
   it("forwards an exec create under the container's full id", async () => {

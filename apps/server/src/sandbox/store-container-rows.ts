@@ -3,7 +3,7 @@ import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import type { ContainerRows, StoreFailed, TaskContainerRow } from "./proxy/index.js";
-import type { ContainerStatus, SandboxStore } from "./store/index.js";
+import type { ContainerRow, SandboxStore } from "./store/index.js";
 
 /**
  * `ContainerRows` over the sandbox store, which the socket proxy reads on
@@ -29,16 +29,13 @@ async function listTaskContainers(
   taskId: string,
 ): Promise<ReadonlyArray<TaskContainerRow>> {
   const rows = await deps.runInTx((tx) => deps.store.listContainersForTask(tx, taskId));
-  return R.pipe(
-    rows,
-    R.filter((row) => notReaped(row.status)),
-    R.map((row) => ({ id: row.id, dockerId: row.dockerId, parentId: row.parentId })),
-  );
+  return R.flatMap(rows, notReaped);
 }
 
-function notReaped(status: ContainerStatus): boolean {
-  return match(status)
-    .with("starting", "running", "exited", () => true)
-    .with("reaped", () => false)
+function notReaped(row: ContainerRow): TaskContainerRow[] {
+  const { id, dockerId, parentId } = row;
+  return match(row.status)
+    .with("starting", "running", "exited", (status) => [{ id, dockerId, parentId, status }])
+    .with("reaped", () => [])
     .exhaustive();
 }

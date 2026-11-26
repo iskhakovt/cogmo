@@ -18,7 +18,7 @@ import {
   startFakeDockerDaemon,
 } from "../../test/fake-docker-daemon.js";
 import { CogmoSocketProxy } from "./index.js";
-import type { ContainerRows, TaskScope } from "./types.js";
+import type { ChildContainers, ContainerRows, TaskScope } from "./types.js";
 
 const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
 vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
@@ -32,6 +32,7 @@ const SCOPE: TaskScope = {
   cgroupParent: "cogmo-task-abc.slice",
   instanceId: "019d0000-0000-7000-8000-0000000000ff",
   resourceLimits: { cpus: 2, memory_bytes: 1024 ** 3, pids: 256 },
+  ttlExpiresAt: new Date("2026-12-01T00:00:00.000Z"),
 };
 
 const ErrorSchema = z.object({ message: z.string() });
@@ -63,18 +64,30 @@ beforeEach(async () => {
     }),
   );
   const containerRows = mock<ContainerRows>();
-  const taskRow = SCOPE.parentContainerRowId;
+  const taskRow = expectDefined(SCOPE.parentContainerRowId, "the scope's row");
   containerRows.forTask.mockReturnValue(
     okAsync([
-      { id: taskRow, dockerId: TASK_CONTAINER.id, parentId: null },
-      { id: "019d0000-0000-7000-8000-00000000c001", dockerId: LINKED_CHILD.id, parentId: taskRow },
-      { id: "019d0000-0000-7000-8000-00000000c002", dockerId: CLI_CHILD.id, parentId: taskRow },
+      { id: taskRow, dockerId: TASK_CONTAINER.id, parentId: null, status: "running" },
+      {
+        id: "019d0000-0000-7000-8000-00000000c001",
+        dockerId: LINKED_CHILD.id,
+        parentId: taskRow,
+        status: "running",
+      },
+      {
+        id: "019d0000-0000-7000-8000-00000000c002",
+        dockerId: CLI_CHILD.id,
+        parentId: taskRow,
+        status: "running",
+      },
     ]),
   );
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
     hostDockerSocket: daemon.socketPath,
     containerRows,
+    // An exec names no create, start or removal.
+    childContainers: mock<ChildContainers>(),
   });
   socket = await proxy.registerTask(SCOPE);
 });

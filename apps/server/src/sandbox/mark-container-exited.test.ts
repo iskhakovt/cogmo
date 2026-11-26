@@ -14,7 +14,7 @@ describe("markContainerExited", () => {
     store.transitionContainerStatus.mockResolvedValue({ kind: "transitioned" });
     const result = await markContainerExited(
       { store, runInTx: fakeRunInTx },
-      { id: "row-1", dockerId: "c1", from: "running", at: AT },
+      { id: "row-1", dockerId: "c1", from: "running", at: AT, cause: "missing_from_daemon" },
     );
     expect(result).toEqual({ kind: "transitioned" });
     expect(store.transitionContainerStatus).toHaveBeenCalledWith(expect.anything(), {
@@ -30,7 +30,7 @@ describe("markContainerExited", () => {
     store.transitionContainerStatus.mockResolvedValue({ kind: "stale", status: "reaped" });
     const result = await markContainerExited(
       { store, runInTx: fakeRunInTx },
-      { id: "row-1", dockerId: "c1", from: "starting", at: AT },
+      { id: "row-1", dockerId: "c1", from: "starting", at: AT, cause: "removed_by_task" },
     );
     expect(result).toEqual({ kind: "stale", status: "reaped" });
   });

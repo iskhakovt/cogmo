@@ -97,16 +97,22 @@ export function checkCreateFields(
   ]).map(() => undefined);
 }
 
+type LabelScope = Pick<TaskScope, "instanceId" | "taskId" | "parentDockerId" | "parentDepth">;
+
 /** The caller's labels without any `cogmo.` key, plus the Cogmo labels from the scope. */
 export function taskLabels(
   labels: Readonly<Record<string, string>> | null | undefined,
-  scope: Pick<TaskScope, "instanceId" | "taskId" | "parentDockerId" | "parentDepth">,
+  scope: LabelScope,
 ): Record<string, string> {
   const own = Object.entries(labels ?? {}).filter(
     ([key]) => !key.toLowerCase().startsWith(COGMO_LABEL_PREFIX),
   );
+  return { ...Object.fromEntries(own), ...cogmoLabels(scope) };
+}
+
+/** The labels Cogmo puts on a child, the mirror of its row's lineage. */
+export function cogmoLabels(scope: LabelScope): Record<string, string> {
   return {
-    ...Object.fromEntries(own),
     "cogmo.managed": "true",
     "cogmo.instance": scope.instanceId,
     "cogmo.root_task": scope.taskId,

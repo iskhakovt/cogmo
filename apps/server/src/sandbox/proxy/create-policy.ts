@@ -12,17 +12,19 @@
 
 import { err, ok, type Result, ResultAsync } from "neverthrow";
 import * as R from "remeda";
+import type { ResourceLimits } from "../types.js";
 import { type CreateBody, CreateBodySchema } from "./body-schemas.js";
 import {
   bindPublishedPorts,
   checkCreateFields,
+  cogmoLabels,
   publishesPorts,
   taskLabels,
 } from "./create-fields.js";
 import { parseBody } from "./key-rules.js";
 import { isHostPlatform } from "./platform.js";
 import { denied, type ProxyRejection } from "./rejection.js";
-import { limitResources, type ResourceFields } from "./resources.js";
+import { effectiveLimits, limitResources, type ResourceFields } from "./resources.js";
 import { checkSysboxEnv } from "./sysbox-env.js";
 import type { DaemonLookups, ImageFacts, TaskScope } from "./types.js";
 
@@ -46,17 +48,24 @@ const REPLACED_HOST_FIELDS = [
   "PortBindings",
 ] as const;
 
-interface CreateForward {
+interface CreatePolicyOutcome {
   /** The query keys the daemon reads, when non-empty. */
   query: URLSearchParams;
   body: Buffer;
+  /** What the child's row records of the create. */
+  child: {
+    /** The image as the task named it, not the inspected id the daemon gets. */
+    image: string;
+    labels: Record<string, string>;
+    resourceLimits: ResourceLimits;
+  };
 }
 
 export function applyContainerCreatePolicy(
   request: { body: Buffer; query: URLSearchParams },
   scope: TaskScope,
   lookups: DaemonLookups,
-): ResultAsync<CreateForward, ProxyRejection> {
+): ResultAsync<CreatePolicyOutcome, ProxyRejection> {
   const query = forwardedQuery(request.query);
   return parseBody(request.body, CreateBodySchema)
     .andThen((body) =>
@@ -69,12 +78,21 @@ export function applyContainerCreatePolicy(
         .andThen(() => new ResultAsync(lookups.inspectImage(body.Image)))
         .andThen((image) => checkSysboxEnv(image.env, "the image's Config.Env").map(() => image))
         .andThen((image) =>
-          new ResultAsync(publishAddressFor(body, lookups)).map((address) =>
-            rebuild(body, { image, resources, address, scope }),
-          ),
+          new ResultAsync(publishAddressFor(body, lookups)).map((address) => ({
+            rebuilt: rebuild(body, { image, resources, address, scope }),
+            child: {
+              image: body.Image,
+              labels: cogmoLabels(scope),
+              resourceLimits: effectiveLimits(resources),
+            },
+          })),
         ),
     )
-    .map((rebuilt) => ({ query, body: Buffer.from(JSON.stringify(rebuilt), "utf8") }));
+    .map(({ rebuilt, child }) => ({
+      query,
+      body: Buffer.from(JSON.stringify(rebuilt), "utf8"),
+      child,
+    }));
 }
 
 function forwardedQuery(query: URLSearchParams): URLSearchParams {

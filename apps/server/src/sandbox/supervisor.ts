@@ -232,19 +232,20 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     const proxy = spec.dockerSocket ? this.#proxy : undefined;
 
     // Pre-allocate the proxy socket so the task container can mount it at
-    // `/var/run/docker.sock` from the moment it starts. Parent docker id
-    // isn't known yet — register with a placeholder, then upsert below
-    // after `createContainer` returns.
+    // `/var/run/docker.sock` from the moment it starts. The task container's
+    // row and docker id aren't known yet — register with placeholders, then
+    // upsert below once the row exists.
     const proxySocketPath = proxy
       ? await proxy.registerTask({
           taskId: spec.taskId,
-          parentContainerRowId: "",
+          parentContainerRowId: null,
           parentDockerId: "",
           parentDepth: 0,
           runtime,
           cgroupParent,
           instanceId: this.#instanceId,
           resourceLimits: spec.resourceLimits,
+          ttlExpiresAt: spec.expiresAt,
         })
       : null;
 
@@ -355,14 +356,17 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     } catch (err) {
       // The daemon has the container but no row records it. Remove it here;
       // should that fail, the reaper's orphan pass removes a container with
-      // no row on its next tick.
+      // no row once its grace window has passed.
       log.error({ err, dockerId: container.id }, "container row insert failed, removing");
-      await container.remove({ force: true }).catch((removeErr: unknown) => {
-        log.warn(
-          { err: removeErr, dockerId: container.id },
-          "removing the rowless container failed",
-        );
-      });
+      const removed = await killAndRemoveContainer(this.#docker, container.id);
+      removed.match(
+        () => undefined,
+        (e) =>
+          log.warn(
+            { err: e.error, op: e.op, dockerId: container.id },
+            "removing the rowless container failed",
+          ),
+      );
       await releaseProxyScope(proxy, spec.taskId);
       throw err;
     }
@@ -377,6 +381,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         cgroupParent,
         instanceId: this.#instanceId,
         resourceLimits: spec.resourceLimits,
+        ttlExpiresAt: spec.expiresAt,
       });
     }
 
@@ -499,11 +504,20 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
   }
 
   async deleteByTaskId(taskId: string): Promise<void> {
-    const rows = await this.#runInTx((tx) => this.#store.listContainersForTask(tx, taskId));
-    // Cascade order: deepest first, so a parent isn't reaped while a
-    // child still depends on it.
-    const ordered = [...rows].sort((a, b) => b.depth - a.depth);
+    // The proxy goes first: it stops taking requests, then waits for the
+    // container creates in flight, so a child the daemon has created has
+    // its row before the cascade below lists the task's rows. A failure is
+    // logged, not raised: the cascade still has to run.
+    if (this.#proxy) {
+      await this.#proxy.unregisterTask(taskId).catch((err: unknown) => {
+        log.warn({ err, taskId }, "proxy unregisterTask failed during delete");
+      });
+    }
     try {
+      const rows = await this.#runInTx((tx) => this.#store.listContainersForTask(tx, taskId));
+      // Cascade order: deepest first, so a parent isn't reaped while a
+      // child still depends on it.
+      const ordered = [...rows].sort((a, b) => b.depth - a.depth);
       for (const row of ordered) {
         if (row.status === "reaped") continue;
         const reaped = await reapContainer(this.#reapDeps(), {
@@ -517,16 +531,6 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         if (reaped.isErr()) throw reaped.error.error;
       }
     } finally {
-      // Tear down the per-task proxy socket regardless of whether the
-      // cascade reap succeeded — leaving the socket file around (and the
-      // listener bound) leaks resources across crashes. Idempotent: safe
-      // when no proxy is configured or when the task was never
-      // registered.
-      if (this.#proxy) {
-        await this.#proxy.unregisterTask(taskId).catch((err: unknown) => {
-          log.warn({ err, taskId }, "proxy unregisterTask failed during delete");
-        });
-      }
       // Wipe per-task askpass material. Idempotent — a missing directory
       // is a no-op. Failure is logged inside `cleanupAskpass`; we never
       // throw out of the finally.

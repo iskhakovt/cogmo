@@ -7,6 +7,7 @@ import { statusCodeOf } from "./docker-facade.js";
 import { markContainerExited } from "./mark-container-exited.js";
 import { reapContainer, reapDiscoveredContainer } from "./reap-container.js";
 import {
+  type ContainerRow,
   type ContainerTransitionResult,
   isLiveContainer,
   type SandboxStore,
@@ -14,6 +15,16 @@ import {
 import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
 
 const log = logger.child({ component: "sandbox.reaper" });
+
+/**
+ * How long the orphan pass leaves a container that is labelled with a live
+ * instance and has no row: the gap between a create's daemon answer and
+ * its row insert, in the supervisor or the proxy, is one round trip.
+ */
+const ROWLESS_GRACE_MS = 2 * 60_000;
+
+/** What the orphan and stale passes read of a listed container. */
+type ListedContainer = Pick<Docker.ContainerInfo, "Id" | "Labels" | "Created">;
 
 /**
  * Cron reaper for the sandbox module. Runs three passes per tick:
@@ -25,13 +36,15 @@ const log = logger.child({ component: "sandbox.reaper" });
  *
  * 2. **Orphan pass.** Walks every container the daemon reports as
  *    `cogmo.managed=true`. Anything stamped with an instance id that
- *    isn't live (or isn't a known Cogmo instance at all), or that has
- *    no matching DB row, gets reaped. Catches:
+ *    isn't live (or isn't a known Cogmo instance at all) gets reaped at
+ *    once, and so does one with no matching DB row once it is 2 minutes
+ *    old. Catches:
  *    - Containers from a previous Cogmo run that crashed before
  *      graceful shutdown.
- *    - Containers created by Docker but whose DB write failed (rare,
- *      but possible across a network blip between createContainer
- *      and `setTaskContainerId`).
+ *    - Containers created by Docker whose row insert failed, in the
+ *      supervisor or the proxy, and whose removal failed too. The grace
+ *      window leaves alone a create between the daemon's answer and its
+ *      row insert.
  *
  * 3. **Stale DB pass.** Rows the DB still considers live but the
  *    daemon doesn't know about — most often a manual `docker rm`
@@ -110,13 +123,13 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
   // `dockerContainers` array is indistinguishable from "no containers",
   // and the stale pass would mark every live row `exited`. Skip the
   // stale pass when we don't have a trusted Docker view.
-  let dockerContainers: Array<{ Id: string; Labels?: Record<string, string> }> = [];
+  let dockerContainers: ReadonlyArray<ListedContainer> = [];
   let dockerListOk = false;
   try {
-    dockerContainers = (await deps.docker.listContainers({
+    dockerContainers = await deps.docker.listContainers({
       all: true,
       filters: { label: [`${LABEL_MANAGED}=true`] },
-    })) as Array<{ Id: string; Labels?: Record<string, string> }>;
+    });
     dockerListOk = true;
   } catch (err) {
     log.warn({ err }, "reaper orphan pass: docker.listContainers failed");
@@ -126,12 +139,8 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     (await deps.runInTx((tx) => deps.store.listLiveInstances(tx))).map((i) => i.id),
   );
   for (const c of dockerContainers) {
-    const stamped = c.Labels?.[LABEL_INSTANCE];
     const dbRow = await deps.runInTx((tx) => deps.store.getContainerByDockerId(tx, c.Id));
-    // Orphan if: no instance label, label points at a dead instance,
-    // OR no DB row exists at all (rare orphaned create).
-    const isOrphan = !stamped || !liveInstanceIds.has(stamped) || !dbRow;
-    if (!isOrphan) continue;
+    if (!isOrphan(c, dbRow, liveInstanceIds, now)) continue;
     // Counted per daemon object: the listing proved it existed, whatever
     // its row says.
     const outcome = await reapDiscoveredContainer(deps, {
@@ -168,6 +177,7 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
         dockerId: row.dockerId,
         from: row.status,
         at: now,
+        cause: "missing_from_daemon",
       });
       result.staleMarked += counted(outcome);
     }
@@ -219,6 +229,23 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
   }
 
   return result;
+}
+
+/**
+ * An orphan has no instance label, or one naming an instance that is not
+ * live, or no row once the grace window has passed. The daemon's `Created`
+ * is in seconds.
+ */
+function isOrphan(
+  c: ListedContainer,
+  row: ContainerRow | undefined,
+  liveInstanceIds: ReadonlySet<string>,
+  now: Date,
+): boolean {
+  const stamped = c.Labels?.[LABEL_INSTANCE];
+  if (stamped === undefined || !liveInstanceIds.has(stamped)) return true;
+  if (row !== undefined) return false;
+  return now.getTime() - c.Created * 1000 >= ROWLESS_GRACE_MS;
 }
 
 /** A DB-driven pass counts the rows it finished; a row another path finished is its count. */

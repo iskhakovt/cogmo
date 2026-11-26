@@ -6,7 +6,8 @@
  *
  * A normal forward goes through `http.request` without the hop-by-hop
  * headers, and its response streams back: whole, filtered to the task's
- * objects, or read for the exec id it creates. Every request but an
+ * objects, read for the exec id it creates, or held until a child's row
+ * has followed it. Every request but an
  * upgrade is a normal forward, so the client connection stays under Node's
  * parser and a request pipelined after one is classified on its own. An
  * upgrade is raw-piped: its request line, headers and body are sent under
@@ -17,7 +18,7 @@
 import * as http from "node:http";
 import * as net from "node:net";
 import { type Duplex, PassThrough, pipeline, type Transform } from "node:stream";
-import { ok, type Result } from "neverthrow";
+import { ok, type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import {
@@ -35,7 +36,7 @@ import {
   writeRawRejectionAndDestroy,
 } from "./http-io.js";
 import { daemonFailed, type ProxyRejection } from "./rejection.js";
-import { createdExecId, filterContainerList, taskEventFilter } from "./response-filters.js";
+import { createdId, filterContainerList, taskEventFilter } from "./response-filters.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
 
@@ -59,12 +60,6 @@ export interface Forward {
   /** The client's body as it came, a JSON body the proxy rebuilt, or none at all. */
   body: { kind: "piped" } | { kind: "json"; bytes: Buffer } | { kind: "none" };
   response: ResponseRelay;
-  /**
-   * What happens when the client is gone before the request is sent, or
-   * goes before its answer is complete: `drop` sends nothing or closes the
-   * daemon request, `send` sends it all the same (a container create).
-   */
-  whenClientGone: "drop" | "send";
 }
 
 export type ResponseRelay =
@@ -74,7 +69,12 @@ export type ResponseRelay =
   /** Keep only the event lines of the task's own container and its children. */
   | { kind: "events"; taskContainerId: string }
   /** Record the `Id` of a 201, the exec the task may then start. */
-  | { kind: "exec_created"; record: (execId: string) => void };
+  | { kind: "exec_created"; record: (execId: string) => void }
+  /**
+   * Answer once the child's row has followed the daemon's `status`; a
+   * rejection replaces the daemon's answer.
+   */
+  | { kind: "child_transition"; settle: (status: number) => Promise<Result<void, ProxyRejection>> };
 
 export function forward(
   req: http.IncomingMessage,
@@ -82,12 +82,8 @@ export function forward(
   upstream: Upstream,
   plan: Forward,
 ): void {
-  const gone = res.destroyed || req.socket.destroyed;
-  const send = match(plan.whenClientGone)
-    .with("drop", () => !gone)
-    .with("send", () => true)
-    .exhaustive();
-  if (!send) return;
+  // A client that is gone before the request is sent gets none sent.
+  if (res.destroyed || req.socket.destroyed) return;
   const headers = match(plan.body)
     .with({ kind: "piped" }, () => pipedRequestHeaders(req))
     .with({ kind: "json" }, ({ bytes }) => jsonRequestHeaders(req, bytes))
@@ -113,14 +109,9 @@ export function forward(
   });
   // A client that hangs up before its answer is complete, even before the
   // daemon has answered at all (a `wait`), closes the daemon request with it.
-  match(plan.whenClientGone)
-    .with("drop", () =>
-      res.once("close", () => {
-        if (!res.writableFinished) outgoing.destroy(hungUp);
-      }),
-    )
-    .with("send", () => undefined)
-    .exhaustive();
+  res.once("close", () => {
+    if (!res.writableFinished) outgoing.destroy(hungUp);
+  });
   match(plan.body)
     .with({ kind: "piped" }, () => req.pipe(outgoing))
     .with({ kind: "json" }, ({ bytes }) => outgoing.end(bytes))
@@ -203,7 +194,7 @@ function relay(
   res: http.ServerResponse,
   how: ResponseRelay,
 ): void {
-  // A client that is gone (a container create sent all the same) gets nothing.
+  // A client that is gone gets nothing.
   if (res.destroyed) {
     reply.resume();
     return;
@@ -230,16 +221,19 @@ function relay(
       relayStream(req, reply, res, taskEventFilter(taskContainerId));
     })
     .with({ kind: "container_list" }, ({ owned }) =>
-      relayBuffered(reply, res, (body) =>
+      relayBuffered(reply, res, async (body) =>
         status === 200 ? filterContainerList(body, owned) : ok(body),
       ),
     )
     .with({ kind: "exec_created" }, ({ record }) =>
-      relayBuffered(reply, res, (body) => {
-        const created = status === 201 ? createdExecId(body) : null;
+      relayBuffered(reply, res, async (body) => {
+        const created = status === 201 ? createdId(body) : null;
         if (created !== null) record(created);
         return ok(body);
       }),
+    )
+    .with({ kind: "child_transition" }, ({ settle }) =>
+      relayBuffered(reply, res, async (body) => (await settle(status)).map(() => body)),
     )
     .exhaustive();
 }
@@ -265,9 +259,9 @@ function relayStream(
 function relayBuffered(
   reply: http.IncomingMessage,
   res: http.ServerResponse,
-  transform: (body: Buffer) => Result<Buffer, ProxyRejection>,
+  transform: (body: Buffer) => Promise<Result<Buffer, ProxyRejection>>,
 ): void {
-  const relayed = readBody(reply, MAX_BUFFERED_REPLY_BYTES).then((read) => {
+  const relayed = readBody(reply, MAX_BUFFERED_REPLY_BYTES).then((read) =>
     read
       .mapErr((failure) =>
         match(failure)
@@ -279,9 +273,11 @@ function relayBuffered(
           )
           .exhaustive(),
       )
-      .andThen(transform)
+      .asyncAndThen((body) => new ResultAsync(transform(body)))
       .match(
         (body) => {
+          // A client that hung up while a child's row was written gets nothing.
+          if (res.destroyed) return;
           res.writeHead(
             reply.statusCode ?? 502,
             rebuiltResponseHeaders(reply.headers, body.length),
@@ -294,8 +290,8 @@ function relayBuffered(
           if (res.headersSent || res.destroyed) return;
           respondRejection(res, rejection);
         },
-      );
-  });
+      ),
+  );
   relayed.catch((cause: unknown) => {
     const aborted = cause instanceof Error && isAbortError(cause);
     if (!aborted) log.error({ err: cause }, "relaying a buffered daemon reply failed");

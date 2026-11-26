@@ -279,8 +279,8 @@ type Resolved<T> = { kind: "found"; item: T } | { kind: "missing" } | { kind: "a
 /**
  * Answers `GET /version`, `GET /info`, `GET /images/{name}/json` (404 for an
  * unknown image), `GET /containers/json`, `GET /containers/{ref}/json`,
- * `GET /networks/{ref}`, `POST /containers/create` (201) and
- * `POST /containers/{ref}/exec` (201 with a fresh exec id). A container or
+ * `GET /networks/{ref}`, `POST /containers/create` (201 with a fresh
+ * container id) and `POST /containers/{ref}/exec` (201 with a fresh exec id). A container or
  * network ref resolves as the daemon resolves it: full id, then name, then
  * unique id prefix; an ambiguous prefix gets the daemon's 400 and an unknown
  * ref its 404. A path with an empty, `.` or `..` segment gets the 301 the
@@ -288,6 +288,7 @@ type Resolved<T> = { kind: "found"; item: T } | { kind: "missing" } | { kind: "a
  */
 export function dockerApi(opts: DockerApiOptions): FakeDaemonResponder {
   let execs = 0;
+  let creates = 0;
   return (req, res) => {
     const path = decodedPath(req.url);
     if (path === null) {
@@ -369,7 +370,9 @@ export function dockerApi(opts: DockerApiOptions): FakeDaemonResponder {
       return;
     }
     if (req.method === "POST" && path === "/containers/create") {
-      respondJson(res, 201, { Id: "child-container-1", Warnings: [] });
+      creates += 1;
+      const id = createHash("sha256").update(`container-${creates}`).digest("hex");
+      respondJson(res, 201, { Id: id, Warnings: [] });
       return;
     }
     const exec = /^\/containers\/(.+)\/exec$/.exec(path);

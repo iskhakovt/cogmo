@@ -1,0 +1,112 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { mock } from "vitest-mock-extended";
+import type { Database, Transactor } from "../db/index.js";
+import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import type { DockerContainer, DockerFacade } from "./docker-facade.js";
+import { insertChildContainer } from "./insert-child-container.js";
+import type { ChildRecord } from "./proxy/index.js";
+import { DrizzleSandboxStore } from "./store/index.js";
+
+const TASK_ID = "019d0000-0000-7000-8000-000000000001";
+const TTL = new Date("2026-12-01T00:00:00.000Z");
+const LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
+
+let db: Database;
+let tx: Transactor;
+let close: () => Promise<void>;
+const store = new DrizzleSandboxStore();
+
+beforeAll(async () => {
+  ({ db, tx, close } = await createTestDatabase());
+});
+
+afterEach(async () => {
+  await truncateAll(db);
+});
+
+afterAll(async () => {
+  await close();
+});
+
+function stubDocker(): {
+  docker: DockerFacade;
+  container: ReturnType<typeof mock<DockerContainer>>;
+} {
+  const container = mock<DockerContainer>();
+  container.kill.mockResolvedValue(undefined);
+  container.remove.mockResolvedValue(undefined);
+  const docker = mock<DockerFacade>();
+  docker.getContainer.mockReturnValue(container);
+  return { docker, container };
+}
+
+/** No instance row has this id, so an insert naming it fails on its foreign key. */
+const UNKNOWN_INSTANCE = "019d0000-0000-7000-8000-000000000bad";
+
+/** A child of a fresh depth-0 row, under a fresh instance row. */
+async function childOf(): Promise<ChildRecord> {
+  const instance = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+  const parent = await tx((trx) =>
+    store.insertContainer(trx, {
+      dockerId: "task-container",
+      parentId: null,
+      rootTaskId: TASK_ID,
+      depth: 0,
+      image: "devbase",
+      runtime: "runc",
+      labels: {},
+      resourceLimits: LIMITS,
+      ttlExpiresAt: TTL,
+      instanceId: instance.id,
+    }),
+  );
+  return {
+    dockerId: "child-container",
+    parentId: parent.id,
+    rootTaskId: TASK_ID,
+    depth: 1,
+    image: "postgres:18-alpine",
+    runtime: "runc",
+    labels: { "cogmo.managed": "true", "cogmo.depth": "1" },
+    resourceLimits: { cpus: 0.25, memory_bytes: 128 * 1024 * 1024, pids: 32 },
+    ttlExpiresAt: TTL,
+    instanceId: instance.id,
+  };
+}
+
+describe("insertChildContainer", () => {
+  it("inserts the child's row in starting with its lineage", async () => {
+    const { docker, container } = stubDocker();
+    const child = await childOf();
+
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child);
+
+    expect(inserted.isOk()).toBe(true);
+    const row = await tx((trx) => store.getContainerByDockerId(trx, "child-container"));
+    expect(row).toMatchObject({ ...child, status: "starting", startedAt: null, exitedAt: null });
+    expect(container.remove).not.toHaveBeenCalled();
+  });
+
+  it("removes the container with its anonymous volumes when the insert fails", async () => {
+    const { docker, container } = stubDocker();
+    const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
+
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child);
+
+    expect(inserted.isErr() && inserted.error.kind).toBe("record_failed");
+    expect(docker.getContainer).toHaveBeenCalledWith("child-container");
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+    expect(await tx((trx) => store.getContainerByDockerId(trx, "child-container"))).toBeUndefined();
+  });
+
+  it("is record_failed when the removal is refused too", async () => {
+    const { docker, container } = stubDocker();
+    container.remove.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
+    const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
+
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child);
+
+    expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
+    expect(container.remove).toHaveBeenCalledTimes(1);
+  });
+});

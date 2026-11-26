@@ -19,6 +19,7 @@ import {
   type SessionSandbox,
 } from "../sandbox/index.js";
 import type { SandboxRuntime } from "../sandbox/runtime.js";
+import { storeChildContainers } from "../sandbox/store-child-containers.js";
 import { storeContainerRows } from "../sandbox/store-container-rows.js";
 import { LOCAL_DOCKER_CAPABILITIES } from "../sandbox/supervisor.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "../skills/worker-sysbox/host.js";
@@ -186,6 +187,11 @@ async function bootstrapLocalDocker(core: CoreDeps, runtime: SandboxRuntime): Pr
     socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
     hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
     containerRows: storeContainerRows({ store: core.sandboxStore, runInTx: core.runInTx }),
+    childContainers: storeChildContainers({
+      store: core.sandboxStore,
+      runInTx: core.runInTx,
+      docker,
+    }),
   });
   const localDocker = await createSandboxBackend({
     backend: "local-docker",

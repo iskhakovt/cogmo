@@ -7,14 +7,21 @@ const log = logger.child({ component: "sandbox" });
 
 /**
  * Mark a row `exited` because the daemon no longer has its container and
- * Cogmo did not remove it (a `docker rm` outside Cogmo, or a crash between
- * a reap's remove and its transition). No exit code: the daemon never
- * reported one. `stale` means another path finished the row first and is
- * logged at debug.
+ * Cogmo did not remove it: the reaper's stale pass found it missing (a
+ * `docker rm` outside Cogmo, or a crash between a reap's remove and its
+ * transition), or the task removed its child through the proxy. No exit
+ * code: the daemon never reported one. `stale` means another path finished
+ * or moved the row first and is logged at debug.
  */
 export async function markContainerExited(
   deps: { store: SandboxStore; runInTx: Transactor },
-  args: { id: string; dockerId: string; from: "starting" | "running"; at: Date },
+  args: {
+    id: string;
+    dockerId: string;
+    from: "starting" | "running";
+    at: Date;
+    cause: "missing_from_daemon" | "removed_by_task";
+  },
 ): Promise<ContainerTransitionResult> {
   const result = await deps.runInTx((tx) =>
     deps.store.transitionContainerStatus(tx, {
@@ -26,7 +33,14 @@ export async function markContainerExited(
   );
   match(result)
     .with({ kind: "transitioned" }, () =>
-      log.info({ dockerId: args.dockerId }, "container missing from the daemon, marked exited"),
+      match(args.cause)
+        .with("missing_from_daemon", () =>
+          log.info({ dockerId: args.dockerId }, "container missing from the daemon, marked exited"),
+        )
+        .with("removed_by_task", () =>
+          log.debug({ dockerId: args.dockerId }, "child removed by its task, marked exited"),
+        )
+        .exhaustive(),
     )
     .with({ kind: "stale" }, ({ status }) =>
       log.debug(

@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { okAsync } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -20,7 +21,7 @@ import {
 } from "../../test/fake-docker-daemon.js";
 import { TESTCONTAINERS_CREATE_REQUEST } from "../../test/testcontainers-create-request.js";
 import { CogmoSocketProxy } from "./index.js";
-import type { ContainerRows, TaskScope } from "./types.js";
+import type { ChildContainers, ContainerRows, TaskScope } from "./types.js";
 
 const GIB = 1024 ** 3;
 const ALPINE_ID = `sha256:${"a".repeat(64)}`;
@@ -45,6 +46,7 @@ const SCOPE: TaskScope = {
   cgroupParent: "cogmo-task-abc.slice",
   instanceId: "019d0000-0000-7000-8000-0000000000ff",
   resourceLimits: { cpus: 2, memory_bytes: GIB, pids: 256 },
+  ttlExpiresAt: new Date("2026-12-01T00:00:00.000Z"),
 };
 
 const ForwardedSchema = z.looseObject({
@@ -83,11 +85,25 @@ async function startDaemon(arch: string): Promise<void> {
 beforeEach(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "cogmo-proxy-create-"));
   await startDaemon("amd64");
+  // The task's own row, which a create's child is recorded under, and no children.
+  const containerRows = mock<ContainerRows>();
+  containerRows.forTask.mockReturnValue(
+    okAsync([
+      {
+        id: expectDefined(SCOPE.parentContainerRowId, "the scope's row"),
+        dockerId: SCOPE.parentDockerId,
+        parentId: null,
+        status: "running",
+      },
+    ]),
+  );
+  const childContainers = mock<ChildContainers>();
+  childContainers.record.mockReturnValue(okAsync(undefined));
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
     hostDockerSocket: daemon.socketPath,
-    // A create names no existing container, so it reads no rows.
-    containerRows: mock<ContainerRows>(),
+    containerRows,
+    childContainers,
   });
   socket = await proxy.registerTask(SCOPE);
 });
