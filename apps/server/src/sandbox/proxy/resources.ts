@@ -29,6 +29,17 @@ type ResourceRequest = Pick<
   "Memory" | "MemorySwap" | "PidsLimit" | "NanoCpus" | "CpuQuota" | "CpuPeriod" | "ShmSize"
 >;
 
+/** The limits forwarded resource fields come to, as a child's row records them. */
+export function effectiveLimits(fields: ResourceFields): ResourceLimits {
+  return { cpus: cpusOf(fields), memory_bytes: fields.Memory, pids: fields.PidsLimit };
+}
+
+function cpusOf(cpu: CpuFields): number {
+  return "NanoCpus" in cpu
+    ? cpu.NanoCpus / NANOS_PER_CPU
+    : cpu.CpuQuota / (cpu.CpuPeriod ?? DEFAULT_CPU_PERIOD);
+}
+
 /** The resource fields to forward in place of the request's. */
 export function limitResources(
   host: ResourceRequest,

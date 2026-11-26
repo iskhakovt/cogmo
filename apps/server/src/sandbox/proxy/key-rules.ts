@@ -67,7 +67,7 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
  * message quotes the text around it, and a body can hold a secret (an `Env`
  * token) that a rejection's message and its log line must not carry.
  */
-function parseJson(raw: Buffer): Result<unknown, ProxyRejection> {
+export function parseJson(raw: Buffer): Result<unknown, ProxyRejection> {
   try {
     return ok(JSON.parse(raw.toString("utf8")));
   } catch (cause) {

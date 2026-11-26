@@ -56,7 +56,6 @@ describe("forward: a reply read whole", () => {
         path: "/containers/abc/exec",
         body: { kind: "json", bytes: Buffer.from('{"Cmd":["id"]}') },
         response: { kind: "exec_created", record },
-        whenClientGone: "drop",
       },
     );
 

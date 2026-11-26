@@ -2,13 +2,19 @@
  * Turns a classified route into what reaches the daemon, after the checks
  * its route class needs (design/sandbox.md → Proxy Design → Route table):
  * ownership of the container it names, an exec id created through this
- * task's socket, or a body policy. Each outcome other than a forward is a
+ * task's socket, or a body policy; a child's create, start and removal are
+ * planned in `child-plan.ts`. Each outcome other than a forward is a
  * `ProxyRejection`. The HTTP edge runs the plan.
  */
 
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
-import { applyContainerCreatePolicy } from "./create-policy.js";
+import {
+  type ChildContext,
+  planChildRemove,
+  planChildRestart,
+  planChildStart,
+} from "./child-plan.js";
 import type { ExecIdLookup } from "./exec-ids.js";
 import { applyExecPolicy } from "./exec-policy.js";
 import type { Forward } from "./forward.js";
@@ -16,21 +22,15 @@ import { imageCreateQuery } from "./image-create-query.js";
 import { applyNetworkEndpointPolicy, type NetworkEndpoint } from "./network-endpoint.js";
 import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
 import { notFound, type ProxyRejection } from "./rejection.js";
-import { withQuery } from "./request-path.js";
+import { onlyKeys, withQuery } from "./request-path.js";
 import type { ContainerTarget, ExecTarget, RequestRoute, StreamRoute } from "./router.js";
-import type { DaemonLookups, TaskScope } from "./types.js";
 
 export interface StreamContext extends OwnershipLookups {
   /** The exec ids the daemon created through this task's socket. */
   execIds: ExecIdLookup;
 }
 
-export interface RequestContext extends StreamContext {
-  scope: TaskScope;
-  /** The daemon reads the container create policy needs. */
-  createLookups: DaemonLookups;
-  /** The request body, bounded; read only by a route with a body policy. */
-  readBody(): Promise<Result<Buffer, ProxyRejection>>;
+export interface RequestContext extends StreamContext, ChildContext {
   /** Add an exec id the daemon created through this task's socket. */
   recordExec(execId: string): void;
 }
@@ -48,6 +48,9 @@ export function planRequest(
     .with({ kind: "container" }, async ({ target }) =>
       (await containerPath(target, query, ctx)).map(piped),
     )
+    .with({ kind: "child_signal" }, async ({ target, keys }) =>
+      (await containerPath(target, onlyKeys(query, keys), ctx)).map(piped),
+    )
     .with({ kind: "exec" }, async ({ target }) => execPath(target, query, ctx.execIds).map(piped))
     .with({ kind: "container_list" }, async ({ path }) =>
       (await ownedContainers(ctx)).map(
@@ -55,7 +58,6 @@ export function planRequest(
           path: withQuery(path, query),
           body: { kind: "piped" },
           response: { kind: "container_list", owned: new Set(all.map((r) => r.dockerId)) },
-          whenClientGone: "drop",
         }),
       ),
     )
@@ -65,13 +67,12 @@ export function planRequest(
           path: withQuery(path, query),
           body: { kind: "piped" },
           response: { kind: "events", taskContainerId: task.dockerId },
-          whenClientGone: "drop",
         }),
       ),
     )
-    .with({ kind: "container_create" }, ({ versionPrefix }) =>
-      planContainerCreate(versionPrefix, query, ctx),
-    )
+    .with({ kind: "child_start" }, ({ target }) => planChildStart(target, query, ctx))
+    .with({ kind: "child_restart" }, ({ target }) => planChildRestart(target, query, ctx))
+    .with({ kind: "child_remove" }, ({ target }) => planChildRemove(target, query, ctx))
     .with({ kind: "exec_create" }, ({ ref, versionPrefix }) =>
       planExecCreate({ ref, versionPrefix }, query, ctx),
     )
@@ -112,29 +113,6 @@ function planImageCreate(
       path: withQuery(`${versionPrefix}/images/create`, forwarded),
       body: { kind: "none" },
       response: { kind: "piped" },
-      whenClientGone: "drop",
-    }),
-  );
-}
-
-async function planContainerCreate(
-  versionPrefix: string,
-  query: URLSearchParams,
-  ctx: RequestContext,
-): Promise<Result<Forward, ProxyRejection>> {
-  const body = await ctx.readBody();
-  if (body.isErr()) return err(body.error);
-  const created = await applyContainerCreatePolicy(
-    { body: body.value, query },
-    ctx.scope,
-    ctx.createLookups,
-  );
-  return created.map(
-    (forward): Forward => ({
-      ...rebuilt(withQuery(`${versionPrefix}/containers/create`, forward.query), forward.body),
-      // A create is not bound to the client: a task that hangs up still
-      // gets its container (Child containers).
-      whenClientGone: "send",
     }),
   );
 }
@@ -157,7 +135,6 @@ async function planExecCreate(
       path: withQuery(`${target.versionPrefix}/containers/${container.dockerId}/exec`, query),
       body: { kind: "json", bytes: body.value },
       response: { kind: "exec_created", record: ctx.recordExec },
-      whenClientGone: "drop",
     }),
   );
 }
@@ -204,7 +181,7 @@ export function streamForward(path: string): Forward {
 }
 
 function piped(path: string): Forward {
-  return { path, body: { kind: "piped" }, response: { kind: "piped" }, whenClientGone: "drop" };
+  return { path, body: { kind: "piped" }, response: { kind: "piped" } };
 }
 
 function rebuilt(path: string, bytes: Buffer): Forward {
@@ -212,6 +189,5 @@ function rebuilt(path: string, bytes: Buffer): Forward {
     path,
     body: { kind: "json", bytes },
     response: { kind: "piped" },
-    whenClientGone: "drop",
   };
 }

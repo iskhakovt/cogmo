@@ -13,7 +13,7 @@ import { match } from "ts-pattern";
 import type { CreateBody, CreateHostConfig, CreatePortBindings } from "./body-schemas.js";
 import { denied, type ProxyRejection } from "./rejection.js";
 import { checkSysboxEnv } from "./sysbox-env.js";
-import type { TaskScope } from "./types.js";
+import type { TaskAnchor, TaskScope } from "./types.js";
 
 /** Docker's default capability set (moby `oci/caps.DefaultCapabilities`). */
 const DOCKER_DEFAULT_CAPS = [
@@ -97,20 +97,27 @@ export function checkCreateFields(
   ]).map(() => undefined);
 }
 
-/** The caller's labels without any `cogmo.` key, plus the Cogmo labels from the scope. */
+type LabelScope = Pick<TaskScope, "instanceId" | "taskId" | "parentDepth">;
+
+/** The caller's labels without any `cogmo.` key, plus the Cogmo labels of a child of `anchor`. */
 export function taskLabels(
   labels: Readonly<Record<string, string>> | null | undefined,
-  scope: Pick<TaskScope, "instanceId" | "taskId" | "parentDockerId" | "parentDepth">,
+  scope: LabelScope,
+  anchor: TaskAnchor,
 ): Record<string, string> {
   const own = Object.entries(labels ?? {}).filter(
     ([key]) => !key.toLowerCase().startsWith(COGMO_LABEL_PREFIX),
   );
+  return { ...Object.fromEntries(own), ...cogmoLabels(scope, anchor) };
+}
+
+/** The labels Cogmo puts on a child of `anchor`, the mirror of its row's lineage. */
+export function cogmoLabels(scope: LabelScope, anchor: TaskAnchor): Record<string, string> {
   return {
-    ...Object.fromEntries(own),
     "cogmo.managed": "true",
     "cogmo.instance": scope.instanceId,
     "cogmo.root_task": scope.taskId,
-    "cogmo.parent": scope.parentDockerId,
+    "cogmo.parent": anchor.dockerId,
     "cogmo.depth": String(scope.parentDepth + 1),
   };
 }

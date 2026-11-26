@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { okAsync } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -20,7 +21,7 @@ import {
 } from "../../test/fake-docker-daemon.js";
 import { TESTCONTAINERS_CREATE_REQUEST } from "../../test/testcontainers-create-request.js";
 import { CogmoSocketProxy } from "./index.js";
-import type { ContainerRows, TaskScope } from "./types.js";
+import type { ChildContainers, ContainerRows, TaskScope } from "./types.js";
 
 const GIB = 1024 ** 3;
 const ALPINE_ID = `sha256:${"a".repeat(64)}`;
@@ -36,15 +37,18 @@ const IMAGES: ReadonlyMap<string, FakeImage> = new Map([
   ["postgres:18-alpine", { id: POSTGRES_ALPINE_ID, env: ["PGDATA=/var/lib/pg"] }],
 ]);
 
+/** The task's depth-0 container. */
+const ANCHOR = { rowId: "019d0000-0000-7000-8000-00000000bbbb", dockerId: "docker-parent-abc" };
+
 const SCOPE: TaskScope = {
   taskId: "019d0000-0000-7000-8000-00000000aaaa",
-  parentContainerRowId: "019d0000-0000-7000-8000-00000000bbbb",
-  parentDockerId: "docker-parent-abc",
+  anchor: ANCHOR,
   parentDepth: 0,
   runtime: "sysbox-runc",
   cgroupParent: "cogmo-task-abc.slice",
   instanceId: "019d0000-0000-7000-8000-0000000000ff",
   resourceLimits: { cpus: 2, memory_bytes: GIB, pids: 256 },
+  ttlExpiresAt: new Date("2026-12-01T00:00:00.000Z"),
 };
 
 const ForwardedSchema = z.looseObject({
@@ -83,11 +87,26 @@ async function startDaemon(arch: string): Promise<void> {
 beforeEach(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "cogmo-proxy-create-"));
   await startDaemon("amd64");
+  // The task's own row, which a create's child is recorded under, and no children.
+  const containerRows = mock<ContainerRows>();
+  containerRows.forTask.mockReturnValue(
+    okAsync([
+      {
+        id: ANCHOR.rowId,
+        dockerId: ANCHOR.dockerId,
+        parentId: null,
+        depth: 0,
+        status: "running",
+      },
+    ]),
+  );
+  const childContainers = mock<ChildContainers>();
+  childContainers.record.mockReturnValue(okAsync(undefined));
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
     hostDockerSocket: daemon.socketPath,
-    // A create names no existing container, so it reads no rows.
-    containerRows: mock<ContainerRows>(),
+    containerRows,
+    childContainers,
   });
   socket = await proxy.registerTask(SCOPE);
 });
@@ -353,7 +372,7 @@ describe("create policy: labels and env", () => {
       "cogmo.managed": "true",
       "cogmo.instance": SCOPE.instanceId,
       "cogmo.root_task": SCOPE.taskId,
-      "cogmo.parent": SCOPE.parentDockerId,
+      "cogmo.parent": ANCHOR.dockerId,
       "cogmo.depth": "1",
     });
   });
@@ -1116,7 +1135,7 @@ describe("create policy: the query", () => {
         "cogmo.managed": "true",
         "cogmo.instance": SCOPE.instanceId,
         "cogmo.root_task": SCOPE.taskId,
-        "cogmo.parent": SCOPE.parentDockerId,
+        "cogmo.parent": ANCHOR.dockerId,
         "cogmo.depth": "1",
       },
       HostConfig: {
@@ -1168,7 +1187,7 @@ describe("create policy: the Docker CLI", () => {
         "cogmo.managed": "true",
         "cogmo.instance": SCOPE.instanceId,
         "cogmo.root_task": SCOPE.taskId,
-        "cogmo.parent": SCOPE.parentDockerId,
+        "cogmo.parent": ANCHOR.dockerId,
         "cogmo.depth": "1",
       },
       HostConfig: {

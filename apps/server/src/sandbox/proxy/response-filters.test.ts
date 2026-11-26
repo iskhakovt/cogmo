@@ -2,7 +2,7 @@ import { Readable } from "node:stream";
 import { text } from "node:stream/consumers";
 import { describe, expect, it } from "vitest";
 import { expectOk } from "../../test/assertions.js";
-import { createdExecId, filterContainerList, taskEventFilter } from "./response-filters.js";
+import { createdId, filterContainerList, taskEventFilter } from "./response-filters.js";
 
 const TASK = "019d0000-0000-7000-8000-00000000aaaa";
 /** The task's own container. */
@@ -46,10 +46,15 @@ describe("filterContainerList", () => {
   });
 });
 
-describe("createdExecId", () => {
+describe("createdId", () => {
   it("reads the Id of an exec create's 201", () => {
     const id = "e".repeat(64);
-    expect(createdExecId(Buffer.from(JSON.stringify({ Id: id })))).toBe(id);
+    expect(createdId(Buffer.from(JSON.stringify({ Id: id })))).toBe(id);
+  });
+
+  it("reads the Id of a container create's 201 beside its Warnings", () => {
+    const id = "1de4fa597531b3b58f56cd2245ea135ce58a151d360961954131b705293dbf40";
+    expect(createdId(Buffer.from(JSON.stringify({ Id: id, Warnings: [] })))).toBe(id);
   });
 
   it.each([
@@ -57,7 +62,7 @@ describe("createdExecId", () => {
     ["an Id that is not a full hex id", '{"Id":"../../containers/x"}'],
     ["no Id", "{}"],
   ])("is null for a body that is %s", (_label, raw) => {
-    expect(createdExecId(Buffer.from(raw))).toBeNull();
+    expect(createdId(Buffer.from(raw))).toBeNull();
   });
 });
 

@@ -6,7 +6,8 @@
  *
  * A normal forward goes through `http.request` without the hop-by-hop
  * headers, and its response streams back: whole, filtered to the task's
- * objects, or read for the exec id it creates. Every request but an
+ * objects, read for the exec id it creates, or held until a child's row
+ * has followed it. Every request but an
  * upgrade is a normal forward, so the client connection stays under Node's
  * parser and a request pipelined after one is classified on its own. An
  * upgrade is raw-piped: its request line, headers and body are sent under
@@ -17,7 +18,7 @@
 import * as http from "node:http";
 import * as net from "node:net";
 import { type Duplex, PassThrough, pipeline, type Transform } from "node:stream";
-import { ok, type Result } from "neverthrow";
+import { ok, type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import {
@@ -35,7 +36,7 @@ import {
   writeRawRejectionAndDestroy,
 } from "./http-io.js";
 import { daemonFailed, type ProxyRejection } from "./rejection.js";
-import { createdExecId, filterContainerList, taskEventFilter } from "./response-filters.js";
+import { createdId, filterContainerList, taskEventFilter } from "./response-filters.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
 
@@ -59,12 +60,6 @@ export interface Forward {
   /** The client's body as it came, a JSON body the proxy rebuilt, or none at all. */
   body: { kind: "piped" } | { kind: "json"; bytes: Buffer } | { kind: "none" };
   response: ResponseRelay;
-  /**
-   * What happens when the client is gone before the request is sent, or
-   * goes before its answer is complete: `drop` sends nothing or closes the
-   * daemon request, `send` sends it all the same (a container create).
-   */
-  whenClientGone: "drop" | "send";
 }
 
 export type ResponseRelay =
@@ -74,7 +69,13 @@ export type ResponseRelay =
   /** Keep only the event lines of the task's own container and its children. */
   | { kind: "events"; taskContainerId: string }
   /** Record the `Id` of a 201, the exec the task may then start. */
-  | { kind: "exec_created"; record: (execId: string) => void };
+  | { kind: "exec_created"; record: (execId: string) => void }
+  /**
+   * Follow the daemon's `status` in the child's row as soon as its status
+   * line arrives, whether or not the body then does, and answer once the
+   * row has followed it; a rejection replaces the daemon's answer.
+   */
+  | { kind: "child_transition"; settle: (status: number) => Promise<Result<void, ProxyRejection>> };
 
 export function forward(
   req: http.IncomingMessage,
@@ -82,17 +83,15 @@ export function forward(
   upstream: Upstream,
   plan: Forward,
 ): void {
-  const gone = res.destroyed || req.socket.destroyed;
-  const send = match(plan.whenClientGone)
-    .with("drop", () => !gone)
-    .with("send", () => true)
-    .exhaustive();
-  if (!send) return;
+  // A client that is gone before the request is sent gets none sent.
+  if (res.destroyed || req.socket.destroyed) return;
   const headers = match(plan.body)
     .with({ kind: "piped" }, () => pipedRequestHeaders(req))
     .with({ kind: "json" }, ({ bytes }) => jsonRequestHeaders(req, bytes))
     .with({ kind: "none" }, () => emptyBodyRequestHeaders(req))
     .exhaustive();
+  // Once the daemon has answered, the relay of its reply answers the client.
+  let replied = false;
   const outgoing = http.request(
     {
       socketPath: upstream.socketPath,
@@ -101,7 +100,10 @@ export function forward(
       headers,
       signal: upstream.signal,
     },
-    (reply) => relay(req, reply, res, plan.response),
+    (reply) => {
+      replied = true;
+      relay(req, reply, res, plan.response);
+    },
   );
   // The proxy's own close of the daemon request, for a client that hung up:
   // not an upstream failure, and there is no one left to answer.
@@ -109,18 +111,20 @@ export function forward(
   outgoing.on("error", (cause) => {
     if (cause === hungUp) return;
     if (!isAbortError(cause)) log.warn({ err: cause.message, path: pathOf(req) }, "upstream error");
+    // Once the daemon has answered, the relay owns the client's answer: a
+    // failure mid-reply fails the read of a body read whole, which the relay
+    // answers `daemon_failed`.
+    if (replied) return;
     respondDaemonFailed(res, cause);
   });
   // A client that hangs up before its answer is complete, even before the
-  // daemon has answered at all (a `wait`), closes the daemon request with it.
-  match(plan.whenClientGone)
-    .with("drop", () =>
-      res.once("close", () => {
-        if (!res.writableFinished) outgoing.destroy(hungUp);
-      }),
-    )
-    .with("send", () => undefined)
-    .exhaustive();
+  // daemon has answered at all (a `wait`), closes the daemon request with
+  // it; a child's start, restart or removal goes on, since its row follows the answer.
+  if (boundToClient(plan.response)) {
+    res.once("close", () => {
+      if (!res.writableFinished) outgoing.destroy(hungUp);
+    });
+  }
   match(plan.body)
     .with({ kind: "piped" }, () => req.pipe(outgoing))
     .with({ kind: "json" }, ({ bytes }) => outgoing.end(bytes))
@@ -203,8 +207,8 @@ function relay(
   res: http.ServerResponse,
   how: ResponseRelay,
 ): void {
-  // A client that is gone (a container create sent all the same) gets nothing.
-  if (res.destroyed) {
+  // A client that is gone gets nothing, but a child's row still follows the answer.
+  if (res.destroyed && boundToClient(how)) {
     reply.resume();
     return;
   }
@@ -230,16 +234,23 @@ function relay(
       relayStream(req, reply, res, taskEventFilter(taskContainerId));
     })
     .with({ kind: "container_list" }, ({ owned }) =>
-      relayBuffered(reply, res, (body) =>
-        status === 200 ? filterContainerList(body, owned) : ok(body),
+      relayBuffered(reply, res, (read) =>
+        read.andThen((body) => (status === 200 ? filterContainerList(body, owned) : ok(body))),
       ),
     )
     .with({ kind: "exec_created" }, ({ record }) =>
-      relayBuffered(reply, res, (body) => {
-        const created = status === 201 ? createdExecId(body) : null;
-        if (created !== null) record(created);
-        return ok(body);
-      }),
+      relayBuffered(reply, res, (read) =>
+        read.map((body) => {
+          const created = status === 201 ? createdId(body) : null;
+          if (created !== null) record(created);
+          return body;
+        }),
+      ),
+    )
+    .with({ kind: "child_transition" }, ({ settle }) =>
+      // The row write follows the status line and does not wait for the
+      // body, so a reply cut short after it still moves the row.
+      relayBuffered(reply, res, (read) => new ResultAsync(settle(status)).andThen(() => read)),
     )
     .exhaustive();
 }
@@ -261,41 +272,37 @@ function relayStream(
   });
 }
 
-/** Read the whole reply, pass it through `transform`, and answer with what it returns. */
+/**
+ * Read the whole reply, and answer with what `answer` makes of the read:
+ * the body to send, or the rejection that replaces it.
+ */
 function relayBuffered(
   reply: http.IncomingMessage,
   res: http.ServerResponse,
-  transform: (body: Buffer) => Result<Buffer, ProxyRejection>,
+  answer: (read: ResultAsync<Buffer, ProxyRejection>) => ResultAsync<Buffer, ProxyRejection>,
 ): void {
-  const relayed = readBody(reply, MAX_BUFFERED_REPLY_BYTES).then((read) => {
-    read
-      .mapErr((failure) =>
-        match(failure)
-          .with({ kind: "too_large" }, ({ maxBytes }) =>
-            daemonFailed(`Cogmo proxy: the daemon's reply exceeds ${maxBytes} bytes`),
-          )
-          .with({ kind: "malformed" }, () =>
-            daemonFailed("Cogmo proxy: the daemon's reply ended early"),
-          )
-          .exhaustive(),
+  const read = new ResultAsync(readBody(reply, MAX_BUFFERED_REPLY_BYTES)).mapErr((failure) =>
+    match(failure)
+      .with({ kind: "too_large" }, ({ maxBytes }) =>
+        daemonFailed(`Cogmo proxy: the daemon's reply exceeds ${maxBytes} bytes`),
       )
-      .andThen(transform)
-      .match(
-        (body) => {
-          res.writeHead(
-            reply.statusCode ?? 502,
-            rebuiltResponseHeaders(reply.headers, body.length),
-          );
-          res.end(body);
-        },
-        (rejection) => {
-          // A daemon connection that failed mid-reply has been answered
-          // already, by the forward's error listener, or has no one to answer.
-          if (res.headersSent || res.destroyed) return;
-          respondRejection(res, rejection);
-        },
-      );
-  });
+      .with({ kind: "malformed" }, () =>
+        daemonFailed("Cogmo proxy: the daemon's reply ended early"),
+      )
+      .exhaustive(),
+  );
+  const relayed = answer(read).match(
+    (body) => {
+      // A client that hung up while a child's row was written gets nothing.
+      if (res.destroyed) return;
+      res.writeHead(reply.statusCode ?? 502, rebuiltResponseHeaders(reply.headers, body.length));
+      res.end(body);
+    },
+    (rejection) => {
+      if (res.destroyed) return;
+      respondRejection(res, rejection);
+    },
+  );
   relayed.catch((cause: unknown) => {
     const aborted = cause instanceof Error && isAbortError(cause);
     if (!aborted) log.error({ err: cause }, "relaying a buffered daemon reply failed");
@@ -303,12 +310,18 @@ function relayBuffered(
   });
 }
 
-/** A forward whose daemon connection failed: `daemon_failed` if nothing was sent yet. */
+/** Whether a forward ends with its client: all but a child's start, restart or removal. */
+function boundToClient(how: ResponseRelay): boolean {
+  return match(how)
+    .with({ kind: "piped" }, { kind: "container_list" }, { kind: "events" }, () => true)
+    .with({ kind: "exec_created" }, () => true)
+    .with({ kind: "child_transition" }, () => false)
+    .exhaustive();
+}
+
+/** A forward whose daemon connection failed before the daemon answered: `daemon_failed`. */
 function respondDaemonFailed(res: http.ServerResponse, cause: Error): void {
-  if (res.headersSent) {
-    res.destroy(cause);
-    return;
-  }
+  if (res.destroyed) return;
   respondRejection(res, daemonFailed(`Cogmo proxy upstream error: ${cause.message}`));
 }
 

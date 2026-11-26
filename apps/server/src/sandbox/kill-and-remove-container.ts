@@ -10,11 +10,13 @@ export interface DaemonError {
 }
 
 /**
- * Kill, then force-remove, a container; tolerant of the daemon having got
- * there first. 304/409/404 on kill and 409/404 on remove all mean "already
- * stopped, being removed, or gone" — the reaper and a cascade can race on
- * the same id. Anything else is a `DaemonError` for the caller to log or
- * surface.
+ * Kill, then force-remove, a container with its anonymous volumes (`v`);
+ * tolerant of the daemon having got there first. 304/409/404 on kill and
+ * 409/404 on remove all mean "already stopped, being removed, or gone" —
+ * the reaper and a cascade can race on the same id. Anything else is a
+ * `DaemonError` for the caller to log or surface. Every container removal
+ * Cogmo makes goes through here: the reaper, the cascade and the create
+ * rollbacks.
  */
 export async function killAndRemoveContainer(
   docker: DockerFacade,
@@ -30,7 +32,7 @@ export async function killAndRemoveContainer(
     }
   }
   try {
-    await c.remove({ force: true });
+    await c.remove({ force: true, v: true });
   } catch (error) {
     const statusCode = statusCodeOf(error);
     if (statusCode !== 404 && statusCode !== 409) {

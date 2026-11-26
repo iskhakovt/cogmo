@@ -4,7 +4,7 @@
  * container, a child of it, a salvage container that shares the task's
  * `root_task_id` at depth 0, a sibling task's container and one of Cogmo's
  * own; the fake `ContainerRows` returns the rows each task's store read
- * would.
+ * would, and the fake `ChildContainers` records every child write as done.
  *
  * `useProxyHarness()` registers the `beforeEach` and `afterEach` that start
  * and stop it, so a test file calls it once at the top level.
@@ -19,7 +19,12 @@ import { afterEach, beforeEach, expect } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { CogmoSocketProxy } from "../sandbox/proxy/index.js";
-import type { ContainerRows, TaskContainerRow, TaskScope } from "../sandbox/proxy/types.js";
+import type {
+  ChildContainers,
+  ContainerRows,
+  TaskContainerRow,
+  TaskScope,
+} from "../sandbox/proxy/types.js";
 import { expectDefined } from "./assertions.js";
 import {
   BRIDGE_NETWORK,
@@ -85,30 +90,40 @@ export const RECORDED_BRIDGE: FakeNetwork = {
 export const TASK_NETWORK: FakeNetwork = { id: containerId("5e"), name: "task-net" };
 export const HOST_NETWORK: FakeNetwork = { id: containerId("6f"), name: "host" };
 
-const OWN_ROW: TaskContainerRow = {
+export const OWN_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000bbbb",
   dockerId: OWN.id,
   parentId: null,
+  depth: 0,
+  status: "running",
 };
 const SIBLING_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000dddd",
   dockerId: SIBLING.id,
   parentId: null,
+  depth: 0,
+  status: "running",
 };
 export const SALVAGE_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000eeee",
   dockerId: SALVAGE.id,
   parentId: null,
+  depth: 0,
+  status: "running",
 };
 export const CHILD_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000c001",
   dockerId: CHILD.id,
   parentId: OWN_ROW.id,
+  depth: 1,
+  status: "running",
 };
 const RECORDED_ROW: TaskContainerRow = {
   id: "019d0000-0000-7000-8000-00000000c002",
   dockerId: RECORDED.id,
   parentId: OWN_ROW.id,
+  depth: 1,
+  status: "running",
 };
 
 /** The task's rows that are not `reaped`, as its store read returns them. */
@@ -121,20 +136,19 @@ export const TASK_ROWS: ReadonlyArray<TaskContainerRow> = [
 
 export const SCOPE: TaskScope = {
   taskId: TASK_ID,
-  parentContainerRowId: OWN_ROW.id,
-  parentDockerId: OWN.id,
+  anchor: { rowId: OWN_ROW.id, dockerId: OWN.id },
   parentDepth: 0,
   runtime: "sysbox-runc",
   cgroupParent: "cogmo-task-abc.slice",
   instanceId: "019d0000-0000-7000-8000-0000000000ff",
   resourceLimits: { cpus: 2, memory_bytes: 1024 ** 3, pids: 256 },
+  ttlExpiresAt: new Date("2026-12-01T00:00:00.000Z"),
 };
 
 export const SIBLING_SCOPE: TaskScope = {
   ...SCOPE,
   taskId: SIBLING_TASK_ID,
-  parentContainerRowId: SIBLING_ROW.id,
-  parentDockerId: SIBLING.id,
+  anchor: { rowId: SIBLING_ROW.id, dockerId: SIBLING.id },
 };
 
 const ErrorSchema = z.object({ message: z.string() });
@@ -158,6 +172,8 @@ export interface ProxyHarness {
   readonly proxy: CogmoSocketProxy;
   /** Returns `TASK_ROWS` for the task and the sibling's one row for the sibling. */
   readonly rows: MockProxy<ContainerRows>;
+  /** Records each child, and finds each started child's row moved to `running`. */
+  readonly children: MockProxy<ChildContainers>;
   /** The task's socket. */
   readonly socket: string;
   send(
@@ -185,6 +201,7 @@ interface Running {
   daemon: FakeDockerDaemon;
   proxy: CogmoSocketProxy;
   rows: MockProxy<ContainerRows>;
+  children: MockProxy<ChildContainers>;
   socket: string;
 }
 
@@ -199,13 +216,20 @@ export function useProxyHarness(): ProxyHarness {
     rows.forTask.mockImplementation((taskId) =>
       okAsync(taskId === TASK_ID ? TASK_ROWS : [SIBLING_ROW]),
     );
+    const children = mock<ChildContainers>();
+    children.record.mockReturnValue(okAsync(undefined));
+    children.started.mockReturnValue(okAsync({ kind: "started" }));
+    children.removed.mockReturnValue(okAsync(undefined));
+    // The daemon has every child the rows name.
+    children.reconcile.mockImplementation((live) => okAsync(live));
     const proxy = await CogmoSocketProxy.create({
       socketDir: join(baseDir, "sockets"),
       hostDockerSocket: daemon.socketPath,
       containerRows: rows,
+      childContainers: children,
     });
     const socket = await proxy.registerTask(SCOPE);
-    running = { baseDir, daemon, proxy, rows, socket };
+    running = { baseDir, daemon, proxy, rows, children, socket };
   });
 
   afterEach(async () => {
@@ -230,6 +254,9 @@ export function useProxyHarness(): ProxyHarness {
     },
     get rows() {
       return current().rows;
+    },
+    get children() {
+      return current().children;
     },
     get socket() {
       return current().socket;

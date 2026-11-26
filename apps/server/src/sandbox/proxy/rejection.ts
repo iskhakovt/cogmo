@@ -25,7 +25,9 @@ export type ProxyRejection =
   /** A store read or daemon lookup the checks need failed; the client may retry. */
   | { kind: "unavailable"; message: string }
   /** The daemon connection for the forward itself failed. */
-  | { kind: "daemon_failed"; message: string };
+  | { kind: "daemon_failed"; message: string }
+  /** The daemon created a container and inserting its row failed. */
+  | { kind: "record_failed"; message: string };
 
 export function rejectionStatus(rejection: ProxyRejection): number {
   return match(rejection)
@@ -37,6 +39,7 @@ export function rejectionStatus(rejection: ProxyRejection): number {
     .with({ kind: "expectation_failed" }, () => 417)
     .with({ kind: "unavailable" }, () => 503)
     .with({ kind: "daemon_failed" }, () => 502)
+    .with({ kind: "record_failed" }, () => 500)
     .exhaustive();
 }
 
@@ -56,7 +59,16 @@ export function rejectionMessage(rejection: ProxyRejection): string {
       () => "Cogmo proxy: an upgrade cannot wait for 100 Continue; send its body with it",
     )
     .with(
-      { kind: P.union("not_found", "denied", "malformed", "unavailable", "daemon_failed") },
+      {
+        kind: P.union(
+          "not_found",
+          "denied",
+          "malformed",
+          "unavailable",
+          "daemon_failed",
+          "record_failed",
+        ),
+      },
       ({ message }) => message,
     )
     .exhaustive();
@@ -81,4 +93,8 @@ export function unavailable(message: string): Extract<ProxyRejection, { kind: "u
 
 export function daemonFailed(message: string): Extract<ProxyRejection, { kind: "daemon_failed" }> {
   return { kind: "daemon_failed", message };
+}
+
+export function recordFailed(message: string): Extract<ProxyRejection, { kind: "record_failed" }> {
+  return { kind: "record_failed", message: `Cogmo proxy: ${message}` };
 }

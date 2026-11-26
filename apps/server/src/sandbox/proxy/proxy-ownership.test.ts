@@ -94,13 +94,91 @@ describe("container ownership", () => {
       "/containers/own-child/rename?name=other",
       `/containers/${CHILD.id}/rename?name=other`,
     ],
-    ["DELETE", "/containers/own-child?force=true", `/containers/${CHILD.id}?force=true`],
+    ["DELETE", "/containers/own-child?force=true", `/containers/${CHILD.id}?force=true&v=true`],
   ])("forwards %s %s under the full id", async (method, path, forwarded) => {
     const r = await h.send(method, path);
 
     expect(r.status, r.body).toBe(200);
     const ref = path.includes("own-child") ? "own-child" : "cogmo-task-own";
     expect(h.received()).toEqual([resolveOf(ref), `${method} ${forwarded}`]);
+  });
+
+  it.each([
+    ["no query", "", "?v=true"],
+    ["v=false", "?v=false", "?v=true"],
+    ["v=0 twice beside force", "?v=0&force=1&v=0", "?v=true&force=1"],
+  ])("forwards a child DELETE with v=true: %s", async (_label, query, forwarded) => {
+    const r = await h.send("DELETE", `/containers/own-child${query}`);
+
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual([
+      resolveOf("own-child"),
+      `DELETE /containers/${CHILD.id}${forwarded}`,
+    ]);
+  });
+
+  it.each([
+    // docker-py and testcontainers-python
+    ["?v=True&link=False&force=True", "?v=true&link=False&force=True"],
+    ["?link=0", "?link=0&v=true"],
+    ["?link=no", "?link=no&v=true"],
+    ["?link=NONE", "?link=NONE&v=true"],
+    ["?link=", "?link=&v=true"],
+    ["?link=%20false%20", "?link=+false+&v=true"],
+    ["?link=0&link=1", "?link=0&link=1&v=true"],
+  ])(
+    "forwards a child DELETE whose link value is false, as the daemon reads it: %s",
+    async (query, forwarded) => {
+      const r = await h.send("DELETE", `/containers/own-child${query}`);
+
+      expect(r.status, r.body).toBe(200);
+      expect(h.received()).toEqual([
+        resolveOf("own-child"),
+        `DELETE /containers/${CHILD.id}${forwarded}`,
+      ]);
+    },
+  );
+
+  it.each([
+    "?link=true",
+    "?link=True",
+    "?link=1",
+    "?link=yes",
+    "?link=x",
+    "?force=1&link=1",
+    "?link=1&link=0",
+  ])(
+    "denies a child DELETE whose link value is true, as the daemon reads it: %s",
+    async (query) => {
+      const r = await h.send("DELETE", `/containers/own-child${query}`);
+
+      h.expectRejected(r, 403, []);
+      expect(message(r)).toContain("link");
+    },
+  );
+
+  it.each([
+    ["no body", undefined],
+    ["an empty JSON object, as the Ruby docker-api client sends", "{}"],
+    ["null", "null"],
+  ])("forwards a child start with %s, with no body", async (_label, body) => {
+    const r = await h.send("POST", "/containers/own-child/start", body);
+
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual([resolveOf("own-child"), `POST /containers/${CHILD.id}/start`]);
+    expect(h.daemon.requests().at(-1)?.body).toBe("");
+  });
+
+  it.each([
+    ["a pre-1.24 HostConfig", JSON.stringify({ HostConfig: { Privileged: true } })],
+    ["whitespace alone", "   "],
+    ["a list", "[]"],
+    ["a string", '"x"'],
+    ["text that is not JSON", "x"],
+  ])("denies a child start with a body that is %s", async (_label, body) => {
+    const r = await h.send("POST", "/containers/own-child/start", body);
+
+    h.expectRejected(r, 403, []);
   });
 
   it("forwards an exec create under the container's full id", async () => {

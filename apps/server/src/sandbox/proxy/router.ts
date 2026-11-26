@@ -14,7 +14,9 @@
  * back. A **stream** route, exec start or attach, may be upgraded: an
  * upgrade is raw-piped once its checks pass, and a request without
  * `Upgrade` goes through `http.request` as any other route does, so a
- * request pipelined after it is classified on its own.
+ * request pipelined after it is classified on its own. A container
+ * **create** is a request whose daemon answer the proxy reads and records
+ * before it answers, bound to neither the client nor the task's sockets.
  */
 
 import { match } from "ts-pattern";
@@ -51,7 +53,14 @@ export type RequestRoute =
   /** Forwarded without an ownership check: the meta routes, and image, network and volume routes until their policies land. */
   | { kind: "plain"; path: string }
   | { kind: "container"; target: ContainerTarget }
-  | { kind: "container_create"; versionPrefix: string }
+  /** A child's `start`, whose row follows the daemon's answer. */
+  | { kind: "child_start"; target: ContainerTarget }
+  /** A child's `restart`, whose row follows the daemon's answer as a start's does. */
+  | { kind: "child_restart"; target: ContainerTarget }
+  /** A child's `DELETE`, whose row follows the daemon's answer. */
+  | { kind: "child_remove"; target: ContainerTarget }
+  /** A child's `stop` or `kill`, forwarded with only the query keys the daemon documents for it. */
+  | { kind: "child_signal"; target: ContainerTarget; keys: ReadonlySet<string> }
   /** `POST /images/create`, under its query policy. */
   | { kind: "image_create"; versionPrefix: string }
   | { kind: "exec_create"; ref: string; versionPrefix: string }
@@ -72,12 +81,15 @@ export type StreamRoute =
 export type Classified =
   | { kind: "reject"; rejection: ProxyRejection }
   | { kind: "request"; route: RequestRoute; query: URLSearchParams }
-  | { kind: "stream"; route: StreamRoute; query: URLSearchParams };
+  | { kind: "stream"; route: StreamRoute; query: URLSearchParams }
+  /** `POST /containers/create`. */
+  | { kind: "create"; versionPrefix: string; query: URLSearchParams };
 
 type Outcome =
   | { kind: "reject"; rejection: ProxyRejection }
   | { kind: "request"; route: RequestRoute }
-  | { kind: "stream"; route: StreamRoute };
+  | { kind: "stream"; route: StreamRoute }
+  | { kind: "create"; versionPrefix: string };
 
 interface Row {
   method: string;
@@ -85,7 +97,11 @@ interface Row {
   outcome: (groups: ReadonlyArray<string>, versionPrefix: string, route: string) => Outcome;
 }
 
-const LIFECYCLE_ACTIONS = "kill|pause|unpause|restart|start|stop|rename";
+const LIFECYCLE_ACTIONS = "pause|unpause|rename";
+
+/** The query keys the daemon reads on a `stop` and on a `kill`; no other key is forwarded. */
+const STOP_KEYS: ReadonlySet<string> = new Set(["t", "signal"]);
+const KILL_KEYS: ReadonlySet<string> = new Set(["signal"]);
 
 /** A row forwarded under its canonical path with no ownership check. */
 function plainRow(method: string, pattern: RegExp): Row {
@@ -138,7 +154,29 @@ const ROWS: ReadonlyArray<Row> = [
   {
     method: "POST",
     pattern: /^\/containers\/create$/,
-    outcome: (_, v) => request({ kind: "container_create", versionPrefix: v }),
+    outcome: (_, v) => ({ kind: "create", versionPrefix: v }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/(start)$/,
+    outcome: (g, v) => request({ kind: "child_start", target: container("POST", "child", g, v) }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/(restart)$/,
+    outcome: (g, v) => request({ kind: "child_restart", target: container("POST", "child", g, v) }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/(stop)$/,
+    outcome: (g, v) =>
+      request({ kind: "child_signal", target: container("POST", "child", g, v), keys: STOP_KEYS }),
+  },
+  {
+    method: "POST",
+    pattern: /^\/containers\/(.+)\/(kill)$/,
+    outcome: (g, v) =>
+      request({ kind: "child_signal", target: container("POST", "child", g, v), keys: KILL_KEYS }),
   },
   {
     method: "POST",
@@ -184,7 +222,8 @@ const ROWS: ReadonlyArray<Row> = [
   {
     method: "DELETE",
     pattern: /^\/containers\/(.+)$/,
-    outcome: (g, v) => request({ kind: "container", target: container("DELETE", "child", g, v) }),
+    outcome: (g, v) =>
+      request({ kind: "child_remove", target: container("DELETE", "child", g, v) }),
   },
   // Images
   plainRow("GET", /^\/images\/json$/),
@@ -226,6 +265,11 @@ export function classify(method: string, rawTarget: string): Classified {
     .with({ kind: "reject" }, (outcome) => outcome)
     .with({ kind: "request" }, ({ route: r }) => ({ kind: "request" as const, route: r, query }))
     .with({ kind: "stream" }, ({ route: r }) => ({ kind: "stream" as const, route: r, query }))
+    .with({ kind: "create" }, ({ versionPrefix: v }) => ({
+      kind: "create" as const,
+      versionPrefix: v,
+      query,
+    }))
     .exhaustive();
 }
 

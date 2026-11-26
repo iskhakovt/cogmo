@@ -1,6 +1,6 @@
 /**
- * What the proxy reads from a daemon response: the exec id an exec create
- * names, and the filters that keep a task to its own objects
+ * What the proxy reads from a daemon response: the id a container or exec
+ * create names, and the filters that keep a task to its own objects
  * (design/sandbox.md → Proxy Design → Route table, Lists and Events). A
  * container list keeps the containers whose rows the task owns. An event
  * stream keeps the lines of the task's own container, by `Actor.ID`, and of
@@ -33,7 +33,8 @@ const PARENT_ATTRIBUTE = "cogmo.parent";
 
 const ContainerListSchema = z.array(z.looseObject({ Id: z.string() }));
 
-const ExecCreatedSchema = z.object({ Id: z.string().regex(/^[0-9a-f]{64}$/) });
+/** A container or exec create's 201 names the daemon's 64-character hex id. */
+const CreatedSchema = z.object({ Id: z.string().regex(/^[0-9a-f]{64}$/) });
 
 const EventSchema = z.looseObject({
   Actor: z.looseObject({
@@ -53,9 +54,12 @@ export function filterContainerList(
   return ok(Buffer.from(JSON.stringify(kept), "utf8"));
 }
 
-/** The exec id a `POST /containers/{id}/exec` 201 names, or `null` for a body that names none. */
-export function createdExecId(body: Buffer): string | null {
-  const parsed = ExecCreatedSchema.safeParse(parseJson(body.toString("utf8")));
+/**
+ * The id a 201 to `POST /containers/create` or `POST /containers/{id}/exec`
+ * names, or `null` for a body that names none.
+ */
+export function createdId(body: Buffer): string | null {
+  const parsed = CreatedSchema.safeParse(parseJson(body.toString("utf8")));
   return parsed.success ? parsed.data.Id : null;
 }
 

@@ -21,12 +21,12 @@ function stubDocker(): {
 }
 
 describe("killAndRemoveContainer", () => {
-  it("kills with SIGTERM, then force-removes", async () => {
+  it("kills with SIGTERM, then force-removes with the container's anonymous volumes", async () => {
     const { docker, container } = stubDocker();
     const result = await killAndRemoveContainer(docker, "c1");
     expect(result.isOk()).toBe(true);
     expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
-    expect(container.remove).toHaveBeenCalledWith({ force: true });
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
   });
 
   it.each([304, 409, 404])("tolerates a %i on kill and still removes", async (code) => {

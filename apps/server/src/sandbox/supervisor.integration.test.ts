@@ -5,11 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Docker from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { Transactor } from "../db/index.js";
+import { expectDefined } from "../test/assertions.js";
+import { requestOverSocket } from "../test/fake-docker-daemon.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { sessionNetwork } from "../test/session-network.js";
-import { LocalDockerSandboxClient } from "./index.js";
+import { CogmoSocketProxy, LocalDockerSandboxClient } from "./index.js";
+import { runReap } from "./reaper.js";
 import { DrizzleSandboxStore } from "./store/index.js";
+import { storeChildContainers } from "./store-child-containers.js";
+import { storeContainerRows } from "./store-container-rows.js";
 import { LABEL_INSTANCE, LABEL_MANAGED, LABEL_ROOT_TASK } from "./supervisor.js";
 import type { ResourceLimits } from "./types.js";
 
@@ -114,6 +120,33 @@ async function bootSandbox(): Promise<{ sandbox: LocalDockerSandboxClient; insta
   });
   sandboxes.push(sandbox);
   return { sandbox, instanceId: inst.id };
+}
+
+/** The daemon socket dockerode dials: `DOCKER_HOST`'s, or Docker's default. */
+function daemonSocketPath(): string {
+  const host = process.env.DOCKER_HOST;
+  if (host === undefined || host === "") return "/var/run/docker.sock";
+  if (!host.startsWith("unix://"))
+    throw new Error(`a Unix-socket DOCKER_HOST is needed, not ${host}`);
+  return host.slice("unix://".length);
+}
+
+/**
+ * `docker`, listing only the containers labelled with `instanceId`: a
+ * reaper tick here would otherwise take the containers of every other
+ * file and session on the daemon for orphans of this file's database.
+ */
+function listingOnly(docker: Docker, instanceId: string): Docker {
+  return new Proxy(docker, {
+    get(target, key, receiver) {
+      if (key !== "listContainers") return Reflect.get(target, key, receiver);
+      return (opts: Docker.ContainerListOptions) =>
+        target.listContainers({
+          ...opts,
+          filters: { label: [`${LABEL_MANAGED}=true`, `${LABEL_INSTANCE}=${instanceId}`] },
+        });
+    },
+  });
 }
 
 function uniqueName(prefix: string): string {
@@ -432,4 +465,92 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
     expect(["running", "created"]).toContain(inspected.State.Status);
     await sandbox.deleteByTaskId(taskId);
   });
+});
+
+describe("LocalDockerSandboxClient with the socket proxy (real Docker, runc runtime)", () => {
+  const CreatedSchema = z.object({ Id: z.string() });
+
+  it("records a child created through a task socket, which a reaper tick leaves and the cascade removes", async () => {
+    const socketDir = mkdtempSync(join(tmpdir(), "cogmo-sandbox-proxy-it-"));
+    const instance = await tx((trx) =>
+      store.insertInstance(trx, { host: "test-host", pid: process.pid }),
+    );
+    testFileInstanceIds.push(instance.id);
+    const proxy = await CogmoSocketProxy.create({
+      socketDir,
+      hostDockerSocket: daemonSocketPath(),
+      containerRows: storeContainerRows({ store, runInTx: tx }),
+      childContainers: storeChildContainers({ store, runInTx: tx, docker }),
+    });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: RUNTIME,
+      instanceId: instance.id,
+      proxy,
+    });
+    sandboxes.push(sandbox);
+    const taskId = "019d0000-0000-7000-8000-000000002222";
+    const session = await sandbox.create({
+      taskId,
+      image: TEST_IMAGE,
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 10 * 60_000),
+      network: "bridge",
+      dockerSocket: true,
+    });
+    // The task socket, as the supervisor bind-mounted it into the task container.
+    const mounts = (await docker.getContainer(session.state.dockerId).inspect()).Mounts;
+    const socket = expectDefined(
+      mounts.find((m) => m.Type === "bind" && m.Destination === "/var/run/docker.sock"),
+      "the task socket's mount",
+    ).Source;
+    try {
+      const created = await requestOverSocket(socket, {
+        method: "POST",
+        path: "/containers/create",
+        body: JSON.stringify({ Image: TEST_IMAGE, Cmd: ["sleep", "300"] }),
+      });
+      expect(created.status, created.body).toBe(201);
+      const childId = CreatedSchema.parse(JSON.parse(created.body)).Id;
+      const started = await requestOverSocket(socket, {
+        method: "POST",
+        path: `/containers/${childId}/start`,
+      });
+      expect(started.status, started.body).toBe(204);
+
+      const row = await tx((trx) => store.getContainerByDockerId(trx, childId));
+      expect(row).toMatchObject({
+        parentId: session.state.containerRowId,
+        rootTaskId: taskId,
+        depth: 1,
+        status: "running",
+        instanceId: instance.id,
+      });
+      const child = await docker.getContainer(childId).inspect();
+      expect(child.Config.Labels?.["cogmo.parent"]).toBe(session.state.dockerId);
+      expect(child.HostConfig.Memory).toBe(RESOURCE_LIMITS.memory_bytes);
+
+      const tick = await runReap({
+        docker: listingOnly(docker, instance.id),
+        store,
+        runInTx: tx,
+        instanceId: instance.id,
+      });
+      expect(tick).toMatchObject({ ttlReaped: 0, orphansReaped: 0, staleMarked: 0 });
+      expect((await docker.getContainer(childId).inspect()).State.Status).toBe("running");
+
+      await sandbox.deleteByTaskId(taskId);
+
+      await expect(docker.getContainer(childId).inspect()).rejects.toMatchObject({
+        statusCode: 404,
+      });
+      const reaped = await tx((trx) => store.getContainerByDockerId(trx, childId));
+      expect(reaped).toMatchObject({ status: "reaped", reapedReason: "cascade" });
+    } finally {
+      await sandbox.deleteByTaskId(taskId);
+      rmSync(socketDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

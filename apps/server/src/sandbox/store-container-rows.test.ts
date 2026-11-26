@@ -46,7 +46,7 @@ async function insert(row: {
 }
 
 describe("storeContainerRows", () => {
-  it("lists the task's rows in every state but reaped, with their lineage", async () => {
+  it("lists the task's rows in every state but reaped, with their lineage and status", async () => {
     const instance = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const instanceId = instance.id;
     const base = { instanceId, rootTaskId: TASK_ID };
@@ -81,10 +81,10 @@ describe("storeContainerRows", () => {
     const rows = expectOk(await storeContainerRows({ store, runInTx: tx }).forTask(TASK_ID));
 
     expect([...rows].sort((a, b) => a.dockerId.localeCompare(b.dockerId))).toEqual([
-      { id: exited, dockerId: "exited", parentId: task },
-      { id: running, dockerId: "running", parentId: task },
-      { id: salvage, dockerId: "salvage", parentId: null },
-      { id: task, dockerId: "task-container", parentId: null },
+      { id: exited, dockerId: "exited", parentId: task, depth: 1, status: "exited" },
+      { id: running, dockerId: "running", parentId: task, depth: 1, status: "running" },
+      { id: salvage, dockerId: "salvage", parentId: null, depth: 0, status: "starting" },
+      { id: task, dockerId: "task-container", parentId: null, depth: 0, status: "starting" },
     ]);
   });
 

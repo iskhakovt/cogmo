@@ -95,6 +95,8 @@ export const LOCAL_DOCKER_CAPABILITIES: Readonly<SandboxCapabilities> = Object.f
 });
 
 const HOME_VOLUME_TARGET = "/home/vscode";
+/** Where a task container sees its proxy socket, the path Docker clients dial by default. */
+const DOCKER_SOCKET_TARGET = "/var/run/docker.sock";
 
 /**
  * Local-Docker backend. Spawns task containers as siblings on the host
@@ -227,25 +229,29 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     const cgroupParent = taskSliceName(spec.taskId);
 
     // A session without `dockerSocket` gets no proxy scope. A failed create
-    // releases only the scope it registered: scopes are keyed by task id,
-    // which a salvage session shares with its coding task.
+    // releases only the registration it got, by its socket path: scopes are
+    // keyed by task id, which a salvage session shares with its coding task,
+    // and the task may have registered again on a newer socket meanwhile.
     const proxy = spec.dockerSocket ? this.#proxy : undefined;
 
     // Pre-allocate the proxy socket so the task container can mount it at
-    // `/var/run/docker.sock` from the moment it starts. Parent docker id
-    // isn't known yet — register with a placeholder, then upsert below
-    // after `createContainer` returns.
-    const proxySocketPath = proxy
-      ? await proxy.registerTask({
-          taskId: spec.taskId,
-          parentContainerRowId: "",
-          parentDockerId: "",
-          parentDepth: 0,
-          runtime,
-          cgroupParent,
-          instanceId: this.#instanceId,
-          resourceLimits: spec.resourceLimits,
-        })
+    // `/var/run/docker.sock` from the moment it starts. The task container
+    // has no row yet — register with no anchor, then `anchorTask` below once
+    // the row exists.
+    const registration: ProxyRegistration | null = proxy
+      ? {
+          proxy,
+          socketPath: await proxy.registerTask({
+            taskId: spec.taskId,
+            anchor: null,
+            parentDepth: 0,
+            runtime,
+            cgroupParent,
+            instanceId: this.#instanceId,
+            resourceLimits: spec.resourceLimits,
+            ttlExpiresAt: spec.expiresAt,
+          }),
+        }
       : null;
 
     const binds: string[] = [];
@@ -259,9 +265,6 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       }
       binds.push(`${spec.worktree.hostPath}:/workspace`);
     }
-    if (proxySocketPath) {
-      binds.push(`${proxySocketPath}:/var/run/docker.sock`);
-    }
     if (spec.askpass) {
       // Read-only — the in-container helper only `cat`s the secret file.
       binds.push(`${spec.askpass.hostDir}:${spec.askpass.containerDir}:ro`);
@@ -273,6 +276,13 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // omits the home volume entirely. When custom devcontainer support
     // grows, the mount target needs to become image-declared.
     const mounts: DockerodeMountSettings[] = [];
+    if (registration) {
+      // A mount, not a `Binds` entry: the daemon refuses the create when the
+      // socket is gone, a registration torn down since `registerTask`,
+      // where a bind would have it create a directory at the socket's path
+      // when the container starts (checked on Docker 29.9.3).
+      mounts.push({ Type: "bind", Source: registration.socketPath, Target: DOCKER_SOCKET_TARGET });
+    }
     if (spec.homeVolume) {
       mounts.push({
         Type: "volume",
@@ -332,7 +342,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         },
       });
     } catch (err) {
-      await releaseProxyScope(proxy, spec.taskId);
+      await releaseProxyScope(registration, spec.taskId);
       throw err;
     }
 
@@ -355,29 +365,35 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     } catch (err) {
       // The daemon has the container but no row records it. Remove it here;
       // should that fail, the reaper's orphan pass removes a container with
-      // no row on its next tick.
+      // no row once its grace window has passed.
       log.error({ err, dockerId: container.id }, "container row insert failed, removing");
-      await container.remove({ force: true }).catch((removeErr: unknown) => {
-        log.warn(
-          { err: removeErr, dockerId: container.id },
-          "removing the rowless container failed",
-        );
-      });
-      await releaseProxyScope(proxy, spec.taskId);
+      const removed = await killAndRemoveContainer(this.#docker, container.id);
+      removed.match(
+        () => undefined,
+        (e) =>
+          log.warn(
+            { err: e.error, op: e.op, dockerId: container.id },
+            "removing the rowless container failed",
+          ),
+      );
+      await releaseProxyScope(registration, spec.taskId);
       throw err;
     }
 
-    if (proxy) {
-      await proxy.registerTask({
-        taskId: spec.taskId,
-        parentContainerRowId: containerRow.id,
-        parentDockerId: container.id,
-        parentDepth: 0,
-        runtime,
-        cgroupParent,
-        instanceId: this.#instanceId,
-        resourceLimits: spec.resourceLimits,
+    if (registration) {
+      // The anchor reaches only the registration this create mounted, so a
+      // newer registration of the task is never anchored to this container.
+      const anchored = registration.proxy.anchorTask(spec.taskId, registration.socketPath, {
+        rowId: containerRow.id,
+        dockerId: container.id,
       });
+      if (anchored.isErr()) {
+        // The registration was torn down between the insert and here: its
+        // socket is gone, and no other one would be mounted. The container
+        // goes, and there is no session to hand back.
+        await this.#reapAbandoned(containerRow.id, container.id);
+        throw new Error(`task ${spec.taskId} was torn down while its container was created`);
+      }
     }
 
     try {
@@ -409,7 +425,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
           "reaping the unstarted container failed",
         );
       }
-      await releaseProxyScope(proxy, spec.taskId);
+      await releaseProxyScope(registration, spec.taskId);
       throw err;
     }
 
@@ -435,7 +451,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
               "removing the container of a finished row failed",
             ),
         );
-        await releaseProxyScope(proxy, spec.taskId);
+        await releaseProxyScope(registration, spec.taskId);
         throw new Error(`container ${container.id} was ${status} before it finished starting`);
       })
       .exhaustive();
@@ -499,11 +515,20 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
   }
 
   async deleteByTaskId(taskId: string): Promise<void> {
-    const rows = await this.#runInTx((tx) => this.#store.listContainersForTask(tx, taskId));
-    // Cascade order: deepest first, so a parent isn't reaped while a
-    // child still depends on it.
-    const ordered = [...rows].sort((a, b) => b.depth - a.depth);
+    // The proxy goes first: it stops taking requests, then waits for the
+    // container creates in flight, so a child the daemon has created has
+    // its row before the cascade below lists the task's rows. A failure is
+    // logged, not raised: the cascade still has to run.
+    if (this.#proxy) {
+      await this.#proxy.unregisterTask(taskId).catch((err: unknown) => {
+        log.warn({ err, taskId }, "proxy unregisterTask failed during delete");
+      });
+    }
     try {
+      const rows = await this.#runInTx((tx) => this.#store.listContainersForTask(tx, taskId));
+      // Cascade order: deepest first, so a parent isn't reaped while a
+      // child still depends on it.
+      const ordered = [...rows].sort((a, b) => b.depth - a.depth);
       for (const row of ordered) {
         if (row.status === "reaped") continue;
         const reaped = await reapContainer(this.#reapDeps(), {
@@ -517,16 +542,6 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         if (reaped.isErr()) throw reaped.error.error;
       }
     } finally {
-      // Tear down the per-task proxy socket regardless of whether the
-      // cascade reap succeeded — leaving the socket file around (and the
-      // listener bound) leaks resources across crashes. Idempotent: safe
-      // when no proxy is configured or when the task was never
-      // registered.
-      if (this.#proxy) {
-        await this.#proxy.unregisterTask(taskId).catch((err: unknown) => {
-          log.warn({ err, taskId }, "proxy unregisterTask failed during delete");
-        });
-      }
       // Wipe per-task askpass material. Idempotent — a missing directory
       // is a no-op. Failure is logged inside `cleanupAskpass`; we never
       // throw out of the finally.
@@ -553,6 +568,24 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         log.warn({ err }, "proxy close failed during shutdown");
       });
     }
+  }
+
+  /** Reap a container whose task was torn down while `create` made it; a failure is logged. */
+  async #reapAbandoned(rowId: string, dockerId: string): Promise<void> {
+    const reaped = await reapContainer(this.#reapDeps(), {
+      id: rowId,
+      dockerId,
+      reason: "cascade",
+      at: new Date(),
+    });
+    reaped.match(
+      () => undefined,
+      (e) =>
+        log.warn(
+          { err: e.error, op: e.op, dockerId },
+          "reaping a torn-down task's container failed",
+        ),
+    );
   }
 
   #reapDeps(): ReapContainerDeps {
@@ -818,16 +851,23 @@ function sinkWritable(sink: ExecSink, stream: ExecStreamName): Writable {
   });
 }
 
+/** The proxy registration a `create` got: the socket path it mounts, and so releases. */
+interface ProxyRegistration {
+  proxy: CogmoSocketProxy;
+  socketPath: string;
+}
+
 /**
- * Drop the proxy scope a failed `create` registered, if it registered one; a
- * failure here is logged, not raised over the original error.
+ * Release the proxy registration a failed `create` got, if it got one and
+ * it still serves the task; a failure here is logged, not raised over the
+ * original error.
  */
 async function releaseProxyScope(
-  proxy: CogmoSocketProxy | undefined,
+  registration: ProxyRegistration | null,
   taskId: string,
 ): Promise<void> {
-  if (!proxy) return;
-  await proxy.unregisterTask(taskId).catch((err: unknown) => {
-    log.warn({ err, taskId }, "proxy unregisterTask failed during create rollback");
+  if (!registration) return;
+  await registration.proxy.releaseTask(taskId, registration.socketPath).catch((err: unknown) => {
+    log.warn({ err, taskId }, "proxy release failed during create rollback");
   });
 }

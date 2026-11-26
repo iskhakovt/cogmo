@@ -102,8 +102,8 @@ describe("router.classify", () => {
       ["/v1.44//containers/./create", "/v1.44"],
     ])("keeps the version prefix of POST %s as %j", (path, versionPrefix) => {
       const r = classify("POST", path);
-      assertKind(r, "request");
-      expect(r.route).toEqual({ kind: "container_create", versionPrefix });
+      assertKind(r, "create");
+      expect(r.versionPrefix).toBe(versionPrefix);
     });
   });
 
@@ -119,14 +119,9 @@ describe("router.classify", () => {
       ["POST", "/containers/abc/wait", "/wait", "any"],
       ["POST", "/containers/abc/resize", "/resize", "any"],
       ["PUT", "/containers/abc/archive", "/archive", "child"],
-      ["POST", "/containers/abc/start", "/start", "child"],
-      ["POST", "/containers/abc/stop", "/stop", "child"],
-      ["POST", "/containers/abc/restart", "/restart", "child"],
-      ["POST", "/containers/abc/kill", "/kill", "child"],
       ["POST", "/containers/abc/pause", "/pause", "child"],
       ["POST", "/containers/abc/unpause", "/unpause", "child"],
       ["POST", "/containers/abc/rename", "/rename", "child"],
-      ["DELETE", "/containers/abc", "", "child"],
     ])("%s %s checks ownership with depth %s", (method, path, suffix, depth) => {
       const r = classify(method, path);
       assertKind(r, "request");
@@ -137,6 +132,44 @@ describe("router.classify", () => {
           versionPrefix: "",
           suffix,
           depth,
+          route: `${method} /containers/{id}${suffix}`,
+        },
+      });
+    });
+
+    it.each([
+      ["/stop", ["t", "signal"]],
+      ["/kill", ["signal"]],
+    ])("POST /containers/abc%s is a child_signal, of a child only, keeping %j", (suffix, keys) => {
+      const r = classify("POST", `/containers/abc${suffix}`);
+      assertKind(r, "request");
+      expect(r.route).toEqual({
+        kind: "child_signal",
+        target: {
+          ref: "abc",
+          versionPrefix: "",
+          suffix,
+          depth: "child",
+          route: `POST /containers/{id}${suffix}`,
+        },
+        keys: new Set(keys),
+      });
+    });
+
+    it.each([
+      ["POST", "/containers/abc/start", "child_start", "/start"],
+      ["POST", "/containers/abc/restart", "child_restart", "/restart"],
+      ["DELETE", "/containers/abc", "child_remove", ""],
+    ])("%s %s is a %s, of a child only", (method, path, kind, suffix) => {
+      const r = classify(method, path);
+      assertKind(r, "request");
+      expect(r.route).toEqual({
+        kind,
+        target: {
+          ref: "abc",
+          versionPrefix: "",
+          suffix,
+          depth: "child",
           route: `${method} /containers/{id}${suffix}`,
         },
       });

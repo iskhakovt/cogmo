@@ -6,11 +6,12 @@ import type { ContainerTransitionResult, SandboxStore } from "./store/index.js";
 const log = logger.child({ component: "sandbox" });
 
 /**
- * Mark a row `exited` because the daemon no longer has its container and
- * Cogmo did not remove it (a `docker rm` outside Cogmo, or a crash between
- * a reap's remove and its transition). No exit code: the daemon never
- * reported one. `stale` means another path finished the row first and is
- * logged at debug.
+ * Mark a row `exited` for the reaper's stale pass, which found its
+ * container missing from the daemon though Cogmo did not remove it: a
+ * `docker rm` outside Cogmo, a child that removed itself, or a crash
+ * between a reap's remove and its transition. No exit code: the daemon
+ * never reported one. `stale` means another path finished or moved the row
+ * first and is logged at debug.
  */
 export async function markContainerExited(
   deps: { store: SandboxStore; runInTx: Transactor },

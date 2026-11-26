@@ -1,10 +1,6 @@
-/**
- * Supervisor unit tests — focused on the proxy wiring (slice 3.0f). The
- * full Docker-side behavior is covered by `supervisor.integration.test.ts`
- * and `supervisor.sysbox.integration.test.ts`; this file uses stub Docker +
- * stub proxy to verify the supervisor calls the proxy in the right order
- * and bind-mounts the returned socket path.
- */
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough, type Writable } from "node:stream";
 import type { ContainerInfo } from "dockerode";
 import { sql } from "drizzle-orm";
@@ -17,8 +13,8 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { DockerContainer, DockerFacade, DockerImage, ExecInspect } from "./docker-facade.js";
 import type { ExecOutcome } from "./exec-state.js";
 import { LocalDockerSandboxClient } from "./index.js";
-import type { CogmoSocketProxy } from "./proxy/index.js";
-import type { TaskScope } from "./proxy/types.js";
+import { type ChildContainers, CogmoSocketProxy, type ContainerRows } from "./proxy/index.js";
+import type { TaskAnchor, TaskScope } from "./proxy/types.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
 import type { ResourceLimits } from "./types.js";
@@ -156,38 +152,52 @@ function stubContainerExec<E>(exec: E) {
   });
 }
 
-/** Stub proxy that records register/unregister calls. */
+/** Stub proxy that records register, anchor, unregister and release calls. */
 function fakeProxy(): {
   proxy: CogmoSocketProxy;
   registers: TaskScope[];
+  anchors: Array<{ taskId: string; socketPath: string; anchor: TaskAnchor }>;
   unregisters: string[];
+  /** The registrations failed creates released, each by the path its register answered. */
+  releases: Array<{ taskId: string; socketPath: string }>;
   socketDirAt: (taskId: string) => string;
 } {
   const registers: TaskScope[] = [];
+  const anchors: Array<{ taskId: string; socketPath: string; anchor: TaskAnchor }> = [];
   const unregisters: string[] = [];
+  const releases: Array<{ taskId: string; socketPath: string }> = [];
   const proxy = {
     registerTask: vi.fn(async (scope: TaskScope) => {
       registers.push(scope);
       return `/var/lib/cogmo/sockets/${scope.taskId}.sock`;
     }),
+    anchorTask: vi.fn((taskId: string, socketPath: string, anchor: TaskAnchor) => {
+      anchors.push({ taskId, socketPath, anchor });
+      return ok(undefined);
+    }),
     unregisterTask: vi.fn(async (taskId: string) => {
       unregisters.push(taskId);
+    }),
+    releaseTask: vi.fn(async (taskId: string, socketPath: string) => {
+      releases.push({ taskId, socketPath });
     }),
     close: vi.fn(async () => {}),
   } as unknown as CogmoSocketProxy;
   return {
     proxy,
     registers,
+    anchors,
     unregisters,
+    releases,
     socketDirAt: (taskId) => `/var/lib/cogmo/sockets/${taskId}.sock`,
   };
 }
 
 describe("LocalDockerSandboxClient — proxy wiring", () => {
-  it("registers the proxy with placeholder, then upserts the parent docker id", async () => {
+  it("registers the proxy with no anchor, then anchors it to the task container", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-task-xyz" });
-    const { proxy, registers } = fakeProxy();
+    const { proxy, registers, anchors } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -210,31 +220,39 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     });
     expect(handle.state.dockerId).toBe("docker-task-xyz");
 
-    // Two register calls: pre-create placeholder, post-create upsert.
-    expect(registers).toHaveLength(2);
-    const reg0 = expectDefined(registers[0], "first register");
-    const reg1 = expectDefined(registers[1], "second register");
-    expect(reg0.parentDockerId).toBe("");
-    expect(reg0.parentContainerRowId).toBe("");
+    // One register before the create, with no anchor; one anchor update once the row exists.
+    expect(registers).toHaveLength(1);
+    const reg0 = expectDefined(registers[0], "the register");
+    expect(reg0.anchor).toBeNull();
     expect(reg0.runtime).toBe("runc");
-    expect(reg1.parentDockerId).toBe("docker-task-xyz");
-    expect(reg1.parentContainerRowId).toBeTruthy();
+    // The anchor names the registration the register answered for.
+    expect(anchors).toEqual([
+      {
+        taskId,
+        socketPath: `/var/lib/cogmo/sockets/${taskId}.sock`,
+        anchor: { rowId: handle.state.containerRowId, dockerId: "docker-task-xyz" },
+      },
+    ]);
 
-    // Cgroup parent (slice 3.0h): both registers carry the same slice
-    // name; the proxy uses it to inject CgroupParent on every child
-    // create so siblings land in the same subtree.
+    // Cgroup parent: the scope carries the task's slice name; the proxy
+    // injects it as CgroupParent on every child create so siblings land in
+    // the same subtree.
     const expectedSlice = "cogmo-task-019d0000000070008000000000000aaa.slice";
     expect(reg0.cgroupParent).toBe(expectedSlice);
-    expect(reg1.cgroupParent).toBe(expectedSlice);
 
-    // Container created with the proxy socket bind-mounted at /var/run/docker.sock.
+    // Container created with the proxy socket bind-mounted at
+    // /var/run/docker.sock, as a mount, which the daemon refuses when its
+    // source is gone rather than creating a directory there.
     expect(calls.create).toHaveLength(1);
     const create0 = expectDefined(calls.create[0], "first create call");
     const binds = create0.HostConfig?.Binds ?? [];
     expect(binds).toContain("/tmp/wt:/workspace");
-    expect(binds).toContain(
-      "/var/lib/cogmo/sockets/019d0000-0000-7000-8000-000000000aaa.sock:/var/run/docker.sock",
-    );
+    expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
+    expect(create0.HostConfig?.Mounts).toContainEqual({
+      Type: "bind",
+      Source: "/var/lib/cogmo/sockets/019d0000-0000-7000-8000-000000000aaa.sock",
+      Target: "/var/run/docker.sock",
+    });
     // Task container itself pinned to the slice — Docker creates the
     // slice on demand and aborts here if systemd refuses (e.g. on a
     // non-systemd host).
@@ -399,7 +417,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker();
     docker.createContainer.mockRejectedValue(new Error("daemon refused"));
-    const { proxy, registers, unregisters } = fakeProxy();
+    const { proxy, registers, unregisters, releases } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -422,14 +440,20 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       }),
     ).rejects.toThrow("daemon refused");
 
-    expect(registers).toHaveLength(1); // only the placeholder
-    expect(unregisters).toEqual(["019d0000-0000-7000-8000-000000000ccc"]);
+    expect(registers).toHaveLength(1); // only the unanchored register
+    expect(unregisters).toEqual([]);
+    expect(releases).toEqual([
+      {
+        taskId: "019d0000-0000-7000-8000-000000000ccc",
+        socketPath: "/var/lib/cogmo/sockets/019d0000-0000-7000-8000-000000000ccc.sock",
+      },
+    ]);
   });
 
   it("rolls back the proxy registration when container.start fails", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-fail-start", failStart: true });
-    const { proxy, registers, unregisters } = fakeProxy();
+    const { proxy, registers, anchors, unregisters, releases } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -452,11 +476,17 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       }),
     ).rejects.toThrow("boom");
 
-    // Both the placeholder + post-create register fired (container was
-    // created successfully — only start failed); unregister rolls them
-    // back together.
-    expect(registers).toHaveLength(2);
-    expect(unregisters).toEqual(["019d0000-0000-7000-8000-000000000ddd"]);
+    // The register and the anchor fired (the container was created; only
+    // start failed); the release rolls the registration back.
+    expect(registers).toHaveLength(1);
+    expect(anchors).toHaveLength(1);
+    expect(unregisters).toEqual([]);
+    expect(releases).toEqual([
+      {
+        taskId: "019d0000-0000-7000-8000-000000000ddd",
+        socketPath: "/var/lib/cogmo/sockets/019d0000-0000-7000-8000-000000000ddd.sock",
+      },
+    ]);
     // The supervisor removed the container, so the row is `reaped`.
     const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-fail-start"));
     expect(row?.status).toBe("reaped");
@@ -486,9 +516,12 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       dockerSocket: true,
     });
 
-    const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
-    expect(binds).toContain("/tmp/wt:/workspace");
-    expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
+    const hostConfig = expectDefined(calls.create[0], "first create call").HostConfig;
+    expect(hostConfig?.Binds ?? []).toContain("/tmp/wt:/workspace");
+    expect(
+      (hostConfig?.Binds ?? []).find((b) => b.includes("/var/run/docker.sock")),
+    ).toBeUndefined();
+    expect((hostConfig?.Mounts ?? []).map((m) => m.Target)).not.toContain("/var/run/docker.sock");
   });
 
   it("mounts no socket and registers no scope for a session without dockerSocket", async () => {
@@ -514,8 +547,11 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     });
 
     expect(registers).toEqual([]);
-    const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
-    expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
+    const hostConfig = expectDefined(calls.create[0], "first create call").HostConfig;
+    expect(
+      (hostConfig?.Binds ?? []).find((b) => b.includes("/var/run/docker.sock")),
+    ).toBeUndefined();
+    expect((hostConfig?.Mounts ?? []).map((m) => m.Target)).not.toContain("/var/run/docker.sock");
   });
 
   /** The salvage create's failure, arranged on its own container. */
@@ -564,7 +600,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       const taskId = "019d0000-0000-7000-8000-000000000e02";
       const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
       const { docker } = fakeDocker({ dockerId: "docker-coding" });
-      const { proxy, registers, unregisters } = fakeProxy();
+      const { proxy, registers, unregisters, releases } = fakeProxy();
       const clientOn = (instanceId: string) =>
         LocalDockerSandboxClient.create({
           docker,
@@ -583,7 +619,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
         network: "bridge",
       } as const;
       await (await clientOn(inst.id)).create({ ...spec, dockerSocket: true });
-      expect(registers).toHaveLength(2);
+      expect(registers).toHaveLength(1);
 
       const salvage = mock<DockerContainer>();
       Object.defineProperty(salvage, "id", { value: "docker-salvage", configurable: true });
@@ -594,8 +630,9 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
       await expect(salvageClient.create({ ...spec, dockerSocket: false })).rejects.toThrow();
 
-      expect(registers).toHaveLength(2);
+      expect(registers).toHaveLength(1);
       expect(unregisters).toEqual([]);
+      expect(releases).toEqual([]);
     },
   );
 
@@ -944,14 +981,14 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
 
     await expect(sandbox.create(SPEC)).rejects.toThrow(/was reaped before it finished starting/);
     expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
-    expect(container.remove).toHaveBeenCalledWith({ force: true });
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
   });
 
   it("create removes the container and releases the proxy when the row insert fails", async () => {
     // No `cogmo_instances` row for this id, so `insertContainer` fails on the
     // FK after the daemon has already created the container.
-    const { docker, calls } = fakeDocker({ dockerId: "docker-rowless" });
-    const { proxy, unregisters } = fakeProxy();
+    const { docker, container, calls } = fakeDocker({ dockerId: "docker-rowless" });
+    const { proxy, unregisters, releases } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -966,14 +1003,186 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(calls.create).toHaveLength(1);
     expect(calls.start).toBe(0);
     expect(calls.remove).toBe(1);
-    expect(unregisters).toEqual([TASK_ID]);
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+    expect(unregisters).toEqual([]);
+    expect(releases).toEqual([
+      { taskId: TASK_ID, socketPath: `/var/lib/cogmo/sockets/${TASK_ID}.sock` },
+    ]);
+  });
+
+  it("create reaps its container and rejects, starting nothing, when the task is torn down before its anchor", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, container, calls } = fakeDocker({ dockerId: "docker-torn-down" });
+    const { proxy, registers, unregisters, releases } = fakeProxy();
+    // The task's registration is gone by the time its row exists.
+    vi.mocked(proxy.anchorTask).mockReturnValue(err({ kind: "not_serving" }));
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+
+    await expect(sandbox.create(SPEC)).rejects.toThrow(/torn down/);
+
+    expect(registers).toHaveLength(1);
+    expect(proxy.anchorTask).toHaveBeenCalledWith(
+      TASK_ID,
+      `/var/lib/cogmo/sockets/${TASK_ID}.sock`,
+      { rowId: expect.any(String), dockerId: "docker-torn-down" },
+    );
+    expect(calls.start).toBe(0);
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+    // The teardown that dropped the registration owns its socket.
+    expect(unregisters).toEqual([]);
+    expect(releases).toEqual([]);
+    const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-torn-down"));
+    expect(row).toMatchObject({ status: "reaped", reapedReason: "cascade" });
+  });
+
+  it("create still rejects, starting nothing, when the daemon refuses the reap of a torn-down task's container", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, container, calls } = fakeDocker({ dockerId: "docker-torn-down-refused" });
+    container.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
+    const { proxy } = fakeProxy();
+    vi.mocked(proxy.anchorTask).mockReturnValue(err({ kind: "not_serving" }));
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+
+    await expect(sandbox.create(SPEC)).rejects.toThrow(/torn down/);
+
+    expect(calls.start).toBe(0);
+    expect(container.remove).not.toHaveBeenCalled();
+    // The reap removes before it transitions, so the refused one leaves the
+    // row live for the TTL pass rather than reaped over a running container.
+    const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-torn-down-refused"));
+    expect(row?.status).toBe("starting");
+  });
+
+  it("create's rollback releases only the registration it got, leaving a newer one serving", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = fakeDocker({ dockerId: "docker-rolled-back" });
+    const socketDir = await mkdtemp(join(tmpdir(), "cogmo-supervisor-release-"));
+    const proxy = await CogmoSocketProxy.create({
+      socketDir,
+      containerRows: mock<ContainerRows>(),
+      childContainers: mock<ChildContainers>(),
+    });
+    // While the row insert is in flight, the task is torn down and another
+    // create registers it again; then the insert fails.
+    const newer: string[] = [];
+    const tornDownThenFailing: Transactor = async () => {
+      await proxy.unregisterTask(TASK_ID);
+      const path = await proxy.registerTask({
+        taskId: TASK_ID,
+        anchor: null,
+        parentDepth: 0,
+        runtime: "runc",
+        cgroupParent: "cogmo-task-other.slice",
+        instanceId: inst.id,
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: SPEC.expiresAt,
+      });
+      newer.push(path);
+      throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+    };
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tornDownThenFailing,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    try {
+      await expect(sandbox.create(SPEC)).rejects.toThrow("connection reset");
+
+      const served = expectDefined(newer[0], "the newer registration's path");
+      const anchored = proxy.anchorTask(TASK_ID, served, { rowId: "r", dockerId: "d" });
+      expect(anchored.isOk()).toBe(true);
+    } finally {
+      await proxy.close();
+      await rm(socketDir, { recursive: true, force: true });
+    }
+  });
+
+  it("deleteByTaskId reaps the task's rows when the proxy's teardown rejects", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = fakeDocker({ dockerId: "docker-teardown-rejects" });
+    const { proxy } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    const session = await sandbox.create(SPEC);
+    vi.mocked(proxy.unregisterTask).mockRejectedValue(new Error("socket busy"));
+
+    await sandbox.deleteByTaskId(TASK_ID);
+
+    expect(await tx((trx) => store.getContainer(trx, session.state.containerRowId))).toMatchObject({
+      status: "reaped",
+      reapedReason: "cascade",
+    });
+  });
+
+  it("deleteByTaskId reaps a child whose row a create in flight inserted during the proxy's teardown", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = fakeDocker({ dockerId: "docker-parent-teardown" });
+    const { proxy } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    const session = await sandbox.create(SPEC);
+    // The proxy's teardown waits for a create the daemon has answered, whose
+    // row lands before `unregisterTask` resolves.
+    let childRowId = "";
+    vi.mocked(proxy.unregisterTask).mockImplementation(async () => {
+      const child = await tx((trx) =>
+        store.insertContainer(trx, {
+          dockerId: "docker-child-in-flight",
+          parentId: session.state.containerRowId,
+          rootTaskId: TASK_ID,
+          depth: 1,
+          image: "alpine",
+          runtime: "runc",
+          labels: { [LABEL_MANAGED]: "true", [LABEL_INSTANCE]: inst.id },
+          resourceLimits: RESOURCE_LIMITS,
+          ttlExpiresAt: SPEC.expiresAt,
+          instanceId: inst.id,
+        }),
+      );
+      childRowId = child.id;
+    });
+
+    await sandbox.deleteByTaskId(TASK_ID);
+
+    const child = await tx((trx) => store.getContainer(trx, childRowId));
+    expect(child?.status).toBe("reaped");
+    expect(child?.reapedReason).toBe("cascade");
   });
 
   it("a start failure whose kill the daemon refuses leaves the row starting and surfaces the start error", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, container, calls } = fakeDocker({ dockerId: "docker-refuse", failStart: true });
     container.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
-    const { proxy, unregisters } = fakeProxy();
+    const { proxy, unregisters, releases } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -990,13 +1199,16 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(calls.remove).toBe(0);
     const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-refuse"));
     expect(row?.status).toBe("starting");
-    expect(unregisters).toEqual([TASK_ID]);
+    expect(unregisters).toEqual([]);
+    expect(releases).toEqual([
+      { taskId: TASK_ID, socketPath: `/var/lib/cogmo/sockets/${TASK_ID}.sock` },
+    ]);
   });
 
   it("a start failure whose reap throws still releases the proxy and surfaces the start error", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-reap-throws", failStart: true });
-    const { proxy, unregisters } = fakeProxy();
+    const { proxy, unregisters, releases } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -1020,13 +1232,16 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(calls.remove).toBe(1);
     const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-reap-throws"));
     expect(row?.status).toBe("starting");
-    expect(unregisters).toEqual([TASK_ID]);
+    expect(unregisters).toEqual([]);
+    expect(releases).toEqual([
+      { taskId: TASK_ID, socketPath: `/var/lib/cogmo/sockets/${TASK_ID}.sock` },
+    ]);
   });
 
   it("a finished row after a successful start with a refused kill still throws and releases the proxy", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, container, calls } = fakeDocker({ dockerId: "docker-midstart-refused" });
-    const { proxy, unregisters } = fakeProxy();
+    const { proxy, unregisters, releases } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -1047,14 +1262,17 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     // Residual (design/sandbox.md → Container state machine): the container
     // stays on the daemon under a terminal row until the instance row closes.
     expect(calls.remove).toBe(0);
-    expect(unregisters).toEqual([TASK_ID]);
+    expect(unregisters).toEqual([]);
+    expect(releases).toEqual([
+      { taskId: TASK_ID, socketPath: `/var/lib/cogmo/sockets/${TASK_ID}.sock` },
+    ]);
   });
 
   it("a failing proxy release does not mask the start error", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-busy-sock", failStart: true });
     const { proxy } = fakeProxy();
-    vi.mocked(proxy.unregisterTask).mockRejectedValue(new Error("socket busy"));
+    vi.mocked(proxy.releaseTask).mockRejectedValue(new Error("socket busy"));
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -1065,7 +1283,10 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     });
 
     await expect(sandbox.create(SPEC)).rejects.toThrow("boom");
-    expect(proxy.unregisterTask).toHaveBeenCalledWith(TASK_ID);
+    expect(proxy.releaseTask).toHaveBeenCalledWith(
+      TASK_ID,
+      `/var/lib/cogmo/sockets/${TASK_ID}.sock`,
+    );
   });
 
   it("create surfaces the insert error, not the remove error, when both fail", async () => {
@@ -1073,7 +1294,7 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     container.remove.mockRejectedValue(
       Object.assign(new Error("daemon i/o error"), { statusCode: 500 }),
     );
-    const { proxy, unregisters } = fakeProxy();
+    const { proxy, unregisters, releases } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -1087,7 +1308,10 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     // failed remove is logged and left to the orphan pass.
     await expect(sandbox.create(SPEC)).rejects.toThrow(/insert into "containers"/);
     expect(container.remove).toHaveBeenCalledTimes(1);
-    expect(unregisters).toEqual([TASK_ID]);
+    expect(unregisters).toEqual([]);
+    expect(releases).toEqual([
+      { taskId: TASK_ID, socketPath: `/var/lib/cogmo/sockets/${TASK_ID}.sock` },
+    ]);
   });
 });
 
@@ -1889,7 +2113,65 @@ describe("LocalDockerSandboxClient — reconcileCrashedInstances", () => {
     const result = await sandbox.reconcileCrashedInstances(current.id);
     expect(result.orphansReaped).toBe(1);
     expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
-    expect(container.remove).toHaveBeenCalledWith({ force: true });
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+  });
+
+  it("reaps a fresh rowless container a crashed create left under a prior open instance", async () => {
+    const crashed = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
+    const { docker, container } = mockDockerFacade();
+    const fresh = containerInfoStub("docker-crashed-create", {
+      [LABEL_MANAGED]: "true",
+      [LABEL_INSTANCE]: crashed.id,
+    });
+    Object.defineProperty(fresh, "Created", {
+      value: Math.floor(Date.now() / 1000),
+      configurable: true,
+    });
+    docker.listContainers.mockResolvedValue([fresh]);
+    container.kill.mockResolvedValue(undefined);
+    container.remove.mockResolvedValue(undefined);
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: current.id,
+    });
+
+    const result = await sandbox.reconcileCrashedInstances(current.id);
+
+    expect(result.orphansReaped).toBe(1);
+    expect(docker.getContainer).toHaveBeenCalledWith("docker-crashed-create");
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+  });
+
+  it("closes the prior instance though it failed to remove a fresh rowless child of it", async () => {
+    const prior = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
+    const { docker, container } = mockDockerFacade();
+    const child = containerInfoStub("docker-rowless-child", {
+      [LABEL_MANAGED]: "true",
+      [LABEL_INSTANCE]: prior.id,
+    });
+    Object.defineProperty(child, "Created", {
+      value: Math.floor(Date.now() / 1000),
+      configurable: true,
+    });
+    docker.listContainers.mockResolvedValue([child]);
+    container.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: current.id,
+    });
+
+    const result = await sandbox.reconcileCrashedInstances(current.id);
+
+    expect(result.orphansReaped).toBe(0);
+    expect((await tx((trx) => store.getInstance(trx, prior.id)))?.stoppedAt).toBeInstanceOf(Date);
   });
 
   it("closes the stale instance rows it targeted, so the orphan pass retries what it could not kill", async () => {
@@ -1968,7 +2250,7 @@ describe("LocalDockerSandboxClient — reconcileCrashedInstances", () => {
 
     expect(result.orphansReaped).toBe(1);
     expect(refused.remove).not.toHaveBeenCalled();
-    expect(fine.remove).toHaveBeenCalledWith({ force: true });
+    expect(fine.remove).toHaveBeenCalledWith({ force: true, v: true });
     expect((await tx((trx) => store.getContainer(trx, refusedRow.id)))?.status).toBe("starting");
     const reaped = await tx((trx) => store.getContainer(trx, fineRow.id));
     expect(reaped?.status).toBe("reaped");
