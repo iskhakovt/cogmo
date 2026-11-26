@@ -6,12 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "./assertions.js";
 import { normalizeHappenedIn } from "./llmock-happened-in.js";
-import {
-  type CassetteFixture,
-  describeMiss,
-  narrowModelMatch,
-  prepareCassetteFixture,
-} from "./llmock-miss.js";
+import { type CassetteFixture, describeMiss, prepareCassetteFixture } from "./llmock-miss.js";
 
 function chat(text: string, extra: Partial<ChatCompletionRequest> = {}): ChatCompletionRequest {
   return { model: "claude-sonnet-5", messages: [{ role: "user", content: text }], ...extra };
@@ -137,7 +132,7 @@ describe("describeMiss", () => {
   });
 });
 
-describe("narrowModelMatch", () => {
+describe("prepareCassetteFixture on a model id", () => {
   let dir: string;
   let mock: LLMock;
   let url: string;
@@ -158,7 +153,7 @@ describe("narrowModelMatch", () => {
     );
     mock = new LLMock({ port: 0, logLevel: "silent", strict: true });
     mock.loadFixtureFile(file);
-    mock.getFixtures().forEach(narrowModelMatch);
+    mock.getFixtures().forEach(prepareCassetteFixture);
     url = await mock.start();
   });
 
@@ -196,17 +191,22 @@ describe("prepareCassetteFixture on embedding fixtures", () => {
   let mock: LLMock;
   let url: string;
 
+  const MODEL = "text-embedding-3-small";
   const STAMPED =
     "User moved to Lisbon | Where: Lisbon | Involving: user (happened in November 2026) [user]";
   const PLAIN = "User moved to Lisbon | Where: Lisbon | Involving: user";
 
-  function recordedEmbedding(input: string, keyText: string, embedding: number[]) {
+  function recordedEmbedding(
+    wire: { input: string | string[]; dimensions?: number },
+    keyText: string,
+    embedding: number[],
+  ) {
     return {
       match: {
         endpoint: "embedding",
         inputText: keyText,
-        model: "text-embedding-3-small",
-        embeddingRequest: { operation: "/v1/embeddings", input: [input] },
+        model: MODEL,
+        embeddingRequest: { operation: "/v1/embeddings", ...wire },
       },
       response: { embedding },
     };
@@ -223,12 +223,22 @@ describe("prepareCassetteFixture on embedding fixtures", () => {
       JSON.stringify({
         fixtures: [
           recordedEmbedding(
-            "homelab IP is 10.0.10.10 (happened in November 2026) [homelab]",
+            { input: ["homelab IP is 10.0.10.10 (happened in November 2026) [homelab]"] },
             "homelab IP is 10.0.10.10 (happened in [WHEN]) [homelab]",
             [0, 0, 1],
           ),
-          recordedEmbedding(STAMPED, "User moved to Lisbon", [1, 0, 0]),
-          recordedEmbedding(PLAIN, "User moved to Lisbon", [0, 1, 0]),
+          recordedEmbedding({ input: [STAMPED] }, "User moved to Lisbon", [1, 0, 0]),
+          recordedEmbedding({ input: [PLAIN] }, "User moved to Lisbon", [0, 1, 0]),
+          recordedEmbedding(
+            { input: "Owns a bike (happened in November 2026) [user]" },
+            "Owns a bike (happened in [WHEN]) [user]",
+            [0, 1, 1],
+          ),
+          recordedEmbedding(
+            { input: ["Owns a car (happened in November 2026) [user]"], dimensions: 3 },
+            "Owns a car (happened in [WHEN]) [user]",
+            [1, 1, 0],
+          ),
         ],
       }),
     );
@@ -251,36 +261,54 @@ describe("prepareCassetteFixture on embedding fixtures", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  async function embed(
-    input: string[],
-    model = "text-embedding-3-small",
-  ): Promise<number[] | number> {
+  async function embed(body: {
+    input: string | string[];
+    model: string;
+    dimensions?: number;
+  }): Promise<number[] | number> {
     const res = await fetch(`${url}/v1/embeddings`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model, input }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) return res.status;
-    const body = EmbeddingsBody.parse(await res.json());
-    return expectDefined(body.data[0], "embedding").embedding;
+    const parsed = EmbeddingsBody.parse(await res.json());
+    return expectDefined(parsed.data[0], "embedding").embedding;
   }
 
   it.each(["November", "December"])("answers a fact stamped %s", async (month) => {
-    expect(await embed([`homelab IP is 10.0.10.10 (happened in ${month} 2026) [homelab]`])).toEqual(
-      [0, 0, 1],
-    );
-    expect(await embed([STAMPED.replace("November", month)])).toEqual([1, 0, 0]);
+    const homelab = `homelab IP is 10.0.10.10 (happened in ${month} 2026) [homelab]`;
+    expect(await embed({ input: [homelab], model: MODEL })).toEqual([0, 0, 1]);
+    expect(await embed({ input: [STAMPED.replace("November", month)], model: MODEL })).toEqual([
+      1, 0, 0,
+    ]);
+  });
+
+  it("answers a fact recorded as a single string in another month", async () => {
+    const input = "Owns a bike (happened in December 2026) [user]";
+    expect(await embed({ input, model: MODEL })).toEqual([0, 1, 1]);
   });
 
   it("answers each shape of a fact with its own vector", async () => {
-    expect(await embed([PLAIN])).toEqual([0, 1, 0]);
+    expect(await embed({ input: [PLAIN], model: MODEL })).toEqual([0, 1, 0]);
   });
 
+  // aimock alone accepts the recorded id followed by `-<digit>…`; the
+  // model predicate the embedding match keeps rejects it.
   it("misses a fact recorded on another model", async () => {
-    expect(await embed([PLAIN], "text-embedding-3-large")).toBe(503);
+    expect(await embed({ input: [PLAIN], model: "text-embedding-3-small-5" })).toBe(503);
   });
 
   it("misses a batch that shares only its first fact with a recording", async () => {
-    expect(await embed([PLAIN, "User works at a bakery | Involving: user"])).toBe(503);
+    const input = [PLAIN, "User works at a bakery | Involving: user"];
+    expect(await embed({ input, model: MODEL })).toBe(503);
+  });
+
+  it.each([
+    ["November", [1, 1, 0]],
+    ["December", 503],
+  ])("keeps the exact match for a recording with dimensions (%s)", async (month, expected) => {
+    const input = [`Owns a car (happened in ${month} 2026) [user]`];
+    expect(await embed({ input, model: MODEL, dimensions: 3 })).toEqual(expected);
   });
 });

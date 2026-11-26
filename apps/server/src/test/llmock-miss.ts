@@ -1,9 +1,10 @@
 /**
- * Explains an llmock request no fixture matched: the request's match key and
- * the cassette fixtures closest to it, each with the fields where it differs.
- * Takes the request after `requestTransform`, which is what fixtures are
- * compared against. Under `src/` so it is tsc-checked; used by
- * `test/llmock-setup.ts`.
+ * How llmock cassette fixtures match: `prepareCassetteFixture` adjusts each
+ * fixture `loadCassette` loads, and `describeMiss` explains a request none
+ * matched, with the request's match key and the closest fixtures, each with
+ * the fields where it differs. `describeMiss` takes the request after
+ * `requestTransform`, which is what fixture keys are compared against. Under
+ * `src/` so it is tsc-checked; used by `test/llmock-setup.ts`.
  */
 import { type ChatCompletionRequest, type Fixture, getTextContent } from "@copilotkit/aimock";
 import { normalizeHappenedIn } from "./llmock-happened-in.js";
@@ -72,7 +73,7 @@ function modelMatches(fixtureModel: string, requestModel: string): boolean {
  * cassette would answer `claude-sonnet-5-5` with another model's recording.
  * Mutates the fixture aimock holds, which is what its router reads.
  */
-export function narrowModelMatch(fixture: Fixture): void {
+function narrowModelMatch(fixture: Fixture): void {
   const recorded = fixture.match.model;
   if (typeof recorded !== "string") return;
   fixture.match.predicate = (req) => req.model === undefined || modelMatches(recorded, req.model);
@@ -89,15 +90,16 @@ export function prepareCassetteFixture(fixture: Fixture): void {
 
 /**
  * Match a loaded embedding fixture's recorded wire input with the month
- * normalized. aimock requires `embeddingRequest` verbatim, before
- * `requestTransform` runs, so a fact Hindsight stamped "(happened in November
- * 2026)" would miss the next month. The predicate makes the same comparison
- * over the inputs as aimock joins them, month normalized on both sides, and
- * keeps any predicate already set. It sees neither the input array nor
- * `dimensions`: a recording with `dimensions` or token inputs keeps the exact
- * match, and a request differing from a recording only in its array split or
- * its `dimensions` matches it. Mutates the fixture aimock holds, which is what
- * its router reads.
+ * normalized. aimock compares `embeddingRequest` verbatim with the original
+ * request, not the one `requestTransform` returns, so a fact Hindsight stamped
+ * "(happened in November 2026)" would miss the next month. The predicate
+ * makes the same comparison over the inputs as aimock joins them, month
+ * normalized on both sides, and keeps any predicate already set. It sees only
+ * that joined text: a recording with `dimensions` or token inputs keeps the
+ * exact match, and a request matches a recording it differs from only in its
+ * array split, its `dimensions`, token inputs, or its endpoint (Ollama's
+ * `/api/embed`). Mutates the fixture aimock holds, which is what its router
+ * reads.
  */
 function normalizeEmbeddingMatch(fixture: Fixture): void {
   const recorded = fixture.match.embeddingRequest;
