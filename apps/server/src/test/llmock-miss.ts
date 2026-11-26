@@ -6,6 +6,7 @@
  * `test/llmock-setup.ts`.
  */
 import { type ChatCompletionRequest, type Fixture, getTextContent } from "@copilotkit/aimock";
+import { normalizeHappenedIn } from "./llmock-happened-in.js";
 
 export interface CassetteFixture {
   readonly fixture: Fixture;
@@ -75,6 +76,39 @@ export function narrowModelMatch(fixture: Fixture): void {
   const recorded = fixture.match.model;
   if (typeof recorded !== "string") return;
   fixture.match.predicate = (req) => req.model === undefined || modelMatches(recorded, req.model);
+}
+
+/**
+ * Adjust a fixture `loadCassette` loaded: {@link narrowModelMatch}, then
+ * {@link normalizeEmbeddingMatch}, which keeps the predicate the first sets.
+ */
+export function prepareCassetteFixture(fixture: Fixture): void {
+  narrowModelMatch(fixture);
+  normalizeEmbeddingMatch(fixture);
+}
+
+/**
+ * Match a loaded embedding fixture's recorded wire input with the month
+ * normalized. aimock requires `embeddingRequest` verbatim, before
+ * `requestTransform` runs, so a fact Hindsight stamped "(happened in November
+ * 2026)" would miss the next month. The predicate makes the same comparison
+ * over the inputs as aimock joins them, month normalized on both sides, and
+ * keeps any predicate already set. It sees neither the input array nor
+ * `dimensions`: a recording with `dimensions` or token inputs keeps the exact
+ * match, and a request differing from a recording only in its array split or
+ * its `dimensions` matches it. Mutates the fixture aimock holds, which is what
+ * its router reads.
+ */
+function normalizeEmbeddingMatch(fixture: Fixture): void {
+  const recorded = fixture.match.embeddingRequest;
+  if (recorded === undefined || recorded.dimensions !== undefined) return;
+  const inputs = typeof recorded.input === "string" ? [recorded.input] : recorded.input;
+  if (!Array.isArray(inputs) || !inputs.every((input) => typeof input === "string")) return;
+  const wire = normalizeHappenedIn(inputs.join(" "));
+  const prior = fixture.match.predicate;
+  delete fixture.match.embeddingRequest;
+  fixture.match.predicate = (req) =>
+    (prior === undefined || prior(req)) && normalizeHappenedIn(req.embeddingInput) === wire;
 }
 
 function differences(req: ChatCompletionRequest, fixture: Fixture, text: string): string[] {
