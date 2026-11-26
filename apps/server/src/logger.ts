@@ -1,6 +1,10 @@
 import type { EventEmitter } from "node:events";
 import pino from "pino";
-import { redactSecretsInText } from "./util/redact-secrets.js";
+import {
+  literalSecretPattern,
+  redactLiterals,
+  redactSecretsInText,
+} from "./util/redact-secrets.js";
 
 // Bootstrap-tier code: read `process.env` directly to keep the logger
 // independent of the typed env. Anything that imports `env-bootstrap.ts`
@@ -75,20 +79,46 @@ export function sendLogsTo(stream: LogStream): void {
   router.select(stream);
 }
 
+/** Secrets known only at runtime, masked by value in every line before the shapes. */
+const runtimeSecrets = new Map<string, RegExp>();
+
+/** Below this, masking by value would hit unrelated text, and no real credential is this short. */
+const MIN_MASKED_SECRET_LENGTH = 16;
+
+/**
+ * Mask `secret` in every line written from here on, by any logger
+ * `createLogger` builds: raw, or percent-encoded as `literalSecretPattern`
+ * matches it. For a credential an upstream error can echo bare, such as a
+ * channel's bot token from a custom Bot API server (design/liveness.md →
+ * Surface). Lines are matched after JSON serialization, so a secret should
+ * hold no character JSON escapes; one shorter than `MIN_MASKED_SECRET_LENGTH`
+ * is not masked.
+ */
+export function maskInLogs(secret: string): void {
+  if (secret.length < MIN_MASKED_SECRET_LENGTH || runtimeSecrets.has(secret)) return;
+  runtimeSecrets.set(secret, literalSecretPattern(secret));
+}
+
+/** The registered secrets first: a shape stops at a percent-encoded `-` or `_` and would leave the rest. */
+function redactLine(line: string): string {
+  return redactSecretsInText(redactLiterals(line, runtimeSecrets.values()));
+}
+
 /**
  * Build a logger with cogmo's options, writing to `destination`.
  *
- * Every line passes through `redactSecretsInText` on its way to `destination`,
- * after serialization: a Telegram Bot API URL carries the bot token in its
- * path, and node-fetch puts that URL in its error messages, which pino's
- * `err` serializer reaches through grammY's `HttpError.error`. Redacting the
- * serialized line covers every field and nesting depth, and every sink —
+ * Every line passes through the `maskInLogs` secrets, then
+ * `redactSecretsInText`, on its way to `destination`, after serialization: a
+ * Telegram Bot API URL carries the bot token in its path, and node-fetch puts
+ * that URL in its error messages, which pino's `err` serializer reaches
+ * through grammY's `HttpError.error`. Redacting the serialized line covers
+ * every field and nesting depth, and every sink —
  * `destination` and, when telemetry is on, instrumentation-pino's OTLP log
  * stream, which receives the same post-hook line.
  */
 export function createLogger(destination: pino.DestinationStream): pino.Logger {
   return pino(
-    { level: process.env.LOG_LEVEL ?? "info", hooks: { streamWrite: redactSecretsInText } },
+    { level: process.env.LOG_LEVEL ?? "info", hooks: { streamWrite: redactLine } },
     destination,
   );
 }

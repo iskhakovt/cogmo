@@ -77,6 +77,7 @@ export async function startTransport(core: CoreDeps, wiring: TransportWiring) {
   const {
     functions: channelFunctions,
     adapters,
+    unsupported: unsupportedChannels,
     adapterMap,
   } = await startChannels({
     ...transportDeps,
@@ -108,7 +109,14 @@ export async function startTransport(core: CoreDeps, wiring: TransportWiring) {
       })
     : null;
 
-  return { webStreamRegistry, channelFunctions, adapters, deliveryRouter, webTransport };
+  return {
+    webStreamRegistry,
+    channelFunctions,
+    adapters,
+    unsupportedChannels,
+    deliveryRouter,
+    webTransport,
+  };
 }
 
 export function createSessionFunctions(core: CoreDeps, timing: SessionTiming) {

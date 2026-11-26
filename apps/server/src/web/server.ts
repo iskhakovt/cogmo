@@ -1,9 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { z } from "zod";
 import type { Transactor } from "../db/index.js";
+import type { LivenessReadings } from "../liveness/registry.js";
 import { logger } from "../logger.js";
 import type { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import type { Transport } from "../transport/transport.js";
+import { abortable } from "../util/abortable.js";
 import { finishesWithin } from "../util/finishes-within.js";
 import {
   buildClearCookie,
@@ -34,6 +36,8 @@ export interface CreateWebServerDeps {
   webSessionStore: WebSessionStore;
   /** SSE bridge the chat routes register tab connections on; the WebUiAdapter writes through it. */
   webStreamRegistry: WebStreamRegistry;
+  /** The liveness registry's last tick, which `/health` renders. */
+  liveness: LivenessReadings;
   runInTx: Transactor;
   /** Constant-time compare of a presented bootstrap token to the derived one. */
   verifyLoginToken: (candidate: string) => boolean;
@@ -80,6 +84,9 @@ function normalizeOrigin(origin: string): string {
   return origin.endsWith("/") ? origin.slice(0, -1) : origin;
 }
 
+/** How long `/health` waits on a session lookup before answering with the public body. */
+const HEALTH_SESSION_DEADLINE_MS = 2_000;
+
 /** Login request body. Validated with Zod rather than a hand-rolled typeof ladder. */
 const LoginBody = z.object({ token: z.string() });
 
@@ -88,7 +95,7 @@ const LoginBody = z.object({ token: z.string() });
  * server plus the auth-gated oRPC admin API and the static SPA. Exported
  * unbound so tests can use an ephemeral port.
  *
- * Routes: `GET /health` (public) · `POST /api/session` (public login) ·
+ * Routes: `GET /health` (public; `checks` with a valid session) · `POST /api/session` (public login) ·
  * `DELETE /api/session` (gated logout) · `ALL /rpc/*` (gated oRPC) ·
  * `GET /*` (sirv SPA fallback). Fail-closed: anything gated without a valid
  * session is 401.
@@ -149,6 +156,24 @@ export function createWebServer(deps: CreateWebServerDeps): WebServer {
     res.end(JSON.stringify({ ok: true }));
   }
 
+  /**
+   * Whether `/health` may show `checks`: a session that resolves within the
+   * deadline. A lookup that rejects or runs late answers the public body,
+   * still 200, rather than reaching the server's outer catch.
+   */
+  async function healthShowsChecks(req: IncomingMessage): Promise<boolean> {
+    try {
+      const identity = await abortable(
+        authenticate(req, strategies),
+        AbortSignal.timeout(HEALTH_SESSION_DEADLINE_MS),
+      );
+      return identity !== null;
+    } catch (err) {
+      logger.warn({ err }, "health: the session lookup failed; answering the public body");
+      return false;
+    }
+  }
+
   async function handleLogout(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const rawToken = parseCookies(req.headers.cookie)[cookieName];
     if (rawToken) {
@@ -194,9 +219,9 @@ export function createWebServer(deps: CreateWebServerDeps): WebServer {
       }
     }
 
-    // Public, safe: liveness.
+    // Public, safe: liveness, with its checks for a valid session.
     if (method === "GET" && path === "/health") {
-      writeHealth(res);
+      writeHealth(res, deps.liveness, await healthShowsChecks(req));
       return;
     }
 

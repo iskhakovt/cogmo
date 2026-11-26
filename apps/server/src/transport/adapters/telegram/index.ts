@@ -1,6 +1,6 @@
 import { Bot } from "grammy";
 import { z } from "zod";
-import { logger } from "../../../logger.js";
+import { logger, maskInLogs } from "../../../logger.js";
 import type { AdapterDeps, AdapterModule, AdapterSetupResult } from "../../adapter-module.js";
 import { TelegramAdapter } from "./adapter.js";
 import { registerCallbackQueries } from "./callback-routes.js";
@@ -34,6 +34,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     throw new Error(`telegram credentials: ${z.prettifyError(parsed.error)}`);
   }
   const { token } = parsed.data;
+  // A Bot API error's text can echo the token bare, which no URL shape catches.
+  maskInLogs(token);
   // An empty apiRoot means Telegram's own server, for the bot and its file downloads alike.
   const apiRoot = parsed.data.apiRoot || TELEGRAM_API_ROOT;
   const bot = new Bot(token, { client: { apiRoot } });

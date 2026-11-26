@@ -1,13 +1,19 @@
 import { matchFilter } from "grammy";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expectDefined } from "../../../test/assertions.js";
 import {
+  botApiError,
   commandComposer,
   handlers,
   mockBotApi,
   resetGrammyMock,
 } from "../../../test/telegram/grammy-mock.js";
-import { createAdapter, makeCtx } from "../../../test/telegram/harness.js";
+import {
+  captureLogLines,
+  createAdapter,
+  createAdapterWithToken,
+  makeCtx,
+} from "../../../test/telegram/harness.js";
 
 vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
 
@@ -69,6 +75,35 @@ describe("registerCommands", () => {
     );
     // handleNew names the profile it used in the reply; the mocked createConversation default returns profileName "assistant".
     expect(ctx.reply.mock.calls[0]?.[0]).toBe('New conversation started with profile "assistant".');
+  });
+
+  describe("the command menu's warning", () => {
+    /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
+    const TOKEN = "123456:AAsecret-tok_en";
+    const ENCODED = encodeURIComponent(TOKEN);
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("masks the bot token, raw and percent-encoded, bare and in a URL", async () => {
+      const lines = captureLogLines();
+      mockBotApi.setMyCommands.mockRejectedValueOnce(
+        botApiError(
+          "setMyCommands",
+          400,
+          `Bad Request: ${TOKEN} ${ENCODED} https://bot-api.local/bot${TOKEN}/setMyCommands`,
+        ),
+      );
+
+      await createAdapterWithToken(TOKEN);
+
+      const line = lines.filter((l) => l.includes("failed to register telegram bot commands"));
+      expect(line).toHaveLength(1);
+      expect(line[0]).not.toContain(TOKEN);
+      expect(line[0]).not.toContain(ENCODED);
+      expect(line[0]).toContain("Bad Request: <redacted> <redacted>");
+    });
   });
 
   describe("forwarded messages", () => {

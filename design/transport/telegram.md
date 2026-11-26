@@ -108,7 +108,7 @@ grammY's `bot.start()` runs a setup (`deleteWebhook`, alongside `getMe` on the f
 
 A 409 means something else holds the token. The Bot API fails an open long poll with 409 when a newer `getUpdates` on the same token supersedes it, refuses `getUpdates` while a webhook is set, and fails a pending `deleteWebhook` that a newer `setWebhook` supersedes. So the cause is another poller (a second cogmo, a dev run on the production token) or a webhook, never the adapter's own retries; nothing else in cogmo polls the token. A restart runs `deleteWebhook` again, which clears a webhook. Against another poller, each side's restart supersedes the other's poll, so both keep logging.
 
-The supervisor lives in the adapter's memory. Nothing persists and a new process starts at `idle`, so there is no durable id, `pgEnum` or table.
+The supervisor lives in the adapter's memory. Nothing persists and a new process starts at `idle`, so there is no durable id, `pgEnum` or table. `polling`'s receive sub-state and the projection `liveness()` returns are in [liveness.md → Telegram receive loop](../liveness.md#telegram-receive-loop-confirmed).
 
 ```mermaid
 stateDiagram-v2
@@ -126,9 +126,9 @@ stateDiagram-v2
 | State | Carries | Meaning |
 |-|-|-|
 | `idle` | — | Built; `setup()` has not started polling yet |
-| `polling` | the run, its start time, the 409 streak before it | A `bot.start()` is in flight: its setup, then the loop |
-| `backoff` | the timer | Waiting out a 409's backoff |
-| `failed` | `unauthorized`, `rejected` or `ended` | Polling is down until cogmo restarts. The process, web UI, crons and other adapters keep running |
+| `polling` | the run, its start time, the 409 streak before it, the receive sub-state | A `bot.start()` is in flight: its setup, then the loop |
+| `backoff` | the timer, the 409 streak, when it began, the 409's error | Waiting out a 409's backoff |
+| `failed` | `unauthorized`, `rejected` or `ended`, and its error | Polling is down until cogmo restarts. The process, web UI, crons and other adapters keep running |
 | `stopped` | the drain | `stop()` was called. Terminal |
 
 | From | Event | To | Effects |
@@ -166,7 +166,9 @@ A run's exit moves the state only while the state is still that run. Once `stop(
 
 | Module | Holds |
 |-|-|
-| `adapter.ts` | `TelegramAdapter`: delivery, stream handles, voice, polling supervision, and a `stop()` that confirms handled updates |
+| `adapter.ts` | `TelegramAdapter`: delivery, stream handles, voice, polling supervision and its `liveness()`, and a `stop()` that confirms handled updates |
+| `polling-state.ts` | The supervisor's states, how a run's exit reads, the 409 backoff, and the liveness projection |
+| `receive-outcome.ts` | Each `getUpdates` outcome as a receive sub-state change, and a Bot API error as a `ChannelError` |
 | `private-chat-gate.ts` | The first middleware, which drops an update from outside a private chat |
 | `sender-gate.ts` | The middleware ahead of every handler that drops an update the channel doesn't admit |
 | `command-routes.ts` | Command registration on the forward-dropping composer, `/start`, `/cancel`, the command menu |

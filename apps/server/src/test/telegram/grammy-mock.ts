@@ -33,6 +33,20 @@ export const handlers = new Map<string, any>();
 
 type Handler = (ctx: unknown) => unknown;
 
+/** A Bot API call as a transformer passes it on. */
+type ApiCall = (method: string, payload: unknown, signal?: AbortSignal) => Promise<unknown>;
+
+/** A grammY API transformer: `prev` makes the call the transformer stands in front of. */
+type Transformer = (
+  prev: ApiCall,
+  method: string,
+  payload: unknown,
+  signal?: AbortSignal,
+) => Promise<unknown>;
+
+/** The transformers installed with `bot.api.config.use`, in install order. Reset before each test. */
+const transformers: Transformer[] = [];
+
 export const mockBotApi = {
   sendMessage: vi.fn().mockResolvedValue({ message_id: 100 }),
   sendChatAction: vi.fn().mockResolvedValue(true),
@@ -46,7 +60,30 @@ export const mockBotApi = {
   getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
   setMyCommands: vi.fn().mockResolvedValue(true),
   getUpdates: vi.fn().mockResolvedValue([]),
+  // Not a mock function, so a test listing the API calls made doesn't count
+  // the adapter installing its transformer.
+  config: {
+    use: (...installed: Transformer[]): void => {
+      transformers.push(...installed);
+    },
+  },
 };
+
+/**
+ * Make one Bot API call through the installed transformers, as grammY chains
+ * them, with `answer` standing in for grammY's client: it resolves with the
+ * parsed reply or rejects with the request's failure.
+ */
+export function callThroughTransformers(
+  method: string,
+  answer: () => Promise<unknown>,
+): Promise<unknown> {
+  const call = transformers.reduce<ApiCall>(
+    (prev, transformer) => (m, payload, signal) => transformer(prev, m, payload, signal),
+    () => answer(),
+  );
+  return call(method, {});
+}
 
 // Commands belong on the composer `bot.drop(matchFilter(":forward_origin"))`
 // returns, which records them under `command:<name>`. The bot refuses a
@@ -58,9 +95,12 @@ export const commandComposer = {
   command: vi.fn((cmd: string, handler: Handler) => handlers.set(`command:${cmd}`, handler)),
 };
 
-/** The part of a grammY context the bot's middleware reads: the update's id, its chat and its sender. */
+/**
+ * The part of a grammY context the bot's middleware reads: the update's id,
+ * its chat and its sender. grammY hands on an update with no id too.
+ */
 interface UpdateCtx {
-  update: { update_id: number };
+  update: { update_id?: number };
   chat?: { id: number; type: string };
   from?: { id: number };
 }
@@ -70,27 +110,37 @@ type UpdateMiddleware = (ctx: UpdateCtx, next: () => Promise<void>) => Promise<v
 /**
  * What the mocked `bot.start()` (the polling loop) and `bot.stop()` (the
  * offset confirmation) return, the middleware `bot.use()` registered, the
- * options the bot was built with, and the order the bot's middleware went
- * in (`use`, `drop`, `callbackQuery`, `on:<filter>`, `start` once per
- * `bot.start()`), which is the order grammY runs it in. `polling` gets a
- * promise that resolves once `bot.stop()` is called, and by default runs
- * until then, as grammY's loop does. Reset before each test.
+ * handler `bot.catch()` set, the options the bot was built with, and the
+ * order the bot's middleware went in (`use`, `drop`, `callbackQuery`,
+ * `on:<filter>`, `start` once per `bot.start()`), which is the order grammY
+ * runs it in. `polling` gets a promise that resolves once `bot.stop()` is
+ * called, and by default runs until then, as grammY's loop does. Reset
+ * before each test.
  */
 export const botLifecycle = {
   polling: (stopped: Promise<void>): Promise<void> => stopped,
   stop: (): Promise<void> => Promise.resolve(),
   middleware: [] as UpdateMiddleware[],
+  errorHandler: undefined as ((err: { error: unknown; ctx?: unknown }) => unknown) | undefined,
   options: undefined as unknown,
   registrations: [] as string[],
 };
 
 /**
  * Run one update from sender 1 in its private chat through the registered
- * middleware, then `handler`, as grammY composes them.
+ * middleware, then `handler`, as grammY composes them. `undefined` stands for
+ * an update with no id.
  */
-export function runUpdate(updateId: number, handler: () => Promise<void>): Promise<void> {
+export function runUpdate(
+  updateId: number | undefined,
+  handler: () => Promise<void>,
+): Promise<void> {
   return compose(
-    { update: { update_id: updateId }, chat: { id: 1, type: "private" }, from: { id: 1 } },
+    {
+      update: updateId === undefined ? {} : { update_id: updateId },
+      chat: { id: 1, type: "private" },
+      from: { id: 1 },
+    },
     handler,
   );
 }
@@ -142,7 +192,9 @@ class MockBot {
     botLifecycle.registrations.push("drop");
     return commandComposer;
   });
-  catch = vi.fn();
+  catch = vi.fn((handler: (err: { error: unknown; ctx?: unknown }) => unknown) => {
+    botLifecycle.errorHandler = handler;
+  });
   use = vi.fn((middleware: UpdateMiddleware) => {
     botLifecycle.registrations.push("use");
     botLifecycle.middleware.push(middleware);
@@ -164,6 +216,7 @@ class MockBot {
 export const grammyModule = {
   Bot: MockBot,
   GrammyError: actual.GrammyError,
+  HttpError: actual.HttpError,
   InputFile,
   matchFilter: vi.fn(() => forwardFilter),
 };
@@ -174,6 +227,8 @@ export function resetGrammyMock(): void {
   botLifecycle.polling = (stopped) => stopped;
   botLifecycle.stop = () => Promise.resolve();
   botLifecycle.middleware = [];
+  botLifecycle.errorHandler = undefined;
   botLifecycle.options = undefined;
+  transformers.length = 0;
   botLifecycle.registrations = [];
 }

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  REDACTED_BOT_SEGMENT,
+  literalSecretPattern,
+  redactLiterals,
   redactSecretsInText,
   truncationSafeLength,
 } from "./redact-secrets.js";
+
+/** What a token-shaped path segment becomes. */
+const REDACTED_BOT_SEGMENT = "bot<redacted>";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";
@@ -35,6 +39,21 @@ describe("redactSecretsInText", () => {
       "a percent-encoded colon",
       `https://api.telegram.org/bot123456789%3A${FAKE_SECRET}/getMe`,
       `https://api.telegram.org/${REDACTED_BOT_SEGMENT}/getMe`,
+    ],
+    [
+      "a percent-encoded slash",
+      `https%3A%2F%2Fapi.telegram.org%2Fbot123456789%3A${FAKE_SECRET}%2FgetMe`,
+      `https%3A%2F%2Fapi.telegram.org%2F${REDACTED_BOT_SEGMENT}%2FgetMe`,
+    ],
+    [
+      "a lowercase percent-encoded slash",
+      `https%3a%2f%2fapi.telegram.org%2fbot123456789%3a${FAKE_SECRET}%2fgetMe`,
+      `https%3a%2f%2fapi.telegram.org%2f${REDACTED_BOT_SEGMENT}%2fgetMe`,
+    ],
+    [
+      "a URL carried in another's query",
+      `https://proxy.local/?target=https%3A%2F%2Fapi.telegram.org%2Fbot${FAKE_TOKEN}%2FgetUpdates`,
+      `https://proxy.local/?target=https%3A%2F%2Fapi.telegram.org%2F${REDACTED_BOT_SEGMENT}%2FgetUpdates`,
     ],
     [
       "a token as the last segment",
@@ -71,6 +90,9 @@ describe("redactSecretsInText", () => {
     ["`bot` inside a longer segment", "https://example.com/robot123:abc/x"],
     ["a word starting with bot", "https://example.com/botanist/1:2"],
     ["a capitalised segment", `https://example.com/BOT${FAKE_TOKEN}/x`],
+    ["`bot` inside a longer encoded segment", "https%3A%2F%2Fexample.com%2Frobot123%3Aabc"],
+    ["an encoded word starting with bot", "https%3A%2F%2Fexample.com%2Fbotanist%2F1%3A2"],
+    ["an encoded capitalised segment", `https%3A%2F%2Fexample.com%2FBOT${FAKE_TOKEN}`],
     ["text with no URL", "telegram polling loop failed"],
   ])("leaves %s untouched", (_label, input) => {
     expect(redactSecretsInText(input)).toBe(input);
@@ -210,6 +232,36 @@ describe("redactSecretsInText", () => {
   });
 });
 
+describe("literalSecretPattern", () => {
+  const SECRET = "123456:AAsecret-tok_en";
+
+  it.each([
+    ["raw", SECRET],
+    ["percent-encoded", encodeURIComponent(SECRET)],
+    ["percent-encoded in lowercase hex", "123456%3aAAsecret-tok_en"],
+    ["with an unreserved character percent-encoded", "123456:AAsecret%2Dtok%5Fen"],
+  ])("masks the secret %s", (_, form) => {
+    expect(redactLiterals(`token ${form}.`, [literalSecretPattern(SECRET)])).toBe(
+      "token <redacted>.",
+    );
+  });
+
+  it("masks every occurrence and leaves other text alone", () => {
+    expect(redactLiterals(`${SECRET} and ${SECRET}`, [literalSecretPattern(SECRET)])).toBe(
+      "<redacted> and <redacted>",
+    );
+    expect(redactLiterals("123456:AAsecret-other", [literalSecretPattern(SECRET)])).toBe(
+      "123456:AAsecret-other",
+    );
+  });
+
+  it("matches regex metacharacters literally", () => {
+    const pattern = literalSecretPattern("a.b*c");
+
+    expect(redactLiterals("axbbbc a.b*c", [pattern])).toBe("axbbbc <redacted>");
+  });
+});
+
 describe("truncationSafeLength", () => {
   it.each([
     ["the empty text", "", 0],
@@ -221,6 +273,7 @@ describe("truncationSafeLength", () => {
     ["the earliest of several starts", "env\nX=sk-ant-oat01-ab://u", 6],
     ["a last run after a tab", "a\tghs_123", 2],
     ["a whole text that is one run", "/bot123:abc", 0],
+    ["an encoded token the cut ran through", "fetch https%3A%2F%2Fh%2Fbot12", 21],
   ])("keeps all before a cut secret could begin: %s", (_label, text, expected) => {
     expect(truncationSafeLength(text)).toBe(expected);
   });

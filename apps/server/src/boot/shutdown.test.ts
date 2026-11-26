@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
+import type { Liveness } from "../liveness/registry.js";
 import type { McpRegistryImpl } from "../mcp/registry.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { DrizzleSandboxStore } from "../sandbox/store/index.js";
@@ -22,6 +23,7 @@ function resources(steps: Partial<ServeResources> = {}): ServeResources {
     web: { close: vi.fn(async () => {}) },
     connectors: { close: vi.fn(async () => {}) },
     adapters: [channel("telegram", async () => {})],
+    liveness: { stop: vi.fn() },
     codingStreams: { close: vi.fn() },
     mcpRegistry: { stop: vi.fn(async () => {}) },
     skills: { shutdown: vi.fn(async () => {}) },
@@ -71,6 +73,7 @@ describe("shutdownServe", () => {
         web: { close: step("web") },
         connectors: { close: step("connectors") },
         adapters: [channel("telegram", step("telegram"))],
+        liveness: { stop: () => events.push("liveness") },
         codingStreams: { close: () => events.push("coding streams") },
         mcpRegistry: { stop: step("mcp") },
         skills: { shutdown: step("skills") },
@@ -83,6 +86,7 @@ describe("shutdownServe", () => {
     expect(events).toEqual([
       "web start",
       "web end",
+      "liveness",
       "connectors start",
       "connectors end",
       "telegram start",
@@ -120,6 +124,7 @@ describe("shutdownServe", () => {
 
     expect(outcomes).toEqual([
       { step: "web server", outcome: "done" },
+      { step: "liveness", outcome: "done" },
       { step: "connector server", outcome: "done" },
       { step: "telegram adapter", outcome: "done" },
       { step: "web adapter", outcome: "done" },
@@ -230,6 +235,7 @@ describe("shutdownServe", () => {
 
     expect(outcomes.map(({ step }) => step)).toEqual([
       "web server",
+      "liveness",
       "connector server",
       "telegram adapter",
       "coding streams",
@@ -250,6 +256,7 @@ describe("serveResources", () => {
       sandbox: null,
       sandboxInstanceId,
       adapters: [],
+      liveness: mock<Liveness>(),
       codingStreams: { close: vi.fn() },
       mcpRegistry: mock<McpRegistryImpl>(),
       skillRunner: mock<SkillRunnerImpl>(),
@@ -258,7 +265,13 @@ describe("serveResources", () => {
 
   it("hands each started resource to its teardown step", () => {
     const sandbox = mock<SandboxClient>();
-    const adapters = [{ channelType: "telegram", adapter: mock<ChannelAdapter["adapter"]>() }];
+    const adapters = [
+      {
+        channelType: "telegram",
+        channelId: "channel-1",
+        adapter: mock<ChannelAdapter["adapter"]>(),
+      },
+    ];
     const deps = { ...boot("instance-1"), sandbox, adapters };
     const { web, connectors } = resources();
 
@@ -266,6 +279,7 @@ describe("serveResources", () => {
       web,
       connectors,
       adapters,
+      liveness: deps.liveness,
       codingStreams: deps.codingStreams,
       mcpRegistry: deps.mcpRegistry,
       skills: deps.skillRunner,

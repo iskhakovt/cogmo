@@ -20,8 +20,8 @@
  * on.
  */
 
-/** What a token-shaped path segment is replaced with. */
-export const REDACTED_BOT_SEGMENT = "bot<redacted>";
+/** What a Bot API token, or a secret known by value, is replaced with. */
+const REDACTED = "<redacted>";
 
 /**
  * A secret's shape, as regex sources: the `start` every match opens with and
@@ -56,16 +56,17 @@ const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   // `oat01`), then the secret.
   { start: "sk-ant-", rest: String.raw`[a-z]+\d+-[A-Za-z0-9_-]{20,}`, replacement: "$1REDACTED" },
   // A Bot API token as a path segment: `/bot`, the numeric bot id, a colon
-  // (literal or percent-encoded) and the secret's URL-safe base64 characters.
-  // Anchored on the `/` so `bot` inside a longer segment doesn't match, and
-  // host-agnostic so a self-hosted Bot API server (`apiRoot`) is covered too.
-  // There is no trailing boundary: in running text a token can be followed
-  // by any punctuation, and replacing a token-shaped prefix is the safe
-  // failure.
+  // and the secret's URL-safe base64 characters. The slash and the colon may
+  // each be percent-encoded, in either case, as in a URL carried inside
+  // another. Anchored on the slash so `bot` inside a longer segment doesn't
+  // match, and host-agnostic so a self-hosted Bot API server (`apiRoot`) is
+  // covered too. There is no trailing boundary: in running text a token can
+  // be followed by any punctuation, and replacing a token-shaped prefix is
+  // the safe failure.
   {
-    start: "/bot",
+    start: "(?:/|%2[Ff])bot",
     rest: String.raw`\d+(?::|%3[Aa])[A-Za-z0-9_-]+`,
-    replacement: `/${REDACTED_BOT_SEGMENT}`,
+    replacement: `$1${REDACTED}`,
   },
 ];
 
@@ -101,4 +102,35 @@ export function truncationSafeLength(text: string): number {
   while (runStart > 0 && !WHITESPACE.test(text.charAt(runStart - 1))) runStart -= 1;
   const start = text.slice(runStart).search(SECRET_START);
   return start === -1 ? text.length : runStart + start;
+}
+
+const ALPHANUMERIC = /^[A-Za-z0-9]$/;
+
+/** `byte` as `%XX`, each hex letter in either case. */
+function percentEncodedAnyCase(byte: number): string {
+  const hex = byte.toString(16).toUpperCase().padStart(2, "0");
+  return `%${hex.replace(/[A-F]/g, (letter) => `[${letter}${letter.toLowerCase()}]`)}`;
+}
+
+/**
+ * A pattern for `secret` as text can carry it: raw, or with any character but
+ * a letter or digit percent-encoded (UTF-8, either hex case), as in a URL.
+ * For a secret known by value that no shape above recognises on its own, such
+ * as a bot token an error's text echoes bare.
+ */
+export function literalSecretPattern(secret: string): RegExp {
+  const encoder = new TextEncoder();
+  const source = [...secret]
+    .map((char) => {
+      if (ALPHANUMERIC.test(char)) return char;
+      const encoded = [...encoder.encode(char)].map(percentEncodedAnyCase).join("");
+      return `(?:${RegExp.escape(char)}|${encoded})`;
+    })
+    .join("");
+  return new RegExp(source, "g");
+}
+
+/** `text` with every match of each pattern masked. */
+export function redactLiterals(text: string, patterns: Iterable<RegExp>): string {
+  return [...patterns].reduce((out, pattern) => out.replace(pattern, REDACTED), text);
 }

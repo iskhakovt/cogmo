@@ -1,20 +1,25 @@
-import { Bot as MockBot } from "grammy";
+import { HttpError, Bot as MockBot } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
 import { err, ok } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { logger } from "../../../logger.js";
-import { expectDefined, resolvesWithin } from "../../../test/assertions.js";
+import { assertKind, expectDefined, resolvesWithin } from "../../../test/assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import {
   botApiError,
   botLifecycle,
+  callThroughTransformers,
   mockBotApi,
   resetGrammyMock,
   runUpdate,
 } from "../../../test/telegram/grammy-mock.js";
-import { createAdapter } from "../../../test/telegram/harness.js";
-import type { StreamingAdapter } from "../../types.js";
+import {
+  captureLogLines,
+  createAdapter,
+  createAdapterWithToken,
+} from "../../../test/telegram/harness.js";
+import type { Adapter, ChannelLiveness, StreamingAdapter } from "../../types.js";
 import { TelegramAdapter } from "./adapter.js";
 import { setup } from "./index.js";
 
@@ -153,6 +158,33 @@ describe("TelegramAdapter", () => {
     }
 
     const rejectWith = (failure: unknown) => () => Promise.reject(failure);
+
+    /** An adapter on the mocked bot that hasn't started polling. */
+    function bareAdapter(): TelegramAdapter {
+      return new TelegramAdapter(new MockBot("fake"), mockAttachmentStore());
+    }
+
+    /** The adapter's projection, which a Telegram adapter always has. */
+    function projected(adapter: Pick<Adapter, "liveness">): ChannelLiveness {
+      return expectDefined(adapter.liveness(), "liveness");
+    }
+
+    const batch = (...ids: number[]) => ({
+      ok: true,
+      result: ids.map((update_id) => ({ update_id })),
+    });
+    const refusal = (error_code: number, description: string) => ({
+      ok: false,
+      error_code,
+      description,
+    });
+
+    /** One `getUpdates` the loop makes, answered with `reply`. */
+    const poll = (reply: unknown) => callThroughTransformers("getUpdates", async () => reply);
+
+    /** One `getUpdates` the loop makes, failing with `failure`, which grammY retries. */
+    const failedPoll = (failure: unknown) =>
+      callThroughTransformers("getUpdates", () => Promise.reject(failure)).catch(() => {});
 
     it("waits a backoff that doubles to a cap between consecutive 409s", async () => {
       botLifecycle.polling = () => Promise.reject(conflict());
@@ -323,7 +355,7 @@ describe("TelegramAdapter", () => {
     });
 
     it("refuses startPolling() once polling has started or stopped", async () => {
-      const adapter = new TelegramAdapter(new MockBot("fake"), mockAttachmentStore());
+      const adapter = bareAdapter();
       adapter.startPolling();
       expect(() => adapter.startPolling()).toThrow("while polling");
 
@@ -371,10 +403,14 @@ describe("TelegramAdapter", () => {
 
       /**
        * A Bot API behind grammY's `fetch`: each long poll takes the next of
-       * `polls`, and once they run out it stays open until grammY aborts it.
-       * Every other call succeeds, except as `hold` says.
+       * `polls`, answering once a promise among them settles, and once they
+       * run out it stays open until grammY aborts it. Every other call
+       * succeeds, except as `hold` says.
        */
-      function fakeBotApi(polls: object[], hold?: Hold): { fetch: typeof fetch; calls: ApiCall[] } {
+      function fakeBotApi(
+        polls: Array<object | Promise<object>>,
+        hold?: Hold,
+      ): { fetch: typeof fetch; calls: ApiCall[] } {
         const calls: ApiCall[] = [];
         const fetch: typeof globalThis.fetch = async (input, init) => {
           const method = String(input).split("/").at(-1) ?? "";
@@ -396,12 +432,12 @@ describe("TelegramAdapter", () => {
             return Response.json({ ok: true, result: method === "getUpdates" ? [] : true });
           }
           const next = polls.shift();
-          return next === undefined ? openUntilAborted(init?.signal) : Response.json(next);
+          return next === undefined ? openUntilAborted(init?.signal) : Response.json(await next);
         };
         return { fetch, calls };
       }
 
-      async function grammyAdapter(polls: object[], hold?: Hold) {
+      async function grammyAdapter(polls: Array<object | Promise<object>>, hold?: Hold) {
         const { Bot: GrammyBot } = await vi.importActual<typeof import("grammy")>("grammy");
         const api = fakeBotApi(polls, hold);
         const bot = new GrammyBot("123:fake", { botInfo: BOT_INFO, client: { fetch: api.fetch } });
@@ -479,6 +515,486 @@ describe("TelegramAdapter", () => {
           expect(logs.warn).not.toHaveBeenCalled();
         },
       );
+
+      // grammY hands on an update with no update_id, which must not reach the
+      // offset stop() confirms past.
+      it("confirms past the valid update alone after a malformed batch", async () => {
+        const { adapter, calls } = await grammyAdapter([
+          { ok: true, result: [{}] },
+          { ok: true, result: [{ update_id: 41 }] },
+        ]);
+        await vi.advanceTimersByTimeAsync(0);
+
+        await adapter.stop();
+
+        expect(calls.at(-1)).toEqual({
+          method: "getUpdates",
+          payload: { offset: 42, limit: 1, timeout: 0 },
+        });
+      });
+
+      it("credits progress for a valid batch, and not for a malformed one", async () => {
+        const malformed = Promise.withResolvers<object>();
+        const valid = Promise.withResolvers<object>();
+        const { adapter } = await grammyAdapter([malformed.promise, valid.promise]);
+        const startedAt = performance.now();
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        malformed.resolve({ ok: true, result: [{}] });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(projected(adapter)).toMatchObject({
+          state: { kind: "retrying", since: performance.now(), cause: "bad_reply" },
+          progressAt: startedAt,
+          handlingSince: null,
+        });
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        valid.resolve({ ok: true, result: [{ update_id: 41 }] });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(projected(adapter)).toMatchObject({
+          state: { kind: "receiving" },
+          progressAt: performance.now(),
+        });
+        await adapter.stop();
+      });
+
+      it("hands grammY the replies it polls on unchanged", async () => {
+        const handled = vi.fn();
+        const { Bot: GrammyBot } = await vi.importActual<typeof import("grammy")>("grammy");
+        const api = fakeBotApi([
+          { ok: true, result: [{ update_id: 41, message: { text: "hi" } }] },
+        ]);
+        const bot = new GrammyBot("123:fake", { botInfo: BOT_INFO, client: { fetch: api.fetch } });
+        const adapter = new TelegramAdapter(bot, mockAttachmentStore());
+        bot.use((ctx) => handled(ctx.update));
+        adapter.startPolling();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(handled).toHaveBeenCalledWith({ update_id: 41, message: { text: "hi" } });
+        await adapter.stop();
+      });
+    });
+
+    describe("liveness", () => {
+      const THRESHOLDS = { staleAfterMs: 90_000, wedgedAfterMs: 300_000 };
+      const HEALTHY_RUN_MS = 10 * 60_000;
+
+      it("projects an adapter not yet polling as starting, with progress from its construction", async () => {
+        const adapter = bareAdapter();
+        const builtAt = performance.now();
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(projected(adapter)).toEqual({
+          state: { kind: "starting" },
+          progressAt: builtAt,
+          handlingSince: null,
+          conflicts: 0,
+          thresholds: THRESHOLDS,
+        });
+      });
+
+      it("starts each run at starting, with progress from the run's start", async () => {
+        const adapter = bareAdapter();
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        adapter.startPolling();
+
+        expect(projected(adapter)).toMatchObject({
+          state: { kind: "starting" },
+          progressAt: performance.now(),
+        });
+        await adapter.stop();
+      });
+
+      it("receives on a valid batch, an empty one included, and credits progress", async () => {
+        const { adapter } = await createAdapter();
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await poll(batch());
+        expect(projected(adapter)).toMatchObject({
+          state: { kind: "receiving" },
+          progressAt: performance.now(),
+        });
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await poll(batch(7, 8));
+        expect(projected(adapter)).toMatchObject({
+          state: { kind: "receiving" },
+          progressAt: performance.now(),
+        });
+        await adapter.stop();
+      });
+
+      it("retries on what grammY retries, from its entry and without progress, until a valid batch", async () => {
+        const { adapter } = await createAdapter();
+        const startedAt = performance.now();
+        await vi.advanceTimersByTimeAsync(1_000);
+        const since = performance.now();
+
+        await poll(refusal(502, "Bad Gateway"));
+        expect(projected(adapter)).toMatchObject({
+          state: {
+            kind: "retrying",
+            since,
+            cause: "server_error",
+            error: { code: "502", detail: "Bad Gateway" },
+          },
+          progressAt: startedAt,
+        });
+
+        await vi.advanceTimersByTimeAsync(3_000);
+        await poll(refusal(429, "Too Many Requests: retry after 5"));
+        await vi.advanceTimersByTimeAsync(5_000);
+        await failedPoll(
+          new HttpError(
+            "Network request for 'getUpdates' failed!",
+            Object.assign(new Error("request failed"), {
+              name: "FetchError",
+              type: "system",
+              code: "ECONNRESET",
+            }),
+          ),
+        );
+        expect(projected(adapter)).toMatchObject({
+          state: {
+            kind: "retrying",
+            since,
+            cause: "network",
+            error: { code: "ECONNRESET", detail: null },
+          },
+          progressAt: startedAt,
+        });
+
+        await poll(batch());
+        expect(projected(adapter).state).toEqual({ kind: "receiving" });
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        await poll({ ok: true });
+        expect(projected(adapter).state).toEqual({
+          kind: "retrying",
+          since: performance.now(),
+          cause: "bad_reply",
+          error: { code: "unexpected-reply", detail: null },
+        });
+        await adapter.stop();
+      });
+
+      it.each([401, 409])("leaves receive alone on a %i reply, the supervisor's", async (code) => {
+        const { adapter } = await createAdapter();
+        await poll(batch());
+
+        await poll(refusal(code, "x"));
+
+        expect(projected(adapter).state).toEqual({ kind: "receiving" });
+        await adapter.stop();
+      });
+
+      it("passes the reply and the failure on unchanged", async () => {
+        await createAdapter();
+        const reply = batch(1);
+        const malformed = { ok: true, result: [{}] };
+        const failure = new Error("network down");
+        const sent = { ok: true, result: { message_id: 1 } };
+
+        await expect(poll(reply)).resolves.toBe(reply);
+        await expect(poll(malformed)).resolves.toBe(malformed);
+        await expect(
+          callThroughTransformers("getUpdates", () => Promise.reject(failure)),
+        ).rejects.toBe(failure);
+        await expect(callThroughTransformers("sendMessage", async () => sent)).resolves.toBe(sent);
+      });
+
+      it("reads no method but getUpdates", async () => {
+        const { adapter } = await createAdapter();
+
+        await callThroughTransformers("sendMessage", async () => refusal(500, "Internal"));
+
+        expect(projected(adapter).state).toEqual({ kind: "starting" });
+        await adapter.stop();
+      });
+
+      it.each<[string, () => Promise<Pick<Adapter, "liveness">>]>([
+        ["idle", async () => bareAdapter()],
+        [
+          "backoff",
+          async () => {
+            loops(rejectWith(conflict()));
+            const { adapter } = await createAdapter();
+            await vi.advanceTimersByTimeAsync(0);
+            return adapter;
+          },
+        ],
+        [
+          "failed",
+          async () => {
+            loops(rejectWith(botApiError("getUpdates", 401, "Unauthorized")));
+            const { adapter } = await createAdapter();
+            await vi.advanceTimersByTimeAsync(0);
+            return adapter;
+          },
+        ],
+        [
+          "stopped",
+          async () => {
+            const { adapter } = await createAdapter();
+            await adapter.stop();
+            return adapter;
+          },
+        ],
+      ])("changes nothing on a getUpdates outcome while %s", async (_, reach) => {
+        const adapter = await reach();
+        const before = projected(adapter);
+        // Inside the backoff, so a credited batch would move progressAt.
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await poll(batch(1));
+        await poll(refusal(502, "Bad Gateway"));
+        await failedPoll(new Error("network down"));
+
+        expect(projected(adapter)).toEqual(before);
+      });
+
+      it("drops an outcome from an earlier run", async () => {
+        const firstRun = Promise.withResolvers<void>();
+        loops(() => firstRun.promise);
+        const { adapter } = await createAdapter();
+        const late = Promise.withResolvers<unknown>();
+        const inFlight = callThroughTransformers("getUpdates", () => late.promise);
+        firstRun.reject(conflict());
+        await vi.advanceTimersByTimeAsync(3_750);
+        expect(starts()).toBe(2);
+
+        late.resolve(refusal(502, "Bad Gateway"));
+        await inFlight;
+
+        expect(projected(adapter).state).toEqual({ kind: "starting" });
+        await adapter.stop();
+      });
+
+      it("projects a 409's backoff as retrying on a conflict, with progress from the 409", async () => {
+        const firstRun = Promise.withResolvers<void>();
+        loops(() => firstRun.promise);
+        const { adapter } = await createAdapter();
+        // A long poll that answers only after 100 s, with a 409.
+        await vi.advanceTimersByTimeAsync(100_000);
+        const since = performance.now();
+
+        firstRun.reject(conflict());
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(projected(adapter)).toEqual({
+          state: {
+            kind: "retrying",
+            since,
+            cause: "conflict",
+            error: { code: "409", detail: CONFLICT },
+          },
+          progressAt: since,
+          handlingSince: null,
+          conflicts: 1,
+          thresholds: THRESHOLDS,
+        });
+        await adapter.stop();
+      });
+
+      it("projects a run's streak until it has run HEALTHY_RUN_MS, then zero", async () => {
+        loops(rejectWith(conflict()), rejectWith(conflict()));
+        const { adapter } = await createAdapter();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(projected(adapter).conflicts).toBe(1);
+        await vi.advanceTimersByTimeAsync(3_750);
+        expect(projected(adapter).conflicts).toBe(2);
+        await vi.advanceTimersByTimeAsync(7_500);
+        expect(starts()).toBe(3);
+        expect(projected(adapter)).toMatchObject({ state: { kind: "starting" }, conflicts: 2 });
+
+        await vi.advanceTimersByTimeAsync(HEALTHY_RUN_MS - 1);
+        expect(projected(adapter).conflicts).toBe(2);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(projected(adapter).conflicts).toBe(0);
+        await adapter.stop();
+      });
+
+      it.each<[string, () => unknown, object]>([
+        [
+          "a 401",
+          () => botApiError("getMe", 401, "Unauthorized"),
+          { reason: "unauthorized", error: { code: "401", detail: "Unauthorized" } },
+        ],
+        [
+          "a 404",
+          () => botApiError("deleteWebhook", 404, "Not Found"),
+          { reason: "rejected", error: { code: "404", detail: "Not Found" } },
+        ],
+        [
+          "an error that isn't the Bot API's",
+          () => new Error("onStart threw"),
+          { reason: "rejected", error: { code: "unknown", detail: null } },
+        ],
+      ])(
+        "projects the failure after %s, with progress from before it",
+        async (_, failure, failed) => {
+          const run = Promise.withResolvers<void>();
+          loops(() => run.promise);
+          const { adapter } = await createAdapter();
+          const builtAt = performance.now();
+          await vi.advanceTimersByTimeAsync(60_000);
+
+          run.reject(failure());
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(projected(adapter)).toEqual({
+            state: { kind: "failed", ...failed },
+            progressAt: builtAt,
+            handlingSince: null,
+            conflicts: 0,
+            thresholds: THRESHOLDS,
+          });
+        },
+      );
+
+      it("projects a loop that ends without stop() as failed, with no error", async () => {
+        loops(() => Promise.resolve());
+        const { adapter } = await createAdapter();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(projected(adapter).state).toEqual({ kind: "failed", reason: "ended", error: null });
+      });
+
+      it("projects stopped", async () => {
+        const { adapter } = await createAdapter();
+
+        await adapter.stop();
+
+        expect(projected(adapter).state).toEqual({ kind: "stopped" });
+      });
+
+      it("marks the update in hand, and credits progress once it finishes", async () => {
+        const release = Promise.withResolvers<void>();
+        loops((stopped) => runUpdate(7, () => release.promise).then(() => stopped));
+        const { adapter } = await createAdapter();
+        const handlingSince = performance.now();
+
+        await vi.advanceTimersByTimeAsync(400_000);
+        expect(projected(adapter)).toMatchObject({ handlingSince, progressAt: handlingSince });
+
+        release.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(projected(adapter)).toMatchObject({
+          handlingSince: null,
+          progressAt: performance.now(),
+        });
+        await adapter.stop();
+      });
+
+      it("credits no progress for an update with no id", async () => {
+        const release = Promise.withResolvers<void>();
+        loops((stopped) => runUpdate(undefined, () => release.promise).then(() => stopped));
+        const { adapter } = await createAdapter();
+        const startedAt = performance.now();
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        release.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(projected(adapter)).toMatchObject({ handlingSince: null, progressAt: startedAt });
+        await adapter.stop();
+        expect(mockBotApi.getUpdates).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("the token in log lines", () => {
+      /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
+      const TOKEN = "123456:AAsecret-tok_en";
+      const ENCODED = encodeURIComponent(TOKEN);
+      /** The token every way a Bot API error can echo it: bare, percent-encoded, and in a URL. */
+      const ECHO = `${TOKEN} ${ENCODED} https://bot-api.local/bot${TOKEN}/getUpdates https%3A%2F%2Fbot-api.local%2Fbot${ENCODED}`;
+      let lines: string[];
+
+      beforeEach(() => {
+        lines = captureLogLines();
+      });
+
+      /** The lines written whose message contains `msg`, which must be there. */
+      function written(msg: string): string {
+        const matching = lines.filter((line) => line.includes(msg));
+        expect(matching).not.toEqual([]);
+        return matching.join("");
+      }
+
+      /** Assert `line` keeps the field that carried the token, with the token masked. */
+      function expectMasked(line: string): void {
+        expect(line).not.toContain(TOKEN);
+        expect(line).not.toContain(ENCODED);
+        expect(line).toContain("<redacted>");
+      }
+
+      const echoing = (method: string, code: number) =>
+        botApiError(method, code, `Refused: ${ECHO}`);
+
+      /** A failed request, as grammY wraps node-fetch's error. */
+      const failedRequest = () =>
+        new HttpError(
+          "Network request for 'getUpdates' failed!",
+          Object.assign(new Error(`request to ${ECHO} failed`), {
+            name: "FetchError",
+            type: "system",
+            code: "ECONNRESET",
+          }),
+        );
+
+      it("masks the token in the 409 line", async () => {
+        loops(rejectWith(echoing("getUpdates", 409)));
+        const { adapter } = await createAdapterWithToken(TOKEN);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expectMasked(written("conflict (409)"));
+        await adapter.stop();
+      });
+
+      it("masks the token in the 401 line", async () => {
+        loops(rejectWith(echoing("getMe", 401)));
+        await createAdapterWithToken(TOKEN);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expectMasked(written("(401)"));
+      });
+
+      it.each<[string, () => unknown]>([
+        ["a Bot API refusal", () => echoing("deleteWebhook", 404)],
+        ["a failed request", failedRequest],
+        ["an error with a cause", () => new Error(ECHO, { cause: new Error(ECHO) })],
+      ])("masks the token in the failure line after %s", async (_, failure) => {
+        loops(rejectWith(failure()));
+        const { adapter } = await createAdapterWithToken(TOKEN);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expectMasked(written("failed; down until cogmo restarts"));
+        const { state } = projected(adapter);
+        assertKind(state, "failed");
+        expect(state.error?.code).not.toContain(TOKEN);
+      });
+
+      it("masks the token in a failure that settles while stopping", async () => {
+        loops((stopped) => stopped.then(() => Promise.reject(echoing("getUpdates", 409))));
+        const { adapter } = await createAdapterWithToken(TOKEN);
+
+        await adapter.stop();
+
+        expectMasked(written("failed while stopping"));
+      });
+
+      it("masks the token in both offset confirmations' warnings", async () => {
+        botLifecycle.stop = () => Promise.reject(echoing("getUpdates", 409));
+        loops((stopped) => runUpdate(7, async () => {}).then(() => stopped));
+        mockBotApi.getUpdates.mockRejectedValueOnce(failedRequest());
+        const { adapter } = await createAdapterWithToken(TOKEN);
+
+        await adapter.stop();
+
+        expectMasked(written("confirming the update offset on stop failed"));
+        expectMasked(written("confirming the handled updates on stop failed"));
+      });
     });
   });
 

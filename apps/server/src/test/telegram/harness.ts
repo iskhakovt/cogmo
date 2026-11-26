@@ -1,7 +1,11 @@
-/** `setup()` with a stub transport, and the grammY contexts the adapter's tests drive its handlers with. */
+/**
+ * `setup()` with a stub transport, the grammY contexts the adapter's tests
+ * drive its handlers with, and the adapter's log lines as they are written.
+ */
 
 import { ok } from "neverthrow";
 import { vi } from "vitest";
+import { createLogger, logger } from "../../logger.js";
 import { setup } from "../../transport/adapters/telegram/index.js";
 import { asBatchAdapter } from "../assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../factories.js";
@@ -95,7 +99,13 @@ export function makeDocumentCtx(
   };
 }
 
-export async function createAdapter(
+export function createAdapter(transportOverrides?: Partial<ReturnType<typeof mockTransport>>) {
+  return createAdapterWithToken("fake", transportOverrides);
+}
+
+/** `createAdapter` on a channel whose bot token is `token`. */
+export async function createAdapterWithToken(
+  token: string,
   transportOverrides?: Partial<ReturnType<typeof mockTransport>>,
 ) {
   const transport = mockTransport({
@@ -126,7 +136,7 @@ export async function createAdapter(
 
   const result = await setup({
     channelId: "tg-ch",
-    credentials: { token: "fake" },
+    credentials: { token },
     transport,
     attachments,
     inngest: mockInngest(),
@@ -134,4 +144,22 @@ export async function createAdapter(
   });
 
   return { adapter: asBatchAdapter(result.adapter), transport, attachments };
+}
+
+/**
+ * The lines `logger` writes at info, warn and error from here on, as
+ * `createLogger` serializes and masks them. `vi.restoreAllMocks()` undoes it.
+ */
+export function captureLogLines(): string[] {
+  const lines: string[] = [];
+  const capturing = createLogger({
+    write: (line: string) => {
+      lines.push(line);
+    },
+  });
+  capturing.level = "info";
+  vi.spyOn(logger, "info").mockImplementation(capturing.info.bind(capturing));
+  vi.spyOn(logger, "warn").mockImplementation(capturing.warn.bind(capturing));
+  vi.spyOn(logger, "error").mockImplementation(capturing.error.bind(capturing));
+  return lines;
 }

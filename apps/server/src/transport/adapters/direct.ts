@@ -158,6 +158,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         );
       },
       stop: async () => {},
+      // No receive loop: inbound arrives on an Inngest function.
+      liveness: () => null,
     },
     functions: [inboundFn],
   };

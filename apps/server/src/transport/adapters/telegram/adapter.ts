@@ -1,6 +1,10 @@
-/** The running adapter: outbound delivery, stream handles, voice, polling supervision, and a shutdown that confirms handled updates. */
+/**
+ * The running adapter: outbound delivery, stream handles, voice, polling
+ * supervision and its liveness projection, and a shutdown that confirms
+ * handled updates.
+ */
 
-import { type Bot, GrammyError, InputFile } from "grammy";
+import { type Bot, InputFile } from "grammy";
 import { match, P } from "ts-pattern";
 import type { JsonValue } from "type-fest";
 import { logger } from "../../../logger.js";
@@ -10,75 +14,35 @@ import {
   type RenderedMessage,
 } from "../../adapter-module.js";
 import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js";
-import type { Adapter, StreamHandle, StreamingAdapter, StreamOpts } from "../../types.js";
+import type {
+  Adapter,
+  ChannelError,
+  ChannelLiveness,
+  StreamHandle,
+  StreamingAdapter,
+  StreamOpts,
+} from "../../types.js";
+import {
+  classifyRejection,
+  conflictBackoffMs,
+  HEALTHY_RUN_MS,
+  type PollingExit,
+  type PollingRun,
+  type PollingState,
+  projectLiveness,
+} from "./polling-state.js";
+import {
+  channelError,
+  failureOutcome,
+  isUpdateId,
+  type ReceiveOutcome,
+  replyOutcome,
+} from "./receive-outcome.js";
 import { stripHtmlTags } from "./render.js";
 import { type SettlingStreamHandle, TelegramStreamHandle } from "./stream-handle.js";
 import { splitAtCap } from "./stream-state.js";
 
 const TELEGRAM_CHUNK_TARGET_DEFAULT = 4000;
-
-/** The ceiling of the wait after a first 409. */
-const CONFLICT_BACKOFF_FIRST_MS = 5_000;
-const CONFLICT_BACKOFF_MAX_MS = 5 * 60_000;
-/** A run this long resets the 409 streak; twice the cap, so two pollers taking turns never do. */
-const HEALTHY_RUN_MS = 10 * 60_000;
-
-/** One `bot.start()`, from the call until its exit is handled. */
-interface PollingRun {
-  kind: "polling";
-  /** Settles once the run's exit has moved the state on. */
-  run: Promise<void>;
-  /** `performance.now()` at the `bot.start()` call. */
-  startedAt: number;
-  /** Consecutive 409s before this run. */
-  conflicts: number;
-}
-
-/** Where polling is (design/transport/telegram.md → Polling Supervision). */
-type PollingState =
-  | { kind: "idle" }
-  | PollingRun
-  | { kind: "backoff"; timer: NodeJS.Timeout }
-  | { kind: "failed"; reason: "unauthorized" | "rejected" | "ended" }
-  | { kind: "stopped"; drained: Promise<void> };
-
-/** How a `bot.start()` ended. */
-type PollingExit =
-  /** The way `bot.stop()` ends it: resolved, or a setup retry's wait cut short. */
-  | { kind: "ended" }
-  | { kind: "conflict"; err: GrammyError }
-  | { kind: "unauthorized"; err: GrammyError }
-  | { kind: "rejected"; err: unknown };
-
-/** What `bot.start()` rejects with (design/transport/telegram.md → Polling Supervision). */
-function classifyRejection(err: unknown): PollingExit {
-  return match(err)
-    .returnType<PollingExit>()
-    .with(P.intersection(P.instanceOf(GrammyError), { error_code: 409 }), (e) => ({
-      kind: "conflict",
-      err: e,
-    }))
-    .with(P.intersection(P.instanceOf(GrammyError), { error_code: 401 }), (e) => ({
-      kind: "unauthorized",
-      err: e,
-    }))
-    .with(P.intersection(P.instanceOf(Error), { message: "Aborted delay" }), () => ({
-      kind: "ended",
-    }))
-    .otherwise(() => ({ kind: "rejected", err }));
-}
-
-/**
- * The wait before the restart that follows the `conflicts`-th 409 in a row: a
- * random point in the upper half of a ceiling that doubles from 5 s to 5 min.
- */
-function conflictBackoffMs(conflicts: number): number {
-  const ceiling = Math.min(
-    CONFLICT_BACKOFF_MAX_MS,
-    CONFLICT_BACKOFF_FIRST_MS * 2 ** (conflicts - 1),
-  );
-  return Math.round(ceiling * (0.5 + Math.random() / 2));
-}
 
 export class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
@@ -89,6 +53,10 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
   #polling: PollingState = { kind: "idle" };
   /** Highest update id whose middleware has run to completion. */
   #lastHandledUpdateId: number | undefined;
+  /** `performance.now()` at construction, then at each valid batch and finished update; spans runs. */
+  #progressAt = performance.now();
+  /** `performance.now()` when handling the update in hand began. */
+  #handlingSince: number | null = null;
 
   constructor(bot: Bot, attachments: AttachmentStore) {
     this.#bot = bot;
@@ -96,12 +64,64 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
     // Registered before `setup` adds any handler, so it wraps them all. A
     // handler that throws still counts: grammY treats its update as done.
     bot.use(async (ctx, next) => {
+      this.#handlingSince = performance.now();
       try {
         await next();
       } finally {
-        this.#lastHandledUpdateId = Math.max(this.#lastHandledUpdateId ?? 0, ctx.update.update_id);
+        this.#handlingSince = null;
+        // grammY hands on an update with no `update_id`, which must neither
+        // credit progress nor reach the offset `stop()` confirms.
+        if (isUpdateId(ctx.update.update_id)) {
+          this.#progressAt = performance.now();
+          this.#lastHandledUpdateId = Math.max(
+            this.#lastHandledUpdateId ?? 0,
+            ctx.update.update_id,
+          );
+        }
       }
     });
+    // Sees every `getUpdates` outcome, the ones grammY retries included. It
+    // hands `prev`'s result or error on unchanged, and its bookkeeping can't
+    // throw: grammY reads a transformer's throw as a failed request.
+    bot.api.config.use((prev, method, payload, signal) => {
+      if (method !== "getUpdates") return prev(method, payload, signal);
+      const at = this.#polling;
+      return prev(method, payload, signal).then(
+        (reply) => {
+          this.#receive(at, replyOutcome(reply));
+          return reply;
+        },
+        (err: unknown) => {
+          this.#receive(at, failureOutcome(err));
+          throw err;
+        },
+      );
+    });
+  }
+
+  /** The receive loop's projection (design/liveness.md → Telegram receive loop → States). */
+  liveness(): ChannelLiveness {
+    return projectLiveness(
+      this.#polling,
+      { progressAt: this.#progressAt, handlingSince: this.#handlingSince },
+      performance.now(),
+    );
+  }
+
+  /** Apply a `getUpdates` outcome to the run it was called in, if that run is still current. */
+  #receive(at: PollingState, outcome: ReceiveOutcome): void {
+    if (at.kind !== "polling" || this.#polling !== at) return;
+    match(outcome)
+      .with({ kind: "batch" }, () => {
+        at.receive = { kind: "receiving" };
+        this.#progressAt = performance.now();
+      })
+      .with({ kind: "supervised" }, () => undefined)
+      .with({ kind: "retrying" }, ({ cause, error }) => {
+        const since = at.receive.kind === "retrying" ? at.receive.since : performance.now();
+        at.receive = { kind: "retrying", since, cause, error };
+      })
+      .exhaustive();
   }
 
   /**
@@ -123,6 +143,7 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
       kind: "polling",
       startedAt: performance.now(),
       conflicts,
+      receive: { kind: "starting" },
       run: this.#bot
         .start({
           // grammY calls it once setup succeeds, even after `bot.stop()`.
@@ -150,37 +171,42 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
     match(exit)
       .with({ kind: "conflict" }, ({ err }) => {
         const healthy = performance.now() - run.startedAt >= HEALTHY_RUN_MS;
-        this.#backoff(err.description, (healthy ? 0 : run.conflicts) + 1);
+        this.#backoff(channelError(err), (healthy ? 0 : run.conflicts) + 1);
       })
       .with({ kind: "unauthorized" }, ({ err }) => {
+        const error = channelError(err);
         logger.error(
-          { description: err.description },
+          { description: error.detail },
           "telegram polling: the Bot API refused the bot token (401), revoked or invalid; down until the channel's token is replaced and cogmo restarts",
         );
-        this.#polling = { kind: "failed", reason: "unauthorized" };
+        this.#polling = { kind: "failed", reason: "unauthorized", error };
       })
       .with({ kind: "rejected" }, ({ err }) => {
         logger.error({ err }, "telegram polling: failed; down until cogmo restarts");
-        this.#polling = { kind: "failed", reason: "rejected" };
+        this.#polling = {
+          kind: "failed",
+          reason: "rejected",
+          error: channelError(err),
+        };
       })
       .with({ kind: "ended" }, () => {
         logger.error("telegram polling: ended without stop(); down until cogmo restarts");
-        this.#polling = { kind: "failed", reason: "ended" };
+        this.#polling = { kind: "failed", reason: "ended", error: null };
       })
       .exhaustive();
   }
 
-  #backoff(description: string, conflicts: number): void {
+  #backoff(error: ChannelError, conflicts: number): void {
     const retryInMs = conflictBackoffMs(conflicts);
     logger.error(
-      { description, conflicts, retryInMs },
+      { description: error.detail, conflicts, retryInMs },
       "telegram polling: conflict (409), another poller or a webhook is using the bot token; starting again after a backoff",
     );
     // `stop()` clears it; unref'd, so a backoff alone never holds the process open.
     const timer = setTimeout(() => {
       if (this.#polling.kind === "backoff" && this.#polling.timer === timer) this.#poll(conflicts);
     }, retryInMs).unref();
-    this.#polling = { kind: "backoff", timer };
+    this.#polling = { kind: "backoff", timer, conflicts, since: performance.now(), error };
   }
 
   async deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void> {
