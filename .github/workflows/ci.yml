@@ -6,8 +6,9 @@ on:
   pull_request:
     # `labeled` lets adding the `e2e` label retrigger the workflow without
     # forcing a no-op commit — the e2e job's gate then evaluates true on
-    # the next run. `unlabeled` is intentionally absent: removing a label
-    # shouldn't invalidate a passing e2e result for the same SHA.
+    # the next run. Any other label runs no tests (see `changes`).
+    # `unlabeled` is intentionally absent: removing a label shouldn't
+    # invalidate a passing e2e result for the same SHA.
     types: [opened, synchronize, reopened, labeled]
 
 # A push to a PR cancels the run for the commit it replaced. `labeled` and
@@ -46,8 +47,12 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # Every label fires `labeled`, but only `e2e` changes what the suite
+    # runs; any other label leaves a head SHA that has already been tested.
+    # The two outputs share that predicate.
     outputs:
-      code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
+      label-only: ${{ github.event.action == 'labeled' && github.event.label.name != 'e2e' }}
+      code: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'e2e') && (github.event_name != 'pull_request' || steps.filter.outputs.code == 'true') }}
     steps:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         if: github.event_name == 'pull_request'
@@ -527,8 +532,13 @@ jobs:
   # detection breaks, the whole pipeline must fail rather than silently
   # green. When you add a new job below, add it to both `needs:` and
   # `allowed-skips:` if it can be legitimately skipped.
+  #
+  # The `main` ruleset requires this name, so a label-only run reports
+  # under another. A run creates this check only once every job it needs
+  # has finished, so a label run's early pass would be the only
+  # `Required Checks` on the commit and make the PR mergeable mid-run.
   required-checks:
-    name: Required Checks
+    name: ${{ needs.changes.outputs.label-only == 'true' && 'Label added (CI not rerun)' || 'Required Checks' }}
     if: always()
     needs:
       - changes
