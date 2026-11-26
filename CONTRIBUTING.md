@@ -92,7 +92,7 @@ Wrong format = no release. The PR title check runs commitlint (the `pr-title` jo
 | **Skills Runtime** | ruff, pyrefly and pytest over the Python skills runtime |
 | **Web Tests** | `pnpm --filter web build` and `pnpm --filter web test` (Vitest Browser Mode on Chromium) |
 | **E2E Tests** | Bakes the `cogmo` image and runs `pnpm test:e2e` against it. On PRs only with the `e2e` label (removed after a pass); always on pushes to `main` |
-| **Required Checks** | Aggregates the jobs above; the merge gate. A label other than `e2e` reruns only PR Title and Schema ⇒ design doc, and reports as **Label added (CI not rerun)** instead |
+| **Required Checks** | Aggregates the jobs above; the merge gate. After a label other than `e2e`, only PR Title and Schema ⇒ design doc rerun, and this check reports as **Label added (CI not rerun)** |
 
 ## Release process
 
