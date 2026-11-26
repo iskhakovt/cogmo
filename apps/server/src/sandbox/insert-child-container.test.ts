@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
@@ -40,6 +40,9 @@ function stubDocker(): {
   return { docker, container };
 }
 
+/** A deadline that never passes. */
+const NO_DEADLINE = new AbortController().signal;
+
 /** No instance row has this id, so an insert naming it fails on its foreign key. */
 const UNKNOWN_INSTANCE = "019d0000-0000-7000-8000-000000000bad";
 
@@ -79,7 +82,7 @@ describe("insertChildContainer", () => {
     const { docker, container } = stubDocker();
     const child = await childOf();
 
-    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child);
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_DEADLINE);
 
     expect(inserted.isOk()).toBe(true);
     const row = await tx((trx) => store.getContainerByDockerId(trx, "child-container"));
@@ -91,7 +94,7 @@ describe("insertChildContainer", () => {
     const { docker, container } = stubDocker();
     const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
 
-    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child);
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_DEADLINE);
 
     expect(inserted.isErr() && inserted.error.kind).toBe("record_failed");
     expect(docker.getContainer).toHaveBeenCalledWith("child-container");
@@ -103,9 +106,25 @@ describe("insertChildContainer", () => {
     const { docker, container } = stubDocker();
     const child = { ...(await childOf()), resourceLimits: { cpus: -1, memory_bytes: 1, pids: 1 } };
 
-    await expect(insertChildContainer({ store, runInTx: tx, docker }, child)).rejects.toThrow(
-      /cpus/,
-    );
+    await expect(
+      insertChildContainer({ store, runInTx: tx, docker }, child, NO_DEADLINE),
+    ).rejects.toThrow(/cpus/);
+    expect(container.remove).not.toHaveBeenCalled();
+  });
+
+  it("rethrows a Node programmer error that carries a code but is not the store's", async () => {
+    const { docker, container } = stubDocker();
+    const child = await childOf();
+    const misuse: Transactor = () =>
+      Promise.reject(
+        Object.assign(new TypeError("The argument must be of type string"), {
+          code: "ERR_INVALID_ARG_TYPE",
+        }),
+      );
+
+    await expect(
+      insertChildContainer({ store, runInTx: misuse, docker }, child, NO_DEADLINE),
+    ).rejects.toThrow("must be of type string");
     expect(container.remove).not.toHaveBeenCalled();
   });
 
@@ -114,7 +133,7 @@ describe("insertChildContainer", () => {
     container.remove.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
     const child = { ...(await childOf()), instanceId: UNKNOWN_INSTANCE };
 
-    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child);
+    const inserted = await insertChildContainer({ store, runInTx: tx, docker }, child, NO_DEADLINE);
 
     expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
     expect(container.remove).toHaveBeenCalledTimes(1);
@@ -131,7 +150,11 @@ describe("insertChildContainer", () => {
       const { docker, container } = stubDocker();
       const child = await childOf();
 
-      const inserted = await insertChildContainer({ store, runInTx: lossy, docker }, child);
+      const inserted = await insertChildContainer(
+        { store, runInTx: lossy, docker },
+        child,
+        NO_DEADLINE,
+      );
 
       expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
       expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
@@ -146,11 +169,62 @@ describe("insertChildContainer", () => {
       );
       const child = await childOf();
 
-      const inserted = await insertChildContainer({ store, runInTx: lossy, docker }, child);
+      const inserted = await insertChildContainer(
+        { store, runInTx: lossy, docker },
+        child,
+        NO_DEADLINE,
+      );
 
       expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
       const row = await tx((trx) => store.getContainerByDockerId(trx, "child-container"));
       expect(row?.status).toBe("starting");
+    });
+  });
+
+  describe("the create's deadline", () => {
+    it("removes the container and is deadline_passed when the deadline passes before the insert", async () => {
+      const { docker, container } = stubDocker();
+      const child = await childOf();
+      const deadline = new AbortController();
+      const held = Promise.withResolvers<void>();
+      const slow: Transactor = async (cb) => {
+        await held.promise;
+        return tx(cb);
+      };
+
+      const inserting = insertChildContainer(
+        { store, runInTx: slow, docker },
+        child,
+        deadline.signal,
+      );
+      deadline.abort(new Error("the create's deadline passed"));
+      const inserted = await inserting;
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "deadline_passed" });
+      expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+      // The insert commits late, leaving a starting row over a removed container.
+      held.resolve();
+      await vi.waitFor(async () =>
+        expect(
+          (await tx((trx) => store.getContainerByDockerId(trx, "child-container")))?.status,
+        ).toBe("starting"),
+      );
+    });
+
+    it("is deadline_passed at once for a deadline already passed", async () => {
+      const { docker } = stubDocker();
+      const child = await childOf();
+      const deadline = new AbortController();
+      deadline.abort(new Error("the create's deadline passed"));
+      const never: Transactor = () => new Promise(() => {});
+
+      const inserted = await insertChildContainer(
+        { store, runInTx: never, docker },
+        child,
+        deadline.signal,
+      );
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "deadline_passed" });
     });
   });
 });

@@ -45,8 +45,8 @@ export interface ChildContext extends OwnershipLookups, ChildCapContext {
   createLookups: DaemonLookups;
   /** The request body, bounded; read only by a route with a body policy. */
   readBody(): Promise<Result<Buffer, ProxyRejection>>;
-  /** Insert a created child's row; `record_failed` once its container is gone. */
-  recordChild(child: ChildRecord): Promise<Result<void, ProxyRejection>>;
+  /** Insert a created child's row within `deadline`; a rejection once its container is gone. */
+  recordChild(child: ChildRecord, deadline: AbortSignal): Promise<Result<void, ProxyRejection>>;
   /**
    * Follow a child's start in its row. `not_found`, naming `ref`, when a
    * reap finished the row meanwhile and the container has been removed.
@@ -95,7 +95,7 @@ export async function planContainerCreate(
     return {
       path: withQuery(`${versionPrefix}/containers/create`, created.value.query),
       body: created.value.body,
-      record: (dockerId) => ctx.recordChild({ ...child, dockerId }),
+      record: (dockerId, deadline) => ctx.recordChild({ ...child, dockerId }, deadline),
       admission,
     };
   });
@@ -146,8 +146,10 @@ export async function planChildStart(
 }
 
 /**
- * A child's restart, forwarded as it came. A restart that the daemon
- * answers 204 has left the child running, so its row moves as a start's.
+ * A child's restart, forwarded with no body: the daemon reads only its
+ * query (`t`, `signal`), and a half-sent body could otherwise hold the
+ * daemon request open. A restart the daemon answers 204 has left the child
+ * running, so its row moves as a start's.
  */
 export async function planChildRestart(
   target: ContainerTarget,
@@ -161,7 +163,7 @@ export async function planChildRestart(
         `${target.versionPrefix}/containers/${child.dockerId}${target.suffix}`,
         query,
       ),
-      body: { kind: "piped" },
+      body: { kind: "none" },
       response: {
         kind: "child_transition",
         settle: async (status) =>

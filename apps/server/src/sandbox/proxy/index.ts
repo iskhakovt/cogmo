@@ -36,16 +36,18 @@ import {
 } from "./plan.js";
 import { malformed, type ProxyRejection, unavailable } from "./rejection.js";
 import { classify } from "./router.js";
-import { type TaskSocket, TaskSockets } from "./task-sockets.js";
+import { type NotServing, type TaskSocket, TaskSockets } from "./task-sockets.js";
 import type {
   ChildContainers,
   ContainerRows,
   HostPlatform,
   LookupFailure,
   ProxyOptions,
+  TaskAnchor,
   TaskScope,
 } from "./types.js";
 
+export type { NotServing } from "./task-sockets.js";
 export type {
   ChildContainers,
   ChildRecord,
@@ -192,14 +194,22 @@ export class CogmoSocketProxy {
    * Upsert a task scope, returning the socket path the supervisor mounts
    * into the task container at `/var/run/docker.sock`. A task with no live
    * registration gets a socket of its own, bound before this resolves; an
-   * upsert of a live one replaces its scope (so a supervisor that registers
-   * with no anchor and updates once it has the task container's row doesn't
-   * disrupt connections in flight) and keeps its path. Rejects if the
-   * socket can't be bound, and when `unregisterTask` or `close` runs before
-   * the bind completes.
+   * upsert of a live one replaces its scope, without disrupting connections
+   * in flight, and keeps its path. Rejects if the socket can't be bound,
+   * and when `unregisterTask` or `close` runs before the bind completes.
    */
   registerTask(scope: TaskScope): Promise<string> {
     return this.#sockets.register(scope);
+  }
+
+  /**
+   * Set the anchor of the task's live registration once the supervisor has
+   * the task container's row, keeping its socket path. `not_serving` when
+   * the task was torn down meanwhile: no socket is opened, since nothing
+   * would mount or unregister it.
+   */
+  anchorTask(taskId: string, anchor: TaskAnchor): Result<void, NotServing> {
+    return this.#sockets.anchor(taskId, anchor);
   }
 
   /**
@@ -488,7 +498,12 @@ export class CogmoSocketProxy {
       }),
       readBody: () => readBody(req, MAX_BUFFERED_BODY_BYTES),
       recordExec: (execId) => connection.task.execIds.add(execId),
-      creates: connection.task.creates,
+      // Admitted on this socket; counted across every socket of the task.
+      creates: {
+        admit: () => connection.task.creates.admit(),
+        admitting: () => connection.task.creates.admitting(),
+        admittedBeyond: (counted) => this.#sockets.admittedBeyond(scope.taskId, counted),
+      },
       ...childWrites(this.#children, scope.taskId),
     };
   }

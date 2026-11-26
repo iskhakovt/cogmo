@@ -329,7 +329,8 @@ export const env = createEnv({
     /**
      * Directory holding per-task Docker proxy sockets. Created at boot if
      * missing. Each session created with `dockerSocket` gets
-     * `${SANDBOX_PROXY_SOCKET_DIR}/<taskId>.sock` bind-mounted at
+     * `${SANDBOX_PROXY_SOCKET_DIR}/<taskId>-<generation>.sock` (the
+     * generation a counter the process keeps) bind-mounted at
      * `/var/run/docker.sock` so child container creation
      * flows through the proxy (label injection, runtime override, deny rules).
      * Defaults under `/var/lib/cogmo/` because that is the only host-state

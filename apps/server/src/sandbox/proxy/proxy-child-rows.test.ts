@@ -20,7 +20,7 @@ import { match } from "ts-pattern";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { Database, Transactor } from "../../db/index.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, resolvesWithin } from "../../test/assertions.js";
 import {
   BRIDGE_NETWORK,
   dockerApi,
@@ -165,9 +165,9 @@ afterEach(async () => {
 function gatedRecords(children: ChildContainers): ChildContainers {
   return {
     ...children,
-    record: (child) =>
+    record: (child, deadline) =>
       children
-        .record(child)
+        .record(child, deadline)
         .andThen((recorded) => ResultAsync.fromSafePromise(recordGate.then(() => recorded))),
   };
 }
@@ -478,6 +478,64 @@ describe("child rows", () => {
       released.resolve();
     }
     expect((await first).status).toBe(201);
+  });
+
+  it("counts a create still held on a retiring socket against a re-registration's cap", async () => {
+    for (let n = 0; n < 15; n += 1) await insertChildRow(n, "running", "present");
+    const released = Promise.withResolvers<void>();
+    createGate = released.promise;
+    const first = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE })).catch(
+      () => null,
+    );
+    try {
+      await vi.waitFor(() => expect(creates()).toHaveLength(1));
+      const unregistering = proxy.unregisterTask(TASK_ID);
+      const replacement = await proxy.registerTask(scope);
+
+      const second = requestOverSocket(replacement, {
+        method: "POST",
+        path: "/containers/create",
+        body: JSON.stringify({ Image: IMAGE }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(creates()).toHaveLength(1);
+      released.resolve();
+      expect((await second).status).toBe(403);
+      await unregistering;
+    } finally {
+      released.resolve();
+    }
+    await first;
+  });
+
+  it("removes the container and answers 502 when the row is not written within the create's deadline", async () => {
+    const inserted = Promise.withResolvers<void>();
+    childWriteGate = inserted.promise;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let creating: Promise<SocketResponse>;
+    try {
+      creating = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+      await vi.waitFor(() => expect(creates()).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    try {
+      const child = expectDefined(createdIds.at(-1), "the created child");
+
+      const r = await resolvesWithin(creating, 2_500, "the create's answer");
+
+      expect(r.status, r.body).toBe(502);
+      await vi.waitFor(() =>
+        expect(received()).toContain(`DELETE /containers/${child}?force=true&v=true`),
+      );
+    } finally {
+      inserted.resolve();
+    }
+    // The insert lands late, over a container already removed: the stale pass's case.
+    const child = expectDefined(createdIds.at(-1), "the created child");
+    await vi.waitFor(async () => expect((await rowOf(child))?.status).toBe("starting"));
   });
 
   it("counts a create whose row has committed once, as a row, not again as a create in flight", async () => {

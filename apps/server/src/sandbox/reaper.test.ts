@@ -721,6 +721,34 @@ describe("runReap — the next tick after a failure", () => {
       -1_000,
       { status: "exited", reapedReason: null },
     ],
+    [
+      "a starting row over a container that is gone, before expiry",
+      "starting",
+      "gone",
+      60_000,
+      { status: "exited", reapedReason: null },
+    ],
+    [
+      "a starting row over a container that is gone, after expiry",
+      "starting",
+      "gone",
+      -1_000,
+      { status: "reaped", reapedReason: "ttl_expired" },
+    ],
+    [
+      "a starting row over a container that is running, before expiry",
+      "starting",
+      "present",
+      60_000,
+      { status: "starting", reapedReason: null },
+    ],
+    [
+      "a starting row over a container that is running, after expiry",
+      "starting",
+      "present",
+      -1_000,
+      { status: "reaped", reapedReason: "ttl_expired" },
+    ],
   ] as const)("%s", async (_label, status, onDaemon, ttlMs, expected) => {
     const id = await insertContainer({ dockerId: "c-after-failure", ttlMs, status });
     const listed: DockerSideContainer[] = match(onDaemon)
@@ -765,6 +793,27 @@ describe("runReap — the next tick after a failure", () => {
       status: "reaped",
       reapedReason: "dead_instance",
     });
+  });
+
+  it("removes at once a fresh rowless child whose instance reconcile closed after failing to remove it", async () => {
+    // Reconcile closes the prior instance however its removals went, so the
+    // child's grace window, which covers only a live instance, does not apply.
+    const prior = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 95 }));
+    await tx((trx) => store.closeInstances(trx, [prior.id]));
+    const { docker, killCalls } = fakeDocker({
+      containers: [
+        {
+          Id: "c-rowless-handoff",
+          Created: createdAgo(5_000),
+          Labels: { ...labels(), "cogmo.instance": prior.id, "cogmo.depth": "1" },
+        },
+      ],
+    });
+
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+
+    expect(result.orphansReaped).toBe(1);
+    expect(killCalls).toEqual(["c-rowless-handoff"]);
   });
 
   it("makes one transition when two orphan passes remove one dead-instance object, each counting it", async () => {

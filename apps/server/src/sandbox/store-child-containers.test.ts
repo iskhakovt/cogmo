@@ -85,12 +85,14 @@ describe("storeChildContainers", () => {
     const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
     const { child } = await startingChild();
 
-    expect((await children.record({ ...child, dockerId: "second-child" })).isOk()).toBe(true);
-    const refused = await children.record({
-      ...child,
-      dockerId: "third-child",
-      instanceId: "019d0000-0000-7000-8000-000000000bad",
-    });
+    const deadline = new AbortController().signal;
+    expect((await children.record({ ...child, dockerId: "second-child" }, deadline)).isOk()).toBe(
+      true,
+    );
+    const refused = await children.record(
+      { ...child, dockerId: "third-child", instanceId: "019d0000-0000-7000-8000-000000000bad" },
+      deadline,
+    );
     expect(refused._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
   });
 

@@ -36,13 +36,14 @@ const log = logger.child({ component: "sandbox.proxy" });
 const MAX_CREATE_REPLY_BYTES = 1024 * 1024;
 
 /**
- * How long a create's daemon request may take, answer included, before it
- * is aborted and answered 502, so a wedged create cannot hold its
- * admission, a place under the child cap, or a teardown's wait for ever.
- * The image is already inspected, so the daemon only lays out the
- * container, which takes well under a second; and the bound sits inside
- * the orphan pass's 2-minute grace, so a container whose create the proxy
- * can still record is never reaped as rowless first.
+ * How long a create may take, the daemon's answer and the child's row
+ * insert included, before it is answered 502: an unanswered daemon request
+ * is aborted, and a row not written in time has its container removed. So
+ * a wedged create cannot hold its admission, a place under the child cap,
+ * or a teardown's wait for ever, and no create answers 201 for a container
+ * the orphan pass removed as rowless: the bound sits inside that pass's
+ * 2-minute grace. The image is already inspected, so the daemon only lays
+ * out the container, which takes well under a second.
  */
 const CREATE_DEADLINE_MS = 60_000;
 
@@ -53,10 +54,11 @@ export interface CreateForward {
   /** The body the create policy rebuilt. */
   body: Buffer;
   /**
-   * Insert the row of the child a 201 names. `record_failed` once the
-   * container has been removed, or left to the orphan pass.
+   * Insert the row of the child a 201 names, within `deadline`. A
+   * rejection once the container has been removed, or left to the orphan
+   * pass.
    */
-  record(dockerId: string): Promise<Result<void, ProxyRejection>>;
+  record(dockerId: string, deadline: AbortSignal): Promise<Result<void, ProxyRejection>>;
   /** The create's admission, held from its checks to its answer. */
   admission: CreateAdmission;
 }
@@ -104,7 +106,7 @@ export function forwardCreate(
     },
     (reply) => {
       replied = true;
-      readCreateReply(req, reply, plan).then(answer, (cause: unknown) => {
+      readCreateReply(req, reply, plan, deadline.signal).then(answer, (cause: unknown) => {
         log.error({ err: cause, path: pathOf(req) }, "recording a created child failed");
         answer({ kind: "internal_error", message: `Cogmo proxy: ${describeError(cause)}` });
       });
@@ -136,6 +138,7 @@ async function readCreateReply(
   req: http.IncomingMessage,
   reply: http.IncomingMessage,
   plan: CreateForward,
+  deadline: AbortSignal,
 ): Promise<CreateAnswer> {
   const read = await readBody(reply, MAX_CREATE_REPLY_BYTES);
   if (read.isErr()) {
@@ -162,7 +165,7 @@ async function readCreateReply(
     };
   }
   plan.admission.named(dockerId);
-  const recorded = await plan.record(dockerId);
+  const recorded = await plan.record(dockerId, deadline);
   return recorded.match(
     (): CreateAnswer => relayed,
     (rejection): CreateAnswer => ({ kind: "reject", rejection }),

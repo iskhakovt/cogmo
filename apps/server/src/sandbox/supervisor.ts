@@ -371,16 +371,17 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     }
 
     if (proxy) {
-      await proxy.registerTask({
-        taskId: spec.taskId,
-        anchor: { rowId: containerRow.id, dockerId: container.id },
-        parentDepth: 0,
-        runtime,
-        cgroupParent,
-        instanceId: this.#instanceId,
-        resourceLimits: spec.resourceLimits,
-        ttlExpiresAt: spec.expiresAt,
+      const anchored = proxy.anchorTask(spec.taskId, {
+        rowId: containerRow.id,
+        dockerId: container.id,
       });
+      if (anchored.isErr()) {
+        // The task was torn down between the insert and here: its socket is
+        // gone, and no other one would be mounted. The container goes, and
+        // there is no session to hand back.
+        await this.#reapAbandoned(containerRow.id, container.id);
+        throw new Error(`task ${spec.taskId} was torn down while its container was created`);
+      }
     }
 
     try {
@@ -555,6 +556,24 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         log.warn({ err }, "proxy close failed during shutdown");
       });
     }
+  }
+
+  /** Reap a container whose task was torn down while `create` made it; a failure is logged. */
+  async #reapAbandoned(rowId: string, dockerId: string): Promise<void> {
+    const reaped = await reapContainer(this.#reapDeps(), {
+      id: rowId,
+      dockerId,
+      reason: "cascade",
+      at: new Date(),
+    });
+    reaped.match(
+      () => undefined,
+      (e) =>
+        log.warn(
+          { err: e.error, op: e.op, dockerId },
+          "reaping a torn-down task's container failed",
+        ),
+    );
   }
 
   #reapDeps(): ReapContainerDeps {

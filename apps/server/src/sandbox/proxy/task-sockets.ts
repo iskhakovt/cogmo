@@ -1,10 +1,12 @@
 /**
  * The proxy's per-task Unix sockets (design/sandbox.md → Proxy Design →
  * Teardown order): one registration per task, each on a path of its own,
- * `<task-id>-<generation>.sock`. A registration of a task after its
- * unregister gets a new path, since closing a listener unlinks its path,
- * and an old registration's close must not unlink a new one's file. An
- * upsert of a live registration keeps its path.
+ * `<task-id>-<generation>.sock`, the generation a counter this process
+ * keeps. A registration of a task after its unregister gets a new path,
+ * since closing a listener unlinks its path, and an old registration's
+ * close must not unlink a new one's file. An upsert of a live registration
+ * keeps its path, and an anchor update reaches only a live registration:
+ * a task torn down meanwhile gets no new socket that nothing would mount.
  *
  * A socket serves its scope until its teardown begins, and from then on its
  * connections are `unavailable`, whatever registration the task has since.
@@ -16,11 +18,13 @@ import { rm } from "node:fs/promises";
 import * as net from "node:net";
 import { join } from "node:path";
 import { addAbortSignal } from "node:stream";
+import { err, ok, type Result } from "neverthrow";
+import * as R from "remeda";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { type ExecIdRegistry, ExecIds } from "./exec-ids.js";
 import { type CreateTracker, InFlightCreates } from "./in-flight-creates.js";
-import type { TaskScope } from "./types.js";
+import type { TaskAnchor, TaskScope } from "./types.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
 
@@ -63,13 +67,31 @@ interface Registration extends TaskSocket {
   readonly listening: Promise<net.Server>;
 }
 
+/** The task has no live registration: it was never registered, or is being torn down. */
+export interface NotServing {
+  kind: "not_serving";
+}
+
+export interface TaskSocketRegistry {
+  /** Upsert a task's scope, binding a socket of its own for a task with no live registration. */
+  register(scope: TaskScope): Promise<string>;
+  /** Set the anchor of the task's live registration; `not_serving` when it has none. */
+  anchor(taskId: string, anchor: TaskAnchor): Result<void, NotServing>;
+  /** Tear the task's live registration down in the teardown order, joining a teardown under way. */
+  unregister(taskId: string): Promise<void>;
+  /** The creates admitted on any of the task's sockets whose child is not among `counted`. */
+  admittedBeyond(taskId: string, counted: ReadonlySet<string>): number;
+  /** Tear every socket down at once; a second call resolves with the first. */
+  closeAll(): Promise<void>;
+}
+
 export interface TaskSocketsOptions {
   socketDir: string;
   /** Takes each connection a task socket accepts, already bound to its signal. */
   onConnection(socket: net.Socket, task: TaskSocket): void;
 }
 
-export class TaskSockets {
+export class TaskSockets implements TaskSocketRegistry {
   #socketDir: string;
   #onConnection: (socket: net.Socket, task: TaskSocket) => void;
   /**
@@ -85,7 +107,7 @@ export class TaskSockets {
    */
   #unregistering = new Map<string, Promise<void>>();
   #generation = 0;
-  #closed = false;
+  #state: { kind: "open" } | { kind: "closing"; done: Promise<void> } = { kind: "open" };
 
   constructor(opts: TaskSocketsOptions) {
     this.#socketDir = opts.socketDir;
@@ -100,7 +122,12 @@ export class TaskSockets {
    * `closeAll` runs before the bind completes.
    */
   async register(scope: TaskScope): Promise<string> {
-    if (this.#closed) throw new Error("proxy is closed");
+    match(this.#state)
+      .with({ kind: "open" }, () => undefined)
+      .with({ kind: "closing" }, () => {
+        throw new Error("proxy is closed");
+      })
+      .exhaustive();
     const { taskId } = scope;
     const task = this.#tasks.get(taskId) ?? this.#open(scope);
     task.state = { kind: "serving", scope };
@@ -114,6 +141,30 @@ export class TaskSockets {
     // the socket is not usable.
     task.signal.throwIfAborted();
     return servedPath(task);
+  }
+
+  /**
+   * Set the anchor of the task's serving registration, keeping its path.
+   * `not_serving` when it has none, because it was torn down meanwhile: no
+   * socket is opened for it, since nothing would mount or unregister one.
+   */
+  anchor(taskId: string, anchor: TaskAnchor): Result<void, NotServing> {
+    const task = this.#tasks.get(taskId);
+    if (task === undefined) return err({ kind: "not_serving" });
+    return match(task.state)
+      .with({ kind: "serving" }, ({ scope }): Result<void, NotServing> => {
+        task.state = { kind: "serving", scope: { ...scope, anchor } };
+        return ok(undefined);
+      })
+      .with({ kind: "retiring" }, () => err({ kind: "not_serving" as const }))
+      .exhaustive();
+  }
+
+  admittedBeyond(taskId: string, counted: ReadonlySet<string>): number {
+    const serving = this.#tasks.get(taskId);
+    const retiring = [...this.#retiring.keys()].filter((task) => task.taskId === taskId);
+    const registrations = serving === undefined ? retiring : [serving, ...retiring];
+    return R.sumBy(registrations, (task) => task.creates.admittedBeyond(counted));
   }
 
   /**
@@ -132,17 +183,27 @@ export class TaskSockets {
   /**
    * Tear every socket down at once: every create in flight is aborted, with
    * no wait for it, a teardown already waiting included. Each teardown has
-   * finished before this resolves, and an `unregister` meanwhile joins them.
+   * finished before this resolves, an `unregister` meanwhile joins them, and
+   * a second call resolves with the first.
    */
-  async closeAll(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
+  closeAll(): Promise<void> {
+    return match(this.#state)
+      .with({ kind: "closing" }, ({ done }) => done)
+      .with({ kind: "open" }, () => {
+        const done = this.#closeEverySocket();
+        this.#state = { kind: "closing", done };
+        return done;
+      })
+      .exhaustive();
+  }
+
+  async #closeEverySocket(): Promise<void> {
     const closed = new Error("proxy is closed");
     const serving = [...this.#tasks.values()];
     this.#tasks.clear();
     for (const task of [...serving, ...this.#retiring.keys()]) abortTask(task, closed);
     for (const task of serving) this.#joinTeardown(task.taskId, this.#retire(task, 0));
-    await Promise.all([...this.#retiring.values()]);
+    await Promise.all([...this.#retiring.values(), ...this.#unregistering.values()]);
   }
 
   #joinTeardown(taskId: string, torn: Promise<void>): Promise<void> {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -98,6 +98,28 @@ describe("TaskSockets", () => {
     expect(joined).toBe(false);
     await closing;
     expect(joined).toBe(true);
+  });
+
+  it("resolves a second closeAll only once the first's teardowns have finished", async () => {
+    const path = await sockets.register(SCOPE);
+    let unregistered = false;
+    const first = sockets.closeAll();
+    void sockets.unregister(SCOPE.taskId).then(() => {
+      unregistered = true;
+    });
+    let secondDone = false;
+    const second = sockets.closeAll().then(() => {
+      secondDone = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(secondDone).toBe(false);
+    await second;
+    expect(unregistered).toBe(true);
+    expect((await readdir(dir)).filter((f) => f.endsWith(".sock"))).toEqual([]);
+    expect(basename(path)).toBe(`${SCOPE.taskId}-1.sock`);
+    await first;
   });
 
   it("refuses a registration once closed", async () => {

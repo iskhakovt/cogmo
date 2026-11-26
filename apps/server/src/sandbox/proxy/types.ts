@@ -3,11 +3,11 @@ import type { ResourceLimits } from "../types.js";
 import type { ProxyRejection } from "./rejection.js";
 
 /**
- * Shared types for the Docker socket proxy. The proxy maintains a Map<task
- * socket path → TaskScope> in memory; on connection, the scope is looked up
- * by which socket received it. The scope drives label injection, the
- * resource caps on `POST /containers/create` and the lineage of the child
- * rows it inserts.
+ * Shared types for the Docker socket proxy. A task's scope is carried by
+ * its socket's state while the socket serves (`task-sockets.ts`), and each
+ * request reads it from the socket that accepted the connection. The scope
+ * drives label injection, the resource caps on `POST /containers/create`
+ * and the lineage of the child rows it inserts.
  */
 export interface TaskScope {
   /** Cogmo `coding_tasks.id` — denormalized into `cogmo.root_task` label. */
@@ -100,12 +100,11 @@ export interface ChildRecord {
 }
 
 /**
- * The child's row could not be inserted; its container has been removed,
- * or left to the orphan pass. The use case has logged why.
+ * The child's row was not written: the insert failed, or the create's
+ * deadline passed first. Either way its container has been removed, or
+ * left to the orphan pass; the use case has logged why.
  */
-export interface ChildRecordFailed {
-  kind: "record_failed";
-}
+export type ChildRecordFailed = { kind: "record_failed" } | { kind: "deadline_passed" };
 
 /**
  * Whether a child's start stands. `started` covers a row moved to
@@ -122,8 +121,12 @@ export type ChildStartOutcome = { kind: "started" } | { kind: "reaped" };
  * the sandbox store and the daemon; the proxy never reaches either itself.
  */
 export interface ChildContainers {
-  /** Insert the child's row. A failed insert removes the container, with its anonymous volumes. */
-  record(child: ChildRecord): ResultAsync<void, ChildRecordFailed>;
+  /**
+   * Insert the child's row, within the create's `deadline`. A failed
+   * insert, or one the deadline passes first, removes the container, with
+   * its anonymous volumes.
+   */
+  record(child: ChildRecord, deadline: AbortSignal): ResultAsync<void, ChildRecordFailed>;
   /** `starting → running` once the daemon has started or restarted the child. */
   started(child: TaskContainerRow): ResultAsync<ChildStartOutcome, StoreFailed>;
   /** `→ exited` once the daemon has removed the child at the task's request. */

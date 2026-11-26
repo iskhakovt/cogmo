@@ -15,15 +15,15 @@ interface ReconcileChildContainersDeps {
 }
 
 /**
- * The live children the daemon still has, for a create that would reach
- * the child cap (design/sandbox.md → Proxy Design → Caps and cost). A
+ * The live children the daemon still has, for a create that finds the
+ * child count at 16 (design/sandbox.md → Proxy Design → Caps and cost). A
  * child the daemon answers 404 for is gone: a `docker run --rm` child
  * removes itself, with no `DELETE` through the proxy. Its row moves to
  * `exited`, the transition the reaper's stale pass would make on its next
  * tick, and it no longer counts. A child that exited but was not removed is
- * still on the daemon and still counts: marking it `exited` would kill a
- * later restart of it, as a start of a finished row. An inspect that fails
- * otherwise counts the child as live.
+ * still on the daemon and still counts: marked `exited`, a restart of it
+ * would run under an `exited` row, which neither the TTL pass nor the cap
+ * counts. An inspect that fails otherwise counts the child as live.
  */
 export async function reconcileChildContainers(
   deps: ReconcileChildContainersDeps,

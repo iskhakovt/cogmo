@@ -15,9 +15,11 @@ import {
   API,
   CHILD,
   CHILD_ROW,
+  COGMO_OWN,
   message,
   OWN,
   OWN_ROW,
+  SALVAGE_ROW,
   SCOPE,
   TASK_ROWS,
   upgradeRequest,
@@ -355,6 +357,36 @@ describe("the child cap", () => {
   });
 });
 
+describe("children under another depth-0 row of the task", () => {
+  it("count against the cap, though this socket does not own them", async () => {
+    const underAnchor = Array.from({ length: 15 }, (_, n) => ({
+      ...CHILD_ROW,
+      id: `019d0000-0000-7000-8000-0000000f${String(n).padStart(4, "0")}`,
+      dockerId: `anchored-child-${n}`,
+    }));
+    const elsewhere: TaskContainerRow = {
+      id: "019d0000-0000-7000-8000-0000000f0099",
+      dockerId: COGMO_OWN.id,
+      parentId: SALVAGE_ROW.id,
+      depth: 1,
+      status: "running",
+    };
+    h.rows.forTask.mockReturnValue(okAsync([OWN_ROW, SALVAGE_ROW, ...underAnchor, elsewhere]));
+
+    const created = await h.send(
+      "POST",
+      "/containers/create",
+      JSON.stringify({ Image: "alpine:3" }),
+    );
+    const inspected = await h.send("GET", `/containers/${COGMO_OWN.name}/json`);
+
+    expect(created.status, created.body).toBe(403);
+    expect(h.children.reconcile).toHaveBeenCalledWith([...underAnchor, elsewhere]);
+    expect(inspected.status, inspected.body).toBe(404);
+    expect(h.received().some((l) => l.startsWith("POST /containers/create"))).toBe(false);
+  });
+});
+
 describe("the task's own row", () => {
   it("still lets a task reach its running child once its own container exited", async () => {
     h.rows.forTask.mockReturnValue(okAsync([{ ...OWN_ROW, status: "exited" }, CHILD_ROW]));
@@ -481,6 +513,63 @@ describe("teardown", () => {
 
     expect((await second).status).toBe(503);
     expect(createsReached()).toBe(1);
+  });
+});
+
+describe("teardown during a create at the cap", () => {
+  it("answers a create whose reconcile still finds the cap full after the teardown began unavailable", async () => {
+    const parkedCreates: Array<() => void> = [];
+    h.daemon.setResponder((req, res, raw) => {
+      if (req.url.startsWith("/containers/create")) {
+        parkedCreates.push(() => API(req, res, raw));
+        return;
+      }
+      API(req, res, raw);
+    });
+    const fifteen = Array.from({ length: 15 }, (_, n) => ({
+      ...CHILD_ROW,
+      id: `019d0000-0000-7000-8000-0000000e${String(n).padStart(4, "0")}`,
+      dockerId: `full-child-${n}`,
+    }));
+    h.rows.forTask.mockReturnValue(okAsync([OWN_ROW, ...fifteen]));
+    void h
+      .send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }))
+      .catch(() => {});
+    await vi.waitFor(() => expect(parkedCreates).toHaveLength(1));
+    const reconciled = Promise.withResolvers<ReadonlyArray<TaskContainerRow>>();
+    h.children.reconcile.mockReturnValue(
+      new ResultAsync(
+        reconciled.promise.then((live) => ok<ReadonlyArray<TaskContainerRow>, never>(live)),
+      ),
+    );
+    const second = h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+    await vi.waitFor(() => expect(h.children.reconcile).toHaveBeenCalledTimes(1));
+
+    void h.proxy.unregisterTask(SCOPE.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Every child is still there: the cap stays full.
+    reconciled.resolve(fifteen);
+
+    expect((await second).status).toBe(503);
+    expect(h.received().filter((l) => l.startsWith("POST /containers/create"))).toHaveLength(1);
+  });
+});
+
+describe("a child's restart body", () => {
+  it("forwards a restart with no body, whatever the client sent", async () => {
+    h.daemon.setResponder((req, res, raw) => {
+      if (!req.url.includes("/restart")) return API(req, res, raw);
+      res.writeHead(204);
+      res.end();
+    });
+
+    const r = await h.send("POST", `/containers/${CHILD.name}/restart?t=1`, '{"t":1}');
+
+    expect(r.status, r.body).toBe(204);
+    expect(h.daemon.requests().at(-1)).toMatchObject({
+      url: `/containers/${CHILD.id}/restart?t=1`,
+      body: "",
+    });
   });
 });
 

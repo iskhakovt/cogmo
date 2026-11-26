@@ -12,7 +12,13 @@ import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import type { ChildContext } from "./child-plan.js";
-import { notFound, type ProxyRejection, recordFailed, unavailable } from "./rejection.js";
+import {
+  daemonFailed,
+  notFound,
+  type ProxyRejection,
+  recordFailed,
+  unavailable,
+} from "./rejection.js";
 import type { ChildContainers } from "./types.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
@@ -22,10 +28,17 @@ export function childWrites(
   taskId: string,
 ): Pick<ChildContext, "recordChild" | "childStarted" | "childRemoved" | "reconcileChildren"> {
   return {
-    recordChild: async (child) =>
-      children
-        .record(child)
-        .mapErr(() => recordFailed("the created container's row could not be recorded")),
+    recordChild: async (child, deadline) =>
+      children.record(child, deadline).mapErr((failed) =>
+        match(failed)
+          .with({ kind: "record_failed" }, () =>
+            recordFailed("the created container's row could not be recorded"),
+          )
+          .with({ kind: "deadline_passed" }, () =>
+            daemonFailed("Cogmo proxy: the create did not finish within its deadline"),
+          )
+          .exhaustive(),
+      ),
     childStarted: async (child, ref) =>
       (await children.started(child)).match(
         (outcome): Result<void, ProxyRejection> =>

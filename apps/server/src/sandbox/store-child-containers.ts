@@ -22,7 +22,8 @@ export function storeChildContainers(deps: {
   docker: DockerFacade;
 }): ChildContainers {
   return {
-    record: (child) => new ResultAsync(insertChildContainer(deps, child)).map(() => undefined),
+    record: (child, deadline) =>
+      new ResultAsync(insertChildContainer(deps, child, deadline)).map(() => undefined),
     started: (child) =>
       new ResultAsync(
         markChildRunning(deps, { id: child.id, dockerId: child.dockerId, at: new Date() }),

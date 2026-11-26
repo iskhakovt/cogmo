@@ -16,6 +16,7 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { type ProxyRejection, unavailable } from "./rejection.js";
 
 /** One admitted create. */
@@ -36,6 +37,8 @@ export interface CreateTracker {
   admittedBeyond(counted: ReadonlySet<string>): number;
   /** Admit a create whose checks passed; `unavailable` once teardown has begun. */
   admit(): Result<CreateAdmission, ProxyRejection>;
+  /** `unavailable` once teardown has begun, as `admit` would answer. */
+  admitting(): Result<void, ProxyRejection>;
   /** Admit no more creates: teardown has begun. */
   stopAdmitting(): void;
   /**
@@ -55,7 +58,7 @@ interface Admitted {
 export class InFlightCreates implements CreateTracker {
   #pending = new Set<Admitted>();
   #controller = new AbortController();
-  #admitting = true;
+  #state: { kind: "admitting" } | { kind: "stopped" } = { kind: "admitting" };
 
   get signal(): AbortSignal {
     return this.#controller.signal;
@@ -67,8 +70,18 @@ export class InFlightCreates implements CreateTracker {
     ).length;
   }
 
+  admitting(): Result<void, ProxyRejection> {
+    return match(this.#state)
+      .with({ kind: "admitting" }, (): Result<void, ProxyRejection> => ok(undefined))
+      .with({ kind: "stopped" }, () => err(unavailable("the task is being torn down")))
+      .exhaustive();
+  }
+
   admit(): Result<CreateAdmission, ProxyRejection> {
-    if (!this.#admitting) return err(unavailable("the task is being torn down"));
+    return this.admitting().map(() => this.#admitOne());
+  }
+
+  #admitOne(): CreateAdmission {
     const { promise, resolve } = Promise.withResolvers<void>();
     const entry: Admitted = { settled: promise, dockerId: null };
     this.#pending.add(entry);
@@ -76,7 +89,7 @@ export class InFlightCreates implements CreateTracker {
       this.#pending.delete(entry);
       resolve();
     };
-    return ok({
+    return {
       run: (work) => {
         // A throw from `work` is a bug, which its caller logs.
         const ran = (async () => work())();
@@ -86,11 +99,11 @@ export class InFlightCreates implements CreateTracker {
       named: (dockerId) => {
         entry.dockerId = dockerId;
       },
-    });
+    };
   }
 
   stopAdmitting(): void {
-    this.#admitting = false;
+    this.#state = { kind: "stopped" };
   }
 
   async settled(ms: number): Promise<void> {

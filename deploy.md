@@ -208,7 +208,7 @@ Required by `serve`, which checks the bucket at boot. With `S3_ENDPOINT` unset t
 | `SANDBOX_RUNTIME` | — | OCI runtime for sandbox containers. `sysbox` in production, `runc` in dev / CI. When unset the sandbox module doesn't initialize and coding-delegation features fail with a clear error on first use. Only consulted when `SANDBOX_BACKEND=local-docker`. |
 | `DAYTONA_API_URL` | `https://app.daytona.io/api` | Daytona Cloud or self-hosted base URL. Only consulted when `SANDBOX_BACKEND=daytona`. |
 | `DAYTONA_ORGANIZATION_ID` | — | Daytona organization id. Only needed when the API key is scoped to multiple orgs and the default isn't the right one. |
-| `SANDBOX_PROXY_SOCKET_DIR` | `/var/lib/cogmo/sockets` | Host directory for per-task Docker proxy sockets. Each task container gets `<dir>/<taskId>.sock` bind-mounted at `/var/run/docker.sock` so child-container creation flows through the proxy (label injection, runtime override, deny rules). Created at boot if missing. |
+| `SANDBOX_PROXY_SOCKET_DIR` | `/var/lib/cogmo/sockets` | Host directory for per-task Docker proxy sockets. Each task container gets `<dir>/<taskId>-<generation>.sock` bind-mounted at `/var/run/docker.sock`, the generation a counter the Cogmo process keeps, so child-container creation flows through the proxy (label injection, runtime override, deny rules). Created at boot if missing. |
 | `SANDBOX_HOST_DOCKER_SOCKET` | `/var/run/docker.sock` | Host Docker socket the proxy forwards to. Override only for rootless Docker / snap / unusual installs. |
 | `SANDBOX_ASKPASS_DIR` | `/var/lib/cogmo/askpass` | Host root for per-task git-askpass material (PAT, SSH signing key, helper script). Bind-mounted at `/tmp/cogmo-askpass` per task; wiped on task stop. |
 
