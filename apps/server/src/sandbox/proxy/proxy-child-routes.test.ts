@@ -16,12 +16,14 @@ import {
   CHILD,
   CHILD_ROW,
   message,
+  OWN,
   OWN_ROW,
   SCOPE,
   TASK_ROWS,
   upgradeRequest,
   useProxyHarness,
 } from "../../test/proxy-harness.js";
+import type { TaskContainerRow } from "./types.js";
 
 const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
 vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
@@ -58,7 +60,7 @@ describe("a child's create", () => {
         "cogmo.managed": "true",
         "cogmo.instance": SCOPE.instanceId,
         "cogmo.root_task": SCOPE.taskId,
-        "cogmo.parent": SCOPE.parentDockerId,
+        "cogmo.parent": OWN.id,
         "cogmo.depth": "1",
       },
       resourceLimits: { cpus: 2, memory_bytes: 1024 ** 3, pids: 256 },
@@ -103,7 +105,7 @@ describe("a child's create", () => {
   });
 
   it("answers unavailable, reading no rows, before the scope names its own row", async () => {
-    await h.proxy.registerTask({ ...SCOPE, parentContainerRowId: null });
+    await h.proxy.registerTask({ ...SCOPE, anchor: null });
 
     const r = await h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
 
@@ -272,21 +274,74 @@ describe("a child's removal", () => {
 });
 
 describe("the child cap", () => {
-  it("denies a create once 16 live children hang from any of the task's depth-0 rows", async () => {
-    const children = Array.from({ length: 16 }, (_, n) => ({
-      id: `019d0000-0000-7000-8000-0000000c${String(n).padStart(4, "0")}`,
-      dockerId: `child-${n}`,
-      // An earlier depth-0 row's children count too.
-      parentId: n % 2 === 0 ? OWN_ROW.id : "019d0000-0000-7000-8000-00000000aaa0",
-      status: n % 3 === 0 ? ("starting" as const) : ("running" as const),
-    }));
-    h.rows.forTask.mockReturnValue(okAsync([OWN_ROW, ...children]));
+  /** 16 live children, half of them under an earlier depth-0 row of the task, which count too. */
+  const SIXTEEN: ReadonlyArray<TaskContainerRow> = Array.from({ length: 16 }, (_, n) => ({
+    id: `019d0000-0000-7000-8000-0000000c${String(n).padStart(4, "0")}`,
+    dockerId: `child-${n}`,
+    parentId: n % 2 === 0 ? OWN_ROW.id : "019d0000-0000-7000-8000-00000000aaa0",
+    status: n % 3 === 0 ? ("starting" as const) : ("running" as const),
+  }));
+  const reachedCreate = () =>
+    h.received().some((line) => line.startsWith("POST /containers/create"));
 
+  beforeEach(() => {
+    h.rows.forTask.mockReturnValue(okAsync([OWN_ROW, ...SIXTEEN]));
+  });
+
+  it("denies a create once 16 live children remain after the reconcile", async () => {
     const r = await h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
 
     expect(r.status, r.body).toBe(403);
     expect(message(r)).toContain("16 live children");
-    expect(h.received().some((line) => line.startsWith("POST /containers/create"))).toBe(false);
+    expect(h.children.reconcile).toHaveBeenCalledWith(SIXTEEN);
+    expect(reachedCreate()).toBe(false);
+  });
+
+  it("forwards a create once the reconcile finds a child the daemon no longer has", async () => {
+    h.children.reconcile.mockReturnValue(okAsync(SIXTEEN.slice(1)));
+
+    const r = await h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+
+    expect(r.status, r.body).toBe(201);
+    expect(reachedCreate()).toBe(true);
+  });
+
+  it("answers unavailable, forwarding nothing, when the reconcile's write fails", async () => {
+    h.children.reconcile.mockReturnValue(errAsync({ kind: "store_failed", cause: new Error("x") }));
+
+    const r = await h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+
+    expect(r.status, r.body).toBe(503);
+    expect(reachedCreate()).toBe(false);
+  });
+
+  it("reconciles nothing below the cap", async () => {
+    h.rows.forTask.mockReturnValue(okAsync([OWN_ROW, ...SIXTEEN.slice(1)]));
+
+    const r = await h.send("POST", "/containers/create", JSON.stringify({ Image: "alpine:3" }));
+
+    expect(r.status, r.body).toBe(201);
+    expect(h.children.reconcile).not.toHaveBeenCalled();
+  });
+});
+
+describe("the task's own row", () => {
+  it("still lets a task reach its running child once its own container exited", async () => {
+    h.rows.forTask.mockReturnValue(okAsync([{ ...OWN_ROW, status: "exited" }, CHILD_ROW]));
+
+    const r = await h.send("GET", `/containers/${CHILD.name}/json`);
+
+    expect(r.status, r.body).toBe(200);
+  });
+
+  it("answers unavailable, before any daemon lookup, once its own row is reaped", async () => {
+    // A reaped row is not among those the store read returns.
+    h.rows.forTask.mockReturnValue(okAsync([CHILD_ROW]));
+
+    const r = await h.send("GET", `/containers/${CHILD.name}/json`);
+
+    expect(r.status, r.body).toBe(503);
+    expect(h.received()).toEqual([]);
   });
 });
 

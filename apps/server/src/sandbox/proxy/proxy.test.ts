@@ -4,9 +4,9 @@ import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { okAsync } from "neverthrow";
+import { ok, okAsync, ResultAsync } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mock } from "vitest-mock-extended";
+import { type MockProxy, mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { expectDefined, resolvesWithin } from "../../test/assertions.js";
 import { CogmoSocketProxy } from "./index.js";
@@ -60,11 +60,11 @@ let upstreamRequests: Array<{
 }> = [];
 let upstreamResponder: (req: http.IncomingMessage, res: http.ServerResponse) => void;
 let proxy: CogmoSocketProxy;
+let childContainers: MockProxy<ChildContainers>;
 
 const SCOPE: TaskScope = {
   taskId: "019d0000-0000-7000-8000-00000000aaaa",
-  parentContainerRowId: "019d0000-0000-7000-8000-00000000bbbb",
-  parentDockerId: "docker-parent-abc",
+  anchor: { rowId: "019d0000-0000-7000-8000-00000000bbbb", dockerId: "docker-parent-abc" },
   parentDepth: 0,
   runtime: "sysbox-runc",
   cgroupParent: "cogmo-task-abc.slice",
@@ -119,14 +119,14 @@ beforeEach(async () => {
   containerRows.forTask.mockReturnValue(
     okAsync([
       {
-        id: expectDefined(SCOPE.parentContainerRowId, "the scope's row"),
+        id: expectDefined(SCOPE.anchor, "the scope's anchor").rowId,
         dockerId: TASK_CONTAINER_ID,
         parentId: null,
         status: "running",
       },
     ]),
   );
-  const childContainers = mock<ChildContainers>();
+  childContainers = mock<ChildContainers>();
   childContainers.record.mockReturnValue(okAsync(undefined));
   proxy = await CogmoSocketProxy.create({
     socketDir: join(baseDir, "sockets"),
@@ -275,7 +275,10 @@ describe("CogmoSocketProxy", () => {
     const taskB: TaskScope = {
       ...SCOPE,
       taskId: "019d0000-0000-7000-8000-0000000000b2",
-      parentDockerId: "docker-parent-different",
+      anchor: {
+        rowId: "019d0000-0000-7000-8000-00000000bbbb",
+        dockerId: "docker-parent-different",
+      },
       cgroupParent: "cogmo-task-b.slice",
     };
     const sockA = await proxy.registerTask(taskA);
@@ -478,6 +481,120 @@ describe("CogmoSocketProxy", () => {
 
     expect(again).toBe(sock);
     expect(await socketExists(again)).toBe(true);
+  });
+
+  it("close() does not wait for a create whose row is still being written", {
+    timeout: STREAM_TEST_TIMEOUT_MS,
+  }, async () => {
+    const written = Promise.withResolvers<void>();
+    childContainers.record.mockReturnValue(
+      new ResultAsync(written.promise.then(() => ok<void, never>(undefined))),
+    );
+    upstreamResponder = (_req, res) => {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end(JSON.stringify({ Id: CHILD_CONTAINER_ID }));
+    };
+    const sock = await proxy.registerTask(SCOPE);
+    void unixRequest(sock, "POST", "/containers/create", JSON.stringify({ Image: "alpine" })).catch(
+      () => {},
+    );
+    await vi.waitFor(() => expect(childContainers.record).toHaveBeenCalledTimes(1));
+
+    try {
+      await resolvesWithin(proxy.close(), SETTLE_MS, "close");
+    } finally {
+      written.resolve();
+    }
+  });
+
+  it("close() resolves once a teardown it found waiting has finished", {
+    timeout: STREAM_TEST_TIMEOUT_MS,
+  }, async () => {
+    const written = Promise.withResolvers<void>();
+    childContainers.record.mockReturnValue(
+      new ResultAsync(written.promise.then(() => ok<void, never>(undefined))),
+    );
+    upstreamResponder = (_req, res) => {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end(JSON.stringify({ Id: CHILD_CONTAINER_ID }));
+    };
+    const sock = await proxy.registerTask(SCOPE);
+    void unixRequest(sock, "POST", "/containers/create", JSON.stringify({ Image: "alpine" })).catch(
+      () => {},
+    );
+    await vi.waitFor(() => expect(childContainers.record).toHaveBeenCalledTimes(1));
+    let unregistered = false;
+    void proxy.unregisterTask(SCOPE.taskId).then(() => {
+      unregistered = true;
+    });
+    await sleep(50);
+
+    try {
+      await resolvesWithin(proxy.close(), SETTLE_MS, "close");
+      expect(unregistered).toBe(true);
+    } finally {
+      written.resolve();
+    }
+  });
+
+  it("unregisterTask does not wait for a create whose body is still arriving", {
+    timeout: STREAM_TEST_TIMEOUT_MS,
+  }, async () => {
+    const sock = await proxy.registerTask(SCOPE);
+    const client = openStream(
+      sock,
+      "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n" +
+        'Content-Length: 100\r\n\r\n{"Image":',
+    );
+    await sleep(100);
+
+    await resolvesWithin(proxy.unregisterTask(SCOPE.taskId), SETTLE_MS, "unregisterTask");
+    await resolvesWithin(client.closed, SETTLE_MS, "the client connection to close");
+  });
+
+  it("answers unavailable on a connection the old socket accepted, after the task registers again", {
+    timeout: STREAM_TEST_TIMEOUT_MS,
+  }, async () => {
+    // The daemon holds the create unanswered and answers everything else.
+    const held = Promise.withResolvers<void>();
+    const answer = upstreamResponder;
+    upstreamResponder = (req, res) => {
+      if (!(req.url ?? "").startsWith("/containers/create")) return answer(req, res);
+      res.writeHead(201, { "content-type": "application/json" });
+      res.flushHeaders();
+      held.resolve();
+    };
+    const sock = await proxy.registerTask(SCOPE);
+    const body = JSON.stringify({ Image: "alpine" });
+    openStream(
+      sock,
+      "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n" +
+        `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    );
+    await resolvesWithin(held.promise, SETTLE_MS, "the create to reach the daemon");
+    const plain = openStream(sock, "GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n");
+    const upgrading = openStream(sock, "GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n");
+    await vi.waitFor(() => expect(plain.received()).toContain("200 OK"), { timeout: SETTLE_MS });
+    await vi.waitFor(() => expect(upgrading.received()).toContain("200 OK"), {
+      timeout: SETTLE_MS,
+    });
+    const forwarded = upstreamRequests.length;
+
+    void proxy.unregisterTask(SCOPE.taskId);
+    await sleep(50);
+    await proxy.registerTask(SCOPE);
+    plain.write("GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n");
+    upgrading.write(
+      "POST /containers/abc/attach?stream=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
+    );
+
+    await vi.waitFor(() => expect(plain.received()).toContain("503 Service Unavailable"), {
+      timeout: SETTLE_MS,
+    });
+    await vi.waitFor(() => expect(upgrading.received()).toContain("503 Service Unavailable"), {
+      timeout: SETTLE_MS,
+    });
+    expect(upstreamRequests).toHaveLength(forwarded);
   });
 
   it("unregisterTask leaves another task's streams open", {

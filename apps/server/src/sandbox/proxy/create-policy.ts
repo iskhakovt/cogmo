@@ -26,7 +26,7 @@ import { isHostPlatform } from "./platform.js";
 import { denied, type ProxyRejection } from "./rejection.js";
 import { effectiveLimits, limitResources, type ResourceFields } from "./resources.js";
 import { checkSysboxEnv } from "./sysbox-env.js";
-import type { DaemonLookups, ImageFacts, TaskScope } from "./types.js";
+import type { DaemonLookups, ImageFacts, TaskAnchor, TaskScope } from "./types.js";
 
 /**
  * The only create query keys the daemon reads. docker-modem also copies
@@ -63,9 +63,10 @@ interface CreatePolicyOutcome {
 
 export function applyContainerCreatePolicy(
   request: { body: Buffer; query: URLSearchParams },
-  scope: TaskScope,
+  task: { scope: TaskScope; anchor: TaskAnchor },
   lookups: DaemonLookups,
 ): ResultAsync<CreatePolicyOutcome, ProxyRejection> {
+  const { scope, anchor } = task;
   const query = forwardedQuery(request.query);
   return parseBody(request.body, CreateBodySchema)
     .andThen((body) =>
@@ -79,10 +80,10 @@ export function applyContainerCreatePolicy(
         .andThen((image) => checkSysboxEnv(image.env, "the image's Config.Env").map(() => image))
         .andThen((image) =>
           new ResultAsync(publishAddressFor(body, lookups)).map((address) => ({
-            rebuilt: rebuild(body, { image, resources, address, scope }),
+            rebuilt: rebuild(body, { image, resources, address, scope, anchor }),
             child: {
               image: body.Image,
-              labels: cogmoLabels(scope),
+              labels: cogmoLabels(scope, anchor),
               resourceLimits: effectiveLimits(resources),
             },
           })),
@@ -135,16 +136,22 @@ async function publishAddressFor(
 
 function rebuild(
   body: CreateBody,
-  parts: { image: ImageFacts; resources: ResourceFields; address: string | null; scope: TaskScope },
+  parts: {
+    image: ImageFacts;
+    resources: ResourceFields;
+    address: string | null;
+    scope: TaskScope;
+    anchor: TaskAnchor;
+  },
 ): Record<string, unknown> {
-  const { image, resources, address, scope } = parts;
+  const { image, resources, address, scope, anchor } = parts;
   const config = R.omit(body, ["name", "platform", "Image", "Labels", "HostConfig"]);
   const host = body.HostConfig ?? {};
   const bindings = host.PortBindings;
   return {
     ...config,
     Image: image.id,
-    Labels: taskLabels(body.Labels, scope),
+    Labels: taskLabels(body.Labels, scope, anchor),
     HostConfig: {
       ...R.omit(host, REPLACED_HOST_FIELDS),
       ...(bindings !== undefined && {

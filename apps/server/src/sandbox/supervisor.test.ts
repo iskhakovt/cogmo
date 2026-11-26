@@ -214,12 +214,13 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     expect(registers).toHaveLength(2);
     const reg0 = expectDefined(registers[0], "first register");
     const reg1 = expectDefined(registers[1], "second register");
-    expect(reg0.parentDockerId).toBe("");
-    expect(reg0.parentContainerRowId).toBeNull();
+    expect(reg0.anchor).toBeNull();
     expect(reg0.ttlExpiresAt).toEqual(reg1.ttlExpiresAt);
     expect(reg0.runtime).toBe("runc");
-    expect(reg1.parentDockerId).toBe("docker-task-xyz");
-    expect(reg1.parentContainerRowId).toBeTruthy();
+    expect(reg1.anchor).toEqual({
+      rowId: handle.state.containerRowId,
+      dockerId: "docker-task-xyz",
+    });
 
     // Cgroup parent (slice 3.0h): both registers carry the same slice
     // name; the proxy uses it to inject CgroupParent on every child
@@ -969,6 +970,29 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(calls.remove).toBe(1);
     expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
     expect(unregisters).toEqual([TASK_ID]);
+  });
+
+  it("deleteByTaskId reaps the task's rows when the proxy's teardown rejects", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = fakeDocker({ dockerId: "docker-teardown-rejects" });
+    const { proxy } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    const session = await sandbox.create(SPEC);
+    vi.mocked(proxy.unregisterTask).mockRejectedValue(new Error("socket busy"));
+
+    await sandbox.deleteByTaskId(TASK_ID);
+
+    expect(await tx((trx) => store.getContainer(trx, session.state.containerRowId))).toMatchObject({
+      status: "reaped",
+      reapedReason: "cascade",
+    });
   });
 
   it("deleteByTaskId reaps a child whose row a create in flight inserted during the proxy's teardown", async () => {
@@ -1932,6 +1956,36 @@ describe("LocalDockerSandboxClient — reconcileCrashedInstances", () => {
     const result = await sandbox.reconcileCrashedInstances(current.id);
     expect(result.orphansReaped).toBe(1);
     expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
+    expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+  });
+
+  it("reaps a fresh rowless container a crashed create left under a prior open instance", async () => {
+    const crashed = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
+    const { docker, container } = mockDockerFacade();
+    const fresh = containerInfoStub("docker-crashed-create", {
+      [LABEL_MANAGED]: "true",
+      [LABEL_INSTANCE]: crashed.id,
+    });
+    Object.defineProperty(fresh, "Created", {
+      value: Math.floor(Date.now() / 1000),
+      configurable: true,
+    });
+    docker.listContainers.mockResolvedValue([fresh]);
+    container.kill.mockResolvedValue(undefined);
+    container.remove.mockResolvedValue(undefined);
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: current.id,
+    });
+
+    const result = await sandbox.reconcileCrashedInstances(current.id);
+
+    expect(result.orphansReaped).toBe(1);
+    expect(docker.getContainer).toHaveBeenCalledWith("docker-crashed-create");
     expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
   });
 

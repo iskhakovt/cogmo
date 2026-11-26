@@ -26,6 +26,7 @@ import {
   respondJson,
   respondRejection,
 } from "./http-io.js";
+import type { CreateAdmission } from "./in-flight-creates.js";
 import { daemonFailed, type ProxyRejection } from "./rejection.js";
 import { createdId } from "./response-filters.js";
 
@@ -45,6 +46,8 @@ export interface CreateForward {
    * container has been removed, or left to the orphan pass.
    */
   record(dockerId: string): Promise<Result<void, ProxyRejection>>;
+  /** The create's admission, held from its checks to its answer. */
+  admission: CreateAdmission;
 }
 
 /**

@@ -1,3 +1,10 @@
+/**
+ * `storeChildContainers` as a deliberate cross-module test: the adapter
+ * over its use cases and the sandbox store on PGlite, unmocked, with only
+ * the daemon stubbed, so each port method is checked for the rows it
+ * leaves behind.
+ */
+
 import { match } from "ts-pattern";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -77,6 +84,67 @@ describe("storeChildContainers", () => {
       expect((await tx((trx) => store.getContainer(trx, row.id)))?.status).toBe("exited");
     },
   );
+
+  it("moves a removed child to exited from running when a start moved it after the ownership read", async () => {
+    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
+    const read = await child("starting");
+    await tx((trx) =>
+      store.transitionContainerStatus(trx, {
+        id: read.id,
+        at: new Date(),
+        from: "starting",
+        to: "running",
+      }),
+    );
+
+    const removed = await children.removed(read);
+
+    expect(removed.isOk()).toBe(true);
+    expect((await tx((trx) => store.getContainer(trx, read.id)))?.status).toBe("exited");
+  });
+
+  it("writes exited_at and leaves started_at null for a child removed before it started", async () => {
+    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
+    const row = await child("starting");
+
+    await children.removed(row);
+
+    const after = await tx((trx) => store.getContainer(trx, row.id));
+    expect(after?.exitedAt).toBeInstanceOf(Date);
+    expect(after?.startedAt).toBeNull();
+  });
+
+  it("leaves a removed child that a reap finished first reaped", async () => {
+    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
+    const read = await child("running");
+    await tx((trx) =>
+      store.transitionContainerStatus(trx, {
+        id: read.id,
+        at: new Date(),
+        to: "reaped",
+        reason: "cascade",
+      }),
+    );
+
+    const removed = await children.removed(read);
+
+    expect(removed.isOk()).toBe(true);
+    expect(await tx((trx) => store.getContainer(trx, read.id))).toMatchObject({
+      status: "reaped",
+      reapedReason: "cascade",
+    });
+  });
+
+  it("lets a start that finds its row stale while still starting reject, as the bug it is", async () => {
+    const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });
+    const row = await child("starting");
+    vi.spyOn(store, "transitionContainerStatus").mockResolvedValueOnce({
+      kind: "stale",
+      status: "starting",
+    });
+
+    await expect(children.started(row)).rejects.toThrow(/stale/);
+  });
 
   it("writes nothing for a removed child whose row is already exited", async () => {
     const children = storeChildContainers({ store, runInTx: tx, docker: stubDocker() });

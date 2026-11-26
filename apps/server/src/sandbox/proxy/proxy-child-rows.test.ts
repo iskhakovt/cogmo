@@ -1,18 +1,21 @@
 /**
- * Child rows (design/sandbox.md → Proxy Design → Child containers): the
+ * Child rows (design/sandbox.md → Proxy Design → Child containers), as a
+ * deliberate cross-module test, which the design's test plan names: the
  * proxy in front of a fake daemon, with its `ContainerRows` and
- * `ChildContainers` over the sandbox store on PGlite. The daemon creates
- * children with fresh ids it then resolves, and answers start, stop, kill
- * and DELETE 204, as the daemon does.
+ * `ChildContainers` over the sandbox store on PGlite, and for teardown the
+ * supervisor too, none of them mocked. The daemon creates children with
+ * fresh ids it then resolves, and answers start, stop, kill and DELETE 204,
+ * as the daemon does.
  */
 
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Docker from "dockerode";
 import { sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { Database, Transactor } from "../../db/index.js";
 import { expectDefined } from "../../test/assertions.js";
@@ -31,6 +34,7 @@ import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleSandboxStore } from "../store/index.js";
 import { storeChildContainers } from "../store-child-containers.js";
 import { storeContainerRows } from "../store-container-rows.js";
+import { LocalDockerSandboxClient } from "../supervisor.js";
 import type { ResourceLimits } from "../types.js";
 import { CogmoSocketProxy } from "./index.js";
 import type { TaskScope } from "./types.js";
@@ -69,8 +73,16 @@ const containers: FakeContainer[] = [];
 const createdIds: string[] = [];
 /** Runs before the daemon answers a child's start, as another path would. */
 let onStart: (dockerId: string) => Promise<void>;
+/** Runs before the daemon answers a child's DELETE. */
+let onRemove: (dockerId: string) => Promise<void>;
 /** Holds the daemon's answer to a create until it resolves. */
 let createGate: Promise<void>;
+/**
+ * Holds each child write until it resolves, before its transaction opens:
+ * PGlite runs one transaction at a time, so a gate inside one would hold
+ * every other read too.
+ */
+let childWriteGate: Promise<void>;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
@@ -98,8 +110,7 @@ beforeEach(async () => {
   );
   scope = {
     taskId: TASK_ID,
-    parentContainerRowId: own.id,
-    parentDockerId: OWN_DOCKER_ID,
+    anchor: { rowId: own.id, dockerId: OWN_DOCKER_ID },
     parentDepth: 0,
     runtime: "sysbox-runc",
     cgroupParent: "cogmo-task-abc.slice",
@@ -114,7 +125,9 @@ beforeEach(async () => {
   });
   createdIds.splice(0, createdIds.length);
   onStart = async () => {};
+  onRemove = async () => {};
   createGate = Promise.resolve();
+  childWriteGate = Promise.resolve();
   baseDir = await mkdtemp(join(tmpdir(), "cogmo-proxy-child-rows-"));
   daemon = await startFakeDockerDaemon(join(baseDir, "docker.sock"), childDaemon());
   proxy = await CogmoSocketProxy.create({
@@ -123,7 +136,10 @@ beforeEach(async () => {
     containerRows: storeContainerRows({ store, runInTx: tx }),
     childContainers: storeChildContainers({
       store,
-      runInTx: tx,
+      runInTx: async (cb) => {
+        await childWriteGate;
+        return tx(cb);
+      },
       docker: new Docker({ socketPath: daemon.socketPath }),
     }),
   });
@@ -171,10 +187,18 @@ function childDaemon(): FakeDaemonResponder {
     }
     const removed = /^\/containers\/([0-9a-f]{64})$/.exec(path);
     if (req.method === "DELETE" && removed?.[1] !== undefined) {
-      const at = containers.findIndex((c) => c.id === removed[1]);
-      if (at !== -1) containers.splice(at, 1);
-      res.writeHead(204);
-      res.end();
+      const id = removed[1];
+      void onRemove(id).then(() => {
+        const at = containers.findIndex((c) => c.id === id);
+        if (at !== -1) containers.splice(at, 1);
+        res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
+    // The supervisor's runtime check reads the daemon's runtimes.
+    if (req.method === "GET" && path === "/info") {
+      respondJson(res, 200, { Runtimes: { runc: { path: "runc" } }, SecurityOptions: [] });
       return;
     }
     api(req, res, raw);
@@ -199,13 +223,53 @@ function received(): string[] {
   return daemon.requests().map((r) => `${r.method} ${r.url}`);
 }
 
+/** Send `method path` on a fresh connection, to be hung up once the daemon has it. */
+function sendRaw(method: string, path: string): { hangUp: () => void } {
+  const client = net.createConnection({ path: socket });
+  client.on("error", () => {});
+  client.write(`${method} ${path} HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n`);
+  return { hangUp: () => client.destroy() };
+}
+
+/** Insert a child row of the task's own row in `status`, whose container the daemon has or not. */
+async function insertChildRow(
+  n: number,
+  status: keyof typeof CHILD_STATUS,
+  onDaemon: "present" | "gone",
+): Promise<void> {
+  const dockerId = createHash("sha256").update(`row-${n}`).digest("hex");
+  if (onDaemon === "present") containers.push({ id: dockerId, name: `row-${n}`, labels: {} });
+  await tx(async (trx) => {
+    const row = await store.insertContainer(trx, {
+      dockerId,
+      parentId: expectDefined(scope.anchor, "the scope's anchor").rowId,
+      rootTaskId: TASK_ID,
+      depth: 1,
+      image: IMAGE,
+      runtime: "sysbox-runc",
+      labels: {},
+      resourceLimits: LIMITS,
+      ttlExpiresAt: TTL,
+      instanceId: scope.instanceId,
+    });
+    const { reapedReason } = CHILD_STATUS[status];
+    await trx.execute(
+      sql`UPDATE containers SET status = ${status}, reaped_reason = ${reapedReason} WHERE id = ${row.id}`,
+    );
+  });
+}
+
+function creates(): string[] {
+  return received().filter((r) => r.startsWith("POST /containers/create"));
+}
+
 describe("child rows", () => {
   it("records a created child as a starting row with the scope's lineage", async () => {
     const id = await createChild({ Image: IMAGE, HostConfig: { Memory: GIB / 2 } });
 
     const row = expectDefined(await rowOf(id), "the child's row");
     expect(row).toMatchObject({
-      parentId: scope.parentContainerRowId,
+      parentId: expectDefined(scope.anchor, "the scope's anchor").rowId,
       rootTaskId: TASK_ID,
       depth: 1,
       image: IMAGE,
@@ -313,37 +377,60 @@ describe("child rows", () => {
   });
 
   it("denies the 17th live child, counting no exited or reaped one", async () => {
-    const insertChildRow = (n: number, status: keyof typeof CHILD_STATUS) =>
-      tx(async (trx) => {
-        const row = await store.insertContainer(trx, {
-          dockerId: `child-row-${n}`,
-          parentId: scope.parentContainerRowId,
-          rootTaskId: TASK_ID,
-          depth: 1,
-          image: IMAGE,
-          runtime: "sysbox-runc",
-          labels: {},
-          resourceLimits: LIMITS,
-          ttlExpiresAt: TTL,
-          instanceId: scope.instanceId,
-        });
-        const { reapedReason } = CHILD_STATUS[status];
-        await trx.execute(
-          sql`UPDATE containers SET status = ${status}, reaped_reason = ${reapedReason} WHERE id = ${row.id}`,
-        );
-      });
-    for (let n = 0; n < 15; n += 1) await insertChildRow(n, n % 2 === 0 ? "running" : "starting");
-    await insertChildRow(100, "exited");
-    await insertChildRow(101, "reaped");
+    for (let n = 0; n < 15; n += 1) {
+      await insertChildRow(n, n % 2 === 0 ? "running" : "starting", "present");
+    }
+    await insertChildRow(100, "exited", "gone");
+    await insertChildRow(101, "reaped", "gone");
 
     await createChild({ Image: IMAGE });
-    const creates = () => received().filter((r) => r.startsWith("POST /containers/create"));
     expect(creates()).toHaveLength(1);
 
     const r = await send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
 
     expect(r.status, r.body).toBe(403);
     expect(creates()).toHaveLength(1);
+  });
+
+  it("moves children the daemon no longer has to exited before it decides the cap", async () => {
+    // `docker run --rm` children: auto-removed, never removed through the proxy.
+    for (let n = 0; n < 16; n += 1) await insertChildRow(n, "running", "gone");
+
+    const id = await createChild({ Image: IMAGE });
+
+    const rows = await tx((trx) => store.listContainersForTask(trx, TASK_ID));
+    expect(rows.filter((row) => row.depth === 1 && row.status === "exited")).toHaveLength(16);
+    expect((await rowOf(id))?.status).toBe("starting");
+  });
+
+  it("counts a child that exited but was not removed, which the daemon still has", async () => {
+    for (let n = 0; n < 16; n += 1) await insertChildRow(n, "running", "present");
+
+    const r = await send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+
+    expect(r.status, r.body).toBe(403);
+    const rows = await tx((trx) => store.listContainersForTask(trx, TASK_ID));
+    expect(rows.filter((row) => row.status === "running")).toHaveLength(16);
+  });
+
+  it("counts a create in flight, so the second of two concurrent creates past 15 live children is denied", async () => {
+    for (let n = 0; n < 15; n += 1) await insertChildRow(n, "running", "present");
+    const released = Promise.withResolvers<void>();
+    createGate = released.promise;
+
+    const first = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+    try {
+      await vi.waitFor(() => expect(creates()).toHaveLength(1));
+      const second = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(creates()).toHaveLength(1);
+      released.resolve();
+      expect((await second).status).toBe(403);
+      expect((await first).status).toBe(201);
+    } finally {
+      released.resolve();
+    }
   });
 
   it("records a child whose create is in flight when the task is torn down", async () => {
@@ -366,5 +453,100 @@ describe("child rows", () => {
     const child = expectDefined(createdIds.at(-1), "the created child");
     expect((await rowOf(child))?.status).toBe("starting");
     expect((await creating).status).toBe(201);
+  });
+});
+
+describe("a client that hangs up once the daemon has its request", () => {
+  it("still has its child's row moved to running once the daemon has started it", async () => {
+    const id = await createChild({ Image: IMAGE });
+    const answer = Promise.withResolvers<void>();
+    onStart = () => answer.promise;
+    const { hangUp } = sendRaw("POST", `/containers/${id}/start`);
+    await vi.waitFor(() => expect(received()).toContain(`POST /containers/${id}/start`));
+
+    hangUp();
+    // The proxy sees the hang-up before the daemon answers.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    answer.resolve();
+
+    await vi.waitFor(async () => expect((await rowOf(id))?.status).toBe("running"));
+  });
+
+  it("still has a child the daemon started under a reaped row killed and removed", async () => {
+    const id = await createChild({ Image: IMAGE });
+    const answer = Promise.withResolvers<void>();
+    onStart = async (dockerId) => {
+      await answer.promise;
+      await db.execute(
+        sql`UPDATE containers SET status = 'reaped', reaped_reason = 'ttl_expired', exited_at = now() WHERE docker_id = ${dockerId}`,
+      );
+    };
+    const { hangUp } = sendRaw("POST", `/containers/${id}/start`);
+    await vi.waitFor(() => expect(received()).toContain(`POST /containers/${id}/start`));
+
+    hangUp();
+    // The proxy sees the hang-up before the daemon answers.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    answer.resolve();
+
+    await vi.waitFor(() =>
+      expect(received()).toEqual(
+        expect.arrayContaining([
+          `POST /containers/${id}/kill?signal=SIGTERM`,
+          `DELETE /containers/${id}?force=true&v=true`,
+        ]),
+      ),
+    );
+  });
+
+  it("still has its removed child's row moved to exited", async () => {
+    const id = await createChild({ Image: IMAGE });
+    const answer = Promise.withResolvers<void>();
+    onRemove = () => answer.promise;
+    const { hangUp } = sendRaw("DELETE", `/containers/${id}?force=1`);
+    await vi.waitFor(() => expect(received()).toContain(`DELETE /containers/${id}?force=1&v=true`));
+
+    hangUp();
+    // The proxy sees the hang-up before the daemon answers.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    answer.resolve();
+
+    await vi.waitFor(async () => expect((await rowOf(id))?.status).toBe("exited"));
+  });
+});
+
+describe("two teardowns of one task", () => {
+  it("both wait for a create the daemon has answered before either cascade lists the task's rows", async () => {
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker: new Docker({ socketPath: daemon.socketPath }),
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: scope.instanceId,
+      proxy,
+    });
+    const inserted = Promise.withResolvers<void>();
+    childWriteGate = inserted.promise;
+    const creating = send("POST", "/containers/create", JSON.stringify({ Image: IMAGE }));
+    await vi.waitFor(() => expect(creates()).toHaveLength(1));
+    // The daemon has answered, and the insert waits at its gate.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // From here, only a cascade lists the task's rows.
+    const listed = vi.spyOn(store, "listContainersForTask");
+    try {
+      const first = sandbox.deleteByTaskId(TASK_ID);
+      const second = sandbox.deleteByTaskId(TASK_ID);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(listed).not.toHaveBeenCalled();
+
+      inserted.resolve();
+      await Promise.all([first, second]);
+      expect((await creating).status).toBe(201);
+      const child = expectDefined(createdIds.at(-1), "the created child");
+      expect(await rowOf(child)).toMatchObject({ status: "reaped", reapedReason: "cascade" });
+    } finally {
+      inserted.resolve();
+      listed.mockRestore();
+    }
   });
 });

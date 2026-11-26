@@ -131,8 +131,7 @@ export const TASK_ROWS: ReadonlyArray<TaskContainerRow> = [
 
 export const SCOPE: TaskScope = {
   taskId: TASK_ID,
-  parentContainerRowId: OWN_ROW.id,
-  parentDockerId: OWN.id,
+  anchor: { rowId: OWN_ROW.id, dockerId: OWN.id },
   parentDepth: 0,
   runtime: "sysbox-runc",
   cgroupParent: "cogmo-task-abc.slice",
@@ -144,8 +143,7 @@ export const SCOPE: TaskScope = {
 export const SIBLING_SCOPE: TaskScope = {
   ...SCOPE,
   taskId: SIBLING_TASK_ID,
-  parentContainerRowId: SIBLING_ROW.id,
-  parentDockerId: SIBLING.id,
+  anchor: { rowId: SIBLING_ROW.id, dockerId: SIBLING.id },
 };
 
 const ErrorSchema = z.object({ message: z.string() });
@@ -217,6 +215,8 @@ export function useProxyHarness(): ProxyHarness {
     children.record.mockReturnValue(okAsync(undefined));
     children.started.mockReturnValue(okAsync({ kind: "running" }));
     children.removed.mockReturnValue(okAsync(undefined));
+    // The daemon has every child the rows name.
+    children.reconcile.mockImplementation((live) => okAsync(live));
     const proxy = await CogmoSocketProxy.create({
       socketDir: join(baseDir, "sockets"),
       hostDockerSocket: daemon.socketPath,

@@ -6,33 +6,39 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
+import { match, P } from "ts-pattern";
+import { z } from "zod";
+import { admitWithinCap, type ChildCapContext } from "./child-cap.js";
 import type { CreateForward } from "./create-forward.js";
 import { applyContainerCreatePolicy } from "./create-policy.js";
 import type { Forward } from "./forward.js";
-import {
-  type OwnedContainers,
-  type OwnershipLookups,
-  ownedContainer,
-  ownedContainers,
-} from "./ownership.js";
-import { denied, type ProxyRejection } from "./rejection.js";
+import { type OwnershipLookups, ownedContainer, ownedContainers } from "./ownership.js";
+import { denied, type ProxyRejection, unavailable } from "./rejection.js";
 import { withQuery } from "./request-path.js";
 import type { ContainerTarget } from "./router.js";
-import type { ChildRecord, DaemonLookups, TaskContainerRow, TaskScope } from "./types.js";
-
-/**
- * The live children a task may hold: rows at depth ≥ 1 in `starting` or
- * `running`. The count is read before the forward, so two concurrent
- * creates can land one past it, which is benign at single-user scale
- * (store-pattern.md → admission caps).
- */
-const MAX_LIVE_CHILDREN = 16;
+import type {
+  ChildRecord,
+  DaemonLookups,
+  TaskAnchor,
+  TaskContainerRow,
+  TaskScope,
+} from "./types.js";
 
 /** The daemon's answers to a start that leaves the container running: started, or already running. */
 const STARTED_STATUSES: ReadonlySet<number> = new Set([204, 304]);
 const REMOVED_STATUS = 204;
 
-export interface ChildContext extends OwnershipLookups {
+/**
+ * The start bodies forwarded, with no body: `null` and `{}`, which clients
+ * send (the Ruby docker-api client sends `{}`, dockerode JSON once options
+ * are set) and the daemon reads as nothing.
+ */
+const EmptyStartBodySchema = z.union([z.null(), z.strictObject({})]);
+
+/** The form values moby's `httputils.BoolValue` reads as false, after trimming and lower-casing. */
+const FALSE_FORM_VALUES: ReadonlySet<string> = new Set(["", "0", "no", "false", "none"]);
+
+export interface ChildContext extends OwnershipLookups, ChildCapContext {
   scope: TaskScope;
   /** The daemon reads the container create policy needs. */
   createLookups: DaemonLookups;
@@ -59,20 +65,24 @@ export async function planContainerCreate(
   query: URLSearchParams,
   ctx: ChildContext,
 ): Promise<Result<CreateForward, ProxyRejection>> {
+  const { scope } = ctx;
+  const anchor = anchorOf(scope);
+  if (anchor.isErr()) return err(anchor.error);
   const body = await ctx.readBody();
   if (body.isErr()) return err(body.error);
   const created = await applyContainerCreatePolicy(
     { body: body.value, query },
-    ctx.scope,
+    { scope, anchor: anchor.value },
     ctx.createLookups,
   );
   if (created.isErr()) return err(created.error);
-  const { scope } = ctx;
-  const owned = (await ownedContainers(ctx)).andThen(withinChildCap);
-  return owned.map(({ task }) => {
+  const owned = await ownedContainers(ctx);
+  if (owned.isErr()) return err(owned.error);
+  const admitted = await admitWithinCap(owned.value.liveChildren, ctx);
+  return admitted.map((admission) => {
     const child: Omit<ChildRecord, "dockerId"> = {
       ...created.value.child,
-      parentId: task.id,
+      parentId: owned.value.task.id,
       rootTaskId: scope.taskId,
       depth: scope.parentDepth + 1,
       runtime: scope.runtime,
@@ -83,21 +93,28 @@ export async function planContainerCreate(
       path: withQuery(`${versionPrefix}/containers/create`, created.value.query),
       body: created.value.body,
       record: (dockerId) => ctx.recordChild({ ...child, dockerId }),
+      admission,
     };
   });
 }
 
-function withinChildCap(owned: OwnedContainers): Result<OwnedContainers, ProxyRejection> {
-  return owned.liveChildren >= MAX_LIVE_CHILDREN
-    ? err(denied(`a container create past the task's ${MAX_LIVE_CHILDREN} live children`))
-    : ok(owned);
+/** The task's depth-0 container, which a child's labels and row name; none before its row exists. */
+function anchorOf(scope: TaskScope): Result<TaskAnchor, ProxyRejection> {
+  return match(scope.anchor)
+    .with(
+      null,
+      (): Result<TaskAnchor, ProxyRejection> =>
+        err(unavailable("the task container has no live row")),
+    )
+    .with(P.nonNullable, (anchor) => ok(anchor))
+    .exhaustive();
 }
 
 /**
- * A child's start, sent with no body: a body is the `HostConfig` of API
- * versions before 1.24, which the daemon refuses past seven bytes and
- * ignores below that. Once the daemon has started the child, its row moves
- * to `running`.
+ * A child's start, sent with no body. A body is the `HostConfig` of API
+ * versions before 1.24, which the daemon refuses past seven bytes: `null`
+ * and `{}` mean nothing and are accepted, and anything else is denied.
+ * Once the daemon has started the child, its row moves to `running`.
  */
 export async function planChildStart(
   target: ContainerTarget,
@@ -106,7 +123,7 @@ export async function planChildStart(
 ): Promise<Result<Forward, ProxyRejection>> {
   const body = await ctx.readBody();
   if (body.isErr()) return err(body.error);
-  if (body.value.length > 0) return err(denied(`a body on ${target.route}`));
+  if (!isEmptyStartBody(body.value)) return err(denied(`a body on ${target.route}`));
   const owned = await ownedContainer(ctx, target);
   return owned.map(
     (child): Forward => ({
@@ -126,16 +143,17 @@ export async function planChildStart(
 
 /**
  * A child's removal, which takes its anonymous volumes with it (`v=true`).
- * `link` is denied: with it the daemon removes a legacy link and leaves the
- * container. Once the daemon has removed the child, its row moves to
- * `exited`.
+ * A true `link` is denied: with it the daemon removes a legacy link and
+ * leaves the container. A false one, which docker-py and
+ * testcontainers-python send, is forwarded. Once the daemon has removed
+ * the child, its row moves to `exited`.
  */
 export async function planChildRemove(
   target: ContainerTarget,
   query: URLSearchParams,
   ctx: ChildContext,
 ): Promise<Result<Forward, ProxyRejection>> {
-  if (query.has("link")) return err(denied(`the link query key on ${target.route}`));
+  if (formTrue(query.get("link"))) return err(denied(`a true link on ${target.route}`));
   const owned = await ownedContainer(ctx, target);
   const forwarded = new URLSearchParams(query);
   forwarded.set("v", "true");
@@ -155,4 +173,24 @@ export async function planChildRemove(
       },
     }),
   );
+}
+
+function isEmptyStartBody(body: Buffer): boolean {
+  const text = body.toString("utf8").trim();
+  if (text === "") return true;
+  try {
+    return EmptyStartBodySchema.safeParse(JSON.parse(text)).success;
+  } catch {
+    // Not JSON, so not one of the bodies that mean nothing.
+    return false;
+  }
+}
+
+/**
+ * A query value as moby's `httputils.BoolValue` reads it: absent, or one
+ * of its false values after trimming and lower-casing, is false; anything
+ * else is true. The daemon reads a key's first value, as `get` does.
+ */
+function formTrue(value: string | null): boolean {
+  return value !== null && !FALSE_FORM_VALUES.has(value.trim().toLowerCase());
 }

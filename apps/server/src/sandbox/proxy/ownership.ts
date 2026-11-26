@@ -1,8 +1,7 @@
 /**
  * Container ownership (design/sandbox.md → Proxy Design → Ownership). A
- * task owns its scope's own depth-0 row, the one whose id is
- * `TaskScope.parentContainerRowId`, and that row's children, read from the
- * store on every request. The task's `root_task_id` alone does not decide
+ * task owns its scope's own depth-0 row, the one `TaskScope.anchor` names,
+ * and that row's children, read from the store on every request. The task's `root_task_id` alone does not decide
  * it: coding teardown's salvage containers carry it at depth 0 too, and one
  * of them mounts the PAT. A ref is resolved through the daemon to its full
  * id and checked against the owned rows; the caller forwards the full id,
@@ -14,16 +13,16 @@
  */
 
 import { err, ok, type Result, type ResultAsync } from "neverthrow";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { denied, notFound, type ProxyRejection, unavailable } from "./rejection.js";
 import type { DepthRule } from "./router.js";
-import type { RefLookups, TaskContainerRow } from "./types.js";
+import type { RefLookups, TaskAnchor, TaskContainerRow } from "./types.js";
 
 export interface OwnershipLookups {
   /** The rows that carry the task's `root_task_id` and are not `reaped`; `unavailable` when the store read failed. */
   taskRows(): ResultAsync<ReadonlyArray<TaskContainerRow>, ProxyRejection>;
-  /** The scope's own depth-0 row, `TaskScope.parentContainerRowId`; `null` before it exists. */
-  taskContainerRowId: string | null;
+  /** The scope's own depth-0 container, `TaskScope.anchor`; `null` before its row exists. */
+  anchor: TaskAnchor | null;
   refs: RefLookups;
 }
 
@@ -36,7 +35,7 @@ export interface OwnedContainers {
    * The task's rows at depth ≥ 1 in `starting` or `running`, whichever
    * depth-0 row they hang from: what the child cap counts.
    */
-  liveChildren: number;
+  liveChildren: ReadonlyArray<TaskContainerRow>;
 }
 
 /**
@@ -47,16 +46,24 @@ export interface OwnedContainers {
 export async function ownedContainers(
   lookups: OwnershipLookups,
 ): Promise<Result<OwnedContainers, ProxyRejection>> {
-  const { taskContainerRowId } = lookups;
-  if (taskContainerRowId === null) return err(noLiveRow());
-  const rows = await lookups.taskRows();
-  return rows.andThen((candidates) => {
-    const task = candidates.find((row) => row.id === taskContainerRowId);
-    if (task === undefined) return err(noLiveRow());
-    const all = candidates.filter((row) => row.id === task.id || row.parentId === task.id);
-    const liveChildren = candidates.filter((row) => row.parentId !== null && isLive(row)).length;
-    return ok({ task, all, liveChildren });
-  });
+  return match(lookups.anchor)
+    .with(null, async () => err(noLiveRow()))
+    .with(P.nonNullable, async ({ rowId }) => {
+      const rows = await lookups.taskRows();
+      return rows.andThen((candidates) => owned(candidates, rowId));
+    })
+    .exhaustive();
+}
+
+function owned(
+  candidates: ReadonlyArray<TaskContainerRow>,
+  rowId: string,
+): Result<OwnedContainers, ProxyRejection> {
+  const task = candidates.find((row) => row.id === rowId);
+  if (task === undefined) return err(noLiveRow());
+  const all = candidates.filter((row) => row.id === task.id || row.parentId === task.id);
+  const liveChildren = candidates.filter((row) => row.parentId !== null && isLive(row));
+  return ok({ task, all, liveChildren });
 }
 
 function noLiveRow(): ProxyRejection {

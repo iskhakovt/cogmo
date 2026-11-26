@@ -117,8 +117,38 @@ describe("container ownership", () => {
     ]);
   });
 
-  it.each(["?link=true", "?link=0", "?force=1&link=1"])(
-    "denies a child DELETE carrying the link query key: %s",
+  it.each([
+    // docker-py and testcontainers-python
+    ["?v=True&link=False&force=True", "?v=true&link=False&force=True"],
+    ["?link=0", "?link=0&v=true"],
+    ["?link=no", "?link=no&v=true"],
+    ["?link=NONE", "?link=NONE&v=true"],
+    ["?link=", "?link=&v=true"],
+    ["?link=%20false%20", "?link=+false+&v=true"],
+    ["?link=0&link=1", "?link=0&link=1&v=true"],
+  ])(
+    "forwards a child DELETE whose link value is false, as the daemon reads it: %s",
+    async (query, forwarded) => {
+      const r = await h.send("DELETE", `/containers/own-child${query}`);
+
+      expect(r.status, r.body).toBe(200);
+      expect(h.received()).toEqual([
+        resolveOf("own-child"),
+        `DELETE /containers/${CHILD.id}${forwarded}`,
+      ]);
+    },
+  );
+
+  it.each([
+    "?link=true",
+    "?link=True",
+    "?link=1",
+    "?link=yes",
+    "?link=x",
+    "?force=1&link=1",
+    "?link=1&link=0",
+  ])(
+    "denies a child DELETE whose link value is true, as the daemon reads it: %s",
     async (query) => {
       const r = await h.send("DELETE", `/containers/own-child${query}`);
 
@@ -128,9 +158,23 @@ describe("container ownership", () => {
   );
 
   it.each([
-    ["an empty JSON object", "{}"],
+    ["no body", undefined],
+    ["an empty JSON object, as the Ruby docker-api client sends", "{}"],
+    ["null", "null"],
+  ])("forwards a child start with %s, with no body", async (_label, body) => {
+    const r = await h.send("POST", "/containers/own-child/start", body);
+
+    expect(r.status, r.body).toBe(200);
+    expect(h.received()).toEqual([resolveOf("own-child"), `POST /containers/${CHILD.id}/start`]);
+    expect(h.daemon.requests().at(-1)?.body).toBe("");
+  });
+
+  it.each([
     ["a pre-1.24 HostConfig", JSON.stringify({ HostConfig: { Privileged: true } })],
-  ])("denies a child start with a body: %s", async (_label, body) => {
+    ["a list", "[]"],
+    ["a string", '"x"'],
+    ["text that is not JSON", "x"],
+  ])("denies a child start with a body that is %s", async (_label, body) => {
     const r = await h.send("POST", "/containers/own-child/start", body);
 
     h.expectRejected(r, 403, []);

@@ -108,10 +108,13 @@ export function forward(
     respondDaemonFailed(res, cause);
   });
   // A client that hangs up before its answer is complete, even before the
-  // daemon has answered at all (a `wait`), closes the daemon request with it.
-  res.once("close", () => {
-    if (!res.writableFinished) outgoing.destroy(hungUp);
-  });
+  // daemon has answered at all (a `wait`), closes the daemon request with
+  // it; a child's start or removal goes on, since its row follows the answer.
+  if (boundToClient(plan.response)) {
+    res.once("close", () => {
+      if (!res.writableFinished) outgoing.destroy(hungUp);
+    });
+  }
   match(plan.body)
     .with({ kind: "piped" }, () => req.pipe(outgoing))
     .with({ kind: "json" }, ({ bytes }) => outgoing.end(bytes))
@@ -194,8 +197,8 @@ function relay(
   res: http.ServerResponse,
   how: ResponseRelay,
 ): void {
-  // A client that is gone gets nothing.
-  if (res.destroyed) {
+  // A client that is gone gets nothing, but a child's row still follows the answer.
+  if (res.destroyed && boundToClient(how)) {
     reply.resume();
     return;
   }
@@ -299,8 +302,18 @@ function relayBuffered(
   });
 }
 
+/** Whether a forward ends with its client: all but a child's start or removal. */
+function boundToClient(how: ResponseRelay): boolean {
+  return match(how)
+    .with({ kind: "piped" }, { kind: "container_list" }, { kind: "events" }, () => true)
+    .with({ kind: "exec_created" }, () => true)
+    .with({ kind: "child_transition" }, () => false)
+    .exhaustive();
+}
+
 /** A forward whose daemon connection failed: `daemon_failed` if nothing was sent yet. */
 function respondDaemonFailed(res: http.ServerResponse, cause: Error): void {
+  if (res.destroyed) return;
   if (res.headersSent) {
     res.destroy(cause);
     return;

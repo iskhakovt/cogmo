@@ -1,73 +1,111 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { expectOk } from "../../test/assertions.js";
 import { InFlightCreates } from "./in-flight-creates.js";
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
+/** Admit a create on `creates` and run `work` under it. */
+function runAdmitted(creates: InFlightCreates, work: Promise<void>): Promise<void> {
+  return expectOk(creates.admit()).run(() => work);
+}
+
+/** Whether `promise` has settled once timers and microtasks up to `ms` have run. */
+async function settledWithin(promise: Promise<void>, ms: number): Promise<boolean> {
+  let settled = false;
+  void promise.then(() => {
+    settled = true;
+  });
+  await vi.advanceTimersByTimeAsync(ms);
+  return settled;
+}
+
 describe("InFlightCreates", () => {
-  it("is settled at once with no create in flight", async () => {
+  it("is settled at once with no create admitted", async () => {
     vi.useFakeTimers();
-    let settled = false;
-    void new InFlightCreates().settled(30_000).then(() => {
-      settled = true;
-    });
 
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(settled).toBe(true);
+    expect(await settledWithin(new InFlightCreates().settled(30_000), 0)).toBe(true);
   });
 
-  it("is settled once every create tracked has settled", async () => {
+  it("counts a create from its admission until its work settles", async () => {
+    const creates = new InFlightCreates();
+    const work = Promise.withResolvers<void>();
+    const admission = expectOk(creates.admit());
+    expect(creates.admitted).toBe(1);
+
+    const ran = admission.run(() => work.promise);
+    work.resolve();
+    await ran;
+
+    expect(creates.admitted).toBe(0);
+  });
+
+  it("ends an admission whose work rejects, and passes the rejection on", async () => {
+    const creates = new InFlightCreates();
+
+    await expect(
+      expectOk(creates.admit()).run(async () => {
+        throw new Error("a bug in the forward");
+      }),
+    ).rejects.toThrow("a bug in the forward");
+    expect(creates.admitted).toBe(0);
+  });
+
+  it("is settled once every create admitted has settled", async () => {
     vi.useFakeTimers();
     const creates = new InFlightCreates();
     const first = Promise.withResolvers<void>();
     const second = Promise.withResolvers<void>();
-    creates.track(first.promise);
-    creates.track(second.promise);
-    let settled = false;
-    void creates.settled(30_000).then(() => {
-      settled = true;
-    });
+    void runAdmitted(creates, first.promise);
+    void runAdmitted(creates, second.promise);
+    const settled = creates.settled(30_000);
 
     first.resolve();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(settled).toBe(false);
+    expect(await settledWithin(settled, 0)).toBe(false);
     second.resolve();
-    await vi.advanceTimersByTimeAsync(0);
 
-    expect(settled).toBe(true);
+    expect(await settledWithin(settled, 0)).toBe(true);
+  });
+
+  it("waits for an admission whose work has not started yet", async () => {
+    vi.useFakeTimers();
+    const creates = new InFlightCreates();
+    expectOk(creates.admit());
+
+    expect(await settledWithin(creates.settled(30_000), 29_999)).toBe(false);
   });
 
   it("stops waiting for a create still in flight after the given time", async () => {
     vi.useFakeTimers();
     const creates = new InFlightCreates();
-    creates.track(new Promise<void>(() => {}));
-    let settled = false;
-    void creates.settled(30_000).then(() => {
-      settled = true;
-    });
+    void runAdmitted(creates, new Promise<void>(() => {}));
+    const settled = creates.settled(30_000);
 
-    await vi.advanceTimersByTimeAsync(29_999);
-    expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-
-    expect(settled).toBe(true);
+    expect(await settledWithin(settled, 29_999)).toBe(false);
+    expect(await settledWithin(settled, 1)).toBe(true);
   });
 
-  it("forgets a settled create, so a later wait has nothing to wait for", async () => {
+  it("stops waiting once the creates are aborted", async () => {
     vi.useFakeTimers();
     const creates = new InFlightCreates();
-    creates.track(Promise.resolve());
-    await vi.advanceTimersByTimeAsync(0);
-    let settled = false;
-    void creates.settled(30_000).then(() => {
-      settled = true;
-    });
+    void runAdmitted(creates, new Promise<void>(() => {}));
+    const settled = creates.settled(30_000);
+    expect(await settledWithin(settled, 0)).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(0);
+    creates.abort(new Error("proxy is closed"));
 
-    expect(settled).toBe(true);
+    expect(await settledWithin(settled, 0)).toBe(true);
+  });
+
+  it("admits nothing once teardown has begun", () => {
+    const creates = new InFlightCreates();
+
+    creates.stopAdmitting();
+
+    const admitted = creates.admit();
+    expect(admitted.isErr() && admitted.error.kind).toBe("unavailable");
+    expect(creates.admitted).toBe(0);
   });
 
   it("aborts its signal with the reason given", () => {

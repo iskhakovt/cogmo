@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
+import { expectOk } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { DockerContainer, DockerFacade } from "./docker-facade.js";
 import { markChildRunning } from "./mark-child-running.js";
@@ -81,7 +82,7 @@ describe("markChildRunning", () => {
       { id, dockerId: "child-container", at: AT },
     );
 
-    expect(outcome).toEqual({ kind: "running" });
+    expect(expectOk(outcome)).toEqual({ kind: "running" });
     const row = await tx((trx) => store.getContainer(trx, id));
     expect(row).toMatchObject({ status: "running", startedAt: AT });
     expect(container.kill).not.toHaveBeenCalled();
@@ -96,7 +97,7 @@ describe("markChildRunning", () => {
       { id, dockerId: "child-container", at: AT },
     );
 
-    expect(outcome).toEqual({ kind: "running" });
+    expect(expectOk(outcome)).toEqual({ kind: "running" });
     expect((await tx((trx) => store.getContainer(trx, id)))?.startedAt).toBeNull();
     expect(container.kill).not.toHaveBeenCalled();
   });
@@ -112,7 +113,7 @@ describe("markChildRunning", () => {
         { id, dockerId: "child-container", at: AT },
       );
 
-      expect(outcome).toEqual({ kind: "finished" });
+      expect(expectOk(outcome)).toEqual({ kind: "finished" });
       expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
       expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
       expect((await tx((trx) => store.getContainer(trx, id)))?.status).toBe(status);
@@ -129,7 +130,7 @@ describe("markChildRunning", () => {
       { id, dockerId: "child-container", at: AT },
     );
 
-    expect(outcome).toEqual({ kind: "finished" });
+    expect(expectOk(outcome)).toEqual({ kind: "finished" });
     expect(container.remove).not.toHaveBeenCalled();
   });
 });

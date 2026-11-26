@@ -4,14 +4,15 @@
  * (design/sandbox.md → Proxy Design → Child containers). A failed insert is
  * `record_failed`, since its container is gone; a failed transition is
  * logged and the daemon's own answer stands, since every reap covers the
- * state the row is left in.
+ * state the row is left in; a failed reconcile is `unavailable`, since the
+ * cap cannot be decided.
  */
 
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import type { ChildContext } from "./child-plan.js";
-import { notFound, type ProxyRejection, recordFailed } from "./rejection.js";
+import { notFound, type ProxyRejection, recordFailed, unavailable } from "./rejection.js";
 import type { ChildContainers } from "./types.js";
 
 const log = logger.child({ component: "sandbox.proxy" });
@@ -19,7 +20,7 @@ const log = logger.child({ component: "sandbox.proxy" });
 export function childWrites(
   children: ChildContainers,
   taskId: string,
-): Pick<ChildContext, "recordChild" | "childStarted" | "childRemoved"> {
+): Pick<ChildContext, "recordChild" | "childStarted" | "childRemoved" | "reconcileChildren"> {
   return {
     recordChild: async (child) =>
       children
@@ -38,6 +39,11 @@ export function childWrites(
           return ok(undefined);
         },
       ),
+    reconcileChildren: async (live) =>
+      children.reconcile(live).mapErr(({ cause }): ProxyRejection => {
+        log.warn({ err: cause, taskId }, "child reconcile write failed");
+        return unavailable("the child reconcile failed");
+      }),
     childRemoved: async (child) =>
       (await children.removed(child)).match(
         () => undefined,

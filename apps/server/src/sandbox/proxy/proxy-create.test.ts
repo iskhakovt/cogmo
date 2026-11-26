@@ -37,10 +37,12 @@ const IMAGES: ReadonlyMap<string, FakeImage> = new Map([
   ["postgres:18-alpine", { id: POSTGRES_ALPINE_ID, env: ["PGDATA=/var/lib/pg"] }],
 ]);
 
+/** The task's depth-0 container. */
+const ANCHOR = { rowId: "019d0000-0000-7000-8000-00000000bbbb", dockerId: "docker-parent-abc" };
+
 const SCOPE: TaskScope = {
   taskId: "019d0000-0000-7000-8000-00000000aaaa",
-  parentContainerRowId: "019d0000-0000-7000-8000-00000000bbbb",
-  parentDockerId: "docker-parent-abc",
+  anchor: ANCHOR,
   parentDepth: 0,
   runtime: "sysbox-runc",
   cgroupParent: "cogmo-task-abc.slice",
@@ -90,8 +92,8 @@ beforeEach(async () => {
   containerRows.forTask.mockReturnValue(
     okAsync([
       {
-        id: expectDefined(SCOPE.parentContainerRowId, "the scope's row"),
-        dockerId: SCOPE.parentDockerId,
+        id: ANCHOR.rowId,
+        dockerId: ANCHOR.dockerId,
         parentId: null,
         status: "running",
       },
@@ -369,7 +371,7 @@ describe("create policy: labels and env", () => {
       "cogmo.managed": "true",
       "cogmo.instance": SCOPE.instanceId,
       "cogmo.root_task": SCOPE.taskId,
-      "cogmo.parent": SCOPE.parentDockerId,
+      "cogmo.parent": ANCHOR.dockerId,
       "cogmo.depth": "1",
     });
   });
@@ -1132,7 +1134,7 @@ describe("create policy: the query", () => {
         "cogmo.managed": "true",
         "cogmo.instance": SCOPE.instanceId,
         "cogmo.root_task": SCOPE.taskId,
-        "cogmo.parent": SCOPE.parentDockerId,
+        "cogmo.parent": ANCHOR.dockerId,
         "cogmo.depth": "1",
       },
       HostConfig: {
@@ -1184,7 +1186,7 @@ describe("create policy: the Docker CLI", () => {
         "cogmo.managed": "true",
         "cogmo.instance": SCOPE.instanceId,
         "cogmo.root_task": SCOPE.taskId,
-        "cogmo.parent": SCOPE.parentDockerId,
+        "cogmo.parent": ANCHOR.dockerId,
         "cogmo.depth": "1",
       },
       HostConfig: {

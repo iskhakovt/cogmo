@@ -232,14 +232,13 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     const proxy = spec.dockerSocket ? this.#proxy : undefined;
 
     // Pre-allocate the proxy socket so the task container can mount it at
-    // `/var/run/docker.sock` from the moment it starts. The task container's
-    // row and docker id aren't known yet — register with placeholders, then
-    // upsert below once the row exists.
+    // `/var/run/docker.sock` from the moment it starts. The task container
+    // has no row yet — register with no anchor, then upsert below once the
+    // row exists.
     const proxySocketPath = proxy
       ? await proxy.registerTask({
           taskId: spec.taskId,
-          parentContainerRowId: null,
-          parentDockerId: "",
+          anchor: null,
           parentDepth: 0,
           runtime,
           cgroupParent,
@@ -374,8 +373,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     if (proxy) {
       await proxy.registerTask({
         taskId: spec.taskId,
-        parentContainerRowId: containerRow.id,
-        parentDockerId: container.id,
+        anchor: { rowId: containerRow.id, dockerId: container.id },
         parentDepth: 0,
         runtime,
         cgroupParent,

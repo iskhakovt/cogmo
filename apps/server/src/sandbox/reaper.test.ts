@@ -389,6 +389,24 @@ describe("runReap — orphan pass", () => {
     expect(killCalls).toEqual(["c-fresh-dead"]);
   });
 
+  it("leaves a fresh rowless container labelled with a prior instance whose row is still open", async () => {
+    // A crash between the daemon's 201 and the insert leaves the instance row
+    // open, which counts as live until boot reconcile closes it.
+    const crashed = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 98 }));
+    const { docker, killCalls } = fakeDocker({
+      containers: [
+        {
+          Id: "c-crashed-create",
+          Created: createdAgo(10_000),
+          Labels: { ...labels(), "cogmo.instance": crashed.id },
+        },
+      ],
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.orphansReaped).toBe(0);
+    expect(killCalls).toEqual([]);
+  });
+
   it("does NOT reap a healthy container (live instance + DB row present)", async () => {
     const { docker, killCalls } = fakeDocker({
       containers: [{ Id: "c-good", Created: LONG_AGO, Labels: labels() }],

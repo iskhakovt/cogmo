@@ -13,13 +13,11 @@ export interface TaskScope {
   /** Cogmo `coding_tasks.id` — denormalized into `cogmo.root_task` label. */
   taskId: string;
   /**
-   * The `containers` row id of the supervisor-created depth-0 container,
-   * which the task's ownership is anchored to and a child's row names as
-   * its parent; `null` until that row exists.
+   * The supervisor-created depth-0 container the task's ownership is
+   * anchored to; `null` until its row exists, when every check that needs
+   * ownership, a create included, is `unavailable`.
    */
-  parentContainerRowId: string | null;
-  /** Docker id of the depth-0 task container — written into `cogmo.parent`. */
-  parentDockerId: string;
+  anchor: TaskAnchor | null;
   /** Depth of the parent container (0 for the task container itself). */
   parentDepth: number;
   /** OCI runtime injected onto every `POST /containers/create`. */
@@ -32,6 +30,14 @@ export interface TaskScope {
   resourceLimits: ResourceLimits;
   /** The task's TTL, which a child's row carries. */
   ttlExpiresAt: Date;
+}
+
+/** The task's depth-0 container: its row and its docker id, known together. */
+export interface TaskAnchor {
+  /** The `containers` row id, which a child's row names as its parent. */
+  readonly rowId: string;
+  /** The daemon's id, written into a child's `cogmo.parent` label. */
+  readonly dockerId: string;
 }
 
 export interface ProxyOptions {
@@ -119,6 +125,14 @@ export interface ChildContainers {
   started(child: TaskContainerRow): ResultAsync<ChildStartOutcome, StoreFailed>;
   /** `→ exited` once the daemon has removed the child at the task's request. */
   removed(child: TaskContainerRow): ResultAsync<void, StoreFailed>;
+  /**
+   * The live children the daemon still has. One it no longer has (a
+   * `docker run --rm` child removes itself, with no `DELETE` through the
+   * proxy) moves to `exited`, as the reaper's stale pass would move it.
+   */
+  reconcile(
+    children: ReadonlyArray<TaskContainerRow>,
+  ): ResultAsync<ReadonlyArray<TaskContainerRow>, StoreFailed>;
 }
 
 /** What the create policy reads from an image inspect. */

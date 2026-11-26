@@ -1,10 +1,11 @@
+import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { DockerFacade } from "./docker-facade.js";
 import { killAndRemoveContainer } from "./kill-and-remove-container.js";
-import type { ChildStartOutcome } from "./proxy/index.js";
-import type { SandboxStore } from "./store/index.js";
+import type { ChildStartOutcome, StoreFailed } from "./proxy/index.js";
+import type { ContainerTransitionResult, SandboxStore } from "./store/index.js";
 
 const log = logger.child({ component: "sandbox" });
 
@@ -21,23 +22,39 @@ interface MarkChildRunningDeps {
  * A row already `running` belongs to a child the task stopped and started
  * again, and nothing is written. A row that is `exited` or `reaped` was
  * finished by another path while the daemon started the container (a TTL
- * pass, the cascade, or the stale pass); no pass looks at a terminal row
- * again, so the container this start brought up is killed and removed. A
- * kill the daemon refuses is logged: the container then runs under a
- * terminal row until its instance row closes and the orphan pass takes it.
+ * pass, the cascade, or the stale pass); neither the TTL nor the stale pass
+ * looks at such a row again, so the container this start brought up is
+ * killed and removed. A kill the daemon refuses is logged: the container
+ * then runs under a finished row until the cascade, or until its instance
+ * row closes and the orphan pass takes it.
+ *
+ * A failed store write is `store_failed`; only the transition is caught, so
+ * an invariant violation after it stays a bug and rejects.
  */
 export async function markChildRunning(
   deps: MarkChildRunningDeps,
   args: { id: string; dockerId: string; at: Date },
-): Promise<ChildStartOutcome> {
-  const result = await deps.runInTx((tx) =>
-    deps.store.transitionContainerStatus(tx, {
-      id: args.id,
-      from: "starting",
-      to: "running",
-      at: args.at,
-    }),
+): Promise<Result<ChildStartOutcome, StoreFailed>> {
+  const written = await ResultAsync.fromPromise(
+    deps.runInTx((tx) =>
+      deps.store.transitionContainerStatus(tx, {
+        id: args.id,
+        from: "starting",
+        to: "running",
+        at: args.at,
+      }),
+    ),
+    (cause): StoreFailed => ({ kind: "store_failed", cause }),
   );
+  if (written.isErr()) return err(written.error);
+  return ok(await outcomeOf(deps, args, written.value));
+}
+
+async function outcomeOf(
+  deps: MarkChildRunningDeps,
+  args: { id: string; dockerId: string },
+  result: ContainerTransitionResult,
+): Promise<ChildStartOutcome> {
   return match(result)
     .with({ kind: "transitioned" }, async (): Promise<ChildStartOutcome> => {
       log.debug({ dockerId: args.dockerId }, "child container running");

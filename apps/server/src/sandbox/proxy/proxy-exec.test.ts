@@ -25,8 +25,7 @@ vi.mock("../../logger.js", () => ({ logger: { child: () => log } }));
 
 const SCOPE: TaskScope = {
   taskId: "019d0000-0000-7000-8000-00000000aaaa",
-  parentContainerRowId: "019d0000-0000-7000-8000-00000000bbbb",
-  parentDockerId: `ab${"0".repeat(62)}`,
+  anchor: { rowId: "019d0000-0000-7000-8000-00000000bbbb", dockerId: `ab${"0".repeat(62)}` },
   parentDepth: 0,
   runtime: "sysbox-runc",
   cgroupParent: "cogmo-task-abc.slice",
@@ -64,7 +63,7 @@ beforeEach(async () => {
     }),
   );
   const containerRows = mock<ContainerRows>();
-  const taskRow = expectDefined(SCOPE.parentContainerRowId, "the scope's row");
+  const taskRow = expectDefined(SCOPE.anchor, "the scope's anchor").rowId;
   containerRows.forTask.mockReturnValue(
     okAsync([
       { id: taskRow, dockerId: TASK_CONTAINER.id, parentId: null, status: "running" },

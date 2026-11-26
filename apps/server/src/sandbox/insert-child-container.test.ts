@@ -109,4 +109,38 @@ describe("insertChildContainer", () => {
     expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
     expect(container.remove).toHaveBeenCalledTimes(1);
   });
+
+  describe("an insert that commits and loses its acknowledgement", () => {
+    /** Commits the work, then fails as a connection lost before the commit's reply would. */
+    const lossy: Transactor = async (cb) => {
+      await tx(cb);
+      throw new Error("connection reset after commit");
+    };
+
+    it("removes the container, leaving a starting row over nothing for the stale pass", async () => {
+      const { docker, container } = stubDocker();
+      const child = await childOf();
+
+      const inserted = await insertChildContainer({ store, runInTx: lossy, docker }, child);
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
+      expect(container.remove).toHaveBeenCalledWith({ force: true, v: true });
+      const row = await tx((trx) => store.getContainerByDockerId(trx, "child-container"));
+      expect(row?.status).toBe("starting");
+    });
+
+    it("leaves the row and its container when the removal is refused", async () => {
+      const { docker, container } = stubDocker();
+      container.remove.mockRejectedValue(
+        Object.assign(new Error("daemon i/o"), { statusCode: 500 }),
+      );
+      const child = await childOf();
+
+      const inserted = await insertChildContainer({ store, runInTx: lossy, docker }, child);
+
+      expect(inserted._unsafeUnwrapErr()).toEqual({ kind: "record_failed" });
+      const row = await tx((trx) => store.getContainerByDockerId(trx, "child-container"));
+      expect(row?.status).toBe("starting");
+    });
+  });
 });
