@@ -8,12 +8,9 @@ import {
   type ReceiveOutcome,
   replyOutcome,
 } from "./receive-outcome.js";
-import { TokenRedactor } from "./token-redaction.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const TOKEN = "123456:AAsecret-tok_en";
-const ENCODED = encodeURIComponent(TOKEN);
-const redact = new TokenRedactor(TOKEN);
 
 const BOT_INFO: UserFromGetMe = {
   id: 1,
@@ -101,11 +98,11 @@ describe("replyOutcome", () => {
     ["a batch", { ok: true, result: [{ update_id: 7 }, { update_id: 8, message: {} }] }],
     ["an empty batch, a long-poll timeout", { ok: true, result: [] }],
   ])("reads %s as progress", (_, reply) => {
-    expect(replyOutcome(reply, redact)).toEqual({ kind: "batch" });
+    expect(replyOutcome(reply)).toEqual({ kind: "batch" });
   });
 
   it.each([401, 409])("leaves a %i to the supervisor", (code) => {
-    expect(replyOutcome({ ok: false, error_code: code, description: "x" }, redact)).toEqual({
+    expect(replyOutcome({ ok: false, error_code: code, description: "x" })).toEqual({
       kind: "supervised",
     });
   });
@@ -118,9 +115,7 @@ describe("replyOutcome", () => {
     [400, "client_error"],
     [404, "client_error"],
   ])("reads a %i as a retry (%s), coded by error_code", (code, cause) => {
-    expect(
-      replyOutcome({ ok: false, error_code: code, description: "Telegram says" }, redact),
-    ).toEqual({
+    expect(replyOutcome({ ok: false, error_code: code, description: "Telegram says" })).toEqual({
       kind: "retrying",
       cause,
       error: { code: String(code), detail: "Telegram says" },
@@ -144,18 +139,17 @@ describe("replyOutcome", () => {
     ["null", null, null],
     ["a string", "<html>", null],
   ])("reads %s as a bad reply, without progress", (_, reply, detail) => {
-    expect(replyOutcome(reply, redact)).toEqual(retrying("bad_reply", "unexpected-reply", detail));
+    expect(replyOutcome(reply)).toEqual(retrying("bad_reply", "unexpected-reply", detail));
   });
 
-  it("masks the token, raw and percent-encoded, in the description", () => {
-    const outcome = replyOutcome(
-      { ok: false, error_code: 502, description: `Bad Gateway for ${TOKEN} (${ENCODED})` },
-      redact,
-    );
+  it("keeps the description as detail, whatever it echoes, and never as code", () => {
+    const outcome = replyOutcome({
+      ok: false,
+      error_code: 502,
+      description: `Bad Gateway for ${TOKEN}`,
+    });
 
-    expect(outcome).toEqual(
-      retrying("server_error", "502", "Bad Gateway for <redacted> (<redacted>)"),
-    );
+    expect(outcome).toEqual(retrying("server_error", "502", `Bad Gateway for ${TOKEN}`));
   });
 });
 
@@ -274,7 +268,7 @@ describe("failureOutcome", () => {
 });
 
 describe("channelError", () => {
-  it("codes a Bot API refusal by its error_code, with its description masked", () => {
+  it("codes a Bot API refusal by its error_code, with its description as detail", () => {
     const refusal = new GrammyError(
       "Call to 'deleteWebhook' failed!",
       { ok: false, error_code: 404, description: `Not Found: ${TOKEN}` },
@@ -282,7 +276,7 @@ describe("channelError", () => {
       {},
     );
 
-    expect(channelError(refusal, redact)).toEqual({ code: "404", detail: "Not Found: <redacted>" });
+    expect(channelError(refusal)).toEqual({ code: "404", detail: `Not Found: ${TOKEN}` });
   });
 
   it("codes a refusal whose error_code isn't a number as unknown, with no description", async () => {
@@ -291,17 +285,17 @@ describe("channelError", () => {
     });
 
     expect(refusal).toBeInstanceOf(GrammyError);
-    expect(channelError(refusal, redact)).toEqual({ code: "unknown", detail: null });
+    expect(channelError(refusal)).toEqual({ code: "unknown", detail: null });
   });
 
   it("codes a failed request as getUpdates reads it", async () => {
     const failure = await thrownBy({ apiRoot: `${root}/drop` });
 
-    expect(channelError(failure, redact)).toEqual({ code: "ECONNRESET", detail: null });
+    expect(channelError(failure)).toEqual({ code: "ECONNRESET", detail: null });
   });
 
   it("codes anything else as unknown", () => {
-    expect(channelError(new Error(`onStart threw at ${root}/bot${TOKEN}`), redact)).toEqual({
+    expect(channelError(new Error(`onStart threw at ${root}/bot${TOKEN}`))).toEqual({
       code: "unknown",
       detail: null,
     });

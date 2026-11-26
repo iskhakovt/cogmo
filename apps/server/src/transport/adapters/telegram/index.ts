@@ -1,6 +1,6 @@
 import { Bot } from "grammy";
 import { z } from "zod";
-import { logger } from "../../../logger.js";
+import { logger, maskInLogs } from "../../../logger.js";
 import type { AdapterDeps, AdapterModule, AdapterSetupResult } from "../../adapter-module.js";
 import { TelegramAdapter } from "./adapter.js";
 import { registerCallbackQueries } from "./callback-routes.js";
@@ -14,7 +14,6 @@ import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
 import { senderGate } from "./sender-gate.js";
-import { TokenRedactor } from "./token-redaction.js";
 
 export const channelType = "telegram";
 
@@ -35,11 +34,12 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     throw new Error(`telegram credentials: ${z.prettifyError(parsed.error)}`);
   }
   const { token } = parsed.data;
+  // A Bot API error's text can echo the token bare, which no URL shape catches.
+  maskInLogs(token);
   // An empty apiRoot means Telegram's own server, for the bot and its file downloads alike.
   const apiRoot = parsed.data.apiRoot || TELEGRAM_API_ROOT;
   const bot = new Bot(token, { client: { apiRoot } });
-  const redact = new TokenRedactor(token);
-  const adapter = new TelegramAdapter(bot, attachments, redact);
+  const adapter = new TelegramAdapter(bot, attachments);
   const profileDialogs = new ProfileDialogs();
   const repoDialogs = new RepoDialogs();
   // Ahead of every handler, so nothing runs outside a private chat or for a
@@ -59,10 +59,10 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   });
 
   bot.catch((err) => {
-    logger.error({ err: redact.error(err.error), ctx: err.ctx?.update }, "telegram bot error");
+    logger.error({ err: err.error, ctx: err.ctx?.update }, "telegram bot error");
   });
 
-  await publishCommandMenu(bot.api, redact);
+  await publishCommandMenu(bot.api);
 
   adapter.startPolling();
 

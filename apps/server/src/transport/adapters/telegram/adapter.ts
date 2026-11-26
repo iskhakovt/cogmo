@@ -41,14 +41,12 @@ import {
 import { stripHtmlTags } from "./render.js";
 import { type SettlingStreamHandle, TelegramStreamHandle } from "./stream-handle.js";
 import { splitAtCap } from "./stream-state.js";
-import type { TokenRedactor } from "./token-redaction.js";
 
 const TELEGRAM_CHUNK_TARGET_DEFAULT = 4000;
 
 export class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
   #attachments: AttachmentStore;
-  #redact: TokenRedactor;
   #activeStreams = new Map<string, SettlingStreamHandle>();
   /** Each run's delivered media paths, kept past a failed handle for the one replacing it. */
   #sentMedia = new Map<string, Set<string>>();
@@ -60,10 +58,9 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
   /** `performance.now()` when handling the update in hand began. */
   #handlingSince: number | null = null;
 
-  constructor(bot: Bot, attachments: AttachmentStore, redact: TokenRedactor) {
+  constructor(bot: Bot, attachments: AttachmentStore) {
     this.#bot = bot;
     this.#attachments = attachments;
-    this.#redact = redact;
     // Registered before `setup` adds any handler, so it wraps them all. A
     // handler that throws still counts: grammY treats its update as done.
     bot.use(async (ctx, next) => {
@@ -91,7 +88,7 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
       const at = this.#polling;
       return prev(method, payload, signal).then(
         (reply) => {
-          this.#receive(at, replyOutcome(reply, this.#redact));
+          this.#receive(at, replyOutcome(reply));
           return reply;
         },
         (err: unknown) => {
@@ -166,7 +163,7 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
       match(exit)
         .with({ kind: "ended" }, () => undefined)
         .with({ kind: P.union("conflict", "unauthorized", "rejected") }, ({ err }) =>
-          logger.warn({ err: this.#redact.error(err) }, "telegram polling: failed while stopping"),
+          logger.warn({ err }, "telegram polling: failed while stopping"),
         )
         .exhaustive();
       return;
@@ -174,10 +171,10 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
     match(exit)
       .with({ kind: "conflict" }, ({ err }) => {
         const healthy = performance.now() - run.startedAt >= HEALTHY_RUN_MS;
-        this.#backoff(channelError(err, this.#redact), (healthy ? 0 : run.conflicts) + 1);
+        this.#backoff(channelError(err), (healthy ? 0 : run.conflicts) + 1);
       })
       .with({ kind: "unauthorized" }, ({ err }) => {
-        const error = channelError(err, this.#redact);
+        const error = channelError(err);
         logger.error(
           { description: error.detail },
           "telegram polling: the Bot API refused the bot token (401), revoked or invalid; down until the channel's token is replaced and cogmo restarts",
@@ -185,14 +182,11 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
         this.#polling = { kind: "failed", reason: "unauthorized", error };
       })
       .with({ kind: "rejected" }, ({ err }) => {
-        logger.error(
-          { err: this.#redact.error(err) },
-          "telegram polling: failed; down until cogmo restarts",
-        );
+        logger.error({ err }, "telegram polling: failed; down until cogmo restarts");
         this.#polling = {
           kind: "failed",
           reason: "rejected",
-          error: channelError(err, this.#redact),
+          error: channelError(err),
         };
       })
       .with({ kind: "ended" }, () => {
@@ -343,10 +337,7 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
       await this.#bot.api
         .getUpdates({ offset: this.#lastHandledUpdateId + 1, limit: 1, timeout: 0 })
         .catch((err: unknown) =>
-          logger.warn(
-            { err: this.#redact.error(err) },
-            "telegram: confirming the handled updates on stop failed",
-          ),
+          logger.warn({ err }, "telegram: confirming the handled updates on stop failed"),
         );
     }
   }
@@ -358,10 +349,7 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
     const confirmed = this.#bot
       .stop()
       .catch((err: unknown) =>
-        logger.warn(
-          { err: this.#redact.error(err) },
-          "telegram: confirming the update offset on stop failed",
-        ),
+        logger.warn({ err }, "telegram: confirming the update offset on stop failed"),
       );
     await run;
     await confirmed;

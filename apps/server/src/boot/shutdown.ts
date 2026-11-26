@@ -66,8 +66,8 @@ export async function shutdownServe(
   } = resources;
   const { webDrainMs, stepMs } = bounds;
   const webOutcome = await bounded("web server", webDrainMs + stepMs, () => web.close(webDrainMs));
-  // Nothing reads the verdicts once `/health` is down, and a tick while the
-  // adapters stop would log their `stopped` as a recovery.
+  // Before the adapters, so a tick while they stop can't log their `stopped`
+  // as a recovery.
   const livenessOutcome = await bounded("liveness", stepMs, async () => liveness.stop());
   const connectorOutcomes = connectors
     ? [await bounded("connector server", stepMs, () => connectors.close())]

@@ -9,7 +9,6 @@
 import { GrammyError, HttpError } from "grammy";
 import { match, P } from "ts-pattern";
 import type { ChannelError, RetryCause } from "../../types.js";
-import type { TokenRedactor } from "./token-redaction.js";
 
 /** What one `getUpdates` outcome does to the run's receive sub-state. */
 export type ReceiveOutcome =
@@ -44,7 +43,7 @@ export function isUpdateId(value: unknown): value is number {
 }
 
 /** The outcome of a `getUpdates` reply, which grammY hands its transformers before checking `ok`. */
-export function replyOutcome(reply: unknown, redact: TokenRedactor): ReceiveOutcome {
+export function replyOutcome(reply: unknown): ReceiveOutcome {
   return match(reply)
     .returnType<ReceiveOutcome>()
     .with({ ok: true, result: P.array({ update_id: P.when(isUpdateId) }) }, () => ({
@@ -54,12 +53,12 @@ export function replyOutcome(reply: unknown, redact: TokenRedactor): ReceiveOutc
     .with({ ok: false, error_code: P.number.int().between(400, 599) }, ({ error_code }) => ({
       kind: "retrying",
       cause: refusalCause(error_code),
-      error: { code: String(error_code), detail: description(reply, redact) },
+      error: { code: String(error_code), detail: description(reply) },
     }))
     .otherwise(() => ({
       kind: "retrying",
       cause: "bad_reply",
-      error: { code: "unexpected-reply", detail: description(reply, redact) },
+      error: { code: "unexpected-reply", detail: description(reply) },
     }));
 }
 
@@ -70,14 +69,14 @@ export function failureOutcome(err: unknown): Retrying {
 }
 
 /** The error a supervisor transition records: a Bot API refusal by its code, anything else as `getUpdates` reads a throw. */
-export function channelError(err: unknown, redact: TokenRedactor): ChannelError {
+export function channelError(err: unknown): ChannelError {
   return match(err)
     .returnType<ChannelError>()
     .with(P.instanceOf(GrammyError), (refusal) => ({
       code: match(refusal.error_code)
         .with(P.number.int().gte(0), String)
         .otherwise(() => "unknown"),
-      detail: description(refusal, redact),
+      detail: description(refusal),
     }))
     .otherwise(() => ({ code: requestFailure(err).code, detail: null }));
 }
@@ -116,9 +115,9 @@ function requestFailure(err: unknown): RequestFailure {
     .otherwise(() => UNKNOWN_FAILURE);
 }
 
-/** Telegram's `description`, token masked, or null. */
-function description(source: unknown, redact: TokenRedactor): string | null {
+/** Telegram's `description`, or null. */
+function description(source: unknown): string | null {
   return match(source)
-    .with({ description: P.string }, (s) => redact.text(s.description))
+    .with({ description: P.string }, (s) => s.description)
     .otherwise(() => null);
 }

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  literalSecretPattern,
   REDACTED_BOT_SEGMENT,
+  redactLiterals,
   redactSecretsInText,
   truncationSafeLength,
 } from "./redact-secrets.js";
@@ -225,6 +227,36 @@ describe("redactSecretsInText", () => {
     redactSecretsInText(input);
     truncationSafeLength(input);
     expect(performance.now() - start).toBeLessThan(5_000);
+  });
+});
+
+describe("literalSecretPattern", () => {
+  const SECRET = "123456:AAsecret-tok_en";
+
+  it.each([
+    ["raw", SECRET],
+    ["percent-encoded", encodeURIComponent(SECRET)],
+    ["percent-encoded in lowercase hex", "123456%3aAAsecret-tok_en"],
+    ["with an unreserved character percent-encoded", "123456:AAsecret%2Dtok%5Fen"],
+  ])("masks the secret %s", (_, form) => {
+    expect(redactLiterals(`token ${form}.`, [literalSecretPattern(SECRET)])).toBe(
+      "token <redacted>.",
+    );
+  });
+
+  it("masks every occurrence and leaves other text alone", () => {
+    expect(redactLiterals(`${SECRET} and ${SECRET}`, [literalSecretPattern(SECRET)])).toBe(
+      "<redacted> and <redacted>",
+    );
+    expect(redactLiterals("123456:AAsecret-other", [literalSecretPattern(SECRET)])).toBe(
+      "123456:AAsecret-other",
+    );
+  });
+
+  it("matches regex metacharacters literally", () => {
+    const pattern = literalSecretPattern("a.b*c");
+
+    expect(redactLiterals("axbbbc a.b*c", [pattern])).toBe("axbbbc <redacted>");
   });
 });
 

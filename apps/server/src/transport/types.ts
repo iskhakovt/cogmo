@@ -14,7 +14,7 @@ export type RetryCause =
   | "bad_reply"
   | "unknown";
 
-/** `code` is normalized and is all `/health` shows; `detail` is the platform's text, token redacted, for logs. */
+/** `code` is normalized and is all `/health` shows; `detail` is the platform's text, for logs, which mask the token. */
 export interface ChannelError {
   readonly code: string;
   readonly detail: string | null;

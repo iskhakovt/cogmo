@@ -4,7 +4,7 @@ import { Writable } from "node:stream";
 import { Bot, HttpError } from "grammy";
 import pino from "pino";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createLogger, createLogRouter, type LogStream } from "./logger.js";
+import { createLogger, createLogRouter, type LogStream, maskInLogs } from "./logger.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";
@@ -105,6 +105,46 @@ describe("createLogger", () => {
     pino(stream).error({ err: networkFailure }, "telegram polling loop failed");
 
     expect(lines.join("")).toContain(FAKE_SECRET);
+  });
+});
+
+describe("maskInLogs", () => {
+  /** Shaped like a Bot API token, and registered by no other test in this file. */
+  const SECRET = "987654:AAmask-in_logs";
+
+  it("masks a registered secret bare, raw and percent-encoded, in every field and nesting", () => {
+    maskInLogs(SECRET);
+    const { stream, lines } = capture();
+
+    createLogger(stream).error(
+      {
+        description: `Unauthorized: ${SECRET}`,
+        nested: { echo: encodeURIComponent(SECRET), lower: SECRET.replace(":", "%3a") },
+        err: new Error("handler failed", {
+          cause: new DOMException(`aborted for ${SECRET}`, "TimeoutError"),
+        }),
+      },
+      `refused ${SECRET}`,
+    );
+
+    const [line] = lines;
+    expect(line).toBeDefined();
+    expect(line).not.toContain("AAmask-in_logs");
+    expect(JSON.parse(line ?? "")).toMatchObject({
+      description: "Unauthorized: <redacted>",
+      nested: { echo: "<redacted>", lower: "<redacted>" },
+      err: { message: "handler failed: aborted for <redacted>" },
+      msg: "refused <redacted>",
+    });
+  });
+
+  it("leaves a line without the secret as pino wrote it", () => {
+    maskInLogs(SECRET);
+    const { stream, lines } = capture();
+
+    createLogger(stream).info({ id: "987654" }, "nothing secret");
+
+    expect(JSON.parse(lines[0] ?? "")).toMatchObject({ id: "987654", msg: "nothing secret" });
   });
 });
 

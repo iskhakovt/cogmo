@@ -4,9 +4,8 @@
  */
 
 import { ok } from "neverthrow";
-import pino from "pino";
 import { vi } from "vitest";
-import { logger } from "../../logger.js";
+import { createLogger, logger } from "../../logger.js";
 import { setup } from "../../transport/adapters/telegram/index.js";
 import { asBatchAdapter } from "../assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../factories.js";
@@ -148,22 +147,18 @@ export async function createAdapterWithToken(
 }
 
 /**
- * The lines `logger` writes at info, warn and error from here on, serialized
- * as pino writes them but without the logger's own secret masking, so a test
- * sees what the caller logged. `vi.restoreAllMocks()` undoes it.
+ * The lines `logger` writes at info, warn and error from here on, as
+ * `createLogger` serializes and masks them. `vi.restoreAllMocks()` undoes it.
  */
 export function captureLogLines(): string[] {
   const lines: string[] = [];
-  const plain = pino(
-    { level: "info" },
-    {
-      write: (line: string) => {
-        lines.push(line);
-      },
+  const capturing = createLogger({
+    write: (line: string) => {
+      lines.push(line);
     },
-  );
-  vi.spyOn(logger, "info").mockImplementation(plain.info.bind(plain));
-  vi.spyOn(logger, "warn").mockImplementation(plain.warn.bind(plain));
-  vi.spyOn(logger, "error").mockImplementation(plain.error.bind(plain));
+  });
+  vi.spyOn(logger, "info").mockImplementation(capturing.info.bind(capturing));
+  vi.spyOn(logger, "warn").mockImplementation(capturing.warn.bind(capturing));
+  vi.spyOn(logger, "error").mockImplementation(capturing.error.bind(capturing));
   return lines;
 }

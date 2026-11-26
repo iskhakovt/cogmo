@@ -33,7 +33,7 @@ One in-process check registry, read three ways:
 
 The registry evaluates every check on a 15-second tick, the first when it is built; `/health` and the gauge render the last tick from memory. A check that throws, a bug, reports `warn` (`check_error`) and logs at error. Probes alert on `status`; the gauge and the log lines name the failing check.
 
-**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only, and the Telegram adapter redacts its configured token, raw and percent-encoded in either hex case, from the lines that carry a polling, command-menu or handler error: the verdict line's `detail`, the supervisor's lines, the command-menu warning, both offset-confirmation warnings and the `telegram bot error` line.
+**Only fixed text leaves the process.** `output` is a text per reason and cause from a constant table, plus a normalized code: digits, a system code (`[A-Z][A-Z0-9_]*`), a node-fetch `type` (`[a-z][a-z-]*`), else `unknown`. The gauge carries no text. A Bot API error's own text can echo the request URL or the bare token from a custom `apiRoot`, so it reaches log lines only. The Telegram adapter's setup registers its configured token with the logger (`maskInLogs`), which masks it by value in every serialized line, raw or percent-encoded in either hex case, after the URL shapes: matching the written line, not each field, it covers the verdict line's `detail`, an error's cause chain and every nesting.
 
 The public body, and the same with a session:
 
@@ -93,7 +93,7 @@ type LoopState =
   | { kind: "failed"; reason: "unauthorized" | "rejected" | "ended"; error: ChannelError | null }
   | { kind: "stopped" };
 type RetryCause = "conflict" | "network" | "rate_limited" | "server_error" | "client_error" | "bad_reply" | "unknown";
-/** `code` is normalized and is all `/health` shows; `detail` is the platform's text, token redacted, for logs. */
+/** `code` is normalized and is all `/health` shows; `detail` is the platform's text, for logs, which mask the token. */
 interface ChannelError { readonly code: string; readonly detail: string | null }
 ```
 
@@ -142,7 +142,7 @@ The transformer returns `prev`'s result, or rethrows its error, unchanged, and i
 | An `HttpError` wrapping grammY's client timeout, recognised by its fixed message prefix | `retrying` | `network`, `timeout` |
 | Any other throw, an `HttpError` wrapping another error included | `retrying` | `unknown`, `unknown` |
 
-Only a valid batch counts as progress: grammY polls again at once on `ok: true` with no `result`, and handles an element with no `update_id`, so either would read as a healthy poll. A `result` that is present but not iterable (a number, an object, `null`) ends the run instead: grammY's loop throws iterating it, and the supervisor reads the `TypeError` as `failed` (`rejected`). A string `result` is walked a character at a time, as updates with no id. `detail` is Telegram's `description` when it is a string, token redacted, else null; no error message reaches a `ChannelError`, since a `FetchError`'s names the request URL. The supervisor's transitions map their errors the same way: a `GrammyError` by its `error_code`, `unknown` unless a non-negative integer, and anything but a `GrammyError` or `HttpError` as `unknown`.
+Only a valid batch counts as progress: grammY polls again at once on `ok: true` with no `result`, and handles an element with no `update_id`, so either would read as a healthy poll. A `result` that is present but not iterable (a number, an object, `null`) ends the run instead: grammY's loop throws iterating it, and the supervisor reads the `TypeError` as `failed` (`rejected`). A string `result` is walked a character at a time, as updates with no id. `detail` is Telegram's `description` when it is a string, else null; no error message reaches a `ChannelError`, since a `FetchError`'s names the request URL. The supervisor's transitions map their errors the same way: a `GrammyError` by its `error_code`, `unknown` unless a non-negative integer, and anything but a `GrammyError` or `HttpError` as `unknown`.
 
 ### States
 
@@ -227,7 +227,7 @@ With `@grammyjs/runner` (`todo.md`), `handlingSince` becomes the oldest update i
 | k | A restart while a second poller stays | `idle`, then `polling` | A poller already at the supervisor's cap supersedes this one up to 5 min after boot and again 2.5–5 min later, so `flapping` shows 2.5–10 min after boot. Residual. |
 | l | A channel row whose type this build has no adapter for | No adapter | Its entry warns `unsupported`. |
 | m | `DEBUG=grammy:*` | — | grammY prints polling errors itself, outside pino and the redaction. Residual: an operator opt-in. |
-| n | An error `deliver` or a stream handle throws to its caller | — | It keeps grammY's text; the logger masks a token in a URL (`/bot`, and the `%2Fbot` this design adds), not a bare one. Residual. |
+| n | An error `deliver` or a stream handle throws to its caller | — | It keeps grammY's text; a line that logs it masks the token, by URL shape or by the registered value. Residual: what the caller does with it beyond logging. |
 
 ### Not persisted
 
@@ -342,7 +342,7 @@ Messaging the owner when the loop warns works only for a 409 or a wedged handler
 
 0. Operator: a log rule on the supervisor's lines.
 1. Operator: an OTLP metrics pipeline in any collector in front of the metrics backend; confirm the gauge's name.
-2. cogmo: `src/liveness/` with the registry, the gauge and the verdict lines; `/health`'s public `status` and session-gated `checks`; the required `liveness()`, `null` from direct, web and the adapter test stubs; `startChannels` reporting every row; the receive sub-state; the adapter's token redaction, and `%2Fbot` in `util/redact-secrets.ts`. Update deploy.md (Health check, Observability), design/web-ui.md's `/health` line, Polling Supervision, and AGENTS.md → Module Structure.
+2. cogmo: `src/liveness/` with the registry, the gauge and the verdict lines; `/health`'s public `status` and session-gated `checks`; the required `liveness()`, `null` from direct, web and the adapter test stubs; `startChannels` reporting every row; the receive sub-state; the token registered with the logger, and `%2Fbot` in `util/redact-secrets.ts`. Update deploy.md (Health check, Observability), design/web-ui.md's `/health` line, Polling Supervision, and AGENTS.md → Module Structure.
 3. cogmo: `cron_heartbeats`, the baseline, `createCronFunction` for every cron and the check; `sandbox-reaper` and `model-catalog-refresh` onto `fromStepTools`. Update design/architecture.md → Orchestration Coupling (the Functions row and the single-step list), `refresh-function.ts`'s header, design/data-model.md and `.agents/rules/store-pattern.md`. Confirm in the integration tier that the dev server's cron events carry `scheduledAt`, and run `recordCronTick` on postgres-js.
 4. Operator: the gauge rules, retiring the log rule.
 5. cogmo, once an operator's collector carries metrics: the `cogmo.cron.last_tick` gauge.
@@ -353,7 +353,7 @@ Messaging the owner when the loop warns works only for a 409 or a wedged handler
 - `channelCheck`: each row and threshold at its boundary, precedence, and a reason change logged under `warn`.
 - The adapter: each sub-state transition, field write and projection row (a backoff after a slow poll isn't `stale`), events refused outside `polling`, `conflicts` clearing at `HEALTHY_RUN_MS`, a transformer that passes `prev`'s result or error through unchanged, and a malformed batch then a valid update through `stop()`, which credits and confirms only the valid one.
 - The outcome table, one case per row: each throw shape (system code, `invalid-json`, grammY's timeout, `AbortError`, unwrapped), no `ok`, `error_code` 302, `ok: true` with no `result`, a non-array one, and `[{}]` (`bad_reply`, no progress), `[]` (progress), and the `failed` (`rejected`) mapping; no `code` carries the URL.
-- Redaction: the token, raw and percent-encoded, bare or in a URL, masked in each adapter line that carries a Bot API error; `/health` shows no `detail`.
+- Redaction: the token, raw and percent-encoded, bare or in a URL, masked in each adapter line that carries a Bot API error once setup has registered it; `/health` shows no `detail`.
 - `/health`: always 200 and `Cache-Control: no-store`; `status` without `checks` with no session, an invalid one, or a lookup that rejects or passes its deadline; `checks` with a valid one; a throwing check; an `unsupported` row.
 - The gauges: exactly three attributes on `cogmo.check.status`; `cogmo.cron.last_tick` at the baseline, then the served tick.
 - `cron_heartbeats`: a monotone `last_tick`, a baseline that keeps existing rows and returns all, `no_row`, and a write held on a row lock returning `write_failed` at its deadline, on PGlite and postgres-js.
