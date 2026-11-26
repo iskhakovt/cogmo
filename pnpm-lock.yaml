@@ -126,8 +126,8 @@ importers:
         specifier: ^0.13.11
         version: 0.13.11(typescript@7.0.2)(zod@4.6.7)
       '@vectorize-io/hindsight-client':
-        specifier: ~1.2.1
-        version: 1.2.1
+        specifier: ~1.3.0
+        version: 1.3.0
       ai:
         specifier: ^7.0.177
         version: 7.0.177(zod@4.6.7)
@@ -4727,8 +4727,8 @@ packages:
     peerDependencies:
       typescript: '*'
 
-  '@vectorize-io/hindsight-client@1.2.1':
-    resolution: {integrity: sha512-Av5Dl5MqvZ1Vx+UMF1i0zVxz4BkCrhM4mg3E0hy2K7n6yUWbWz23OqFGTRAJzqtDLoFji6SmQRMj3TH2/Nig7Q==}
+  '@vectorize-io/hindsight-client@1.3.0':
+    resolution: {integrity: sha512-cfsefMNn5uvrH2CE0643rhMRuTLeeTZ5NleZMQ313TpH341pczUKSvDMQJnRSPcQ2/jUa2nA5yey4Al/NWocMA==}
 
   '@vercel/oidc@3.2.0':
     resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
@@ -11661,7 +11661,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@vectorize-io/hindsight-client@1.2.1': {}
+  '@vectorize-io/hindsight-client@1.3.0': {}
 
   '@vercel/oidc@3.2.0': {}
 
