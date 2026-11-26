@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TurnMessage } from "../../store/index.js";
-import { quotesUser, renderContext, renderTurn } from "./turns.js";
+import { quotes, renderContext, renderTurn } from "./turns.js";
 
 const CURSOR = "cursor-1";
 const PREVIOUS = "cursor-0";
@@ -102,18 +102,33 @@ describe("renderContext", () => {
   });
 });
 
-describe("quotesUser", () => {
+describe("quotes", () => {
   const said = "Please,   don’t use bullet points with me.\nJust write plainly.";
 
   it("finds a quote across case, whitespace and curly quotes", () => {
-    expect(quotesUser("DON'T use bullet points", said)).toBe(true);
-    expect(quotesUser('"don\'t use bullet points with me. just write"', said)).toBe(true);
-    expect(quotesUser("…bullet points…", said)).toBe(true);
+    expect(quotes("DON'T use bullet points", said)).toBe(true);
+    expect(quotes('"don\'t use bullet points with me. just write"', said)).toBe(true);
+    expect(quotes("…bullet points…", said)).toBe(true);
+  });
+
+  it("finds a quote of a tool result in a rendered turn, and none of it in the user's text", () => {
+    const turn = renderTurn(
+      [
+        row("user", "Where is the NAS?"),
+        row("assistant", [{ type: "tool_use", id: "t1", name: "dns_lookup", input: { q: "nas" } }]),
+        row("user", [{ type: "tool_result", toolUseId: "t1", content: "nas.lan is 10.0.10.20" }]),
+        row("assistant", "It's at 10.0.10.20."),
+      ],
+      CURSOR,
+    );
+
+    expect(quotes("nas.lan is 10.0.10.20", turn.transcript)).toBe(true);
+    expect(quotes("nas.lan is 10.0.10.20", turn.userText)).toBe(false);
   });
 
   it("refuses a paraphrase, and an empty quote", () => {
-    expect(quotesUser("no bullets", said)).toBe(false);
-    expect(quotesUser('""', said)).toBe(false);
-    expect(quotesUser("", said)).toBe(false);
+    expect(quotes("no bullets", said)).toBe(false);
+    expect(quotes('""', said)).toBe(false);
+    expect(quotes("", said)).toBe(false);
   });
 });

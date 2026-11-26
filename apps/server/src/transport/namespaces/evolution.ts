@@ -21,7 +21,7 @@ export type EvolutionEventEntry = Omit<EvolutionEventRow, "userId">;
  */
 export type TriggerReflectionOutcome =
   | { status: "no_session" }
-  | { status: "skipped"; reason: "conversation_not_found" | "profile_not_found" | "too_short" }
+  | { status: "skipped"; reason: "conversation_not_found" | "profile_not_found" | "nothing_new" }
   | {
       status: "processed";
       eventId: string;
@@ -36,7 +36,7 @@ export type TriggerReflectionOutcome =
       drained: number;
       /** Staged rows a `memory`-category rule forbade. */
       withheld: number;
-      /** 1 when memory extraction was skipped for a user's memory rule the profile can't see. */
+      /** Turns whose memories were held for a user's memory rule the profile can't see. */
       skippedForUnseenRules: number;
       /** Staged rows left pending for a first-party fire. */
       deferredToFirstParty: number;

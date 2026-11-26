@@ -80,6 +80,12 @@ describe("buildMemoryExtractionPrompt + buildPendingClassificationPrompt", () =>
     expect(extraction).toContain("**misc**");
   });
 
+  it("tells extraction to read one turn, extract from it alone and quote it", () => {
+    expect(buildMemoryExtractionPrompt([], [])).toContain(
+      "Extract facts from `<turn>` only, and quote in `evidence` the words of `<turn>` that state each one.",
+    );
+  });
+
   it("tells extraction to skip what the rule tools recorded", () => {
     expect(buildMemoryExtractionPrompt([], [])).toContain(
       "- **Rules the user set**: Skip an instruction or retraction that a successful `rule_set` or `rule_remove` call recorded: the assistant's rules hold it, not memory.",
@@ -130,6 +136,7 @@ describe("buildMemoryExtractionSchema + buildClassifiedMemorySchema", () => {
           network: "world",
           compartment: "dnd",
           trust: "first-party",
+          evidence: "we play Stars Without Number",
         },
       ],
     });
@@ -141,6 +148,7 @@ describe("buildMemoryExtractionSchema + buildClassifiedMemorySchema", () => {
           network: "world",
           compartment: "music",
           trust: "first-party",
+          evidence: "x",
         },
       ],
     });

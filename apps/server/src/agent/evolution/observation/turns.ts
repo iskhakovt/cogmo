@@ -92,15 +92,15 @@ function capped(text: string): string {
 }
 
 /**
- * Whether `evidence` quotes `userText`, after folding case, whitespace and
- * curly quotes, and trimming quote marks and ellipses around the quote. An
- * empty quote quotes nothing.
+ * Whether `evidence` quotes `text`, after folding case, whitespace and curly
+ * quotes, and trimming quote marks and ellipses around the quote. An empty
+ * quote quotes nothing.
  */
-export function quotesUser(evidence: string, userText: string): boolean {
+export function quotes(evidence: string, text: string): boolean {
   const quote = normalized(evidence)
     .replace(/^["'\s.…]+|["'\s.…]+$/g, "")
     .trim();
-  return quote.length > 0 && normalized(userText).includes(quote);
+  return quote.length > 0 && normalized(text).includes(quote);
 }
 
 function normalized(text: string): string {

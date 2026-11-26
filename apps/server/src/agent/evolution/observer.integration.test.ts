@@ -248,7 +248,10 @@ function buildStubProvider(opts: {
       let payload: unknown;
       const sys = params.system ?? "";
       if (sys.includes("memory extraction engine")) {
-        payload = { memories: opts.extractionMemories ?? [] };
+        // Every fact quotes the first turn, so only that turn's extraction keeps it.
+        payload = {
+          memories: (opts.extractionMemories ?? []).map((m) => ({ evidence: "message 0", ...m })),
+        };
       } else if (sys.includes("classifying a single fact")) {
         payload = opts.pendingClassification ?? {
           network: "world",
@@ -327,7 +330,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
     expect(result).toEqual({ status: "skipped", reason: "conversation_not_found" });
     expect(stub.calls).toHaveLength(0);
@@ -342,8 +345,8 @@ describe("runObserver — real PG + recording memory mock", () => {
   // by stubbing `agentStore.getProfile`; the integration tier doesn't add
   // signal beyond what unit coverage gives.
 
-  it("skips with too_short when history has fewer than MIN_MESSAGES_FOR_EXTRACTION rows — no LLM call", async () => {
-    const { conversationId } = await seedConversation({ messageCount: 2 });
+  it("returns nothing_new and writes no row when no turn is answered and nothing is staged", async () => {
+    const { conversationId } = await seedConversation({ messageCount: 1 });
     const stub = buildStubProvider({});
     const recorder = buildRecordingMemory();
     const result = await runObserver(
@@ -360,11 +363,40 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
-    expect(result).toEqual({ status: "skipped", reason: "too_short" });
+    expect(result).toEqual({ status: "skipped", reason: "nothing_new" });
     expect(stub.calls).toHaveLength(0);
     expect(recorder.calls).toHaveLength(0);
+    expect(await fakeRunInTx((tx) => store.listEvolutionEvents(tx, userId))).toEqual([]);
+  });
+
+  it("observes a conversation's first turn", async () => {
+    const { conversationId } = await seedConversation({ messageCount: 2 });
+    const stub = buildStubProvider({
+      extractionMemories: [
+        { fact: "uses Linux", network: "bank", compartment: "technical", trust: "first-party" },
+      ],
+    });
+    const recorder = buildRecordingMemory();
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      { triggeredBy: "idle", runId: "run-1" },
+    );
+    expect(result).toMatchObject({ status: "processed", memories: { extracted: 1 } });
+    expect(recorder.calls.flatMap((c) => c.items.map((i) => i.content))).toEqual(["uses Linux"]);
   });
 
   it("happy path: extracts memories with full network/compartment/trust tags via retainBatch", async () => {
@@ -395,7 +427,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error(`expected processed, got ${result.status}`);
@@ -411,6 +443,7 @@ describe("runObserver — real PG + recording memory mock", () => {
       "trust:first-party",
     ]);
     expect(call?.items[0]?.metadata).toEqual({ source: "conversation" });
+    expect(call?.items[0]?.documentId).toMatch(/^observer:turn:[0-9a-f-]{36}:0$/);
 
     // Audit row: every processed fire writes exactly one row, the result's
     // `eventId` matches it, and the payload mirrors the in-memory result
@@ -423,7 +456,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     expect(row.triggeredBy).toBe("idle");
     expect(row.conversationId).toBe(conversationId);
     expect(row.payload.memories.extracted).toBe(1);
-    expect(row.payload.messageCount).toBeGreaterThan(0);
+    expect(row.payload.messageCount).toBe(4);
   });
 
   it("persists triggered_by='manual' when invoked through triggerReflection", async () => {
@@ -502,7 +535,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error("expected processed");
@@ -542,7 +575,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error("expected processed");
@@ -593,7 +626,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error("expected processed");
@@ -633,15 +666,15 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error("expected processed");
     expect(result.drained.drained).toBe(1);
     expect(result.drained.byNetwork).toEqual({ bank: 1 });
 
-    // Two retainBatch calls: phase 2 (transcript — empty payload) and
-    // phase 3 (pending drain — one item with source: live_retain).
+    // The turns hold no facts, so the drain's is the one retain.
+    expect(recorder.calls).toHaveLength(1);
     const drainCall = recorder.calls.find((c) => c.items.length > 0);
     expect(drainCall?.items[0]?.metadata).toEqual({ source: "live_retain" });
     expect(drainCall?.items[0]?.tags).toEqual([
@@ -684,7 +717,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error("expected processed");
@@ -744,7 +777,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error("expected processed");
@@ -809,7 +842,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           Promise.resolve({ provider, limits: { contextWindow: null, maxOutputTokens: null } }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error("expected processed");
@@ -898,7 +931,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           Promise.resolve({ provider, limits: { contextWindow: null, maxOutputTokens: null } }),
         memory: recorder.memory,
       },
-      "idle",
+      { triggeredBy: "idle", runId: "run-1" },
     );
 
     if (result.status !== "processed") throw new Error("expected processed");

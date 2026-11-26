@@ -178,7 +178,7 @@ Before rolling back to a build older than migration `0084_transcript_head_epoch_
 
 ### Rolling back the Observer's turn cursor
 
-Before rolling back to a build older than migration `0081_turn_observations`, run `UPDATE steering_rules SET contradicted_in_turn_id = NULL;` against the database. The older build graduates a rule clearing only `contradicted_in_conversation_id`, so a rule still carrying a turn marker would fail `chk_steering_rules_lifecycle` on its graduation. What the rollback costs, and what rolling forward again re-applies, is in [observation.md](observation.md#slice-1a) → Failure modes, rows l and l′.
+Before rolling back to a build older than migration `0081_turn_observations`, run `UPDATE steering_rules SET contradicted_in_turn_id = NULL;` against the database. The older build graduates a rule clearing only `contradicted_in_conversation_id`, so a rule still carrying a turn marker would fail `chk_steering_rules_lifecycle` on its graduation. What the rollback costs, and what rolling forward again re-applies, is in [observation.md](observation.md#slice-1a) → Failure modes, rows l and l′. Rolling back past `0094_observation_memories` needs no further step: the older build reads only corrections rows ([observation.md](observation.md#slice-2a) → Failure modes, row o).
 
 ## Monitoring `[proposed]`
 

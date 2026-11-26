@@ -248,11 +248,21 @@ export class DrizzleAgentStore implements AgentStore {
   readonly insertTurnObservations = this.#turnObservations.insertTurnObservations.bind(
     this.#turnObservations,
   );
-  readonly listPendingTurns = this.#turnObservations.listPendingTurns.bind(this.#turnObservations);
+  readonly listOpenTurns = this.#turnObservations.listOpenTurns.bind(this.#turnObservations);
   readonly getTurnObservation = this.#turnObservations.getTurnObservation.bind(
     this.#turnObservations,
   );
   readonly transitionPendingTurn = this.#turnObservations.transitionPendingTurn.bind(
+    this.#turnObservations,
+  );
+  readonly transitionExtractedTurn = this.#turnObservations.transitionExtractedTurn.bind(
+    this.#turnObservations,
+  );
+  readonly releaseHeldTurns = this.#turnObservations.releaseHeldTurns.bind(this.#turnObservations);
+  readonly listHeldExtractedTurns = this.#turnObservations.listHeldExtractedTurns.bind(
+    this.#turnObservations,
+  );
+  readonly releaseHeldExtractedTurns = this.#turnObservations.releaseHeldExtractedTurns.bind(
     this.#turnObservations,
   );
   readonly recordTurnAttempt = this.#turnObservations.recordTurnAttempt.bind(

@@ -1,9 +1,9 @@
 /**
  * The Observer under Inngest's replay model, against PGlite: a turn's step
- * re-run after its apply committed, a memoized turn outcome, and a run of the
- * transcript-era build resumed by this one (design/observation.md → Slice 1a,
- * Failure modes), and two fires on one turn. Steps are memoized with
- * `@inngest/test`'s `steps:`.
+ * re-run after its apply committed or its extraction was stored, a memoized
+ * turn outcome, a run of the transcript-era build resumed by this one
+ * (design/observation.md → Slices 1a and 2a, Failure modes), and two fires on
+ * one turn. Steps are memoized with `@inngest/test`'s `steps:`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -13,15 +13,18 @@ import { StepError } from "inngest";
 import { errors } from "inngest/internals";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import { RefusalError } from "../../llm/fallback.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, LlmResponse } from "../../llm/types.js";
+import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
 import { mockProvider, mockResolver, mockTransportStore } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { DrizzleAgentStore } from "../store/index.js";
+import { type AgentStore, DrizzleAgentStore } from "../store/index.js";
 import { evolutionEvents, messages, steeringRules, turnObservations } from "../store/schema.js";
 import { NO_CORRECTIONS } from "./extract-corrections.js";
 import { discoverTurns } from "./observation/discover-turns.js";
+import type { StoredMemory } from "./observation/turn-extraction.js";
 import {
   createObserver,
   type ObserverDeps,
@@ -48,7 +51,19 @@ afterAll(async () => {
 
 const CORRECTION = "Shorter please, you're far too verbose.";
 
-/** Reinforces the first listed rule from every turn; answers every other prompt with nothing. */
+/** A fact the first seeded turn states. */
+const LISBON_FACT: StoredMemory = {
+  fact: "Lisbon is a city of seven hills",
+  network: "world",
+  compartment: "misc",
+  trust: "any",
+  evidence: "Lisbon is a city of seven hills",
+};
+
+/**
+ * Reinforces the first listed rule from every turn, and states `LISBON_FACT`
+ * for the turn that holds it; answers every other prompt with nothing.
+ */
 function reinforcingProvider(): LlmProvider {
   return mockProvider({
     chat: vi.fn(async (params: ChatParams): Promise<LlmResponse> => {
@@ -66,7 +81,7 @@ function reinforcingProvider(): LlmProvider {
             ],
           }
         : params.system.includes("memory extraction engine")
-          ? { memories: [] }
+          ? { memories: observedTurn(params).includes(LISBON_FACT.evidence) ? [LISBON_FACT] : [] }
           : { groups: [] };
       return {
         content: [{ type: "text", text: JSON.stringify(answer) }],
@@ -78,10 +93,24 @@ function reinforcingProvider(): LlmProvider {
   });
 }
 
+/** The `<turn>` element of an extraction's message. */
+function observedTurn(params: ChatParams): string {
+  const message = params.messages.flatMap((m) =>
+    typeof m.content === "string" ? [m.content] : [],
+  );
+  return /<turn>\n([\s\S]*)\n<\/turn>/.exec(message[0] ?? "")?.[1] ?? "";
+}
+
 function correctionCalls(provider: LlmProvider): number {
   return vi
     .mocked(provider.chat)
     .mock.calls.filter(([p]) => p.system.includes("behavioral correction extractor")).length;
+}
+
+function memoryCalls(provider: LlmProvider): number {
+  return vi
+    .mocked(provider.chat)
+    .mock.calls.filter(([p]) => p.system.includes("memory extraction engine")).length;
 }
 
 /** A conversation with two answered turns, the second carrying the correction, and a rule still learning. */
@@ -142,15 +171,83 @@ async function seed(): Promise<{ conversationId: string; ruleId: string }> {
   return { conversationId, ruleId: expectDefined(rule, "rule").id };
 }
 
-function deps(provider: LlmProvider): ObserverDeps {
+function deps(
+  provider: LlmProvider,
+  opts: { agentStore?: AgentStore; memory?: Pick<MemoryProvider, "retainBatch"> } = {},
+): ObserverDeps {
   return {
     runInTx: tx,
-    agentStore: store,
+    agentStore: opts.agentStore ?? store,
     transportStore: mockTransportStore(),
     resolveProvider: mockResolver(provider),
-    memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
+    memory: opts.memory ?? { retainBatch: vi.fn().mockResolvedValue(undefined) },
   };
 }
+
+/** The memories rows, with what the walk left on them. */
+async function memoryRows() {
+  return db
+    .select({
+      id: turnObservations.id,
+      status: turnObservations.status,
+      attempts: turnObservations.attempts,
+      failureKind: turnObservations.failureKind,
+      extraction: turnObservations.extraction,
+    })
+    .from(turnObservations)
+    .where(eq(turnObservations.phase, "memories"));
+}
+
+async function memoryRow(id: string) {
+  return expectDefined(
+    (await memoryRows()).find((r) => r.id === id),
+    id,
+  );
+}
+
+/** Store the first turn's extraction, as a step that committed it and then died left it. */
+async function storeLisbonExtraction(
+  conversationId: string,
+): Promise<{ observationId: string; cursor: string }> {
+  const plan = await discoverTurns(
+    { runInTx: tx, store },
+    { conversationId, phase: "memories", limit: 10 },
+  );
+  const first = expectDefined(plan.turns[0], "first turn");
+  const conversation = expectDefined(
+    await tx((trx) => store.getConversation(trx, conversationId)),
+    "conversation",
+  );
+  await tx((trx) =>
+    store.transitionPendingTurn(trx, {
+      id: first.observationId,
+      to: {
+        status: "extracted",
+        extraction: {
+          phase: "memories",
+          runId: "run-dead",
+          profileId: conversation.profileId,
+          profileClass: null,
+          seesUserRules: true,
+          items: [LISBON_FACT],
+          dropped: { noEvidence: 0 },
+        },
+      },
+    }),
+  );
+  return first;
+}
+
+/** The harness the SDK is to the walk once a step has failed for good. */
+const sdkFailingStep: ObserverStepHarness = {
+  async run<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      throw new StepError(id, errors.serializeError(err));
+    }
+  },
+};
 
 async function countOf(ruleId: string): Promise<number> {
   const [row] = await db
@@ -172,7 +269,10 @@ type InngestSteps = Array<{ id: string; handler: () => unknown }>;
 describe("createObserver under replay", () => {
   it("re-runs a turn's step whose apply committed without calling the model or writing again", async () => {
     const { conversationId, ruleId } = await seed();
-    const plan = await discoverTurns({ runInTx: tx, store }, { conversationId, limit: 10 });
+    const plan = await discoverTurns(
+      { runInTx: tx, store },
+      { conversationId, phase: "corrections", limit: 10 },
+    );
     const memoizedPlan = [{ id: "discover-turns", handler: () => plan }];
     const first = reinforcingProvider();
     await engine(conversationId, first, memoizedPlan).execute();
@@ -189,7 +289,10 @@ describe("createObserver under replay", () => {
 
   it("replays a memoized turn outcome into the audit row, calling no model", async () => {
     const { conversationId, ruleId } = await seed();
-    const plan = await discoverTurns({ runInTx: tx, store }, { conversationId, limit: 10 });
+    const plan = await discoverTurns(
+      { runInTx: tx, store },
+      { conversationId, phase: "corrections", limit: 10 },
+    );
     const provider = reinforcingProvider();
     const steps = [
       { id: "discover-turns", handler: () => plan },
@@ -223,7 +326,10 @@ describe("createObserver under replay", () => {
 
     expect(error).toBeUndefined();
     expect(await countOf(ruleId)).toBe(1);
-    const rows = await db.select({ status: turnObservations.status }).from(turnObservations);
+    const rows = await db
+      .select({ status: turnObservations.status })
+      .from(turnObservations)
+      .where(eq(turnObservations.phase, "corrections"));
     expect(rows.map((r) => r.status)).toEqual(["applied", "applied"]);
   });
 
@@ -236,7 +342,10 @@ describe("createObserver under replay", () => {
    */
   async function secondTurnFails(failure: "unavailable" | "database") {
     const { conversationId } = await seed();
-    const plan = await discoverTurns({ runInTx: tx, store }, { conversationId, limit: 10 });
+    const plan = await discoverTurns(
+      { runInTx: tx, store },
+      { conversationId, phase: "corrections", limit: 10 },
+    );
     const second = expectDefined(plan.turns[1], "second turn");
     const secondStep = `observe-v1-corrections-${second.observationId}`;
     const inner = reinforcingProvider();
@@ -263,7 +372,10 @@ describe("createObserver under replay", () => {
       },
     };
 
-    await runObserver({ data: { conversationId } }, sdkStep, deps(provider), "idle");
+    await runObserver({ data: { conversationId } }, sdkStep, deps(provider), {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     const [row] = await db
       .select({
@@ -295,7 +407,10 @@ describe("createObserver under replay", () => {
 describe("two fires at once", () => {
   it("writes a turn's corrections once when another fire applies it during this one's model call", async () => {
     const { conversationId, ruleId } = await seed();
-    const plan = await discoverTurns({ runInTx: tx, store }, { conversationId, limit: 10 });
+    const plan = await discoverTurns(
+      { runInTx: tx, store },
+      { conversationId, phase: "corrections", limit: 10 },
+    );
     const contested = expectDefined(plan.turns[1], "the correcting turn");
     const inner = reinforcingProvider();
     // While this fire waits on the model, the other fire applies the turn
@@ -326,14 +441,253 @@ describe("two fires at once", () => {
     });
     const syncStep: ObserverStepHarness = { run: (_id, fn) => fn() };
 
-    const result = await runObserver(
-      { data: { conversationId } },
-      syncStep,
-      deps(provider),
-      "idle",
-    );
+    const result = await runObserver({ data: { conversationId } }, syncStep, deps(provider), {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
 
     expect(result).toMatchObject({ status: "processed", corrections: { reinforced: 0 } });
     expect(await countOf(ruleId)).toBe(1);
+  });
+});
+
+describe("the memories phase under replay", () => {
+  it("re-runs a turn's step whose extraction committed: retains the stored facts and calls no model", async () => {
+    const { conversationId } = await seed();
+    const { observationId, cursor } = await storeLisbonExtraction(conversationId);
+    const retainBatch = vi.fn<MemoryProvider["retainBatch"]>().mockResolvedValue(undefined);
+    const provider = reinforcingProvider();
+    const syncStep: ObserverStepHarness = { run: (_id, fn) => fn() };
+
+    await runObserver(
+      { data: { conversationId } },
+      syncStep,
+      deps(provider, { memory: { retainBatch } }),
+      { triggeredBy: "idle", runId: "run-1" },
+    );
+
+    expect(await memoryRow(observationId)).toMatchObject({
+      status: "applied",
+      extraction: { runId: "run-dead" },
+    });
+    expect((await memoryRows()).map((r) => r.status)).toEqual(["applied", "applied"]);
+    // Only the second turn, which had no extraction, is sent to the model.
+    expect(memoryCalls(provider)).toBe(1);
+    expect(retainBatch).toHaveBeenCalledWith(expect.any(String), [
+      expect.objectContaining({
+        content: LISBON_FACT.fact,
+        documentId: `observer:turn:${cursor}:0`,
+      }),
+    ]);
+  });
+
+  it("re-sends the same documents when the retain was acknowledged and the move to applied was lost", async () => {
+    const { conversationId } = await seed();
+    const sent: RetainBatchItem[][] = [];
+    const memory = {
+      retainBatch: vi.fn(async (_bank: string, items: RetainBatchItem[]) => {
+        sent.push(items);
+      }),
+    };
+    const provider = reinforcingProvider();
+    const failingMove: AgentStore = {
+      ...store,
+      transitionExtractedTurn: vi.fn().mockRejectedValue(new Error("connection reset")),
+    };
+
+    await runObserver(
+      { data: { conversationId } },
+      sdkFailingStep,
+      deps(provider, { agentStore: failingMove, memory }),
+      { triggeredBy: "idle", runId: "run-1" },
+    );
+    await runObserver({ data: { conversationId } }, sdkFailingStep, deps(provider, { memory }), {
+      triggeredBy: "idle",
+      runId: "run-2",
+    });
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toEqual(sent[0]);
+    // The first turn's model call ran once; the second fire re-sent its stored facts.
+    const lisbonCalls = vi
+      .mocked(provider.chat)
+      .mock.calls.filter(
+        ([p]) =>
+          p.system.includes("memory extraction engine") &&
+          observedTurn(p).includes(LISBON_FACT.evidence),
+      );
+    expect(lisbonCalls).toHaveLength(1);
+    // The step stored the extraction before it failed, so the plan's `pending` no longer guards the row.
+    expect((await memoryRows()).map((r) => [r.status, r.attempts])).toEqual([
+      ["applied", 0],
+      ["applied", 0],
+    ]);
+  });
+
+  it("counts a step that fails for good on an extracted row, keeping the extraction", async () => {
+    const { conversationId } = await seed();
+    const { observationId } = await storeLisbonExtraction(conversationId);
+    const failingMove: AgentStore = {
+      ...store,
+      transitionExtractedTurn: vi.fn().mockRejectedValue(new Error("connection reset")),
+    };
+
+    await runObserver(
+      { data: { conversationId } },
+      sdkFailingStep,
+      deps(reinforcingProvider(), { agentStore: failingMove }),
+      { triggeredBy: "idle", runId: "run-1" },
+    );
+
+    expect(await memoryRow(observationId)).toMatchObject({
+      status: "extracted",
+      attempts: 1,
+      failureKind: "exhausted",
+      extraction: { items: [LISBON_FACT] },
+    });
+  });
+
+  it("carries a run of the transcript-era build on from the database", async () => {
+    const { conversationId } = await seed();
+    const retainBatch = vi.fn<MemoryProvider["retainBatch"]>().mockResolvedValue(undefined);
+    // What that build memoized before the deploy: its whole-transcript read and phase.
+    const steps = [
+      { id: "load-history", handler: () => [] },
+      {
+        id: "extract-memories",
+        handler: () => ({ extracted: 1, byNetwork: { world: 1 }, skippedForUnseenRules: 0 }),
+      },
+    ];
+
+    const { error } = await new InngestTestEngine({
+      function: createObserver(deps(reinforcingProvider(), { memory: { retainBatch } })),
+      events: [{ name: "conversation/idle", data: { conversationId } }],
+      steps,
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect((await memoryRows()).map((r) => r.status)).toEqual(["applied", "applied"]);
+    expect(retainBatch).toHaveBeenCalledOnce();
+  });
+
+  it("counts nothing on a turn another run extracted while this run's call failed", async () => {
+    const { conversationId } = await seed();
+    const plan = await discoverTurns(
+      { runInTx: tx, store },
+      { conversationId, phase: "memories", limit: 10 },
+    );
+    const contested = expectDefined(plan.turns[0], "the first turn");
+    const conversation = expectDefined(
+      await tx((trx) => store.getConversation(trx, conversationId)),
+      "conversation",
+    );
+    // While this run waits on the model, the other run stores the turn's
+    // extraction; this run's call then fails in a way that ends a turn.
+    const provider = mockProvider({
+      chat: vi.fn(async (params: ChatParams) => {
+        if (params.system.includes("memory extraction engine")) {
+          await tx((trx) =>
+            store.transitionPendingTurn(trx, {
+              id: contested.observationId,
+              to: {
+                status: "extracted",
+                extraction: {
+                  phase: "memories",
+                  runId: "run-other",
+                  profileId: conversation.profileId,
+                  profileClass: null,
+                  seesUserRules: true,
+                  items: [LISBON_FACT],
+                  dropped: { noEvidence: 0 },
+                },
+              },
+            }),
+          );
+          throw new RefusalError("refused");
+        }
+        return reinforcingProvider().chat(params);
+      }),
+    });
+    const syncStep: ObserverStepHarness = { run: (_id, fn) => fn() };
+
+    await runObserver({ data: { conversationId } }, syncStep, deps(provider), {
+      triggeredBy: "idle",
+      runId: "run-1",
+    });
+
+    expect(await memoryRow(contested.observationId)).toMatchObject({
+      status: "extracted",
+      attempts: 0,
+      failureKind: null,
+      extraction: { runId: "run-other" },
+    });
+  });
+
+  it("replays a memoized memories plan and turn outcomes into the audit row, calling no model", async () => {
+    const { conversationId } = await seed();
+    const plan = await discoverTurns(
+      { runInTx: tx, store },
+      { conversationId, phase: "memories", limit: 10 },
+    );
+    const retainBatch = vi.fn<MemoryProvider["retainBatch"]>().mockResolvedValue(undefined);
+    const provider = reinforcingProvider();
+    const steps = [
+      { id: "discover-memory-turns", handler: () => ({ ...plan, released: 0 }) },
+      ...plan.turns.map((t) => ({
+        id: `observe-v1-memories-${t.observationId}`,
+        handler: () => ({ kind: "applied", byNetwork: { world: 2 }, droppedNoEvidence: 0 }),
+      })),
+    ];
+
+    const { error } = await new InngestTestEngine({
+      function: createObserver(deps(provider, { memory: { retainBatch } })),
+      events: [{ name: "conversation/idle", data: { conversationId } }],
+      steps,
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(memoryCalls(provider)).toBe(0);
+    expect(retainBatch).not.toHaveBeenCalled();
+    const [audit] = await db.select({ payload: evolutionEvents.payload }).from(evolutionEvents);
+    expect(audit?.payload.memories).toEqual({
+      extracted: 2 * plan.turns.length,
+      byNetwork: { world: 2 * plan.turns.length },
+      skippedForUnseenRules: 0,
+    });
+  });
+
+  it("plans a released turn on the next fire when discovery fails after the release committed", async () => {
+    const { conversationId } = await seed();
+    const plan = await discoverTurns(
+      { runInTx: tx, store },
+      { conversationId, phase: "memories", limit: 10 },
+    );
+    const first = expectDefined(plan.turns[0], "first turn");
+    await tx((trx) =>
+      store.transitionPendingTurn(trx, { id: first.observationId, to: { status: "held" } }),
+    );
+    const failingDiscovery: AgentStore = {
+      ...store,
+      listUndiscoveredTurns: vi.fn(async (trx, params) => {
+        if (params.phase === "memories") throw new Error("connection reset");
+        return store.listUndiscoveredTurns(trx, params);
+      }),
+    };
+
+    await runObserver(
+      { data: { conversationId } },
+      sdkFailingStep,
+      deps(reinforcingProvider(), { agentStore: failingDiscovery }),
+      { triggeredBy: "idle", runId: "run-1" },
+    );
+    // The release committed before discovery failed.
+    expect(await memoryRow(first.observationId)).toMatchObject({ status: "pending" });
+
+    await runObserver({ data: { conversationId } }, sdkFailingStep, deps(reinforcingProvider()), {
+      triggeredBy: "idle",
+      runId: "run-2",
+    });
+
+    expect(await memoryRow(first.observationId)).toMatchObject({ status: "applied" });
   });
 });

@@ -4,13 +4,26 @@ import { RefusalError } from "../../../llm/fallback.js";
 import type { LlmProvider } from "../../../llm/provider.js";
 import { expectDefined } from "../../../test/assertions.js";
 import { mockAgentStore, mockProvider } from "../../../test/factories.js";
-import type { AgentStore, ExtractionRule, TurnMessage } from "../../store/index.js";
+import type {
+  AgentStore,
+  ExtractionRule,
+  OpenTurn,
+  TurnMessage,
+  TurnObservation,
+} from "../../store/index.js";
 import { observeTurnCorrections } from "./observe-turn-corrections.js";
+import type { TurnExtraction } from "./turn-extraction.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-const TURN = { observationId: "obs-1", cursor: "cursor-1", firstMessageId: "msg-1", attempts: 0 };
+const TURN: OpenTurn = {
+  observationId: "obs-1",
+  cursor: "cursor-1",
+  status: "pending",
+  firstMessageId: "msg-1",
+  attempts: 0,
+};
 const SCOPE = { profileId: "profile-1", userId: "user-1", seesUserRules: true };
 const SAID = "No, shorter please. I keep asking.";
 
@@ -67,13 +80,20 @@ const CONTRADICTION = {
 };
 
 /** The row as a fresh discovery leaves it. */
-const PENDING = { status: "pending", attempts: 0 } as const;
+const PENDING: TurnObservation = { status: "pending", attempts: 0 };
 
-function setup(opts: {
-  provider: LlmProvider;
-  row: { status: "pending" | "applied"; attempts: number };
-  store?: Partial<AgentStore>;
-}) {
+/** A memories row's stored extraction. */
+const EXTRACTION: TurnExtraction = {
+  phase: "memories",
+  runId: "run-1",
+  profileId: "profile-1",
+  profileClass: null,
+  seesUserRules: true,
+  items: [],
+  dropped: { noEvidence: 0 },
+};
+
+function setup(opts: { provider: LlmProvider; row: TurnObservation; store?: Partial<AgentStore> }) {
   const store = mockAgentStore({
     getTurnObservation: vi.fn().mockResolvedValue(opts.row),
     listTurnMessages: vi.fn().mockResolvedValue(rows(SAID, [])),
@@ -111,15 +131,21 @@ describe("observeTurnCorrections", () => {
     expect(expectDefined(moved, "move")).toBeLessThan(expectDefined(wrote, "write"));
   });
 
-  it("calls no model for a row that already left `pending`", async () => {
-    const { store, provider, run } = setup({
-      provider: answering([]),
-      row: { status: "applied", attempts: 0 },
-    });
+  // `held`, `held_extracted` and `extracted` are the memories phase's statuses.
+  it.each<TurnObservation>([
+    { status: "applied", attempts: 0 },
+    { status: "failed", attempts: 3 },
+    { status: "skipped", attempts: 0 },
+    { status: "held", attempts: 0 },
+    { status: "held_extracted", attempts: 0, extraction: EXTRACTION },
+    { status: "extracted", attempts: 0, extraction: EXTRACTION },
+  ])("calls no model for a row that is $status", async (row) => {
+    const { store, provider, run } = setup({ provider: answering([]), row });
 
-    expect(await run()).toEqual({ kind: "done", status: "applied" });
+    expect(await run()).toEqual({ kind: "done", status: row.status });
     expect(provider.chat).not.toHaveBeenCalled();
     expect(store.listTurnMessages).not.toHaveBeenCalled();
+    expect(store.transitionPendingTurn).not.toHaveBeenCalled();
   });
 
   it("writes nothing when another run moved the row first", async () => {
@@ -203,9 +229,10 @@ describe("observeTurnCorrections", () => {
       expect(await run()).toEqual({ kind: "retryLater", attempts: 1, failure: "parse" });
       expect(store.recordTurnAttempt).toHaveBeenCalledWith(FAKE_TX, {
         id: "obs-1",
+        from: "pending",
         seen: 0,
         failure: { kind: "parse", message: expect.any(String) },
-        to: "pending",
+        giveUp: false,
       });
       expect(store.transitionPendingTurn).not.toHaveBeenCalled();
     });
@@ -219,7 +246,7 @@ describe("observeTurnCorrections", () => {
       expect(await run()).toEqual({ kind: "failed", attempts: 3, failure: "parse" });
       expect(store.recordTurnAttempt).toHaveBeenCalledWith(
         FAKE_TX,
-        expect.objectContaining({ seen: 2, to: "failed" }),
+        expect.objectContaining({ seen: 2, giveUp: true }),
       );
     });
 

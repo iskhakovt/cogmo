@@ -178,9 +178,9 @@ Caller-supplied `tags` / `tagsMatch` and `tagGroups` are folded into the same AN
 
 **Memory rules withhold a row.** A `live_retain` or `skill` row is classified under the live `memory`-category rules its staging profile sees ("Don't save anything about my health"), and the classifier answers `withhold` beside the tags. A withheld row is deleted without a retain and counted in the audit row's `drained.withheld`; a `migration` row passes. A fire on a third-party profile classifies only the rows its own profile staged, and none of those one of the user's own rules binds, since its model sees neither other profiles' facts nor those rules; the rest stay pending for a first-party fire, counted in `drained.deferredToFirstParty`. The fire reads its rows through that filter before the batch limit, so deferred rows never fill its batch ([evolution.md](evolution.md#observer-and-consolidation-confirmed) → Observer and Consolidation).
 
-**The drain's retain is keyed on the staging row.** Retain and delete are separate steps with no transaction spanning Hindsight and Postgres, so a delete that fails after its retain leaves the row pending and the next drain retains it again. Each row goes to Hindsight under its id (`RetainBatchItem.documentId` → `document_id`), and Hindsight upserts on `document_id` within a bank. A row's content never changes, so repeating a retain Hindsight has processed finds no changed chunk: it keeps the extracted facts, extracts nothing new, and relabels the document and its facts with the repeat's tags and metadata. One copy of the fact remains. Transcript extraction has no durable id per fact and leaves `documentId` unset, so the adapter mints a fresh one per item.
+**The drain's retain is keyed on the staging row.** Retain and delete are separate steps with no transaction spanning Hindsight and Postgres, so a delete that fails after its retain leaves the row pending and the next drain retains it again. Each row goes to Hindsight under its id (`RetainBatchItem.documentId` → `document_id`), and Hindsight upserts on `document_id` within a bank. A row's content never changes, so repeating a retain Hindsight has processed finds no changed chunk: it keeps the extracted facts, extracts nothing new, and relabels the document and its facts with the repeat's tags and metadata. One copy of the fact remains. Turn extraction keys each fact on its turn and position the same way (`observer:turn:<turn cursor>:<position>`, [Memory Extraction](#memory-extraction-confirmed)).
 
-`pending_memories` is user-scoped (FK to `users`, no `conversation_id`): pending rows survive `/reset` and are drained on any subsequent `conversation/idle` for that user. The trade-off is freshness — a live retain isn't searchable in a *different* conversation until the source conversation goes idle. Acceptable because conversations are typically idle within seconds of the last user turn, and within the source conversation the fact is already in the LLM context. A scheduled skill's write has no source conversation: it waits for the user's next `conversation/idle` that passes the `too_short` gate, however long that is.
+`pending_memories` is user-scoped (FK to `users`, no `conversation_id`): pending rows survive `/reset` and are drained on any subsequent `conversation/idle` for that user. The trade-off is freshness — a live retain isn't searchable in a *different* conversation until the source conversation goes idle. Acceptable because conversations are typically idle within seconds of the last user turn, and within the source conversation the fact is already in the LLM context. A scheduled skill's write has no source conversation: it waits for the user's next `conversation/idle`, however long that is.
 
 ```
 pending_memories (
@@ -333,7 +333,7 @@ Tags are assigned **at extraction time, not retain time**. No production memory 
 
 | Path | Source | When classified |
 |-|-|-|
-| **Transcript extraction** | Observer reads the conversation history, extracts facts via `chatTyped()` | At `conversation/idle` |
+| **Turn extraction** | Observer reads each turn no fire has observed, extracts facts via `chatTyped()` | At `conversation/idle` |
 | **Live retain via staging** | `memory_retain` tool or a skill's `ctx.memory.remember` inserts into `pending_memories`; Observer drains pending rows for the user | At `conversation/idle` |
 
 **Why not agent-chosen tags at retain time:** Adding `network` / `compartment` / `trust` parameters to `memory_retain` forces the agent to reason about taxonomy on every retain call — extra tokens, extra failure mode, no benefit since Observer classifies with full conversation context and a single prompt. Letta, Mem0, and LangMem all treat classification as extraction-time, not retain-time. We extend that principle to compartment and trust as well.
@@ -353,38 +353,18 @@ Adopted from Mastra's 94.87% LongMemEval approach. The Observer is an Inngest fu
 
 ### Memory Extraction `[confirmed]`
 
-Added as a new step in the existing Observer function, after correction extraction. Uses `chatTyped()` with a Zod schema to extract structured facts.
-
-`[proposed]` Extraction moves to one turn at a time: each turn's facts are stored with the turn's observation row before they are retained, under document ids keyed on the turn and the fact's position, so a re-run replaces rather than duplicates. A Hindsight-side alternative (raw per-turn retains, `entity_labels`) is evaluated there too: [observation.md](observation.md).
+A phase of the Observer, after correction extraction: one `chatTyped()` call per turn no fire has observed, with the exchange before it as context ([observation.md](observation.md#slice-2a) → Slice 2a). The turn's facts are stored on its `turn_observations` row before any is retained, and each retains under the document id `observer:turn:<turn cursor>:<position>`, so a re-run re-sends the same documents and Hindsight replaces them rather than adding duplicates. A fact counts only when its `evidence` quotes the turn. A Hindsight-side alternative (raw per-turn retains, `entity_labels`) is evaluated in [observation.md](observation.md#hindsight-raw-retain-proposed).
 
 ```typescript
-// Extraction schema (chatTyped structured output)
+// Extraction schema (chatTyped structured output), one item per fact
 interface ExtractedMemory {
-  fact: string;                                        // the memory content
+  fact: string;                                          // the memory content
   network: "world" | "bank" | "opinion" | "observation"; // classification
-  context?: string;                                    // when/why this was learned
+  compartment: string;                                   // core or the user's custom compartments
+  trust: "first-party" | "any";
+  context?: string;                                      // when/why this was learned
+  evidence: string;                                      // the turn's words that state the fact
 }
-
-// Observer step: extract-memories (after the corrections phase's turn steps)
-const memories = await step.run("extract-memories", async () => {
-  const extracted = await chatTyped(provider, {
-    model,
-    system: MEMORY_EXTRACTION_PROMPT,
-    messages: [{ role: "user", content: formatTranscript(history) }],
-    schema: extractedMemoriesSchema,
-  });
-
-  // Retain each fact with network tag
-  for (const mem of extracted) {
-    await memory.retain(userId, mem.fact, {
-      tags: [`network:${mem.network}`],
-      context: mem.context,
-      metadata: { source: "conversation" },
-    });
-  }
-
-  return { count: extracted.length };
-});
 ```
 
 The extraction prompt instructs the LLM to:

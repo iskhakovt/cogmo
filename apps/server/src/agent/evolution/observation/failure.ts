@@ -1,14 +1,15 @@
 /**
- * Which extraction failures the turn caused. The provider layer fails by
+ * Which observation failures the turn caused. The provider layer fails by
  * throwing; the Observer converts a throw to a value here, once, and only
  * when the turn caused it, so that only a turn-caused failure is counted on
- * the turn's row (design/observation.md → Slice 1a). Anything else thrown
- * by the extraction (the rules read, the prompt build or the provider call:
- * an outage, a rate limit, an expired key, an unknown model, a 4xx no rule
- * places, bugs included) is rethrown as `ExtractionUnavailableError`: the
+ * the turn's row (design/observation.md → Slices 1a and 2a). Anything else
+ * thrown by the extraction (the rules read, the prompt build or the provider
+ * call: an outage, a rate limit, an expired key, an unknown model, a 4xx no
+ * rule places, bugs included) is rethrown as `ExtractionUnavailableError`,
+ * and anything the memories retain throws as `RetainUnavailableError`: the
  * step retries it, the fire gives up on the phase, and the row stays as it
- * was. What a turn's step throws outside the extraction (loading the turn,
- * applying it, skipping it) is counted.
+ * was. What a turn's step throws elsewhere (loading the turn, a transition)
+ * is counted.
  */
 
 import { match } from "ts-pattern";
@@ -50,8 +51,9 @@ export function classifyTurnFailure(err: unknown): TurnFailure | null {
   return null;
 }
 
-/** `ExtractionUnavailableError`'s name, which a step's failure carries through Inngest. */
+/** The unavailable errors' names, which a step's failure carries through Inngest. */
 const EXTRACTION_UNAVAILABLE = "ExtractionUnavailableError";
+const RETAIN_UNAVAILABLE = "RetainUnavailableError";
 
 /**
  * An extraction call that failed for a reason that isn't the turn's,
@@ -68,11 +70,26 @@ export class ExtractionUnavailableError extends Error {
 }
 
 /**
- * Whether a step's failure is an `ExtractionUnavailableError`, read from the
+ * A memories retain that failed: Hindsight unreachable, or refusing the batch
+ * after the adapter's retries. Rethrown so the step retries it; a step that
+ * fails after its retries with this error is not counted, and the row stays
+ * `extracted` for a later fire to re-send.
+ */
+export class RetainUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(`retain unavailable: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      cause,
+    });
+    this.name = RETAIN_UNAVAILABLE;
+  }
+}
+
+/**
+ * Whether a step's failure is one not counted against the turn, read from the
  * name a `StepError` keeps of the error the step threw.
  */
-export function isExtractionUnavailable(err: { name: string }): boolean {
-  return err.name === EXTRACTION_UNAVAILABLE;
+export function isUnavailable(err: { name: string }): boolean {
+  return err.name === EXTRACTION_UNAVAILABLE || err.name === RETAIN_UNAVAILABLE;
 }
 
 /**
@@ -88,5 +105,5 @@ export function isTerminalTurnFailure(failure: TurnFailure): boolean {
     .exhaustive();
 }
 
-/** Counted failures a turn's corrections may have before the row is `failed`. */
+/** Counted failures a turn's phase may have before the row is `failed`. */
 export const MAX_TURN_ATTEMPTS = 3;

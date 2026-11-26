@@ -126,7 +126,7 @@ export interface EvolutionEventPayload {
     consolidationNeeded: boolean;
   };
   consolidation: { mergedGroups: number; rulesRemoved: number } | null;
-  /** `skippedForUnseenRules`: 1 when a user's memory rule bound a profile that can't see it. */
+  /** `extracted`: facts retained. `skippedForUnseenRules`: turns held for a user's memory rule the profile can't see. */
   memories: { extracted: number; byNetwork: Record<string, number>; skippedForUnseenRules: number };
   /**
    * `withheld`: staged rows a `memory`-category rule forbade, deleted unretained.

@@ -15,10 +15,10 @@
  *    turn context's recalled memories, recalled from Hindsight.
  *
  * A second test gives another user a `memory`-category instruction rule and
- * two staged facts, one it forbids. A third-party profile's fire skips
- * memory extraction and leaves both rows pending; a first-party fire lists
- * the rule in memory extraction and the classifier, withholds the forbidden
- * fact and retains the other.
+ * two staged facts, one it forbids. A third-party profile's fire holds its
+ * turns' memories and leaves both rows pending; a first-party fire lists the
+ * rule in memory extraction and the classifier, withholds the forbidden fact
+ * and retains the other.
  *
  * The user and profile are this file's own. The Observer writes a learned
  * rule global (`profile_id` null; rules have no user column), so the test
@@ -485,7 +485,7 @@ describe("learning loop", () => {
     await turn(plugin, PLUGIN_ASK);
     await turn(plugin, PLUGIN_FOLLOW_UP);
     const deferred = await observe(plugin);
-    expect(deferred.memories).toMatchObject({ extracted: 0, skippedForUnseenRules: 1 });
+    expect(deferred.memories).toMatchObject({ extracted: 0, skippedForUnseenRules: 2 });
     expect(deferred.drained).toMatchObject({ drained: 0, withheld: 0, deferredToFirstParty: 2 });
     expect((await pendingIds()).sort()).toEqual([staged.forbidden.id, staged.allowed.id].sort());
 

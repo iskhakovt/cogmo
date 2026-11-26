@@ -363,7 +363,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             );
             const plan = await discoverTurns(
               { runInTx: db.tx, store },
-              { conversationId: conv.id, limit: conversation.history.length },
+              { conversationId: conv.id, phase: "corrections", limit: conversation.history.length },
             );
             let extracted: ExtractionResult = NO_CORRECTIONS;
             for (const turn of plan.turns) {

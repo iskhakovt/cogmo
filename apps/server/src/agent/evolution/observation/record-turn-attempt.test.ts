@@ -7,6 +7,7 @@ const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 const PARSE = { kind: "parse" as const, message: "bad json" };
+const EXHAUSTED = { kind: "exhausted" as const, message: "connection reset" };
 
 describe("recordTurnAttempt", () => {
   it("counts a failure short of the cap, guarded on the count the caller read", async () => {
@@ -14,15 +15,34 @@ describe("recordTurnAttempt", () => {
 
     const outcome = await recordTurnAttempt(
       { runInTx: fakeRunInTx, store },
-      { observationId: "obs-1", seen: 1, failure: PARSE },
+      { observationId: "obs-1", from: "pending", seen: 1, failure: PARSE },
     );
 
     expect(outcome).toEqual({ kind: "retryLater", attempts: 2, failure: "parse" });
     expect(store.recordTurnAttempt).toHaveBeenCalledWith(FAKE_TX, {
       id: "obs-1",
+      from: "pending",
       seen: 1,
       failure: PARSE,
-      to: "pending",
+      giveUp: false,
+    });
+  });
+
+  it("guards the count on the status the caller read, `extracted` included", async () => {
+    const store = mockAgentStore();
+
+    const outcome = await recordTurnAttempt(
+      { runInTx: fakeRunInTx, store },
+      { observationId: "obs-1", from: "extracted", seen: 0, failure: EXHAUSTED },
+    );
+
+    expect(outcome).toEqual({ kind: "retryLater", attempts: 1, failure: "exhausted" });
+    expect(store.recordTurnAttempt).toHaveBeenCalledWith(FAKE_TX, {
+      id: "obs-1",
+      from: "extracted",
+      seen: 0,
+      failure: EXHAUSTED,
+      giveUp: false,
     });
   });
 
@@ -31,13 +51,18 @@ describe("recordTurnAttempt", () => {
 
     const outcome = await recordTurnAttempt(
       { runInTx: fakeRunInTx, store },
-      { observationId: "obs-1", seen: 2, failure: { kind: "exhausted", message: "reset" } },
+      {
+        observationId: "obs-1",
+        from: "pending",
+        seen: 2,
+        failure: { kind: "exhausted", message: "reset" },
+      },
     );
 
     expect(outcome).toEqual({ kind: "failed", attempts: 3, failure: "exhausted" });
     expect(store.recordTurnAttempt).toHaveBeenCalledWith(
       FAKE_TX,
-      expect.objectContaining({ to: "failed" }),
+      expect.objectContaining({ giveUp: true }),
     );
   });
 
@@ -46,7 +71,12 @@ describe("recordTurnAttempt", () => {
 
     const outcome = await recordTurnAttempt(
       { runInTx: fakeRunInTx, store },
-      { observationId: "obs-1", seen: 0, failure: { kind: "refusal", message: "no" } },
+      {
+        observationId: "obs-1",
+        from: "pending",
+        seen: 0,
+        failure: { kind: "refusal", message: "no" },
+      },
     );
 
     expect(outcome).toEqual({ kind: "failed", attempts: 1, failure: "refusal" });
@@ -59,7 +89,7 @@ describe("recordTurnAttempt", () => {
 
     const outcome = await recordTurnAttempt(
       { runInTx: fakeRunInTx, store },
-      { observationId: "obs-1", seen: 0, failure: PARSE },
+      { observationId: "obs-1", from: "pending", seen: 0, failure: PARSE },
     );
 
     expect(outcome).toEqual({ kind: "taken", status: "pending" });

@@ -1,7 +1,6 @@
 /** `/learned` and `/reflect`: the Observer's audit log and its manual trigger. */
 
 import { match } from "ts-pattern";
-import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../../agent/evolution/index.js";
 import type { Transport } from "../../../transport.js";
 import { formatEvolutionDetail, formatEvolutionDigest } from "./evolution-format.js";
 import { looksLikeUuid } from "./lookup.js";
@@ -70,11 +69,8 @@ export async function handleLearned(
  * `/reflect` — run the Observer synchronously for the current conversation
  * and reply with a one-line digest. The autonomous idle-fire path is
  * untouched; this is the user-initiated debug-shaped trigger that lets the
- * operator see what extraction would do without waiting for idle.
- *
- * Respects the same min-message gate (`MIN_MESSAGES_FOR_EXTRACTION = 4`)
- * as the autonomous path — too-short conversations reply with a clear
- * "not enough yet" message rather than silently no-op.
+ * operator see what extraction would do without waiting for idle. A fire
+ * with no turn left to observe and no staged row replies that nothing is new.
  */
 export async function handleReflect(
   transport: Transport,
@@ -96,16 +92,19 @@ export async function handleReflect(
     .with({ status: "no_session" }, () =>
       ctx.reply("No active conversation here — send a message first."),
     )
-    .with({ status: "skipped" }, ({ reason }) => {
-      const message =
-        reason === "too_short"
-          ? `Conversation too short to reflect on yet (need at least ${MIN_MESSAGES_FOR_EXTRACTION} messages).`
-          : // `conversation_not_found` / `profile_not_found` mean the underlying
-            // row vanished mid-call — surfaces as a soft error rather than an
-            // exception so the command doesn't crash the bot.
-            "Couldn't load the conversation. Try /sessions to confirm it's there.";
-      return ctx.reply(message);
-    })
+    .with({ status: "skipped" }, ({ reason }) =>
+      ctx.reply(
+        match(reason)
+          .with("nothing_new", () => "Nothing new since the Observer last ran.")
+          // The row vanished mid-call: a soft error, so the command doesn't crash the bot.
+          .with(
+            "conversation_not_found",
+            "profile_not_found",
+            () => "Couldn't load the conversation. Try /sessions to confirm it's there.",
+          )
+          .exhaustive(),
+      ),
+    )
     .with({ status: "processed" }, (processed) => {
       const {
         ruleChanges,
@@ -128,9 +127,10 @@ export async function handleReflect(
             (ruleChanges.retired > 0 ? `, ${ruleChanges.retired} retired` : "") +
             (ruleChanges.reset > 0 ? `, ${ruleChanges.reset} reset` : "");
       const extraction =
-        skippedForUnseenRules > 0
-          ? "extraction skipped (a user's memory rule this profile can't see)"
-          : `${memoryCount} extracted`;
+        `${memoryCount} extracted` +
+        (skippedForUnseenRules > 0
+          ? `, ${skippedForUnseenRules} turn(s) held (a user's memory rule a profile can't see)`
+          : "");
       const memorySummary =
         memoryCount === 0 &&
         drained === 0 &&

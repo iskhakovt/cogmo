@@ -108,15 +108,15 @@ export function formatEvolutionDetail(event: EvolutionEventEntry, now: Date): st
   }
   if (phaseFailed(event, "memories")) {
     lines.push("", `Memories: ${PHASE_FAILED}`);
-  } else if (payload.memories.skippedForUnseenRules > 0) {
-    lines.push(
-      "",
-      "Memories: skipped; a user's memory rule binds it and this profile can't see it",
-    );
   } else {
     lines.push("", `Memories: ${payload.memories.extracted} extracted`);
     for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
       lines.push(`  ${network}: ${count}`);
+    }
+    if (payload.memories.skippedForUnseenRules > 0) {
+      lines.push(
+        `  held: ${payload.memories.skippedForUnseenRules} turn(s); a user's memory rule binds a profile that can't see it`,
+      );
     }
   }
   const { deferredToFirstParty } = payload.drained;

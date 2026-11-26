@@ -58,7 +58,7 @@ const RawBankMemorySchema = z
     tags: z.array(z.string()).optional(),
     date: z.string().nullable().optional(),
     // `Record<string, string>` matches what every Cogmo writer
-    // emits today (`extract-memories.ts`, `drain-pending-memories.ts`).
+    // emits today (`retain-turn-memories.ts`, `drain-pending-memories.ts`).
     // Hindsight is third-party and could in theory return non-string
     // values in a future version; if so, parse fails fast HERE —
     // before any destructive op (clearBankMemories) — so the bank
