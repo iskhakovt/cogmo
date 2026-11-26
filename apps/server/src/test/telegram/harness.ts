@@ -157,6 +157,7 @@ export function captureLogLines(): string[] {
       lines.push(line);
     },
   });
+  capturing.level = "info";
   vi.spyOn(logger, "info").mockImplementation(capturing.info.bind(capturing));
   vi.spyOn(logger, "warn").mockImplementation(capturing.warn.bind(capturing));
   vi.spyOn(logger, "error").mockImplementation(capturing.error.bind(capturing));

@@ -138,6 +138,29 @@ describe("maskInLogs", () => {
     });
   });
 
+  it("masks a registered secret in a Bot API URL that percent-encodes its dash", () => {
+    maskInLogs(SECRET);
+    const { stream, lines } = capture();
+
+    createLogger(stream).warn(
+      { url: `https://bot-api.local/bot${SECRET.replace("-", "%2D")}/getMe` },
+      "request failed",
+    );
+
+    expect(JSON.parse(lines[0] ?? "")).toMatchObject({
+      url: "https://bot-api.local/bot<redacted>/getMe",
+    });
+  });
+
+  it("masks no secret shorter than 16 characters", () => {
+    maskInLogs("1");
+    const { stream, lines } = capture();
+
+    createLogger(stream).info({ id: 1 }, "count 1");
+
+    expect(JSON.parse(lines[0] ?? "")).toMatchObject({ id: 1, msg: "count 1" });
+  });
+
   it("leaves a line without the secret as pino wrote it", () => {
     maskInLogs(SECRET);
     const { stream, lines } = capture();
