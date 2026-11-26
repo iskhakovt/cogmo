@@ -50,7 +50,10 @@ const NetworkInspectSchema = z.object({
 
 interface DaemonReply {
   status: number;
+  /** `null` when the body is not JSON. */
   body: unknown;
+  /** Why the body is not JSON, for the lookup's `unavailable` message. */
+  unparsed: string | null;
 }
 
 export function daemonLookups(args: {
@@ -92,11 +95,12 @@ export async function fetchHostPlatform(
   signal: AbortSignal,
 ): Promise<Result<HostPlatform, LookupFailure>> {
   const reply = await getJson(socketPath, "/version", signal);
-  return reply.andThen(({ status, body }) => {
+  return reply.andThen((answer) => {
+    const { status, body } = answer;
     const parsed = VersionSchema.safeParse(body);
     return status === 200 && parsed.success
       ? ok({ os: parsed.data.Os, arch: parsed.data.Arch })
-      : err(unavailable(`GET /version answered ${status}`));
+      : err(unavailable(`GET /version answered ${answered(answer)}`));
   });
 }
 
@@ -106,11 +110,12 @@ export async function fetchRootless(
   signal: AbortSignal,
 ): Promise<Result<boolean, LookupFailure>> {
   const reply = await getJson(socketPath, "/info", signal);
-  return reply.andThen(({ status, body }) => {
+  return reply.andThen((answer) => {
+    const { status, body } = answer;
     const parsed = InfoSchema.safeParse(body);
     return status === 200 && parsed.success
       ? ok((parsed.data.SecurityOptions ?? []).includes("name=rootless"))
-      : err(unavailable(`GET /info answered ${status}`));
+      : err(unavailable(`GET /info answered ${answered(answer)}`));
   });
 }
 
@@ -121,13 +126,14 @@ async function inspectImage(
   signal: AbortSignal,
 ): Promise<Result<ImageFacts, LookupFailure>> {
   const reply = await getJson(socketPath, `/images/${ref}/json`, signal);
-  return reply.andThen(({ status, body }) => {
+  return reply.andThen((answer) => {
+    const { status, body } = answer;
     if (status === 404) return err(notFound(`No such image: ${ref}`));
     if (status === 400) return err(malformed(`image ${ref}: ${daemonReason(body)}`));
     const parsed = ImageInspectSchema.safeParse(body);
     return status === 200 && parsed.success
       ? ok({ id: parsed.data.Id, env: parsed.data.Config?.Env ?? [] })
-      : err(unavailable(`the image inspect for ${ref} answered ${status}`));
+      : err(unavailable(`the image inspect for ${ref} answered ${answered(answer)}`));
   });
 }
 
@@ -136,7 +142,8 @@ async function bridgeGateway(
   signal: AbortSignal,
 ): Promise<Result<string, LookupFailure>> {
   const reply = await getJson(socketPath, "/networks/bridge", signal);
-  return reply.andThen(({ status, body }) => {
+  return reply.andThen((answer) => {
+    const { status, body } = answer;
     const parsed = NetworkInspectSchema.safeParse(body);
     const gateway = parsed.success
       ? (parsed.data.IPAM.Config ?? [])
@@ -145,7 +152,9 @@ async function bridgeGateway(
       : undefined;
     return status === 200 && gateway !== undefined
       ? ok(gateway)
-      : err(unavailable(`GET /networks/bridge answered ${status} without an IPv4 gateway`));
+      : err(
+          unavailable(`GET /networks/bridge answered ${answered(answer)} without an IPv4 gateway`),
+        );
   });
 }
 
@@ -189,8 +198,15 @@ function getJson(
  */
 function parseReply(status: number, raw: Buffer): DaemonReply {
   try {
-    return { status, body: JSON.parse(raw.toString("utf8")) };
-  } catch {
-    return { status, body: null };
+    return { status, body: JSON.parse(raw.toString("utf8")), unparsed: null };
+  } catch (cause) {
+    return { status, body: null, unparsed: describeError(cause) };
   }
+}
+
+/** `200`, or `200 with a body that is not JSON (…)`, for an `unavailable` message. */
+function answered(reply: DaemonReply): string {
+  return reply.unparsed === null
+    ? String(reply.status)
+    : `${reply.status} with a body that is not JSON (${reply.unparsed})`;
 }

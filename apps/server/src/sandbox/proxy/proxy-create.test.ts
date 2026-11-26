@@ -1379,6 +1379,7 @@ describe("create policy: daemon lookups", () => {
     const r = await create({ Image: "alpine" }, "");
 
     expect(r.status, r.body).toBe(503);
+    expect(message(r)).toContain("not JSON");
     expect(creates()).toEqual([]);
   });
 
