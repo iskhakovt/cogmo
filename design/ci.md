@@ -92,20 +92,22 @@ Keep the shape: one `ci.yml`, path filtering inside it, one aggregator. It is th
    - **Live reads.** A rerun keeps its event payload, so CI reads nothing from it that can change on the same commit.
      - `changes` reads the PR's labels from the API and fails when the read fails (R2).
      - PR Title reads the title from the API, as Schema ⇒ design doc reads the body.
-   - **The label stays until removed.** While a PR carries `e2e`, every CI run on it includes E2E, and whoever added the label removes it. CI doesn't remove it: a removal can race a newer push's run reading the labels, and a rerun of a Dependabot run lacks the write access. E2E was requested on 6 PRs in 36 days, so the extra E2E runs are few.
+   - **The label stays until removed.** While a PR carries `e2e`, every CI run on it includes E2E, and whoever added the label removes it. CI doesn't remove it: a removal can race a newer push's run reading the labels, and a rerun of a Dependabot run lacks the write access. E2E was requested on 6 merged PRs in 36 days, so the extra E2E runs are few.
    - **`e2e-request.yml`** runs on `labeled`. Its job runs only for the `e2e` label, in a concurrency group keyed on the PR and the label name, so a newer `e2e` request replaces a pending one; each re-reads the head, so nothing is lost. The job:
      - does nothing if the PR's head SHA has no `pull_request` CI run yet, because that run's `changes` reads the label itself;
      - otherwise waits for the newest such run (by run ID) to finish. It never cancels it, since a cancel is asynchronous and races the rerun;
-     - then reads the head again. It does nothing if the head moved or a newer push cancelled the run, because the new push's run reads the label itself;
+     - then reads the head and the newest run again. It does nothing if the head moved or a newer push cancelled the run, because the new push's run reads the label itself. If a newer run started on the same head (a reopen), it waits for that one instead;
      - stops if the run's newest attempt ran E2E;
-     - reruns every job if the run passed. If it failed, it reruns nothing and fails, so the failure gets investigated, not rerun away (R10).
+     - reruns every job if the run passed. If the run failed, it reruns nothing and fails, so the failure gets investigated, not rerun away (R10). Its message says to push a fix or use "Re-run all jobs", since "Re-run failed jobs" keeps the earlier label read.
    - **Other labels,** Dependabot's included, run that workflow's skipped job and nothing in CI.
-   - **Residual.** A failed request (an API error, the per-run rerun limit, a fork PR's read-only token) shows red but can't block the merge, so the PR can merge without the E2E it asked for. The owner sees the red request.
+   - **Residuals.**
+     - A request isn't a gate: until its rerun starts, the earlier green `Required Checks` stands, so whoever requests E2E waits for it before merging.
+     - A failed request (an API error, the per-run rerun limit, a fork PR's read-only token) shows red but can't block the merge. The owner sees the red request.
 2. **Shared setup.** `.github/actions/setup` (pnpm, Node, `pnpm install --frozen-lockfile`) replaces the steps CI's six Node jobs, `sysbox-e2e.yml` and `dependency-audit.yml` repeat.
 3. **Sharded unit tests (R11).**
    - **Shards.** Unit Tests runs as three shards with the `blob` reporter, covering both unit projects. Each shard is in the aggregator's `needs:`, so a failed shard fails the gate.
    - **Merge job.** A merge job (`if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}`) merges one blob per shard into one JUnit report and, on `main`, one coverage report.
-     - It takes each shard's newest blob across the run's attempts, so after "Re-run failed jobs" it merges the passing shards' earlier blobs with the rerun's.
+     - Artifact names carry the shard and `github.run_attempt`. The job takes each shard's newest blob across the run's attempts, so after "Re-run failed jobs" it merges the passing shards' earlier blobs with the rerun's.
      - It fails when a shard has no blob. A rerun shard that dies before uploading leaves its earlier blob in the report, but that shard's failure still fails the gate.
      - The merge job is in the aggregator's `needs:`, and it and the shards are allowed skips, so a doc-only PR still passes.
    - **Job budget.** The three hadolint matrix jobs fold into one, so the shards and their merge job add one job net: 14 per run (15 with E2E) for a code PR that touches neither `.github/` nor the Sysbox paths.
@@ -137,9 +139,9 @@ One PR per slice, each verified on its own runs:
      - `e2e` reruns CI with E2E and gates the merge;
      - `e2e` added mid-run waits, then reruns;
      - `e2e` on a failed run reruns nothing;
-     - a push while the request waits leaves it doing nothing;
+     - a push while the request waits leaves it doing nothing, and the push's run includes E2E;
      - a non-`e2e` label added while a request is pending leaves it pending.
-   - CONTRIBUTING's E2E row changes with this slice: the label no longer clears itself after a pass.
+   - CONTRIBUTING's E2E row and the dependency-sweep skill (`.agents/skills/dependency-sweep/SKILL.md`) change with this slice: the label no longer clears itself after a pass.
 2. **Composite setup** (2). A pure refactor; check names don't change.
 3. **Unit shards** (3). Check that "Re-run failed jobs" after a failed shard merges all three, then measure gate latency over a week of PRs against R11.
 4. **Workflow linting** (4), after fixing what zizmor reports on today's workflows.
